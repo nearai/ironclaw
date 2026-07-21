@@ -1,3 +1,4 @@
+// arch-exempt: large_file, pre-existing >1500-line factory test module; this PR only adds the mandatory `owner` field to an outbound-target entry fixture for the registry caller-scoping hardening, plan #6389
 use super::*;
 use ironclaw_approvals::{AutoApproveSettingInput, AutoApproveSettingStore};
 use ironclaw_auth::{
@@ -266,7 +267,9 @@ impl RootFilesystem for FailingConversationStateFilesystem {
 /// closed as `DeliveryTargetInvalid`.
 #[tokio::test]
 async fn trigger_delivery_target_validation_resolves_through_the_outbound_registry() {
-    use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+    use crate::outbound::outbound_preferences::{
+        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+    };
     use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
     use ironclaw_product_workflow::{
         RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
@@ -281,12 +284,15 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
     impl OutboundDeliveryTargetProvider for OneTargetProvider {
         async fn list_outbound_delivery_targets(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
+            caller: &WebUiAuthenticatedCaller,
         ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+            // Fixture available to whichever caller asks: claim the querying
+            // caller as owner so it survives the registry caller-scoping filter.
             Ok(vec![OutboundDeliveryTargetEntry {
                 summary: self.entry.summary.clone(),
                 capabilities: self.entry.capabilities.clone(),
                 reply_target_binding_ref: self.entry.reply_target_binding_ref.clone(),
+                owner: OutboundDeliveryTargetOwner::for_caller(caller),
             }])
         }
     }
@@ -334,6 +340,12 @@ async fn trigger_delivery_target_validation_resolves_through_the_outbound_regist
             "reply:registry-validation",
         )
         .expect("binding ref"),
+        // Overwritten with the querying caller by `OneTargetProvider::list`;
+        // set to the scope identity here for clarity.
+        owner: OutboundDeliveryTargetOwner::new(
+            TenantId::new("registry-validation-tenant").expect("tenant"),
+            UserId::new("registry-validation-user").expect("user"),
+        ),
     };
     registry
         .register_provider("test", Arc::new(OneTargetProvider { entry }))

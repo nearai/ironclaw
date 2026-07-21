@@ -1985,8 +1985,8 @@ where
             };
             let slot = slot_for_model_profile(&run_context)?;
             let route = crate::model_routes::ModelRoute::new(
-                snapshot.provider_id.clone(),
-                snapshot.model_id.clone(),
+                snapshot.provider_id().to_string(),
+                snapshot.model_id().to_string(),
             )
             .map_err(model_route_error_to_host_error)?;
             resolver

@@ -10,6 +10,7 @@ use super::error::AgentLoopHostError;
 use super::model::PromptMode;
 use super::refs::{LoopInputCursorToken, origin_input_cursor_token};
 use super::run_context::LoopRunContext;
+use crate::run_profile::SkillTrustLevel;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopContextRequest {
@@ -68,7 +69,7 @@ pub enum LoopContextCompactionKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopContextSnippetMetadata {
     pub source_name: String,
-    pub trust_level: String,
+    pub trust_level: SkillTrustLevel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

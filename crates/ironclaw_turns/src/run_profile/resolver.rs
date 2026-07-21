@@ -275,7 +275,7 @@ impl RunProfileDefinition {
         request: &RunProfileResolutionRequest,
         provenance: &mut RedactedRunProfileProvenance,
     ) -> ResourceBudgetPolicy {
-        if self.resource_budget_policy.tier.as_str() == "mission_high"
+        if self.resource_budget_policy.tier.is_mission_high()
             && !request
                 .authority
                 .allows(PrivilegedRunProfileDimension::HighBudget)
@@ -287,12 +287,15 @@ impl RunProfileDefinition {
                     .to_string(),
             });
             return ResourceBudgetPolicy {
-                tier: ResourceBudgetTier::from_trusted_static("mission_standard"),
-                max_model_calls: self.resource_budget_policy.max_model_calls.min(128),
+                tier: ResourceBudgetTier::mission_standard(),
+                max_model_calls: self
+                    .resource_budget_policy
+                    .max_model_calls
+                    .min(ResourceBudgetPolicy::MISSION_STANDARD_MAX_MODEL_CALLS),
                 max_capability_invocations: self
                     .resource_budget_policy
                     .max_capability_invocations
-                    .min(512),
+                    .min(ResourceBudgetPolicy::MISSION_STANDARD_MAX_CAPABILITY_INVOCATIONS),
             };
         }
 

@@ -42,14 +42,7 @@ impl TurnStatus {
     /// run/external tool). Used to decide when a transition changed the set of
     /// gate-blocked runs and therefore needs durable persistence.
     pub fn is_blocked(self) -> bool {
-        matches!(
-            self,
-            Self::BlockedApproval
-                | Self::BlockedAuth
-                | Self::BlockedResource
-                | Self::BlockedDependentRun
-                | Self::BlockedExternalTool
-        )
+        GateKind::from_status(self).is_some()
     }
 
     pub fn keeps_active_lock(self) -> bool {
@@ -181,15 +174,89 @@ pub enum BlockedReason {
     },
 }
 
-impl BlockedReason {
-    pub fn status(&self) -> TurnStatus {
+/// The canonical kind of gate a run can park on. One value per blocked
+/// `TurnStatus`; every other blocked-gate representation in the crate
+/// (`BlockedReason`, `TurnBlockedGateKind`, `LoopBlockedKind`,
+/// `ResumeTurnPrecondition`) maps to and from this so the correspondence lives
+/// in one place and adding a gate kind is a compiler-forced edit here rather
+/// than across ~6 scattered match tables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateKind {
+    Approval,
+    Auth,
+    Resource,
+    AwaitDependentRun,
+    ExternalTool,
+}
+
+impl GateKind {
+    /// The blocked `TurnStatus` a run in this gate holds. The single
+    /// authoritative `GateKind -> TurnStatus` correspondence.
+    pub fn blocked_status(self) -> TurnStatus {
         match self {
-            Self::Approval { .. } => TurnStatus::BlockedApproval,
-            Self::Auth { .. } => TurnStatus::BlockedAuth,
-            Self::Resource { .. } => TurnStatus::BlockedResource,
-            Self::AwaitDependentRun { .. } => TurnStatus::BlockedDependentRun,
-            Self::ExternalTool { .. } => TurnStatus::BlockedExternalTool,
+            Self::Approval => TurnStatus::BlockedApproval,
+            Self::Auth => TurnStatus::BlockedAuth,
+            Self::Resource => TurnStatus::BlockedResource,
+            Self::AwaitDependentRun => TurnStatus::BlockedDependentRun,
+            Self::ExternalTool => TurnStatus::BlockedExternalTool,
         }
+    }
+
+    /// The gate kind a `TurnStatus` represents, or `None` when the status is not
+    /// a blocked-gate status. Exhaustive over `TurnStatus`, so a new blocked
+    /// variant fails to compile until it is classified here.
+    pub fn from_status(status: TurnStatus) -> Option<Self> {
+        match status {
+            TurnStatus::BlockedApproval => Some(Self::Approval),
+            TurnStatus::BlockedAuth => Some(Self::Auth),
+            TurnStatus::BlockedResource => Some(Self::Resource),
+            TurnStatus::BlockedDependentRun => Some(Self::AwaitDependentRun),
+            TurnStatus::BlockedExternalTool => Some(Self::ExternalTool),
+            TurnStatus::Queued
+            | TurnStatus::Running
+            | TurnStatus::CancelRequested
+            | TurnStatus::Cancelled
+            | TurnStatus::Completed
+            | TurnStatus::Failed
+            | TurnStatus::RecoveryRequired => None,
+        }
+    }
+
+    /// Build the data-carrying [`BlockedReason`] for this gate kind. Only `Auth`
+    /// carries credential requirements; the rest ignore them.
+    pub fn into_blocked_reason(
+        self,
+        gate_ref: GateRef,
+        credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
+    ) -> BlockedReason {
+        match self {
+            Self::Approval => BlockedReason::Approval { gate_ref },
+            Self::Auth => BlockedReason::Auth {
+                gate_ref,
+                credential_requirements,
+            },
+            Self::Resource => BlockedReason::Resource { gate_ref },
+            Self::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
+            Self::ExternalTool => BlockedReason::ExternalTool { gate_ref },
+        }
+    }
+}
+
+impl BlockedReason {
+    /// The gate kind this reason represents.
+    pub fn gate_kind(&self) -> GateKind {
+        match self {
+            Self::Approval { .. } => GateKind::Approval,
+            Self::Auth { .. } => GateKind::Auth,
+            Self::Resource { .. } => GateKind::Resource,
+            Self::AwaitDependentRun { .. } => GateKind::AwaitDependentRun,
+            Self::ExternalTool { .. } => GateKind::ExternalTool,
+        }
+    }
+
+    pub fn status(&self) -> TurnStatus {
+        self.gate_kind().blocked_status()
     }
 
     pub fn gate_ref(&self) -> &GateRef {
