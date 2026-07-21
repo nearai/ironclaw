@@ -84,10 +84,11 @@ fn new_lifecycle_flow(
     expires_at: chrono::DateTime<Utc>,
 ) -> NewAuthFlow {
     let mut flow = new_flow(scope, provider, tag, expires_at);
-    flow.continuation = AuthContinuationRef::LifecycleActivation {
-        package_ref: LifecyclePackageRef::new("conformance-extension")
-            .expect("conformance lifecycle package ref is valid"),
+    let package_ref = match LifecyclePackageRef::new("conformance-extension") {
+        Ok(package_ref) => package_ref,
+        Err(error) => panic!("conformance lifecycle package ref is invalid: {error:?}"),
     };
+    flow.continuation = AuthContinuationRef::LifecycleActivation { package_ref };
     flow
 }
 
@@ -187,11 +188,9 @@ async fn lifecycle_processing_replays_and_uncommitted_failure_rejects(
             panic!("[{CASE}] Processing lifecycle replay must be idempotent: {error:?}")
         }
     };
-    assert_eq!(
-        duplicate.state,
-        AuthFlowState::Processing,
-        "[{CASE}] Processing replay preserves the claimed lifecycle state"
-    );
+    if duplicate.state != AuthFlowState::Processing {
+        panic!("[{CASE}] Processing replay must preserve the claimed lifecycle state");
+    }
 
     let failed_tag = "conformance-lifecycle-failed";
     let failed = flows
@@ -226,11 +225,9 @@ async fn lifecycle_processing_replays_and_uncommitted_failure_rejects(
         )
         .await
         .expect_err("an uncommitted Resolved(Failed) lifecycle flow must reject callback claims");
-    assert_eq!(
-        failed_claim,
-        AuthProductError::FlowAlreadyTerminal,
-        "[{CASE}] Resolved(Failed) without a fingerprint rejects callback claims"
-    );
+    if failed_claim != AuthProductError::FlowAlreadyTerminal {
+        panic!("[{CASE}] Resolved(Failed) without a fingerprint must reject callback claims");
+    }
 }
 
 /// Happy completion, then both replay arms — the exact split the hosted
@@ -401,11 +398,9 @@ async fn canceled_flow_rejects_completion_as_canceled(
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] cancel_flow: {error:?}"));
     let canceled = read_flow(flows, scope, flow.id, CASE).await;
-    assert_eq!(
-        canceled.state,
-        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
-        "[{CASE}] explicit cancel resolves as UserAborted"
-    );
+    if canceled.state != AuthFlowState::Resolved(AuthFlowOutcome::UserAborted) {
+        panic!("[{CASE}] explicit cancel must resolve as UserAborted");
+    }
 
     let error = flows
         .complete_oauth_callback(
