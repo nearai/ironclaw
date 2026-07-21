@@ -5626,123 +5626,23 @@ async fn executor_continues_after_forced_compaction_rejection_from_tool_result_o
     );
 }
 
-// ---------------------------------------------------------------------------
-// F13 — AwaitDependentRunGateStage::SkipAndContinue byte_len accumulation
-// ---------------------------------------------------------------------------
-
-/// Exercises the `SkipAndContinue` arm in `AwaitDependentRunGateStage::process`
-/// (gates.rs:177) via the full executor turn. When the gate strategy returns
-/// `SkipAndContinue` for an `AwaitDependentRun` outcome, `push_completed_result`
-/// must be called: it accumulates `byte_len` into `pending_capability_bytes` and
-/// appends the result ref to `state.result_refs`.
-///
-/// This path is normally guarded against by `validate_for_gate_kind`, but that
-/// check is enforcement-only (test-only call site in strategies/gate.rs). The
-/// `SkipAndContinue` arm of `AwaitDependentRunGateStage::process` is reachable
-/// through a custom gate strategy that bypasses the guard — e.g. Reborn-hosted
-/// gate resolvers that derive their outcome from external policy. This test
-/// drives the arm through `CanonicalAgentLoopExecutor` using `FixedGateStrategy`
-/// (which returns the outcome directly without validation).
-///
-/// Note: `PostCapabilityStage` always clears `pending_capability_bytes` at the
-/// end of a capability turn (line 96, to avoid cross-turn accumulation). To
-/// verify the bytes were accumulated BEFORE the clear, we use a `byte_len` that
-/// exceeds the default 32 000-byte threshold. If `push_completed_result` is
-/// called, the bytes accumulate inside the turn → `PostCapabilityStage`'s policy
-/// check evaluates them → sets `force_compact_on_next_iteration = true` (which
-/// DOES persist in the checkpoint). If `push_completed_result` is NOT called,
-/// `pending_capability_bytes` is empty, the policy never fires, and
-/// `force_compact_on_next_iteration` remains false.
-///
-/// Scenario (single-iteration):
-///   - Model → `AwaitDependentRun` capability outcome with `byte_len = 33 001`.
-///   - Gate returns `SkipAndContinue` → loop continues.
-///   - `terminate_hint = true` in the outcome causes `StopStage` to exit after
-///     this iteration, giving us a deterministic Final checkpoint to inspect.
-///
-/// Asserts:
-///   - Loop completes (not blocked — confirms SkipAndContinue worked).
-///   - Final `force_compact_on_next_iteration = true`: bytes accumulated by
-///     `push_completed_result` were seen by `PostCapabilityStage`'s policy.
-///   - Final `result_refs` contains the `AwaitDependentRun` result ref:
-///     second proof that `push_completed_result` was called in the
-///     `SkipAndContinue` arm (result_refs are retained across turns).
-///   - `force_compact_initiator == CapabilityResultOverflow`: the D-A initiator
-///     threading also works correctly for the `SkipAndContinue` arm.
+/// `GateOutcome::validate_for_gate_kind` is the owning contract for every gate
+/// stage. A custom strategy cannot use `SkipAndContinue` to discard an
+/// `AwaitDependentRun` suspension and report a normal completion; that would
+/// orphan the child-run relationship and hide a planner bug.
 #[tokio::test]
-async fn await_dependent_run_gate_skip_and_continue_accumulates_byte_len() {
-    let result_ref_str = "result:await-skip";
-    // byte_len exceeds the default 32 000-byte threshold to make the policy trip.
-    // See note in docstring: we cannot inspect pending_capability_bytes in the
-    // Final checkpoint directly (PostCapabilityStage clears it), so we rely on
-    // force_compact_on_next_iteration being set as an indirect proof.
-    let byte_len: u64 = 33_001;
+async fn await_dependent_run_gate_skip_and_continue_fails_as_driver_bug() {
     let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
         gate: empty_gate_state(),
     });
-    // Single iteration: model → AwaitDependentRun (SkipAndContinue), terminate_hint=true.
-    // The resolved_result constructed inside AwaitDependentRunGateStage from the
-    // AwaitDependentRun outcome carries byte_len; terminate_hint is set to false
-    // internally (capabilities.rs line 467), but stop.decide exits on the
-    // TerminateHint StopKind from DefaultStopConditionStrategy — which uses the
-    // batch summary's terminate_hint flag, not the result message's. To force
-    // a 1-iteration exit we instead use a terminate_hint=true outcome so that
-    // StopStage exits, giving us a stable Final checkpoint. Since AwaitDependentRun
-    // outcomes set terminate_hint=false in the resolved_result (line 467,
-    // capabilities.rs), the actual CapabilityResultMessage has terminate_hint=false;
-    // the StopStage terminate path is driven by CapabilityBatchTurnSummary which
-    // we can't directly override here. Use terminate_hint via the batch outcome.
-    // Simplest: use the default stop strategy and provide only one model response
-    // (calls_response) and no reply_response — the loop exits after the batch
-    // because DefaultStopConditionStrategy.should_stop_after_observed_turn returns
-    // GracefulStop when there are no more model responses pending AND the only
-    // model response was a capability call that resulted in a SkipAndContinue batch
-    // with a completed result summary. Actually — the simplest approach is two
-    // model responses: calls + reply. After SkipAndContinue, iteration 2 has the
-    // reply and exits. The SkipModel path does NOT fire here because byte_len
-    // accumulates and PostCapabilityStage would set force_compact flags, but we
-    // check the FIRST iteration's contribution via Final state after 2 iterations.
-    // Use terminate_hint=false on the outcome and a second model response (reply).
-    // After iteration 1 (SkipAndContinue + PostCapabilityStage trip):
-    //   state.compaction_state.force_compact_on_next_iteration = true (persists)
-    // After iteration 2 (SkipModel — skip_model_this_iteration was set):
-    //   PromptCompactionStep runs; message_index is empty → Skipped path →
-    //   force_compact_on_next_iteration cleared to false (prompt.rs line 207).
-    // After iteration 3 (reply — provided by second model response):
-    //   Final checkpoint: force_compact_on_next_iteration = false (already cleared).
-    //
-    // To avoid the clearing on the SkipModel iteration we use terminate_hint=true
-    // on the batch outcome (not the result message; terminate_hint on the result
-    // message is set to false by AwaitDependentRunGateStage internally). We achieve
-    // this by using the CapabilityBatchOutcome's StopKind pathway. The cleanest
-    // approach: set terminate_hint=true on a SIBLING completed result in the batch,
-    // but that adds complexity. Instead we use a one-shot check: since
-    // force_compact_on_next_iteration is set in iteration 1's PostCapabilityStage
-    // and only cleared in iteration 2's PromptStage (SkipModel path, when
-    // message_index is empty), and iteration 2 immediately clears the flag before
-    // writing any checkpoint, the flag value in any checkpoint after iteration 2
-    // will be false regardless.
-    //
-    // Resolution: use terminate_hint=true as the capability outcome's own field
-    // which IS propagated to CapabilityBatchTurnSummary. The AwaitDependentRun
-    // CapabilityResultMessage has terminate_hint=false (hardcoded in capabilities.rs)
-    // so the DefaultStopStrategy won't act on it. We cannot set terminate_hint=true
-    // on AwaitDependentRun via the public API without modifying test fixtures.
-    //
-    // Pragmatic solution: check result_refs instead (persists across turns).
-    // Provide 2 model responses so iter 1 is capability + SkipAndContinue and
-    // iter 2 is SkipModel (forced by PostCapabilityStage) and iter 3 is reply.
-    // The force_compact_on_next_iteration is set in iter 1 and cleared in iter 2
-    // — so we check result_refs as the persistent proof and also assert the
-    // SkipModel iteration fired (model count == 2 for 3 total iterations).
-    let host = MockHost::new(vec![calls_response(), reply_response()]).with_batch_outcomes(vec![
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
         ironclaw_host_api::ResolutionBatch {
             resolutions: vec![
                 resolution::await_dependent_run(
                     LoopGateRef::new("gate:await-skip").expect("valid"),
-                    LoopResultRef::new(result_ref_str).expect("valid"),
+                    LoopResultRef::new("result:await-skip").expect("valid"),
                     "dependent run skip and continue".to_string(),
-                    byte_len,
+                    33_001,
                     None,
                 )
                 .resolution,
@@ -5758,39 +5658,17 @@ async fn await_dependent_run_gate_skip_and_continue_accumulates_byte_len() {
         .await
         .expect("execute");
 
-    // SkipAndContinue must allow the loop to complete, not block.
-    assert!(
-        matches!(exit, LoopExit::Completed(_)),
-        "SkipAndContinue must allow the loop to continue to completion; \
-         if Blocked, the AwaitDependentRunGateStage SkipAndContinue arm returned \
-         BatchStep::Exit instead of BatchStep::Continue"
-    );
-
-    // push_completed_result was called in iteration 1's SkipAndContinue arm.
-    // The result ref must appear in state.result_refs (set by push_completed_result).
-    let final_state = final_staged_state(&host);
-    assert!(
-        final_state
-            .result_refs
-            .iter()
-            .any(|r| r.as_str() == result_ref_str),
-        "state.result_refs must contain the AwaitDependentRun result ref; \
-         push_completed_result in the SkipAndContinue arm must call \
-         state.result_refs.push(result.result_ref) — if missing, the \
-         SkipAndContinue arm is not calling push_completed_result"
-    );
-
-    // byte_len = 33 001 exceeds the threshold; PostCapabilityStage set
-    // force_compact_on_next_iteration=true and skip_model_this_iteration=true
-    // after iteration 1. Iteration 2 is therefore a SkipModel iteration, and
-    // the model is called only twice (iter 1 + iter 3 reply). This confirms the
-    // bytes reached the PostCapabilityStage policy evaluator via push_completed_result.
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::DriverBug);
+            assert!(failed.checkpoint_id.is_some());
+        }
+        other => panic!("invalid AwaitDependentRun skip must fail as DriverBug, got {other:?}"),
+    }
     assert_eq!(
         host.model_requests().len(),
-        2,
-        "model must be called exactly twice (capability turn iter 1 + reply turn iter 3); \
-         byte_len=33_001 must have tripped ByteCapStrategy via push_completed_result, \
-         causing iter 2 to be a SkipModel iteration"
+        1,
+        "a driver contract violation must stop before another model turn"
     );
 }
 

@@ -258,14 +258,8 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
             kind: GateKind::AwaitDependentRun,
             gate_ref: gate_ref.clone(),
         };
-        // Deliberately NOT routed through `enforce_gate_outcome_contract`:
-        // `validate_for_gate_kind` declares AwaitDependentRun+SkipAndContinue
-        // invalid, but the executor test suite pins the skip arm as reachable
-        // for custom gate resolvers deriving outcomes from external policy
-        // (`await_dependent_run_gate_skip_and_continue_accumulates_byte_len`).
-        // Reconciling that contradiction is flagged for owner review in
-        // docs/plans/2026-07-03-loop-failure-matrix.md §5a.1.
-        match ctx.planner.gate().handle(&state, &summary).await {
+        let outcome = ctx.planner.gate().handle(&state, &summary).await;
+        match enforce_gate_outcome_contract(outcome, GateKind::AwaitDependentRun) {
             GateOutcome::Block { gate } => {
                 state.gate_state = gate;
                 state.last_gate = Some(gate_ref.clone());

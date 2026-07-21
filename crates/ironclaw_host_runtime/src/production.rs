@@ -1875,10 +1875,11 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability) => {
                 RuntimeFailureKind::InvalidInput
             }
-            // A guest trap is the extension's own execution failing on the
-            // inputs it was given — deterministic with respect to the call,
-            // so infra retries can never resolve it. Surface it to the model
-            // immediately instead of burning the availability retry budget.
+            // A guest trap is an extension-local execution failure. It can be
+            // an extension defect or a call-specific failure, but retrying the
+            // same guest invocation as host infrastructure cannot repair it.
+            // Surface it as an operation failure so the model can change
+            // approach or report the broken extension.
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest) => {
                 RuntimeFailureKind::OperationFailed
             }

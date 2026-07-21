@@ -29,19 +29,28 @@ use parity_qa_support::{
 use reborn_support::doubles::RecordingTestCapabilityPort;
 use serde_json::json;
 
-/// First model call fails (provider rejects the request); the run must end as a
-/// sanitized, retryable `Failed`. Retrying resumes from the `BeforeModel`
-/// checkpoint and the second (resumed) model call succeeds, completing the run.
+/// Repeated stale model requests exhaust in-loop recovery; the run must end as
+/// a sanitized, retryable `Failed`. Retrying resumes from the `BeforeModel`
+/// checkpoint and the next model call succeeds, completing the run.
 #[tokio::test]
 async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        // First model call: the provider rejects the request. This maps to a
-        // model-stage host-unavailable failure with no internal retry loop.
+        // Invalid requests are treated as a stale model surface and retried
+        // twice in-loop. Three consecutive failures exhaust that budget and
+        // leave the successful response for the externally resumed run.
         RebornModelReplayStep::ModelError {
             kind: HostManagedModelErrorKind::InvalidRequest,
             message: "model provider rejected the request".to_string(),
         },
-        // The retry's resumed model call succeeds with a final reply.
+        RebornModelReplayStep::ModelError {
+            kind: HostManagedModelErrorKind::InvalidRequest,
+            message: "model provider rejected the retried request".to_string(),
+        },
+        RebornModelReplayStep::ModelError {
+            kind: HostManagedModelErrorKind::InvalidRequest,
+            message: "model provider rejected the final in-loop retry".to_string(),
+        },
+        // The externally retried run resumes and succeeds with a final reply.
         RebornModelReplayStep::Response {
             response: HostManagedModelResponse::assistant_reply("Recovered: here is your answer."),
             expected_tool_results: Vec::new(),
@@ -68,7 +77,7 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
         .expect("failed run");
     assert_failure_lane_alignment(
         &failed,
-        "host_stage_unavailable_model",
+        "model_stale_request",
         FailureLane::Retriable,
         RetryDisposition::Auto,
     );
@@ -111,8 +120,8 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
         .await
         .expect("recovered reply persisted to the thread");
 
-    // Both scripted steps were consumed: the failing call and the recovered
-    // retry call.
+    // All scripted steps were consumed: three in-loop failures and the
+    // recovered external retry call.
     assert_eq!(harness.remaining_model_responses(), 0);
 
     harness.shutdown().await;
@@ -274,7 +283,10 @@ fn assert_failure_lane_alignment(
     let category = failure.category();
     let retryable = state.checkpoint_id.is_some();
 
-    assert_eq!(category, expected_category, "sanitized failure category");
+    assert_eq!(
+        category, expected_category,
+        "sanitized failure category: {failure:?}"
+    );
     assert_eq!(
         failure_lane(category, retryable),
         expected_lane,

@@ -113,12 +113,9 @@ silently fixed:
    (`enforce_gate_outcome_contract`, executor `gates.rs`): an invalid
    `SkipAndContinue` on an Approval/ExternalTool gate is downgraded to
    `Abort { DriverBug }` and the run fails through the standard abort path
-   (matrix row asserts the `Failed(DriverBug)` terminal). REMAINING for owner
-   review: `AwaitDependentRunGateStage` is deliberately NOT enforced — the
-   executor test
-   `await_dependent_run_gate_skip_and_continue_accumulates_byte_len` pins its
-   skip arm as reachable for custom gate resolvers deriving outcomes from
-   external policy, contradicting the validator's declaration for that kind.
+   (matrix row asserts the `Failed(DriverBug)` terminal). The same validator is
+   enforced by `AwaitDependentRunGateStage`; a custom gate strategy cannot
+   silently discard a dependent-run suspension with `SkipAndContinue`.
 2. **CLOSED (2026-07-21) — `NoProgressDetected` now gets its failure
    explanation.**
    The `StopKind::NoProgressDetected` failed branch calls
