@@ -1423,7 +1423,7 @@ registerPack("en", {
   "app.checkingSession": "Checking session...",
   "app.sessionCheckFailedTitle": "Couldn't verify your session",
   "app.sessionCheckFailedDescription":
-    "We couldn't reach the server. Your sign-in is still saved. Check your connection and try again.",
+    "We couldn't verify your session right now. Your sign-in is still saved. Try again in a moment.",
   "app.retrySession": "Retry",
   "common.close": "Close",
   "common.download": "Download",

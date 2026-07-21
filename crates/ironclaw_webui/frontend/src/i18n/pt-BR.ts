@@ -1371,7 +1371,7 @@ registerPack("pt-BR", {
   "app.checkingSession": "Verificando sessão...",
   "app.sessionCheckFailedTitle": "Não foi possível verificar sua sessão",
   "app.sessionCheckFailedDescription":
-    "Não foi possível acessar o servidor. Seu login continua salvo. Verifique a conexão e tente novamente.",
+    "Não foi possível verificar sua sessão agora. Seu login continua salvo. Tente novamente em alguns instantes.",
   "app.retrySession": "Tentar novamente",
   "common.close": "Fechar",
   "common.download": "Baixar",
