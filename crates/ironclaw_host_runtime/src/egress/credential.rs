@@ -1,6 +1,6 @@
 use ironclaw_host_api::{
     CapabilityId, RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, SecretHandle,
 };
 use ironclaw_network::is_rfc3986_unreserved_segment;
 use ironclaw_safety::redaction_values_for_secret;
@@ -132,7 +132,6 @@ where
         ) {
             Ok(value) => value,
             Err(error) => {
-                restore_staged_secrets(secret_injections, request, &mut credential_materials);
                 request.credential_injections = credential_injections;
                 return Err(error);
             }
@@ -152,7 +151,6 @@ where
         if let Err(error) =
             apply_credential_injection(request, &mut parsed_url, &injection.target, plaintext)
         {
-            restore_staged_secrets(secret_injections, request, &mut credential_materials);
             request.credential_injections = credential_injections;
             return Err(error);
         }
@@ -162,40 +160,6 @@ where
         request.url = url.to_string();
     }
     Ok(redaction_values)
-}
-
-fn restore_staged_secrets(
-    secret_injections: Option<&RuntimeSecretInjectionStore>,
-    request: &RuntimeHttpEgressRequest,
-    cache: &mut Vec<CredentialCacheEntry>,
-) {
-    if runtime_reuses_staged_credentials(request.runtime) {
-        return;
-    }
-    let Some(secret_injections) = secret_injections else {
-        return;
-    };
-    for entry in cache.drain(..) {
-        let (
-            CredentialCacheKey::StagedObligation {
-                capability_id,
-                handle,
-            },
-            Some(material),
-        ) = (entry.key, entry.value)
-        else {
-            continue;
-        };
-        if let Err(error) =
-            secret_injections.insert(&request.scope, &capability_id, &handle, material)
-        {
-            tracing::debug!(
-                error = ?error,
-                capability_id = %capability_id,
-                "runtime HTTP egress failed to restore staged secret after injection failure"
-            );
-        }
-    }
 }
 
 fn credential_value_for_injection<'cache, S>(
@@ -237,11 +201,8 @@ fn staged_secret_for_injection(
     let Some(secret_injections) = secret_injections else {
         return missing_runtime_credential(injection.required);
     };
-    let material = if runtime_reuses_staged_credentials(request.runtime) {
-        secret_injections.clone_material(&request.scope, capability_id, &injection.handle)
-    } else {
-        secret_injections.take(&request.scope, capability_id, &injection.handle)
-    };
+    let material =
+        secret_injections.clone_material(&request.scope, capability_id, &injection.handle);
     match material {
         Ok(Some(material)) => Ok(Some(material)),
         Ok(None) => missing_runtime_credential(injection.required),
@@ -249,12 +210,6 @@ fn staged_secret_for_injection(
             reason: "runtime credential injection store unavailable".to_string(),
         }),
     }
-}
-
-fn runtime_reuses_staged_credentials(runtime: RuntimeKind) -> bool {
-    // Multi-call runtimes borrow invocation-scoped staged credentials until
-    // the capability dispatch completes or aborts.
-    matches!(runtime, RuntimeKind::Mcp | RuntimeKind::Wasm)
 }
 
 fn missing_runtime_credential(

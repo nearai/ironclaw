@@ -32,7 +32,7 @@ use ironclaw_first_party_extensions::{
 use ironclaw_host_api::{
     ExtensionId, InvocationId, NetworkMethod, NetworkScheme,
     RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED, ResourceScope, RuntimeDispatchErrorKind,
-    RuntimeHttpEgressError, SecretHandle, UserId,
+    RuntimeHttpEgressError, RuntimeHttpEgressResponse, SecretHandle, UserId,
 };
 use serde_json::json;
 use support::*;
@@ -306,6 +306,59 @@ async fn calendar_daily_brief_combines_agenda_and_gmail_attention() {
         body["emailAttention"]["messages"][0]["subject"],
         "Launch blocker"
     );
+}
+
+#[tokio::test]
+async fn gmail_message_summaries_borrows_one_credential_for_parallel_metadata_requests() {
+    let scope = scope();
+    let auth =
+        auth_with_google_account(&scope, vec![provider_scope(GOOGLE_GMAIL_READONLY_SCOPE)]).await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({
+            "resultSizeEstimate": 3,
+            "messages": [
+                {"id": "msg-1", "threadId": "thread-1"},
+                {"id": "msg-2", "threadId": "thread-2"},
+                {"id": "msg-3", "threadId": "thread-3"}
+            ]
+        })),
+        gmail_metadata_response("msg-1", "First"),
+        gmail_metadata_response("msg-2", "Second"),
+        gmail_metadata_response("msg-3", "Third"),
+    ]));
+    let capability_id = capability_id(GMAIL_FETCH_MESSAGE_SUMMARIES_CAPABILITY_ID);
+
+    let result = GsuiteExecutor::new(
+        auth.clone(),
+        auth,
+        FailOnNthCallStager::fail_on_second_call(),
+    )
+    .dispatch(GsuiteDispatchRequest {
+        capability_id: &capability_id,
+        scope: &scope,
+        input: &json!({"max_results": 3}),
+        runtime_http_egress: egress.clone(),
+    })
+    .await
+    .expect("Gmail list and metadata fan-out should share one staged credential");
+
+    assert_eq!(result.output["body"]["messageCount"], 3);
+    assert_eq!(egress.requests().len(), 4);
+}
+
+fn gmail_metadata_response(message_id: &str, subject: &str) -> RuntimeHttpEgressResponse {
+    RecordingEgress::json(json!({
+        "id": message_id,
+        "threadId": format!("thread-{message_id}"),
+        "labelIds": ["INBOX"],
+        "snippet": format!("Summary for {subject}"),
+        "payload": {
+            "headers": [
+                {"name": "From", "value": "sender@example.com"},
+                {"name": "Subject", "value": subject}
+            ]
+        }
+    }))
 }
 
 #[tokio::test]
@@ -2217,12 +2270,7 @@ async fn add_attendees_reports_failed_initial_get_network_usage() {
 }
 
 #[tokio::test]
-async fn add_attendees_restages_credential_before_patch() {
-    // P2 regression: the staged-obligation store is one-shot.
-    // execute_add_attendees makes GET then PATCH; without restaging, the PATCH
-    // fires with no credential. We use FailOnNthCallStager to verify the second
-    // staging call happens — if it doesn't happen, the dispatch succeeds instead
-    // of returning AuthRequired.
+async fn add_attendees_borrows_the_invocation_credential_for_get_and_patch() {
     let scope = scope();
     let auth = auth_with_google_account(
         &scope,
@@ -2238,13 +2286,10 @@ async fn add_attendees_restages_credential_before_patch() {
             }),
             50,
         ),
-        // PATCH response — would succeed, but stager fails before we get here
         RecordingEgress::json_with_request_bytes(json!({"id": "evt-1", "updated": true}), 80),
     ]));
 
-    // Stager succeeds on first call (for GET), fails AuthRequired on second call (for PATCH).
-    // Without the P2 fix, the second staging call never happens and dispatch succeeds.
-    let error = GsuiteExecutor::new(
+    let result = GsuiteExecutor::new(
         auth.clone(),
         auth,
         FailOnNthCallStager::fail_on_second_call(),
@@ -2260,21 +2305,11 @@ async fn add_attendees_restages_credential_before_patch() {
         runtime_http_egress: egress.clone(),
     })
     .await
-    .expect_err("second staging should fail with AuthRequired before PATCH fires");
+    .expect("GET and PATCH should share the invocation-scoped credential");
 
-    assert!(
-        error.is_auth_required(),
-        "stager auth-required on PATCH restage must surface as AuthRequired; got {error:?}"
-    );
-    // Only the GET fired; PATCH was blocked by staging failure
+    assert_eq!(egress.requests().len(), 2, "GET and PATCH must both run");
     assert_eq!(
-        egress.requests().len(),
-        1,
-        "PATCH must not fire after staging failure; egress count should be 1 (GET only)"
-    );
-    assert_eq!(
-        error.usage().map(|u| u.network_egress_bytes),
-        Some(50),
-        "GET network bytes must be reported even when PATCH staging fails"
+        result.usage.network_egress_bytes, 130,
+        "both requests must contribute to network accounting"
     );
 }

@@ -260,9 +260,7 @@ impl GsuiteExecutor {
         );
 
         let execute_primary_started_at = gsuite_latency_started_at();
-        let (response, network_egress_bytes) = match execution
-            .execute(&request, &credential, self.credential_stager.as_ref())
-            .await
+        let (response, network_egress_bytes) = match execution.execute(&request, &credential).await
         {
             Ok(CapabilityExecutionOutcome::Response {
                 response,
@@ -415,10 +413,7 @@ impl GsuiteExecutor {
                 );
 
                 let execute_retry_started_at = gsuite_latency_started_at();
-                match retry_execution
-                    .execute(&request, &refreshed, self.credential_stager.as_ref())
-                    .await
-                {
+                match retry_execution.execute(&request, &refreshed).await {
                     Ok(CapabilityExecutionOutcome::Response {
                         response,
                         network_egress_bytes: retry_network_egress_bytes,
@@ -693,7 +688,6 @@ impl CapabilityExecution {
         self,
         request: &GsuiteDispatchRequest<'_>,
         credential: &GoogleCredential,
-        stager: &dyn GsuiteCredentialStager,
     ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
         match self {
             Self::Single { method, url, body } => {
@@ -706,28 +700,22 @@ impl CapabilityExecution {
                 Ok(response_outcome(response, network_egress_bytes))
             }
             Self::CalendarListEvents(input) => {
-                calendar_list_events::execute(request, credential, stager, input).await
+                calendar_list_events::execute(request, credential, input).await
             }
             Self::CalendarAgenda(input) => {
-                context_tools::execute_calendar_agenda(request, credential, stager, input).await
+                context_tools::execute_calendar_agenda(request, credential, input).await
             }
             Self::CalendarDailyBrief(input) => {
-                context_tools::execute_calendar_daily_brief(request, credential, stager, input)
-                    .await
+                context_tools::execute_calendar_daily_brief(request, credential, input).await
             }
             Self::CalendarMeetingPrep(input) => {
-                context_tools::execute_calendar_meeting_prep(request, credential, stager, input)
-                    .await
+                context_tools::execute_calendar_meeting_prep(request, credential, input).await
             }
             Self::GmailFetchMessageSummaries(input) => {
-                context_tools::execute_gmail_fetch_message_summaries(
-                    request, credential, stager, input,
-                )
-                .await
+                context_tools::execute_gmail_fetch_message_summaries(request, credential, input)
+                    .await
             }
-            Self::AddAttendees(input) => {
-                execute_add_attendees(request, credential, stager, input).await
-            }
+            Self::AddAttendees(input) => execute_add_attendees(request, credential, input).await,
         }
     }
 }
@@ -735,7 +723,6 @@ impl CapabilityExecution {
 async fn execute_add_attendees(
     request: &GsuiteDispatchRequest<'_>,
     credential: &GoogleCredential,
-    stager: &dyn GsuiteCredentialStager,
     input: CalendarAddAttendeesInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
     let url = input.event_path.url();
@@ -765,23 +752,6 @@ async fn execute_add_attendees(
         .cloned()
         .unwrap_or_default();
     let attendees = merge_attendees(existing, input.attendees);
-    // Re-stage before the PATCH: the staged-obligation store is one-shot,
-    // so the GET egress consumed the first injection. Stage again so the
-    // PATCH egress has its credential available.
-    stager
-        .stage(GsuiteCredentialStageRequest {
-            source_scope: &credential.access_secret_scope,
-            target_scope: request.scope,
-            capability_id: request.capability_id,
-            access_secret: &access_secret,
-        })
-        .await
-        .map_err(|error| {
-            add_network_usage(
-                map_stage_error(error, access_secret.clone()),
-                network_egress_bytes,
-            )
-        })?;
     let mut patch = runtime_request(
         request,
         access_secret,

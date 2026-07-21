@@ -396,7 +396,7 @@ async fn host_http_egress_helper_injects_staged_credentials_from_handoff_store()
 }
 
 #[tokio::test]
-async fn host_http_egress_helper_consumes_staged_credentials_after_first_egress() {
+async fn host_http_egress_helper_borrows_staged_credentials_concurrently_for_the_invocation() {
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
@@ -421,31 +421,58 @@ async fn host_http_egress_helper_consumes_staged_credentials_after_first_egress(
         .expect("staged credential should be seeded");
     let egress = configured_egress(&services);
 
-    egress
+    let first = egress.execute(request_with_staged_credential(
+        scope.clone(),
+        capability_id.clone(),
+        handle.clone(),
+    ));
+    let second = egress.execute(request_with_staged_credential(
+        scope.clone(),
+        capability_id.clone(),
+        handle.clone(),
+    ));
+    let (first, second) = tokio::join!(first, second);
+    first.expect("first request should borrow the staged credential");
+    second.expect("second request should concurrently borrow the staged credential");
+
+    let foreign_scope = sample_scope();
+    services
+        .network_policy_store
+        .insert(&foreign_scope, &capability_id, staged_policy());
+    let foreign_scope_error = egress
         .execute(request_with_staged_credential(
-            scope.clone(),
+            foreign_scope,
             capability_id.clone(),
             handle.clone(),
         ))
         .await
-        .expect("first request should inject staged credential");
-    let replay = egress
+        .expect_err("another invocation must not borrow the staged credential");
+    assert!(matches!(
+        foreign_scope_error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+
+    services
+        .secret_injection_store
+        .discard_for_capability(&scope, &capability_id)
+        .expect("invocation credential cleanup should succeed");
+    let revoked_error = egress
         .execute(request_with_staged_credential(scope, capability_id, handle))
         .await
-        .expect_err("consumed staged credential must not be reusable");
+        .expect_err("cleanup must revoke the invocation credential");
     assert!(matches!(
-        replay,
+        revoked_error,
         ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
     ));
 
     let requests = recorded_requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert!(
-        requests[0]
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| {
+        request
             .headers
             .iter()
             .any(|(name, value)| name == "authorization" && value == "Bearer staged-secret")
-    );
+    }));
 }
 
 #[tokio::test]

@@ -12,11 +12,10 @@ use serde_json::{Value, json};
 use crate::gsuite::credential::GoogleCredential;
 
 use super::{
-    CALENDAR_API_BASE, CapabilityExecutionOutcome, GMAIL_API_BASE, GsuiteCredentialStageRequest,
-    GsuiteCredentialStager, GsuiteDispatchError, GsuiteDispatchRequest, add_network_usage,
-    calendar_events_collection_url, encode_percent, encode_segment, execute_runtime_http,
-    input_error, is_google_auth_expired_response, map_stage_error, optional_bool,
-    optional_query_value, optional_str, optional_string_array, push_optional_query,
+    CALENDAR_API_BASE, CapabilityExecutionOutcome, GMAIL_API_BASE, GsuiteDispatchError,
+    GsuiteDispatchRequest, add_network_usage, calendar_events_collection_url, encode_percent,
+    encode_segment, execute_runtime_http, input_error, is_google_auth_expired_response,
+    optional_bool, optional_query_value, optional_str, optional_string_array, push_optional_query,
     response_body_json, runtime_request,
 };
 
@@ -175,10 +174,9 @@ impl CalendarDailyBriefInput {
 pub(super) async fn execute_gmail_fetch_message_summaries(
     request: &GsuiteDispatchRequest<'_>,
     credential: &GoogleCredential,
-    stager: &dyn GsuiteCredentialStager,
     input: GmailFetchMessageSummariesInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
-    let mut run = GoogleApiRun::new(request, credential, stager);
+    let mut run = GoogleApiRun::new(request, credential);
     let body = fetch_gmail_summaries(&mut run, &input).await?;
     if let Some(auth_expired) = auth_expired_from_body(&body, run.network_egress_bytes()) {
         return Ok(auth_expired);
@@ -189,10 +187,9 @@ pub(super) async fn execute_gmail_fetch_message_summaries(
 pub(super) async fn execute_calendar_agenda(
     request: &GsuiteDispatchRequest<'_>,
     credential: &GoogleCredential,
-    stager: &dyn GsuiteCredentialStager,
     input: CalendarAgendaInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
-    let mut run = GoogleApiRun::new(request, credential, stager);
+    let mut run = GoogleApiRun::new(request, credential);
     let agenda = fetch_agenda(&mut run, &input, false).await?;
     if let Some(auth_expired) = auth_expired_from_body(&agenda, run.network_egress_bytes()) {
         return Ok(auth_expired);
@@ -203,10 +200,9 @@ pub(super) async fn execute_calendar_agenda(
 pub(super) async fn execute_calendar_meeting_prep(
     request: &GsuiteDispatchRequest<'_>,
     credential: &GoogleCredential,
-    stager: &dyn GsuiteCredentialStager,
     input: CalendarMeetingPrepInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
-    let mut run = GoogleApiRun::new(request, credential, stager);
+    let mut run = GoogleApiRun::new(request, credential);
     let agenda = fetch_agenda(&mut run, &input.agenda, true).await?;
     if let Some(auth_expired) = auth_expired_from_body(&agenda, run.network_egress_bytes()) {
         return Ok(auth_expired);
@@ -238,10 +234,9 @@ pub(super) async fn execute_calendar_meeting_prep(
 pub(super) async fn execute_calendar_daily_brief(
     request: &GsuiteDispatchRequest<'_>,
     credential: &GoogleCredential,
-    stager: &dyn GsuiteCredentialStager,
     input: CalendarDailyBriefInput,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
-    let mut run = GoogleApiRun::new(request, credential, stager);
+    let mut run = GoogleApiRun::new(request, credential);
     let agenda = fetch_agenda(&mut run, &input.agenda, false).await?;
     if let Some(auth_expired) = auth_expired_from_body(&agenda, run.network_egress_bytes()) {
         return Ok(auth_expired);
@@ -283,35 +278,22 @@ pub(super) async fn execute_calendar_daily_brief(
 struct GoogleApiRun<'a, 'request> {
     request: &'a GsuiteDispatchRequest<'request>,
     credential: &'a GoogleCredential,
-    stager: &'a dyn GsuiteCredentialStager,
-    credential_staged: bool,
     network_egress_bytes: u64,
     redaction_applied: bool,
 }
 
 impl<'a, 'request> GoogleApiRun<'a, 'request> {
-    fn new(
-        request: &'a GsuiteDispatchRequest<'request>,
-        credential: &'a GoogleCredential,
-        stager: &'a dyn GsuiteCredentialStager,
-    ) -> Self {
+    fn new(request: &'a GsuiteDispatchRequest<'request>, credential: &'a GoogleCredential) -> Self {
         Self {
             request,
             credential,
-            stager,
-            credential_staged: true,
             network_egress_bytes: 0,
             redaction_applied: false,
         }
     }
 
-    async fn prepare_get(
-        &mut self,
-        url: String,
-    ) -> Result<GoogleApiPreparedGet, GsuiteDispatchError> {
-        self.stage_credential_if_needed().await?;
-        self.credential_staged = false;
-        Ok(GoogleApiPreparedGet {
+    fn prepare_get(&self, url: String) -> GoogleApiPreparedGet {
+        GoogleApiPreparedGet {
             request: runtime_request(
                 self.request,
                 self.credential.access_secret.clone(),
@@ -320,7 +302,7 @@ impl<'a, 'request> GoogleApiRun<'a, 'request> {
                 Vec::new(),
             ),
             runtime_http_egress: Arc::clone(&self.request.runtime_http_egress),
-        })
+        }
     }
 
     async fn get(&mut self, url: String) -> Result<RuntimeHttpEgressResponse, GsuiteDispatchError> {
@@ -333,8 +315,6 @@ impl<'a, 'request> GoogleApiRun<'a, 'request> {
         url: String,
         body: Vec<u8>,
     ) -> Result<RuntimeHttpEgressResponse, GsuiteDispatchError> {
-        self.stage_credential_if_needed().await?;
-        self.credential_staged = false;
         let response = execute_runtime_http(
             runtime_request(
                 self.request,
@@ -363,28 +343,6 @@ impl<'a, 'request> GoogleApiRun<'a, 'request> {
             .network_egress_bytes
             .saturating_add(response.request_bytes);
         self.redaction_applied |= response.redaction_applied;
-    }
-
-    async fn stage_credential_if_needed(&mut self) -> Result<(), GsuiteDispatchError> {
-        if self.credential_staged {
-            return Ok(());
-        }
-        self.stager
-            .stage(GsuiteCredentialStageRequest {
-                source_scope: &self.credential.access_secret_scope,
-                target_scope: self.request.scope,
-                capability_id: self.request.capability_id,
-                access_secret: &self.credential.access_secret,
-            })
-            .await
-            .map_err(|error| {
-                add_network_usage(
-                    map_stage_error(error, self.credential.access_secret.clone()),
-                    self.network_egress_bytes,
-                )
-            })?;
-        self.credential_staged = true;
-        Ok(())
     }
 }
 
@@ -427,11 +385,7 @@ async fn fetch_gmail_summaries(
     let mut partial_failures = Vec::new();
     let mut requests = Vec::new();
     for (index, id) in ids.iter().take(input.max_results as usize).enumerate() {
-        requests.push((
-            index,
-            id.clone(),
-            run.prepare_get(gmail_metadata_url(id)).await?,
-        ));
+        requests.push((index, id.clone(), run.prepare_get(gmail_metadata_url(id))));
     }
     let mut responses = stream::iter(requests)
         .map(|(index, id, request)| async move { (index, id, request.execute().await) })
@@ -531,7 +485,7 @@ async fn fetch_agenda(
     }
     let mut requests = Vec::new();
     for (index, calendar_id, url) in urls {
-        requests.push((index, calendar_id, run.prepare_get(url).await?));
+        requests.push((index, calendar_id, run.prepare_get(url)));
     }
     let mut responses = stream::iter(requests)
         .map(|(index, calendar_id, request)| async move {

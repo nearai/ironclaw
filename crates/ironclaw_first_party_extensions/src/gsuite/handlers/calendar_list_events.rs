@@ -7,10 +7,9 @@ use serde_json::{Value, json};
 use crate::gsuite::credential::GoogleCredential;
 
 use super::{
-    CALENDAR_API_BASE, CapabilityExecutionOutcome, GsuiteCredentialStageRequest,
-    GsuiteCredentialStager, GsuiteDispatchError, GsuiteDispatchRequest, add_network_usage,
-    calendar_events_collection_url, encode_percent, execute_runtime_http, input_error,
-    is_google_auth_expired_response, map_stage_error, optional_bool, optional_query_value,
+    CALENDAR_API_BASE, CapabilityExecutionOutcome, GsuiteDispatchError, GsuiteDispatchRequest,
+    add_network_usage, calendar_events_collection_url, encode_percent, execute_runtime_http,
+    input_error, is_google_auth_expired_response, optional_bool, optional_query_value,
     optional_str, optional_string_array, push_optional_query, response_body_json, runtime_request,
 };
 
@@ -116,10 +115,9 @@ impl CalendarEventsQuery {
 pub(super) async fn execute(
     request: &GsuiteDispatchRequest<'_>,
     credential: &GoogleCredential,
-    stager: &dyn GsuiteCredentialStager,
     input: CalendarEventsQuery,
 ) -> Result<CapabilityExecutionOutcome, GsuiteDispatchError> {
-    let mut run = CalendarListEventsRun::new(request, credential, stager);
+    let mut run = CalendarListEventsRun::new(request, credential);
     if !input.requires_aggregate_response() {
         let response = run
             .get(list_events_url(&input, &input.calendar_id)?)
@@ -203,32 +201,21 @@ pub(super) async fn execute(
 struct CalendarListEventsRun<'a, 'request> {
     request: &'a GsuiteDispatchRequest<'request>,
     credential: &'a GoogleCredential,
-    stager: &'a dyn GsuiteCredentialStager,
-    credential_staged: bool,
     network_egress_bytes: u64,
     redaction_applied: bool,
 }
 
 impl<'a, 'request> CalendarListEventsRun<'a, 'request> {
-    fn new(
-        request: &'a GsuiteDispatchRequest<'request>,
-        credential: &'a GoogleCredential,
-        stager: &'a dyn GsuiteCredentialStager,
-    ) -> Self {
+    fn new(request: &'a GsuiteDispatchRequest<'request>, credential: &'a GoogleCredential) -> Self {
         Self {
             request,
             credential,
-            stager,
-            // GsuiteExecutor stages once before capability execution starts.
-            credential_staged: true,
             network_egress_bytes: 0,
             redaction_applied: false,
         }
     }
 
     async fn get(&mut self, url: String) -> Result<RuntimeHttpEgressResponse, GsuiteDispatchError> {
-        self.stage_credential_if_needed().await?;
-        self.credential_staged = false;
         let response = execute_runtime_http(
             runtime_request(
                 self.request,
@@ -254,26 +241,6 @@ impl<'a, 'request> CalendarListEventsRun<'a, 'request> {
 
     fn redaction_applied(&self) -> bool {
         self.redaction_applied
-    }
-
-    async fn stage_credential_if_needed(&mut self) -> Result<(), GsuiteDispatchError> {
-        if self.credential_staged {
-            return Ok(());
-        }
-        self.stager
-            .stage(GsuiteCredentialStageRequest {
-                source_scope: &self.credential.access_secret_scope,
-                target_scope: self.request.scope,
-                capability_id: self.request.capability_id,
-                access_secret: &self.credential.access_secret,
-            })
-            .await
-            .map_err(|error| {
-                add_network_usage(
-                    map_stage_error(error, self.credential.access_secret.clone()),
-                    self.network_egress_bytes,
-                )
-            })
     }
 }
 
