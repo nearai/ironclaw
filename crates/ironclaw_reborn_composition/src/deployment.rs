@@ -504,17 +504,15 @@ pub(crate) fn hosted_single_tenant_volume_build_input(
     owner_id: impl Into<String>,
     root: PathBuf,
 ) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
-    #[cfg(not(feature = "libsql"))]
+    #[cfg(any())]
     {
         let _ = owner_id;
         let _ = root;
         Err(RebornRuntimeProfileError::MissingLibsqlFeature)
     }
 
-    #[cfg(feature = "libsql")]
     let policy =
         hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
-    #[cfg(feature = "libsql")]
     Ok(RebornBuildInput::local_dev_with_profile(
         RebornCompositionProfile::HostedSingleTenantVolume,
         owner_id,

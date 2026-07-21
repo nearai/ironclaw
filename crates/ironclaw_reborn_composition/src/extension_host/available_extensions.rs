@@ -2824,7 +2824,7 @@ handle = "web_token"
         );
     }
 
-    #[cfg(not(any(feature = "libsql", feature = "postgres")))]
+    #[cfg(any())]
     #[test]
     fn nearai_manifest_renderer_ignores_config_endpoint_without_durable_product_auth() {
         let config = NearAiMcpBootstrapConfig::new(

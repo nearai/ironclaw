@@ -84,7 +84,7 @@ const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_WAIT_TIMEOUT: Duration = Duration::from
 /// OpenAI-compatible conversation bindings must survive a restart, so these
 /// routes need a durable backend. Without one the mount is refused rather than
 /// served over non-durable bindings.
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
+#[cfg(any())]
 pub async fn build_openai_compat_route_mount(
     _runtime: &RebornRuntime,
     _tenant_id: TenantId,
@@ -97,7 +97,6 @@ pub async fn build_openai_compat_route_mount(
     })
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn build_openai_compat_route_mount(
     runtime: &RebornRuntime,
     tenant_id: TenantId,

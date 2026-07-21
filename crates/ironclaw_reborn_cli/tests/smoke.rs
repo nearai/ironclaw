@@ -393,17 +393,13 @@ fn dockerfile_reborn_ships_extension_ownership_migration() {
 
     assert!(
         deps_stage.contains("--package ironclaw_reborn_migration")
-            && deps_stage.contains("--no-default-features")
-            && deps_stage.contains("--features libsql")
             && deps_stage.contains("--recipe-path recipe.json"),
-        "Dockerfile must cache the libSQL-only extension ownership migration dependencies: {dockerfile}"
+        "Dockerfile must cache the extension ownership migration dependencies: {dockerfile}"
     );
     assert!(
         builder_stage.contains("--package ironclaw_reborn_migration")
-            && builder_stage.contains("--no-default-features")
-            && builder_stage.contains("--features libsql")
             && builder_stage.contains("--bin ironclaw-reborn-extension-ownership-migration"),
-        "Dockerfile must build the libSQL-only extension ownership migration binary: {dockerfile}"
+        "Dockerfile must build the extension ownership migration binary: {dockerfile}"
     );
     assert!(
         dockerfile.contains(
@@ -3986,7 +3982,7 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
     );
 }
 
-#[cfg(not(feature = "libsql"))]
+#[cfg(any())]
 #[test]
 fn onboard_reduced_feature_build_reports_llm_provisioning_as_unavailable() {
     let temp = tempfile::tempdir().expect("tempdir");

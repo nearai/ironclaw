@@ -9,7 +9,6 @@ use ironclaw_reborn_composition::OAuthRedirectUri;
 use ironclaw_reborn_composition::SlackPersonalSetupServiceSlot;
 use ironclaw_reborn_composition::TriggerFireAccessPolicy;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
-#[cfg(feature = "postgres")]
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
     CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
@@ -479,7 +478,6 @@ fn apply_credential_refresh_override(
 ///   with no GUI session). `onboard` already pays that cost interactively;
 ///   `serve` is the boot path this fix unblocks. `run` stays fail-fast so
 ///   a forgotten env var doesn't hang instead of erroring clearly.
-#[cfg(feature = "libsql")]
 fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -536,7 +534,7 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
 /// to check, so behavior here is byte-identical to calling
 /// `resolve_reborn_runtime_llm` directly — a required-but-unset API key
 /// still fails closed with `ApiKeyEnvUnset`.
-#[cfg(not(feature = "libsql"))]
+#[cfg(any())]
 fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -715,7 +713,6 @@ fn build_standalone_local_runtime_services_input(
     Ok(services_input)
 }
 
-#[cfg(feature = "postgres")]
 fn build_hosted_single_tenant_services_input(
     profile: RebornProfile,
     owner_id: &str,
@@ -742,7 +739,7 @@ fn build_hosted_single_tenant_services_input(
     )
 }
 
-#[cfg(not(feature = "postgres"))]
+#[cfg(any())]
 fn build_hosted_single_tenant_services_input(
     profile: RebornProfile,
     _owner_id: &str,
@@ -755,7 +752,6 @@ fn build_hosted_single_tenant_services_input(
     )
 }
 
-#[cfg(feature = "postgres")]
 fn build_production_services_input(
     profile: RebornProfile,
     owner_id: &str,
@@ -768,7 +764,7 @@ fn build_production_services_input(
     )
     .map_err(anyhow::Error::from)
 }
-#[cfg(not(feature = "postgres"))]
+#[cfg(any())]
 fn build_production_services_input(
     profile: RebornProfile,
     _owner_id: &str,
@@ -837,7 +833,6 @@ pub(crate) fn resolve_google_oauth_config_state_from_env(
 /// `config set google.client_secret` can ever have written anything here —
 /// a binary without it can't have populated the store, so there is nothing
 /// to read.
-#[cfg(feature = "libsql")]
 fn google_oauth_client_secret_from_store(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<SecretString>> {
@@ -858,7 +853,7 @@ fn google_oauth_client_secret_from_store(
     })
 }
 
-#[cfg(not(feature = "libsql"))]
+#[cfg(any())]
 fn google_oauth_client_secret_from_store(
     _config: &RebornBootConfig,
 ) -> anyhow::Result<Option<SecretString>> {
@@ -1536,8 +1531,7 @@ mod tests {
         resolve_slack_personal_oauth_redirect_uri, runner_settings,
     };
     use ironclaw_reborn_config::GoogleSection;
-    // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
-    #[cfg(feature = "libsql")]
+    // Only the hosted-volume tests consume this.
     use super::local_runtime_storage_root;
     use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 
@@ -2074,7 +2068,6 @@ mod tests {
         EnvGuard::clear("IRONCLAW_CREDENTIAL_REFRESH_ENABLED")
     }
 
-    #[cfg(feature = "postgres")]
     fn clear_reborn_postgres_tls_env() -> (EnvGuard, EnvGuard) {
         (
             EnvGuard::clear("DATABASE_SSLMODE"),
@@ -2239,7 +2232,6 @@ regex_activation_enabled = false
         assert_eq!(policy.secret_mode.as_str(), "inherited_env");
     }
 
-    #[cfg(feature = "libsql")]
     #[test]
     fn build_runtime_input_accepts_hosted_single_tenant_volume_profile() {
         let _lock = lock_runtime_env();
@@ -2277,7 +2269,6 @@ regex_activation_enabled = false
         );
     }
 
-    #[cfg(feature = "postgres")]
     fn boot_config_with_config_toml(
         profile: &str,
         config_toml: &str,
@@ -2296,7 +2287,6 @@ regex_activation_enabled = false
         (temp, config)
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_for_local_dev_rejects_policy_section() {
         let _lock = lock_runtime_env();
@@ -2320,7 +2310,6 @@ default_profile = "secure_default"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_for_hosted_volume_rejects_storage_section() {
         let _lock = lock_runtime_env();
@@ -2345,7 +2334,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_storage_section() {
         let _lock = lock_runtime_env();
@@ -2374,7 +2362,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_postgres_url_env_value() {
         let _lock = lock_runtime_env();
@@ -2417,7 +2404,6 @@ default_profile = "secure_default"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_storage_section_missing_backend_field() {
         let _lock = lock_runtime_env();
@@ -2442,7 +2428,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_policy_section() {
         let _lock = lock_runtime_env();
@@ -2475,7 +2460,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_invalid_policy_deployment_mode() {
         let _lock = lock_runtime_env();
@@ -2512,7 +2496,6 @@ default_profile = "secure_default"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_invalid_policy_default_profile() {
         let _lock = lock_runtime_env();
@@ -2549,7 +2532,6 @@ default_profile = "not_a_profile"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_unsupported_backend() {
         let _lock = lock_runtime_env();
@@ -2573,7 +2555,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_whitespace_only_postgres_url() {
         let _lock = lock_runtime_env();
@@ -2600,7 +2581,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_hosted_single_tenant_constructs_postgres_local_runtime_input() {
         let _lock = lock_runtime_env();
@@ -2641,7 +2621,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         drop(allow_cleartext);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_rejects_invalid_postgres_pool_max_size_override() {
         let _lock = lock_runtime_env();
@@ -2681,7 +2660,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         drop(allow_cleartext);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_preserves_whitespace_secret_master_key() {
         let _lock = lock_runtime_env();
@@ -2711,7 +2689,6 @@ default_profile = "secure_default"
         assert_eq!(services.profile(), RebornCompositionProfile::Production);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_uses_custom_url_env_name() {
         let _lock = lock_runtime_env();
@@ -2743,7 +2720,6 @@ default_profile = "secure_default"
         assert_eq!(services.profile(), RebornCompositionProfile::Production);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_constructs_migration_dry_run_services_input() {
         let _lock = lock_runtime_env();
@@ -2777,7 +2753,6 @@ default_profile = "secure_default"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_secret_master_key_env_value() {
         let _lock = lock_runtime_env();
@@ -2826,7 +2801,6 @@ default_profile = "secure_default"
         assert!(!rendered.contains("postgres://"));
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_remote_postgres_sslmode_disable_redacted() {
         let _lock = lock_runtime_env();
@@ -2878,7 +2852,6 @@ default_profile = "secure_default"
         assert!(!rendered.contains("db.example.com"));
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_database_sslmode_disable_without_opt_in() {
         let _lock = lock_runtime_env();
@@ -2919,7 +2892,6 @@ default_profile = "secure_default"
         assert!(!rendered.contains("db.example.com"));
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_allows_database_sslmode_disable_with_opt_in() {
         let _lock = lock_runtime_env();
@@ -2953,7 +2925,6 @@ default_profile = "secure_default"
         assert_eq!(services.profile(), RebornCompositionProfile::Production);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_invalid_cleartext_opt_in() {
         let _lock = lock_runtime_env();
@@ -2996,7 +2967,6 @@ default_profile = "secure_default"
         assert!(!rendered.contains("db.example.com"));
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_accepts_verify_full_database_sslmode() {
         let _lock = lock_runtime_env();
@@ -3029,7 +2999,6 @@ default_profile = "secure_default"
         assert_eq!(services.profile(), RebornCompositionProfile::Production);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_constructs_postgres_services_input() {
         let lock = lock_runtime_env();
@@ -3972,7 +3941,6 @@ poll_interval_secs = 15
     /// just that the pure merge function accepts a hand-built
     /// `SecretString` — the merge-function tests above already cover the
     /// precedence rules in isolation.
-    #[cfg(feature = "libsql")]
     #[test]
     fn google_oauth_client_secret_from_store_reads_back_a_stored_secret() {
         let _guard = lock_runtime_env();
@@ -4023,7 +3991,6 @@ poll_interval_secs = 15
     /// Deliberately does NOT set `IRONCLAW_DISABLE_OS_KEYCHAIN`; with no
     /// secret-store database, the loader must short-circuit to `None` before
     /// reaching the keychain and complete quickly without a GUI session.
-    #[cfg(feature = "libsql")]
     #[test]
     fn google_oauth_client_secret_from_store_is_read_only_on_a_pristine_home() {
         let _guard = lock_runtime_env();

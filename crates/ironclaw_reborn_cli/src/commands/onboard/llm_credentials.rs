@@ -3,7 +3,6 @@
 //! API key, then persist both — the secret store write lands before the
 //! `config.toml` selection (see [`provision_llm_credentials`]'s doc).
 
-#[cfg(feature = "libsql")]
 use std::path::Path;
 
 use ironclaw_reborn_config::RebornHome;
@@ -15,15 +14,19 @@ use super::prompts::{LlmCredentialPromptError, PromptSource};
 /// shape: the `Skipped*` variants are expected and normal, not a failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LlmCredentialProvisionOutcome {
-    #[cfg(feature = "libsql")]
-    Configured { provider_id: String, model: String },
+    Configured {
+        provider_id: String,
+        model: String,
+    },
     /// `[llm.default]` was already pointed at a provider AND the encrypted
     /// secret store already has a key for it (see
     /// [`already_configured_outcome`]) — this run skipped prompting
     /// entirely rather than re-asking for credentials that are already
     /// durably stored.
-    #[cfg(feature = "libsql")]
-    AlreadyConfigured { provider_id: String, model: String },
+    AlreadyConfigured {
+        provider_id: String,
+        model: String,
+    },
     /// Complete LLM config detected in env (`RebornProviderAdmin::detect_env_llm`)
     /// and `[llm.default]` seeded via `set_provider`. The detected API key is
     /// also persisted to the encrypted secret store (same path the menu flow
@@ -33,53 +36,50 @@ pub(crate) enum LlmCredentialProvisionOutcome {
     /// a headless run.
     /// - Idempotency: once seeded, drift between slot and live env is accepted
     ///   (not re-synced) on later runs; `--force` re-seeds from env again.
-    #[cfg(feature = "libsql")]
-    ConfiguredFromEnv { provider_id: String, model: String },
+    ConfiguredFromEnv {
+        provider_id: String,
+        model: String,
+    },
     /// Headless (non-interactive) session; no LLM environment variables are
     /// set at all. Nothing was seeded.
-    #[cfg(feature = "libsql")]
     SkippedNonInteractive,
     /// Headless (non-interactive) session; some LLM environment
     /// configuration was present but incomplete or invalid (e.g. a
     /// provider's model env var set without its required API key env var).
     /// Nothing was seeded — a partial/broken environment must never be
     /// silently adopted.
-    #[cfg(feature = "libsql")]
-    SkippedNonInteractivePartialEnv { reason: String },
+    SkippedNonInteractivePartialEnv {
+        reason: String,
+    },
     /// This binary was built without the storage/provider features required
     /// for interactive LLM provisioning. Unlike `SkippedNonInteractive`,
     /// changing terminal interactivity cannot make this step available.
-    #[cfg(not(feature = "libsql"))]
+    #[cfg(any())]
     UnavailableInBuild,
 }
 
 impl LlmCredentialProvisionOutcome {
     pub(crate) fn display_line(&self) -> String {
         match self {
-            #[cfg(feature = "libsql")]
             Self::Configured { provider_id, model } => {
                 format!("configured provider `{provider_id}` (model `{model}`)")
             }
-            #[cfg(feature = "libsql")]
             Self::AlreadyConfigured { provider_id, model } => {
                 format!(
                     "already configured (provider `{provider_id}`, model `{model}`); use \
                      --force to reconfigure"
                 )
             }
-            #[cfg(feature = "libsql")]
             Self::ConfiguredFromEnv { provider_id, model } => {
                 format!("configured provider `{provider_id}` (model `{model}`) from environment")
             }
-            #[cfg(feature = "libsql")]
             Self::SkippedNonInteractive => "skipped (non-interactive session)".to_string(),
-            #[cfg(feature = "libsql")]
             Self::SkippedNonInteractivePartialEnv { reason } => {
                 format!(
                     "skipped (non-interactive session; partial environment LLM config: {reason})"
                 )
             }
-            #[cfg(not(feature = "libsql"))]
+            #[cfg(any())]
             Self::UnavailableInBuild => "unavailable in this build (requires `libsql`)".to_string(),
         }
     }
@@ -92,7 +92,6 @@ impl LlmCredentialProvisionOutcome {
 /// - Gated on `libsql`, the same cfg as
 ///   `ironclaw_reborn_composition::LlmKeyStore` (which only exists behind that
 ///   feature); see the `#[cfg(not(...))]` stub below for feature-off.
-#[cfg(feature = "libsql")]
 pub(crate) trait LlmKeyStoreOpener {
     fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore>;
 }
@@ -101,10 +100,8 @@ pub(crate) trait LlmKeyStoreOpener {
 /// secret store `serve` later reads from (see
 /// `ironclaw_reborn_composition::open_local_dev_secret_store`'s doc for why
 /// this is the same physical storage `serve` opens).
-#[cfg(feature = "libsql")]
 pub(crate) struct EncryptedLlmKeyStoreOpener;
 
-#[cfg(feature = "libsql")]
 impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
     fn open(&self, home_path: &Path) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
         let home_path = home_path.to_path_buf();
@@ -121,13 +118,13 @@ impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {
 /// `execute()`'s unconditional
 /// `&EncryptedLlmKeyStoreOpener` call site compiles everywhere — the
 /// feature-off `provision_llm_credentials` below never calls `open`.
-#[cfg(not(feature = "libsql"))]
+#[cfg(any())]
 pub(crate) trait LlmKeyStoreOpener {}
 
-#[cfg(not(feature = "libsql"))]
+#[cfg(any())]
 pub(crate) struct EncryptedLlmKeyStoreOpener;
 
-#[cfg(not(feature = "libsql"))]
+#[cfg(any())]
 impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {}
 
 /// Where `provision_via_menu`'s pre-write key/model verification probe comes
@@ -139,7 +136,6 @@ impl LlmKeyStoreOpener for EncryptedLlmKeyStoreOpener {}
 ///   rather than raw construction ingredients.
 /// - Gated the same as [`LlmKeyStoreOpener`]: no `RebornProviderAdmin`/
 ///   `ProviderProbeOutcome` without `libsql`.
-#[cfg(feature = "libsql")]
 pub(crate) trait LlmProbe {
     fn probe(
         &self,
@@ -154,10 +150,8 @@ pub(crate) trait LlmProbe {
 /// which builds a transient provider from the candidate settings and lists
 /// its models — the same machinery the webui2 settings "Test connection"
 /// button uses, reused here rather than opening a second transport.
-#[cfg(feature = "libsql")]
 pub(crate) struct LiveLlmProbe;
 
-#[cfg(feature = "libsql")]
 impl LlmProbe for LiveLlmProbe {
     fn probe(
         &self,
@@ -182,13 +176,13 @@ impl LlmProbe for LiveLlmProbe {
 /// Feature-off stub, same reasoning as [`LlmKeyStoreOpener`]'s stub: keeps
 /// `execute()`'s unconditional `&LiveLlmProbe` call site compiling; the
 /// feature-off `provision_llm_credentials` below never calls `probe`.
-#[cfg(not(feature = "libsql"))]
+#[cfg(any())]
 pub(crate) trait LlmProbe {}
 
-#[cfg(not(feature = "libsql"))]
+#[cfg(any())]
 pub(crate) struct LiveLlmProbe;
 
-#[cfg(not(feature = "libsql"))]
+#[cfg(any())]
 impl LlmProbe for LiveLlmProbe {}
 
 /// Provision onboard's `[llm.default]` slot.
@@ -230,7 +224,6 @@ impl LlmProbe for LiveLlmProbe {}
 /// [`already_configured_outcome`]. Covers env-seeded slots too: drift between
 /// slot and a since-changed environment is accepted, not re-detected;
 /// `--force` re-seeds from environment again.
-#[cfg(feature = "libsql")]
 pub(crate) fn provision_llm_credentials(
     _home: &RebornHome,
     boot: &ironclaw_reborn_config::RebornBootConfig,
@@ -287,7 +280,6 @@ pub(crate) fn provision_llm_credentials(
 /// Headless counterpart of the env-detect step in [`provision_llm_credentials`]'s
 /// doc: no prompt possible, so a detected config is seeded silently; anything
 /// else seeds nothing and returns a `Skipped*` outcome.
-#[cfg(feature = "libsql")]
 fn provision_headless_from_env(
     store_root: &Path,
     store_opener: &dyn LlmKeyStoreOpener,
@@ -321,7 +313,6 @@ fn provision_headless_from_env(
 /// channel that reaches the daemon. A no-op when the env no longer resolves
 /// a key for `provider_id` (keyless provider, or the env changed between
 /// `detect_env_llm` and this call) — never writes an empty/wrong value.
-#[cfg(feature = "libsql")]
 fn persist_env_detected_key(
     store_root: &Path,
     store_opener: &dyn LlmKeyStoreOpener,
@@ -350,7 +341,6 @@ fn persist_env_detected_key(
 /// Deferred to just before a store is actually needed — see
 /// [`provision_llm_credentials`]'s doc — so a headless/no-op onboard run that
 /// never touches the store leaves the filesystem untouched.
-#[cfg(feature = "libsql")]
 fn open_llm_key_store(
     store_root: &Path,
     store_opener: &dyn LlmKeyStoreOpener,
@@ -364,7 +354,6 @@ fn open_llm_key_store(
 /// Drives the full numbered provider menu, factored out so the "declined
 /// confirm" and "nothing detected" branches share one implementation. See
 /// [`provision_llm_credentials`]'s doc for the store-then-config write ordering.
-#[cfg(feature = "libsql")]
 fn provision_via_menu(
     store_root: &Path,
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
@@ -471,7 +460,6 @@ fn provision_via_menu(
 /// - Successful probe with a non-empty model list missing `effective_model`
 ///   prints a warning but still returns the key (provider lists are often
 ///   incomplete); an empty model list warns about nothing.
-#[cfg(feature = "libsql")]
 fn probe_and_confirm_key(
     prompts: &mut dyn PromptSource,
     probe: &dyn LlmProbe,
@@ -546,7 +534,6 @@ fn probe_and_confirm_key(
 ///   prompt, or re-write credentials on `--force`, every time against a
 ///   config the operator needs to fix by hand). Matches
 ///   [`provider_api_key_required`]'s registry-lookup-failure precedent.
-#[cfg(feature = "libsql")]
 fn already_configured_outcome(
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
     store_root: &Path,
@@ -613,7 +600,6 @@ fn already_configured_outcome(
 ///   configured" and re-run the prompt, or re-write credentials on `--force`,
 ///   every time).
 /// - `Ok(None)`: genuinely "can't tell" — `provider_id` isn't in the registry.
-#[cfg(feature = "libsql")]
 fn provider_api_key_required(
     admin: &ironclaw_reborn_composition::RebornProviderAdmin,
     provider_id: &str,
@@ -625,7 +611,7 @@ fn provider_api_key_required(
 
 /// No `libsql`, nothing to write to — same reasoning as
 /// `provision_master_key`'s not-any-storage-feature fallback.
-#[cfg(not(feature = "libsql"))]
+#[cfg(any())]
 pub(crate) fn provision_llm_credentials(
     home: &RebornHome,
     _boot: &ironclaw_reborn_config::RebornBootConfig,
@@ -643,7 +629,7 @@ pub(crate) fn provision_llm_credentials(
     Ok(LlmCredentialProvisionOutcome::UnavailableInBuild)
 }
 
-#[cfg(all(test, feature = "libsql"))]
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
 

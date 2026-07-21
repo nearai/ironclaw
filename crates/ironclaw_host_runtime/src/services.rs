@@ -23,9 +23,7 @@ use ironclaw_events::{
     SecurityAuditSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry};
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{

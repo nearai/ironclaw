@@ -31,9 +31,7 @@ use ironclaw_events::{
 };
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::DiskFilesystem;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
@@ -60,10 +58,8 @@ use ironclaw_secrets::{
     FilesystemSecretStore, InMemoryCredentialBroker, SecretMaterial, SecretStore,
 };
 use ironclaw_triggers::InMemoryTriggerRepository;
-#[cfg(feature = "libsql")]
 use ironclaw_turns::FilesystemTurnStateRowStore;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
-#[cfg(feature = "libsql")]
 use ironclaw_turns::{
     InMemoryRunProfileResolver, SubmitTurnResponse, TurnCoordinator, TurnStateStore,
 };
@@ -650,7 +646,6 @@ async fn production_wiring_validation_rejects_unsupported_runtime_requirements()
 // graph restart over `DiskFilesystem`) and the `ironclaw_run_state`
 // contract suite.
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -685,7 +680,6 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -722,7 +716,6 @@ async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -763,7 +756,6 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     assert_eq!(notifier.wakes()[0].run_id, run_id);
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -1555,7 +1547,6 @@ async fn host_runtime_services_wires_combined_store_for_atomic_approval_block() 
     .await;
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn host_runtime_services_preserves_combined_store_after_root_filesystem_selection() {
     let db_dir = tempfile::tempdir().unwrap();

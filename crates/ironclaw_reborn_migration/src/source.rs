@@ -17,7 +17,6 @@ use crate::options::SourceDb;
 /// [`is_missing_table_error`] for the string-based libSQL counterpart). Shared
 /// across every read site in the crate (source discovery, the frozen legacy
 /// queries, the wasm stores, and the identity converter).
-#[cfg(feature = "postgres")]
 pub(crate) fn is_missing_postgres_table_error(error: &tokio_postgres::Error) -> bool {
     error
         .as_db_error()
@@ -87,7 +86,6 @@ impl V1Source {
             reason: e.to_string(),
         };
         let sql = format!("SELECT DISTINCT {column} FROM {table}");
-        #[cfg(feature = "libsql")]
         if let Some(db) = self.handles.libsql_db.as_ref() {
             let conn = db.connect().map_err(|e| read_err(&e))?;
             let mut rows = match conn.query(&sql, ()).await {
@@ -101,7 +99,6 @@ impl V1Source {
             }
             return Ok(out);
         }
-        #[cfg(feature = "postgres")]
         if let Some(pool) = self.handles.pg_pool.as_ref() {
             let client = pool.get().await.map_err(|e| read_err(&e))?;
             let stmt_rows = match client.query(sql.as_str(), &[]).await {
