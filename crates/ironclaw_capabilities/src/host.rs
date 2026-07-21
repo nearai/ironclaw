@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     CapabilityAuthorizer, CapabilityDescriptor, CapabilityDispatchRequest,
     CapabilityDispatchResult, CapabilityDispatcher, CapabilityGrantId, CapabilityId, Decision,
     DenyReason, DenyRef, DispatchError, EffectiveRuntimePolicy, ExecutionContext, GateRef,
-    GateWaypoint, Invocation, InvocationFingerprint, InvocationId, InvocationOrigin, Obligation,
-    PermissionMode, ProcessId, ResourceEstimate, ResourceScope, RuntimeLane, Timestamp,
+    GateWaypoint, Invocation, InvocationFingerprint, InvocationId, Obligation, PermissionMode,
+    ProcessId, ResourceEstimate, ResourceScope, RuntimeLane, Timestamp,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -354,65 +354,21 @@ where
             }
         };
 
-        // S6 (§5.3.2/§9): when the fold sealed an `Authorized` witness, dispatch
-        // routes through IT — consumed single-use (`into_parts` moves it, so a
-        // second dispatch is a compile error), failing closed on expiry. The
-        // sealed `mounts`/`reservation` are the fold's `obligation_outcome`
-        // values verbatim (the witness carries the exact `Option`s), so the
-        // dispatch inputs are byte-identical to the pre-S6 path; the `lane` was
-        // resolved from the descriptor at seal time and equals the dispatcher's
-        // own descriptor-derived lane (the dispatcher owns closed-lane routing),
-        // so it is consumed here as proof, not re-passed.
-        //
-        // A `None` witness is NOT an error and does NOT fail closed: the seal
-        // returns none for a host-internal `System`-runtime descriptor (no
-        // untrusted lane — the process-sandbox spawn is the live example on the
-        // spawn path) or, defensively, a context lacking both `origin` and
-        // `run_id`. Those keep today's obligation-derived dispatch inputs, which
-        // are exactly the values the witness would have carried. Failing closed
-        // here would break `system.process_sandbox` dispatch (see §9 / the S6
-        // review note), so this arm is a behavior-preserving fallback, not a
-        // second policy path.
-        let (dispatch_mounts, dispatch_reservation) = match witness {
-            Some(AuthorizeResult::Authorized(witness)) => {
-                match witness.into_parts(chrono::Utc::now()) {
-                    Ok((_invocation, _lane, mounts, reservation)) => (mounts, reservation),
-                    Err(expired) => {
-                        // Expiry cannot occur in a synchronous authorize→dispatch
-                        // today; this fail-closed arm is new-behavior-by-design.
-                        // Release the prepared obligations (the reservation goes
-                        // back through the obligation lifecycle) and consume the
-                        // witness via `abort` — never left to `Drop`.
-                        self.abort_obligations(
-                            CapabilityObligationPhase::Invoke,
-                            &request.context,
-                            &request.capability_id,
-                            &request.estimate,
-                            obligations.as_slice(),
-                            &obligation_outcome,
-                        )
-                        .await;
-                        let _ = expired.abort();
-                        fail_run_if_configured(
-                            self.run_state,
-                            &scope,
-                            invocation_id,
-                            "WitnessExpired",
-                        )
-                        .await;
-                        return Err(CapabilityInvocationError::AuthorizationDenied {
-                            capability: request.capability_id,
-                            reason: DenyReason::InternalInvariantViolation,
-                            detail: None,
-                        });
-                    }
-                }
-            }
-            _ => (
-                obligation_outcome.mounts.clone(),
-                obligation_outcome.resource_reservation.clone(),
-            ),
-        };
+        // S6 (§5.3.2/§9): dispatch routes through the sealed witness (consumed
+        // single-use, failing closed on expiry), or falls back to the fold's
+        // obligation-derived inputs when no witness was sealed. See
+        // [`Self::dispatch_inputs_from_witness`].
+        let (dispatch_mounts, dispatch_reservation) = self
+            .dispatch_inputs_from_witness(
+                CapabilityObligationPhase::Invoke,
+                witness,
+                &request.context,
+                &request.capability_id,
+                &request.estimate,
+                obligations.as_slice(),
+                &obligation_outcome,
+            )
+            .await?;
 
         debug!("capability dispatch starting");
         let dispatch = match self
@@ -1081,10 +1037,7 @@ where
         // reconstructs `LoopRun` (transitional compat). No `"provisional"`
         // fallback: a context that carries neither is not a real production
         // ingress, so it is not sealed here (Option `?`, not a placeholder).
-        let origin = context
-            .origin
-            .clone()
-            .or_else(|| context.run_id.map(InvocationOrigin::LoopRun))?;
+        let origin = context.resolved_origin()?;
         let invocation = Invocation {
             activity_id: ActivityId::from_uuid(context.invocation_id.as_uuid()),
             capability: capability_id.clone(),
@@ -2088,57 +2041,22 @@ where
                 }
             };
 
-        // S6 (§5.3.2/§9): when the fold sealed a witness, the process start's
-        // mounts/reservation come from IT — consumed single-use, failing closed
-        // on expiry. The sealed values are the fold's `obligation_outcome`
-        // verbatim, so the process start inputs are byte-identical to the pre-S6
-        // path; the `lane` is consumed as proof (the process runtime still comes
-        // from the re-resolved descriptor below).
-        //
-        // A `None` witness is NOT an error here: `system.process_sandbox` is a
-        // host-internal `System`-runtime capability with no untrusted lane, so it
-        // seals no witness yet is legitimately spawned through this path (see the
-        // S6 review note). Rather than fail closed — which would break process-
-        // sandbox spawning — the `None` arm keeps today's obligation-derived
-        // inputs, exactly the values a witness would have carried.
-        let (witness_mounts, witness_reservation) = match witness {
-            Some(AuthorizeResult::Authorized(witness)) => {
-                match witness.into_parts(chrono::Utc::now()) {
-                    Ok((_invocation, _lane, mounts, reservation)) => (mounts, reservation),
-                    Err(expired) => {
-                        // Expiry cannot occur in a synchronous authorize→spawn
-                        // today; new-behavior-by-design. Release the prepared
-                        // obligations and consume the witness via `abort`.
-                        self.abort_obligations(
-                            CapabilityObligationPhase::Spawn,
-                            &request.context,
-                            &request.capability_id,
-                            &request.estimate,
-                            obligations.as_slice(),
-                            &obligation_outcome,
-                        )
-                        .await;
-                        let _ = expired.abort();
-                        fail_run_if_configured(
-                            self.run_state,
-                            &scope,
-                            invocation_id,
-                            "WitnessExpired",
-                        )
-                        .await;
-                        return Err(CapabilityInvocationError::AuthorizationDenied {
-                            capability: request.capability_id,
-                            reason: DenyReason::InternalInvariantViolation,
-                            detail: None,
-                        });
-                    }
-                }
-            }
-            _ => (
-                obligation_outcome.mounts.clone(),
-                obligation_outcome.resource_reservation.clone(),
-            ),
-        };
+        // S6 (§5.3.2/§9): the process start's mounts/reservation come from the
+        // sealed witness (consumed single-use, failing closed on expiry), or the
+        // fold's obligation-derived inputs when no witness was sealed
+        // (`system.process_sandbox` is System-runtime with no lane, so it seals
+        // none yet spawns legitimately). See [`Self::dispatch_inputs_from_witness`].
+        let (witness_mounts, witness_reservation) = self
+            .dispatch_inputs_from_witness(
+                CapabilityObligationPhase::Spawn,
+                witness,
+                &request.context,
+                &request.capability_id,
+                &request.estimate,
+                obligations.as_slice(),
+                &obligation_outcome,
+            )
+            .await?;
 
         // Re-resolve the descriptor for the process start. `authorize_spawn`
         // already proved the capability exists (failing the run otherwise) and
@@ -3146,6 +3064,79 @@ where
             .map_err(|error| completion_obligation_error_to_invocation(capability_id, error))
     }
 
+    /// Resolve the mounts/reservation dispatch inputs from the fold's sealed
+    /// witness (S6, §5.3.2/§9), shared by the invoke and spawn paths.
+    ///
+    /// When the fold sealed an `Authorized`, dispatch routes through IT: the
+    /// witness is consumed single-use (`into_parts` moves it, so a second
+    /// dispatch is a compile error) and fails closed on expiry — aborting the
+    /// prepared obligations (releasing the reservation through the obligation
+    /// lifecycle), consuming the witness via `abort` (never `Drop`), failing the
+    /// run, and returning a terminal denial. The sealed `mounts`/`reservation`
+    /// are the fold's `obligation_outcome` values verbatim, so dispatch inputs
+    /// are byte-identical to the pre-S6 path; the sealed `lane` is dropped here
+    /// (the dispatcher re-derives the identical descriptor lane it owns).
+    ///
+    /// A `None` witness is NOT an error: the seal mints none for a host-internal
+    /// `System`-runtime descriptor (no untrusted lane — `system.process_sandbox`
+    /// on the spawn path) or, defensively, an origin-less context. Those keep the
+    /// obligation-derived inputs — exactly the values a witness would have
+    /// carried — rather than failing closed, which would break process-sandbox
+    /// dispatch. Expiry cannot occur in a synchronous authorize→dispatch today;
+    /// the fail-closed arm is new-behavior-by-design for a held witness.
+    // arch-exempt: too_many_args, the witness plus the `abort_obligations` arg set (context/capability_id/estimate/obligations/obligation_outcome) — invoke's `CapabilityInvocationRequest` and spawn's `CapabilitySpawnRequest` are distinct types, so no shared request bundle unifies them (same reason `seal_authorization` is exempt); folds into a prepared-invocation bundle with the capability-path collapse, plan #6175
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_inputs_from_witness(
+        &self,
+        phase: CapabilityObligationPhase,
+        witness: Option<AuthorizeResult>,
+        context: &ExecutionContext,
+        capability_id: &ironclaw_host_api::CapabilityId,
+        estimate: &ResourceEstimate,
+        obligations: &[Obligation],
+        obligation_outcome: &CapabilityObligationOutcome,
+    ) -> Result<
+        (
+            Option<ironclaw_host_api::MountView>,
+            Option<ironclaw_host_api::ResourceReservation>,
+        ),
+        CapabilityInvocationError,
+    > {
+        let Some(AuthorizeResult::Authorized(witness)) = witness else {
+            return Ok((
+                obligation_outcome.mounts.clone(),
+                obligation_outcome.resource_reservation.clone(),
+            ));
+        };
+        match witness.into_parts(chrono::Utc::now()) {
+            Ok((_invocation, _lane, mounts, reservation)) => Ok((mounts, reservation)),
+            Err(expired) => {
+                self.abort_obligations(
+                    phase,
+                    context,
+                    capability_id,
+                    estimate,
+                    obligations,
+                    obligation_outcome,
+                )
+                .await;
+                let _ = expired.abort();
+                fail_run_if_configured(
+                    self.run_state,
+                    &context.resource_scope,
+                    context.invocation_id,
+                    "WitnessExpired",
+                )
+                .await;
+                Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: capability_id.clone(),
+                    reason: DenyReason::InternalInvariantViolation,
+                    detail: None,
+                })
+            }
+        }
+    }
+
     async fn abort_obligations(
         &self,
         phase: CapabilityObligationPhase,
@@ -4011,7 +4002,13 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         use ironclaw_host_api::{InvocationOrigin, ProductKind, RoutineId, RunId, UserId};
 
         let registry = echo_registry();
-        let dispatcher = UnusedDispatcher;
+        // Never dispatched on this authorize-only path; errors if it ever is.
+        let dispatcher =
+            ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|req, _| {
+                Err(DispatchError::UnknownCapability {
+                    capability: req.capability_id.clone(),
+                })
+            });
         let authorizer = AllowAuthorizer;
         let trust_policy = StaticTrustPolicy;
         let runtime_policy = permissive_runtime_policy();

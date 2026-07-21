@@ -129,6 +129,20 @@ impl ExecutionContext {
         Ok(context)
     }
 
+    /// The authoritative invocation origin (§5.2.1): the ingress-stamped
+    /// [`Self::origin`], falling back to reconstructing
+    /// [`InvocationOrigin::LoopRun`] from [`Self::run_id`] when a loop ingress
+    /// stamped only the run id. `None` for a context carrying neither (a
+    /// host-internal or test context). This is the single definition of the
+    /// "`run_id` implies a `LoopRun` origin" rule — the capability seal and the
+    /// authorization gate both resolve origin through here rather than
+    /// re-deriving it.
+    pub fn resolved_origin(&self) -> Option<InvocationOrigin> {
+        self.origin
+            .clone()
+            .or_else(|| self.run_id.map(InvocationOrigin::LoopRun))
+    }
+
     pub fn validate(&self) -> Result<(), HostApiError> {
         if self.resource_scope.invocation_id != self.invocation_id {
             return Err(HostApiError::invariant(

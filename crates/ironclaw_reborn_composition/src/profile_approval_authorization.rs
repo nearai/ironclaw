@@ -280,17 +280,14 @@ async fn require_approval_for_profile_policy(
     let effect_based_intrinsic_gate =
         gate_policy.effects_require_approval(approval_policy, &gate_effects);
 
-    // Class-A origin→gate matrix contribution (§5.2.1/S4). The authoritative
-    // origin is the ingress-stamped `context.origin`, falling back to
-    // reconstructing `LoopRun` from `run_id` exactly like
-    // `CapabilityHost::seal_authorization`, so a loop context that stamped only
-    // `run_id` still has its `LoopRun` column consulted. A context that stamps
-    // neither (test-only) resolves to `None`, and the matrix then contributes
-    // nothing — keeping pre-S4 decisions neutral.
-    let origin = context
-        .origin
-        .clone()
-        .or_else(|| context.run_id.map(InvocationOrigin::LoopRun));
+    // Class-A origin→gate matrix contribution (§5.2.1/S4). Origin is resolved
+    // through `ExecutionContext::resolved_origin` (the single definition of the
+    // `run_id`-implies-`LoopRun` rule, shared with `seal_authorization`), so a
+    // loop context that stamped only `run_id` still has its `LoopRun` column
+    // consulted, and a context that stamps neither (test-only) resolves to
+    // `None` — the matrix then contributes nothing, keeping pre-S4 decisions
+    // neutral.
+    let origin = context.resolved_origin();
     let origin_requirement = gate_policy.origin_gate_requirement(
         approval_policy,
         origin.as_ref(),
