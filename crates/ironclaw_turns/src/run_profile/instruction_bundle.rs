@@ -136,9 +136,10 @@ pub trait InstructionMaterializationStore: Send + Sync {
 
 /// Ephemeral, per-process materialization store for model-visible prompt context.
 ///
-/// This store intentionally has no filesystem-backed implementation: it stages
-/// raw model-visible prompt material between the prompt port and model port for
-/// a claimed run, and raw prompts must not be persisted by `ironclaw_turns`.
+/// This is intentionally not filesystem-backed. It stages raw model-visible
+/// prompt material between prompt construction and model resolution for one
+/// claimed run, and `ironclaw_turns` must not define a durable row shape for
+/// raw prompts.
 #[derive(Default)]
 pub struct EphemeralInstructionMaterializationStore {
     messages: Mutex<HashMap<String, InstructionBundleMaterializedMessage>>,
