@@ -6969,6 +6969,17 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
             && !root.join("wix/main.wxs").exists(),
         "the MSI definition must install only the canonical Reborn executable"
     );
+    let cli_description = cli_manifest
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("description = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("Reborn CLI manifest must define a package description");
+    assert!(
+        wix_manifest.contains(&format!("Description='{cli_description}'")),
+        "the checked-in WiX package description must match the Cargo package metadata"
+    );
     let reborn_cli_selector = code_style_workflow
         .lines()
         .find(|line| line.contains("grep -Eq") && line.contains("crates/ironclaw_reborn_cli/"))
