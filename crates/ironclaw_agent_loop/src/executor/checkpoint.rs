@@ -4,6 +4,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CheckpointSchemaId, LoopCheckpointRequest,
         LoopProgressEvent, LoopSafeSummary, StageCheckpointPayloadRequest,
+        sanitize_model_visible_text,
     },
 };
 
@@ -215,12 +216,27 @@ fn checkpoint_host_error(
             | AgentLoopHostErrorKind::Internal
             | AgentLoopHostErrorKind::BudgetAccountingFailed
     ) {
-        let detail = error.detail.clone();
+        let raw_summary = error.safe_summary;
+        let (safe_summary, rejected_summary_detail) =
+            match LoopSafeSummary::new(raw_summary.clone()) {
+                Ok(summary) => (summary, None),
+                Err(validation_error) => {
+                    tracing::debug!(
+                        checkpoint_kind = ?kind,
+                        validation_error = %validation_error,
+                        "checkpoint error summary rejected; using fallback"
+                    );
+                    (
+                        LoopSafeSummary::model_gateway_failed(),
+                        Some(sanitize_model_visible_text(raw_summary)),
+                    )
+                }
+            };
+        let detail = error.detail.or(rejected_summary_detail);
         return AgentLoopExecutorError::HostUnavailableWithDiagnostics {
             stage: HostStage::Checkpoint,
             kind: error.kind,
-            safe_summary: LoopSafeSummary::new(error.safe_summary)
-                .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
+            safe_summary,
             reason_kind: error.reason_kind,
             diagnostic_ref: error.diagnostic_ref,
             detail,

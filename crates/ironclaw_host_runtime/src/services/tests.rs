@@ -722,7 +722,8 @@ async fn service_guard_releases_reservation_on_planner_denial() {
     assert!(matches!(
         result,
         Err(DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::UnsupportedRunner
+            kind: RuntimeDispatchErrorKind::UnsupportedRunner,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -779,7 +780,7 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
         result,
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::NetworkDenied,
-            safe_summary: None,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -841,7 +842,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
         result,
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::NetworkDenied,
-            safe_summary: None,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -898,7 +899,7 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
         result,
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::SecretDenied,
-            safe_summary: None,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -1279,7 +1280,7 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunti
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         };
         let receipt: ResourceReceipt = request
@@ -1287,7 +1288,7 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunti
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: Value::Null,
