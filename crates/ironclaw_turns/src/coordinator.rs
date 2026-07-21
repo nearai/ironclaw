@@ -230,6 +230,20 @@ where
     }
 }
 
+fn wake_from(
+    scope: TurnScope,
+    run_id: TurnRunId,
+    status: TurnStatus,
+    event_cursor: EventCursor,
+) -> TurnRunWake {
+    TurnRunWake {
+        scope,
+        run_id,
+        status,
+        event_cursor,
+    }
+}
+
 fn submit_wake(scope: TurnScope, response: &SubmitTurnResponse) -> TurnRunWake {
     let SubmitTurnResponse::Accepted {
         run_id,
@@ -237,12 +251,7 @@ fn submit_wake(scope: TurnScope, response: &SubmitTurnResponse) -> TurnRunWake {
         event_cursor,
         ..
     } = response;
-    TurnRunWake {
-        scope,
-        run_id: *run_id,
-        status: *status,
-        event_cursor: *event_cursor,
-    }
+    wake_from(scope, *run_id, *status, *event_cursor)
 }
 
 fn submit_event_cursor(response: &SubmitTurnResponse) -> EventCursor {
@@ -251,30 +260,15 @@ fn submit_event_cursor(response: &SubmitTurnResponse) -> EventCursor {
 }
 
 fn resume_wake(scope: TurnScope, response: &ResumeTurnResponse) -> TurnRunWake {
-    TurnRunWake {
-        scope,
-        run_id: response.run_id,
-        status: response.status,
-        event_cursor: response.event_cursor,
-    }
+    wake_from(scope, response.run_id, response.status, response.event_cursor)
 }
 
 fn retry_wake(scope: TurnScope, response: &RetryTurnResponse) -> TurnRunWake {
-    TurnRunWake {
-        scope,
-        run_id: response.run_id,
-        status: response.status,
-        event_cursor: response.event_cursor,
-    }
+    wake_from(scope, response.run_id, response.status, response.event_cursor)
 }
 
 fn cancel_wake(scope: TurnScope, response: &CancelRunResponse) -> TurnRunWake {
-    TurnRunWake {
-        scope,
-        run_id: response.run_id,
-        status: response.status,
-        event_cursor: response.event_cursor,
-    }
+    wake_from(scope, response.run_id, response.status, response.event_cursor)
 }
 
 fn notify_queued_run_best_effort(notifier: &dyn TurnRunWakeNotifier, wake: TurnRunWake) {
