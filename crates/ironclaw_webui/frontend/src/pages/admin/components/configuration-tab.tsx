@@ -3,6 +3,7 @@ import React from "react";
 import { Button } from "../../../design-system/button";
 import { Input } from "../../../design-system/input";
 import { Panel } from "../../../design-system/primitives";
+import { clientActionId } from "../../../lib/api";
 import { useAdminConfiguration } from "../hooks/useAdminConfiguration";
 
 export function AdminConfigurationTab() {
@@ -61,7 +62,7 @@ export function ConfigurationGroup({ group, state }) {
     const mutation = buildConfigurationSaveMutation(
       group,
       values,
-      globalThis.crypto.randomUUID(),
+      clientActionId(),
     );
     try {
       await state.save(mutation);
