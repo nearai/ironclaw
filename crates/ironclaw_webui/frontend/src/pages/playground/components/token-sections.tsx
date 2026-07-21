@@ -19,13 +19,26 @@ import {
 
 /* ── Shared bits ───────────────────────────────────────────────────── */
 
-export function SectionTitle({ children }) {
+/**
+ * Card-framed page section: eyebrow header on a soft strip, hairline
+ * divider, padded body. Every playground detail view composes these so
+ * each cluster of examples reads as its own clearly-bounded block.
+ */
+export function Section({ title, hint = null, children }) {
   return (
-    <h3
-      className="mb-3 mt-8 font-mono text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-[var(--v2-text-muted)] first:mt-0"
-    >
-      {children}
-    </h3>
+    <section className="mb-5 overflow-hidden rounded-[var(--v2-radius-lg)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)]">
+      <div className="flex items-baseline justify-between gap-4 border-b border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-5 py-2.5">
+        <h3 className="font-mono text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-[var(--v2-text-muted)]">
+          {title}
+        </h3>
+        {hint && (
+          <span className="truncate font-mono text-[0.625rem] text-[var(--v2-text-faint)]">
+            {hint}
+          </span>
+        )}
+      </div>
+      <div className="px-5 py-5">{children}</div>
+    </section>
   );
 }
 
@@ -86,8 +99,7 @@ export function ColorsSection({ theme }) {
   return (
     <div>
       {COLOR_TOKENS.map((group) => (
-        <div key={group.group}>
-          <SectionTitle>{group.group}</SectionTitle>
+        <Section key={group.group} title={group.group}>
           {/* Caps at four columns: the composition bundle guard bans
               `xl:grid-cols-5` (the automations summary strip must never
               force five cards into a row), and swatches read fine at 4. */}
@@ -109,7 +121,7 @@ export function ColorsSection({ theme }) {
               );
             })}
           </div>
-        </div>
+        </Section>
       ))}
     </div>
   );
@@ -120,64 +132,67 @@ export function ColorsSection({ theme }) {
 export function TypographySection({ theme }) {
   return (
     <div>
-      <SectionTitle>Type scale — Geist (sans) / Geist Mono</SectionTitle>
-      <div className="flex flex-col gap-6">
-        {TYPE_TOKENS.map((token) => {
-          const value = readToken(token.var);
-          return (
-            <div key={token.var + theme} className="flex flex-col gap-1">
-              <div className="flex items-baseline gap-3">
-                <TokenName>{token.var}</TokenName>
-                <TokenValue>{value} · {token.note}</TokenValue>
+      <Section title="Type scale" hint="Geist (sans) / Geist Mono">
+        <div className="flex flex-col gap-6">
+          {TYPE_TOKENS.map((token) => {
+            const value = readToken(token.var);
+            return (
+              <div key={token.var + theme} className="flex flex-col gap-1">
+                <div className="flex items-baseline gap-3">
+                  <TokenName>{token.var}</TokenName>
+                  <TokenValue>{value} · {token.note}</TokenValue>
+                </div>
+                <span
+                  className="text-[var(--v2-text-strong)]"
+                  style={{ fontSize: `var(${token.var})` }}
+                >
+                  {token.sample}
+                </span>
               </div>
-              <span
-                className="text-[var(--v2-text-strong)]"
-                style={{ fontSize: `var(${token.var})` }}
-              >
-                {token.sample}
-              </span>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      </Section>
 
-      <SectionTitle>Tag face &amp; letter spacing</SectionTitle>
-      <div className="flex flex-col gap-3">
-        <span className="v2-tag-face text-[0.6875rem] text-[var(--v2-accent-text)]">
-          .v2-tag-face — Geist Pixel Square tag language (--v2-tracking-tag)
-        </span>
-        <span
-          className="font-mono text-[0.6875rem] uppercase text-[var(--v2-text-muted)]"
-          style={{ letterSpacing: "var(--v2-tracking-caps)" }}
-        >
-          --v2-tracking-caps — mono-caps data labels
-        </span>
-        <span
-          className="font-mono text-[0.6875rem] uppercase text-[var(--v2-text-faint)]"
-          style={{ letterSpacing: "var(--v2-tracking-wide)" }}
-        >
-          --v2-tracking-wide — card eyebrows
-        </span>
-        <span
-          className="text-[1.5rem] font-medium text-[var(--v2-text-strong)]"
-          style={{ letterSpacing: "var(--v2-tracking-tight)" }}
-        >
-          --v2-tracking-tight — headings (nux heading tracking)
-        </span>
-        <span
-          className="text-[2.25rem] font-medium text-[var(--v2-text-strong)]"
-          style={{ letterSpacing: "var(--v2-tracking-display)" }}
-        >
-          --v2-tracking-display — display headings
-        </span>
-      </div>
+      <Section title="Tag face &amp; letter spacing">
+        <div className="flex flex-col gap-3">
+          <span className="v2-tag-face text-[0.6875rem] text-[var(--v2-accent-text)]">
+            .v2-tag-face — Geist Pixel Square tag language (--v2-tracking-tag)
+          </span>
+          <span
+            className="font-mono text-[0.6875rem] uppercase text-[var(--v2-text-muted)]"
+            style={{ letterSpacing: "var(--v2-tracking-caps)" }}
+          >
+            --v2-tracking-caps — mono-caps data labels
+          </span>
+          <span
+            className="font-mono text-[0.6875rem] uppercase text-[var(--v2-text-faint)]"
+            style={{ letterSpacing: "var(--v2-tracking-wide)" }}
+          >
+            --v2-tracking-wide — card eyebrows
+          </span>
+          <span
+            className="text-[1.5rem] font-medium text-[var(--v2-text-strong)]"
+            style={{ letterSpacing: "var(--v2-tracking-tight)" }}
+          >
+            --v2-tracking-tight — headings (nux heading tracking)
+          </span>
+          <span
+            className="text-[2.25rem] font-medium text-[var(--v2-text-strong)]"
+            style={{ letterSpacing: "var(--v2-tracking-display)" }}
+          >
+            --v2-tracking-display — display headings
+          </span>
+        </div>
+      </Section>
 
-      <SectionTitle>Weights</SectionTitle>
-      <div className="flex flex-wrap gap-x-8 gap-y-2 text-xl text-[var(--v2-text-strong)]">
-        <span className="font-normal">Regular 400</span>
-        <span className="font-medium">Medium 500</span>
-        <span className="font-medium">Semibold 600</span>
-      </div>
+      <Section title="Weights">
+        <div className="flex flex-wrap gap-x-8 gap-y-2 text-xl text-[var(--v2-text-strong)]">
+          <span className="font-normal">Regular 400</span>
+          <span className="font-medium">Medium 500</span>
+          <span className="font-medium">Semibold 600</span>
+        </div>
+      </Section>
     </div>
   );
 }
@@ -187,44 +202,46 @@ export function TypographySection({ theme }) {
 export function SpacingSection({ theme }) {
   return (
     <div>
-      <SectionTitle>Control density — shared control heights</SectionTitle>
-      <div className="mb-2 flex flex-col gap-3">
-        {CONTROL_TOKENS.map((token) => {
-          const value = readToken(token.var);
-          const isHeight = token.var.includes("-h-");
-          return (
-            <div key={token.var + theme} className="flex items-center gap-4">
-              <span className="w-44 shrink-0 font-mono text-[0.6875rem] text-[var(--v2-text-strong)]">
-                {token.var}
-              </span>
-              <span
-                className="w-24 shrink-0 rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)]"
-                style={isHeight ? { height: `var(${token.var})` } : { height: "1rem", width: `var(${token.var})` }}
-              />
-              <TokenValue>{value} — {token.note}</TokenValue>
-            </div>
-          );
-        })}
-      </div>
+      <Section title="Control density" hint="shared control heights">
+        <div className="flex flex-col gap-3">
+          {CONTROL_TOKENS.map((token) => {
+            const value = readToken(token.var);
+            const isHeight = token.var.includes("-h-");
+            return (
+              <div key={token.var + theme} className="flex items-center gap-4">
+                <span className="w-44 shrink-0 font-mono text-[0.6875rem] text-[var(--v2-text-strong)]">
+                  {token.var}
+                </span>
+                <span
+                  className="w-24 shrink-0 rounded-[var(--v2-radius-sm)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)]"
+                  style={isHeight ? { height: `var(${token.var})` } : { height: "1rem", width: `var(${token.var})` }}
+                />
+                <TokenValue>{value} — {token.note}</TokenValue>
+              </div>
+            );
+          })}
+        </div>
+      </Section>
 
-      <SectionTitle>Spacing scale — 4px base grid</SectionTitle>
-      <div className="flex flex-col gap-3">
-        {SPACE_TOKENS.map((token) => {
-          const value = readToken(token.var);
-          return (
-            <div key={token.var + theme} className="flex items-center gap-4">
-              <span className="w-40 shrink-0 font-mono text-[0.6875rem] text-[var(--v2-text-strong)]">
-                {token.var}
-              </span>
-              <span
-                className="h-4 shrink-0 rounded-[3px] bg-[var(--v2-accent)]"
-                style={{ width: `var(${token.var})` }}
-              />
-              <TokenValue>{value} — {token.note}</TokenValue>
-            </div>
-          );
-        })}
-      </div>
+      <Section title="Spacing scale" hint="4px base grid">
+        <div className="flex flex-col gap-3">
+          {SPACE_TOKENS.map((token) => {
+            const value = readToken(token.var);
+            return (
+              <div key={token.var + theme} className="flex items-center gap-4">
+                <span className="w-40 shrink-0 font-mono text-[0.6875rem] text-[var(--v2-text-strong)]">
+                  {token.var}
+                </span>
+                <span
+                  className="h-4 shrink-0 rounded-[3px] bg-[var(--v2-accent)]"
+                  style={{ width: `var(${token.var})` }}
+                />
+                <TokenValue>{value} — {token.note}</TokenValue>
+              </div>
+            );
+          })}
+        </div>
+      </Section>
     </div>
   );
 }
@@ -234,41 +251,43 @@ export function SpacingSection({ theme }) {
 export function RadiiSection({ theme }) {
   return (
     <div>
-      <SectionTitle>Radius scale</SectionTitle>
-      <div className="flex flex-wrap items-end gap-5">
-        {RADIUS_TOKENS.map((token) => {
-          const value = readToken(token.var);
-          return (
-            <div key={token.var + theme} className="flex w-28 flex-col items-center gap-2 text-center">
-              <div
-                className="h-20 w-20 border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)]"
-                style={{ borderRadius: `var(${token.var})` }}
-              />
-              <TokenName>{token.var.replace("--v2-radius-", "")}</TokenName>
-              <TokenValue>{value}</TokenValue>
-              <span className="text-[0.625rem] leading-4 text-[var(--v2-text-muted)]">{token.note}</span>
-            </div>
-          );
-        })}
-      </div>
+      <Section title="Radius scale">
+        <div className="flex flex-wrap items-end gap-5">
+          {RADIUS_TOKENS.map((token) => {
+            const value = readToken(token.var);
+            return (
+              <div key={token.var + theme} className="flex w-28 flex-col items-center gap-2 text-center">
+                <div
+                  className="h-20 w-20 border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)]"
+                  style={{ borderRadius: `var(${token.var})` }}
+                />
+                <TokenName>{token.var.replace("--v2-radius-", "")}</TokenName>
+                <TokenValue>{value}</TokenValue>
+                <span className="text-[0.625rem] leading-4 text-[var(--v2-text-muted)]">{token.note}</span>
+              </div>
+            );
+          })}
+        </div>
+      </Section>
 
-      <SectionTitle>Shadows</SectionTitle>
-      <div className="flex flex-wrap gap-6">
-        {SHADOW_TOKENS.map((token) => {
-          const value = readToken(token.var);
-          return (
-            <div key={token.var + theme} className="flex w-52 flex-col gap-2">
-              <div
-                className="h-24 rounded-[1.25rem] border border-[var(--v2-card-border)] bg-[var(--v2-card-bg)]"
-                style={{ boxShadow: `var(${token.var})` }}
-              />
-              <TokenName>{token.var}</TokenName>
-              <TokenValue>{value || "none"}</TokenValue>
-              <span className="text-[0.625rem] leading-4 text-[var(--v2-text-muted)]">{token.note}</span>
-            </div>
-          );
-        })}
-      </div>
+      <Section title="Shadows">
+        <div className="flex flex-wrap gap-6">
+          {SHADOW_TOKENS.map((token) => {
+            const value = readToken(token.var);
+            return (
+              <div key={token.var + theme} className="flex w-52 flex-col gap-2">
+                <div
+                  className="h-24 rounded-[1.25rem] border border-[var(--v2-card-border)] bg-[var(--v2-card-bg)]"
+                  style={{ boxShadow: `var(${token.var})` }}
+                />
+                <TokenName>{token.var}</TokenName>
+                <TokenValue>{value || "none"}</TokenValue>
+                <span className="text-[0.625rem] leading-4 text-[var(--v2-text-muted)]">{token.note}</span>
+              </div>
+            );
+          })}
+        </div>
+      </Section>
     </div>
   );
 }
@@ -278,78 +297,83 @@ export function RadiiSection({ theme }) {
 export function MotionSection({ theme }) {
   return (
     <div>
-      <SectionTitle>Restrained-motion policy (nux)</SectionTitle>
-      <p className="max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
-        Motion is purposeful and quick, never decorative. Every duration and
-        easing comes from the tokens below — no raw ms values or ad-hoc
-        cubic-beziers. Hover/focus feedback uses instant/fast + ease; surface
-        entrances use base + out-expo; springs are reserved for small playful
-        pops. Everything is suppressed under{" "}
-        <code className="font-mono text-[0.75rem]">prefers-reduced-motion</code>.
-      </p>
+      <Section title="Restrained-motion policy (nux)">
+        <p className="max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+          Motion is purposeful and quick, never decorative. Every duration and
+          easing comes from the tokens below — no raw ms values or ad-hoc
+          cubic-beziers. Hover/focus feedback uses instant/fast + ease; surface
+          entrances use base + out-expo; springs are reserved for small playful
+          pops. Everything is suppressed under{" "}
+          <code className="font-mono text-[0.75rem]">prefers-reduced-motion</code>.
+        </p>
+      </Section>
 
-      <SectionTitle>Interaction vocabulary (motion/react)</SectionTitle>
-      <p className="max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
-        The interactive components carry a shared vocabulary — animation is
-        felt, not seen: buttons scale to 0.97 on press (CSS, fast + ease);
-        menus and popovers scale in from 0.96 at their trigger&apos;s corner
-        (menu + out-expo) and exit quicker than they enter (exit); modals
-        fade the scrim and settle the panel from 0.96/8px at center (base +
-        out-expo, exit faster); the Tabs underline slides between tabs as a
-        shared-layout element. Keyboard focus traversal never animates. Try
-        them live in the Button / SelectMenu / Tabs / Modal sections.
-      </p>
+      <Section title="Interaction vocabulary" hint="motion/react">
+        <p className="max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+          The interactive components carry a shared vocabulary — animation is
+          felt, not seen: buttons scale to 0.97 on press (CSS, fast + ease);
+          menus and popovers scale in from 0.96 at their trigger&apos;s corner
+          (menu + out-expo) and exit quicker than they enter (exit); modals
+          fade the scrim and settle the panel from 0.96/8px at center (base +
+          out-expo, exit faster); the Tabs underline slides between tabs as a
+          shared-layout element. Keyboard focus traversal never animates. Try
+          them live in the Button / SelectMenu / Tabs / Modal sections.
+        </p>
+      </Section>
 
-      <SectionTitle>Durations &amp; easings</SectionTitle>
-      <div className="flex flex-col gap-2">
-        {/* Ambient loop durations (spin/typing/breathe) are demoed below. */}
-        {MOTION_TOKENS.filter(
-          (token) => !/-(spin|typing|breathe)$/.test(token.var)
-        ).map((token) => (
-          <div key={token.var + theme} className="flex items-baseline gap-4">
-            <span className="w-56 shrink-0 font-mono text-[0.6875rem] text-[var(--v2-text-strong)]">
-              {token.var}
+      <Section title="Durations &amp; easings">
+        <div className="flex flex-col gap-2">
+          {/* Ambient loop durations (spin/typing/breathe) are demoed below. */}
+          {MOTION_TOKENS.filter(
+            (token) => !/-(spin|typing|breathe)$/.test(token.var)
+          ).map((token) => (
+            <div key={token.var + theme} className="flex items-baseline gap-4">
+              <span className="w-56 shrink-0 font-mono text-[0.6875rem] text-[var(--v2-text-strong)]">
+                {token.var}
+              </span>
+              <TokenValue>{readToken(token.var)}</TokenValue>
+            </div>
+          ))}
+        </div>
+      </Section>
+
+      <Section title="Entrance demo">
+        <div
+          key={"entrance" + theme}
+          className="v2-page-entrance flex w-72 items-center gap-3 rounded-[var(--v2-radius-lg)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] px-4 py-3 shadow-[var(--v2-shadow-sm)]"
+        >
+          <span className="text-sm text-[var(--v2-text)]">.v2-page-entrance</span>
+          <TokenValue>base + out-expo</TokenValue>
+        </div>
+      </Section>
+
+      <Section title="Ambient loops" hint="work indicators">
+        <div className="flex flex-col gap-5">
+          <div className="flex items-center gap-4">
+            <span className="flex w-44 items-center gap-1 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2">
+              <span className="v2-typing-dot h-1.5 w-1.5 rounded-full bg-[var(--v2-text-muted)]" />
+              <span className="v2-typing-dot h-1.5 w-1.5 rounded-full bg-[var(--v2-text-muted)]" />
+              <span className="v2-typing-dot h-1.5 w-1.5 rounded-full bg-[var(--v2-text-muted)]" />
             </span>
-            <TokenValue>{readToken(token.var)}</TokenValue>
+            <TokenValue>.v2-typing-dot — var(--v2-duration-typing) = {readToken("--v2-duration-typing")}</TokenValue>
           </div>
-        ))}
-      </div>
-
-      <SectionTitle>Entrance demo</SectionTitle>
-      <div
-        key={"entrance" + theme}
-        className="v2-page-entrance flex w-72 items-center gap-3 rounded-[var(--v2-radius-lg)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] px-4 py-3 shadow-[var(--v2-shadow-sm)]"
-      >
-        <span className="text-sm text-[var(--v2-text)]">.v2-page-entrance</span>
-        <TokenValue>base + out-expo</TokenValue>
-      </div>
-
-      <SectionTitle>Ambient loops (work indicators)</SectionTitle>
-      <div className="flex flex-col gap-5">
-        <div className="flex items-center gap-4">
-          <span className="flex w-44 items-center gap-1 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2">
-            <span className="v2-typing-dot h-1.5 w-1.5 rounded-full bg-[var(--v2-text-muted)]" />
-            <span className="v2-typing-dot h-1.5 w-1.5 rounded-full bg-[var(--v2-text-muted)]" />
-            <span className="v2-typing-dot h-1.5 w-1.5 rounded-full bg-[var(--v2-text-muted)]" />
-          </span>
-          <TokenValue>.v2-typing-dot — var(--v2-duration-typing) = {readToken("--v2-duration-typing")}</TokenValue>
+          <div className="flex items-center gap-4">
+            <span className="grid w-44 place-items-center py-1">
+              <span
+                className="v2-spin h-5 w-5 rounded-full border-2 border-[var(--v2-panel-border)] border-t-[var(--v2-accent)]"
+              />
+            </span>
+            <TokenValue>.v2-spin — var(--v2-duration-spin) = {readToken("--v2-duration-spin")}</TokenValue>
+          </div>
+          <div className="flex items-center gap-4">
+            <span className="flex w-44 items-center justify-center gap-2 py-1">
+              <span className="h-2 w-2 animate-[v2-breathe_2s_ease-in-out_infinite] rounded-full bg-[var(--v2-positive-text)]" />
+              <span className="font-mono text-[0.625rem] uppercase text-[var(--v2-positive-text)]">live</span>
+            </span>
+            <TokenValue>v2-breathe — var(--v2-duration-breathe) = {readToken("--v2-duration-breathe")}</TokenValue>
+          </div>
         </div>
-        <div className="flex items-center gap-4">
-          <span className="grid w-44 place-items-center py-1">
-            <span
-              className="v2-spin h-5 w-5 rounded-full border-2 border-[var(--v2-panel-border)] border-t-[var(--v2-accent)]"
-            />
-          </span>
-          <TokenValue>.v2-spin — var(--v2-duration-spin) = {readToken("--v2-duration-spin")}</TokenValue>
-        </div>
-        <div className="flex items-center gap-4">
-          <span className="flex w-44 items-center justify-center gap-2 py-1">
-            <span className="h-2 w-2 animate-[v2-breathe_2s_ease-in-out_infinite] rounded-full bg-[var(--v2-positive-text)]" />
-            <span className="font-mono text-[0.625rem] uppercase text-[var(--v2-positive-text)]">live</span>
-          </span>
-          <TokenValue>v2-breathe — var(--v2-duration-breathe) = {readToken("--v2-duration-breathe")}</TokenValue>
-        </div>
-      </div>
+      </Section>
       <span className="hidden">{theme}</span>
     </div>
   );
@@ -360,66 +384,68 @@ export function MotionSection({ theme }) {
 export function ZIndexSection({ theme }) {
   return (
     <div>
-      <SectionTitle>Layer ladder</SectionTitle>
-      <div className="flex flex-col gap-2">
-        {Z_TOKENS.slice()
-          .reverse()
-          .map((token) => {
-            const value = readToken(token.var);
+      <Section title="Layer ladder">
+        <div className="flex flex-col gap-2">
+          {Z_TOKENS.slice()
+            .reverse()
+            .map((token) => {
+              const value = readToken(token.var);
+              return (
+                <div
+                  key={token.var + theme}
+                  className="flex items-center gap-4 rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] px-4 py-3"
+                >
+                  <span className="w-10 text-right font-mono text-[0.9rem] font-medium text-[var(--v2-accent-text)]">
+                    {value}
+                  </span>
+                  <TokenName>{token.var}</TokenName>
+                  <span className="text-[0.75rem] text-[var(--v2-text-muted)]">{token.note}</span>
+                </div>
+              );
+            })}
+        </div>
+        <p className="mt-5 max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
+          Use Tailwind classes{" "}
+          <code className="font-mono text-[0.75rem]">z-10 / z-20 / z-40 / z-50 / z-[60]</code>{" "}
+          matching this ladder. Never introduce a new raw z-index value.
+        </p>
+      </Section>
+
+      <Section title="Scrims" hint="overlay layer">
+        <div className="flex flex-wrap gap-6">
+          {/* Derived from the token catalog so a renamed/added scrim can't
+              drift; the usage notes here are layer-specific, so they live
+              in the ternary below rather than tokens.ts. */}
+          {COLOR_TOKENS.flatMap((group) => group.tokens)
+            .filter((token) => token.var.startsWith("--v2-scrim"))
+            .map(({ var: name }) => {
+            const value = readToken(name);
             return (
-              <div
-                key={token.var + theme}
-                className="flex items-center gap-4 rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] px-4 py-3"
-              >
-                <span className="w-10 text-right font-mono text-[0.9rem] font-medium text-[var(--v2-accent-text)]">
-                  {value}
+              <div key={name + theme} className="flex w-60 flex-col gap-2">
+                <div className="relative h-28 overflow-hidden rounded-[var(--v2-radius-lg)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)]">
+                  <div className="flex flex-col gap-2 p-4">
+                    <div className="h-2 w-3/4 rounded-full bg-[var(--v2-surface-muted)]" />
+                    <div className="h-2 w-1/2 rounded-full bg-[var(--v2-surface-muted)]" />
+                    <div className="h-2 w-2/3 rounded-full bg-[var(--v2-surface-muted)]" />
+                  </div>
+                  <div
+                    className="absolute inset-0"
+                    style={{ background: `var(${name})` }}
+                  />
+                  <div className="absolute inset-y-0 right-0 w-2/5 rounded-l-[var(--v2-radius-md)] border-l border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[var(--v2-shadow-lg)]" />
+                </div>
+                <TokenName>{name}</TokenName>
+                <TokenValue>{value}</TokenValue>
+                <span className="text-[0.625rem] leading-4 text-[var(--v2-text-muted)]">
+                  {name === "--v2-scrim-soft"
+                    ? "Behind side sheets / task panels"
+                    : "Behind modals (with backdrop blur)"}
                 </span>
-                <TokenName>{token.var}</TokenName>
-                <span className="text-[0.75rem] text-[var(--v2-text-muted)]">{token.note}</span>
               </div>
             );
           })}
-      </div>
-      <p className="mt-5 max-w-[62ch] text-sm leading-6 text-[var(--v2-text-muted)]">
-        Use Tailwind classes{" "}
-        <code className="font-mono text-[0.75rem]">z-10 / z-20 / z-40 / z-50 / z-[60]</code>{" "}
-        matching this ladder. Never introduce a new raw z-index value.
-      </p>
-
-      <SectionTitle>Scrims (overlay layer)</SectionTitle>
-      <div className="flex flex-wrap gap-6">
-        {/* Derived from the token catalog so a renamed/added scrim can't
-            drift; the usage notes here are layer-specific, so they live
-            in the ternary below rather than tokens.ts. */}
-        {COLOR_TOKENS.flatMap((group) => group.tokens)
-          .filter((token) => token.var.startsWith("--v2-scrim"))
-          .map(({ var: name }) => {
-          const value = readToken(name);
-          return (
-            <div key={name + theme} className="flex w-60 flex-col gap-2">
-              <div className="relative h-28 overflow-hidden rounded-[var(--v2-radius-lg)] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)]">
-                <div className="flex flex-col gap-2 p-4">
-                  <div className="h-2 w-3/4 rounded-full bg-[var(--v2-surface-muted)]" />
-                  <div className="h-2 w-1/2 rounded-full bg-[var(--v2-surface-muted)]" />
-                  <div className="h-2 w-2/3 rounded-full bg-[var(--v2-surface-muted)]" />
-                </div>
-                <div
-                  className="absolute inset-0"
-                  style={{ background: `var(${name})` }}
-                />
-                <div className="absolute inset-y-0 right-0 w-2/5 rounded-l-[var(--v2-radius-md)] border-l border-[var(--v2-panel-border)] bg-[var(--v2-surface)] shadow-[var(--v2-shadow-lg)]" />
-              </div>
-              <TokenName>{name}</TokenName>
-              <TokenValue>{value}</TokenValue>
-              <span className="text-[0.625rem] leading-4 text-[var(--v2-text-muted)]">
-                {name === "--v2-scrim-soft"
-                  ? "Behind side sheets / task panels"
-                  : "Behind modals (with backdrop blur)"}
-              </span>
-            </div>
-          );
-        })}
-      </div>
+        </div>
+      </Section>
     </div>
   );
 }

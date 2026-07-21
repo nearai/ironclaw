@@ -128,10 +128,13 @@ export function PlaygroundPage() {
   const Body = item.render;
 
   return (
-    <div className="flex min-h-[100dvh] bg-[var(--v2-canvas)] text-[var(--v2-text)]">
+    /* h-dvh + overflow-hidden: the app shell pins body { overflow: hidden },
+       so the page can never scroll itself — the canvas <main> below owns
+       the scroll instead. */
+    <div className="flex h-dvh overflow-hidden bg-[var(--v2-canvas)] text-[var(--v2-text)]">
       {/* Left rail */}
       <aside
-        className="sticky top-0 flex h-[100dvh] w-60 shrink-0 flex-col overflow-y-auto border-r border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-4 pb-8 pt-5"
+        className="flex h-full w-60 shrink-0 flex-col overflow-y-auto border-r border-[var(--v2-panel-border)] bg-[var(--v2-surface)] px-4 pb-8 pt-5"
       >
         <div className="mb-6 flex items-center gap-2.5 px-1">
           <span
