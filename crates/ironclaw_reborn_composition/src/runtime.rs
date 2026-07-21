@@ -939,30 +939,14 @@ fn poller_user_directory(
         );
         return Some(Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>);
     }
-    if let Some(production) = services.production_runtime.as_ref() {
-        let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> = match production {
-            crate::factory::RebornProductionRuntimeServices::LibSql(graph) => Arc::new(
-                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-                    Arc::clone(&graph.scoped_filesystem),
-                    tenant_id.clone(),
-                    actor_user_id.clone(),
-                    agent_id.clone(),
-                    project_id.cloned(),
-                ),
-            ),
-            crate::factory::RebornProductionRuntimeServices::Postgres(graph) => Arc::new(
-                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-                    Arc::clone(&graph.scoped_filesystem),
-                    tenant_id.clone(),
-                    actor_user_id.clone(),
-                    agent_id.clone(),
-                    project_id.cloned(),
-                ),
-            ),
-        };
-        return Some(directory);
-    }
-    None
+    services.production_runtime.as_ref().map(|production| {
+        production.reborn_user_directory(
+            tenant_id.clone(),
+            actor_user_id.clone(),
+            agent_id.clone(),
+            project_id.cloned(),
+        )
+    })
 }
 
 struct SnapshotApprovalTurnRunLocator {
@@ -1598,19 +1582,14 @@ impl RebornRuntime {
         // every tenant. The legacy fold is a local libSQL-only migration; a fresh
         // production substrate has no `user_identities` table to fold.
         let _ = tenant_id;
-        if let Some(production) = self.services.production_runtime.as_ref() {
-            let store: Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver> = match production
-            {
-                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                    Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
-                }
-                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                    Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
-                }
-            };
-            return Some(Ok(store));
-        }
-        None
+        self.services.production_runtime.as_ref().map(|production| {
+            Ok(production.reborn_identity_resolver(
+                self.thread_scope.tenant_id.clone(),
+                self.actor_user_id.clone(),
+                self.thread_scope.agent_id.clone(),
+                self.thread_scope.project_id.clone(),
+            ))
+        })
     }
 
     /// Open the admin user-directory surface over the host-owned identity
@@ -1632,19 +1611,14 @@ impl RebornRuntime {
         }
         // Production-shaped substrate (#5013): same identity mount and per-call
         // tenant partitioning as the local path — see `open_reborn_identity_resolver`.
-        if let Some(production) = self.services.production_runtime.as_ref() {
-            let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> = match production
-            {
-                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                    Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
-                }
-                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                    Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
-                }
-            };
-            return Some(directory);
-        }
-        None
+        self.services.production_runtime.as_ref().map(|production| {
+            production.reborn_user_directory(
+                self.thread_scope.tenant_id.clone(),
+                self.actor_user_id.clone(),
+                self.thread_scope.agent_id.clone(),
+                self.thread_scope.project_id.clone(),
+            )
+        })
     }
 
     /// Test-only accessor for the admin user directory the WebUI facade wires.
@@ -1672,17 +1646,10 @@ impl RebornRuntime {
         }
         // Production-shaped substrate: the provisioner was built over the raw
         // production root + the runtime's own crypto in `build_backend_production`.
-        if let Some(production) = self.services.production_runtime.as_ref() {
-            return Some(match production {
-                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                    Arc::clone(&graph.admin_secret_provisioner)
-                }
-                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                    Arc::clone(&graph.admin_secret_provisioner)
-                }
-            });
-        }
-        None
+        self.services
+            .production_runtime
+            .as_ref()
+            .map(|production| production.admin_secret_provisioner())
     }
 
     /// First-class projects + membership (ACL) facade over the host-owned scoped
@@ -1695,17 +1662,10 @@ impl RebornRuntime {
         if let Some(local) = self.services.local_runtime.as_ref() {
             return Some(Arc::clone(&local.project_service));
         }
-        if let Some(production) = self.services.production_runtime.as_ref() {
-            return Some(match production {
-                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                    Arc::clone(&graph.project_service)
-                }
-                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                    Arc::clone(&graph.project_service)
-                }
-            });
-        }
-        None
+        self.services
+            .production_runtime
+            .as_ref()
+            .map(|production| production.project_service())
     }
 
     /// The admin API-token minter supplied via
@@ -4076,20 +4036,13 @@ pub async fn build_reborn_runtime(
                 .map_err(|error| RebornRuntimeError::InvalidArgument {
                     reason: format!("trigger conversation services unavailable: {error}"),
                 })?,
-            None => match services.production_runtime.as_ref() {
-                Some(crate::factory::RebornProductionRuntimeServices::LibSql(graph)) => {
-                    graph.trigger_conversation_services.clone()
-                }
-                Some(crate::factory::RebornProductionRuntimeServices::Postgres(graph)) => {
-                    graph.trigger_conversation_services.clone()
-                }
-                None => {
-                    return Err(RebornRuntimeError::InvalidArgument {
-                        reason: "trigger poller enabled but no runtime substrate present"
-                            .to_string(),
-                    });
-                }
-            },
+            None => services
+                .production_runtime
+                .as_ref()
+                .map(|production| production.trigger_conversation_services())
+                .ok_or_else(|| RebornRuntimeError::InvalidArgument {
+                    reason: "trigger poller enabled but no runtime substrate present".to_string(),
+                })?,
         };
         let trigger_poller_services = build_trigger_poller_services(
             conversation_services,

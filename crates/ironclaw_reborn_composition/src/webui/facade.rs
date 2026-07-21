@@ -181,19 +181,11 @@ pub(crate) struct AutomationBacking {
 /// Resolves the [`AutomationBacking`] pair from the runtime store graph selected
 /// by the composition build. Returns `None` when no runtime graph is present.
 pub(crate) fn automation_backing(services: &crate::RebornServices) -> Option<AutomationBacking> {
-    match services.runtime_store_graph()? {
-        crate::factory::RebornRuntimeStoreGraph::Local(local_runtime) => Some(AutomationBacking {
-            repository: Arc::clone(&local_runtime.trigger_repository),
-            snapshot_source: Arc::clone(&local_runtime.turn_state)
-                as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
-        }),
-        crate::factory::RebornRuntimeStoreGraph::Production(production_runtime) => {
-            Some(AutomationBacking {
-                repository: production_runtime.trigger_repository(),
-                snapshot_source: production_runtime.turn_run_snapshot_source(),
-            })
-        }
-    }
+    let graph = services.runtime_store_graph()?;
+    Some(AutomationBacking {
+        repository: graph.trigger_repository(),
+        snapshot_source: graph.turn_run_snapshot_source(),
+    })
 }
 
 /// Compose the WebUI-facing product facade from an already-built Reborn runtime.

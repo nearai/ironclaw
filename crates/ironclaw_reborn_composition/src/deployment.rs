@@ -29,7 +29,56 @@ use thiserror::Error;
 
 use crate::RebornCompositionProfile;
 use crate::input::RebornBuildInput;
-use crate::readiness::{RebornReadinessDiagnostic, RebornReadinessState};
+use crate::readiness::{
+    RebornReadinessDiagnostic, RebornReadinessDiagnosticReason, RebornReadinessDiagnosticStatus,
+    RebornReadinessState,
+};
+
+impl RebornReadinessDiagnostic {
+    pub fn disabled() -> Self {
+        Self::composition_profile(
+            RebornCompositionProfile::Disabled,
+            RebornReadinessDiagnosticReason::Disabled,
+            RebornReadinessDiagnosticStatus::Blocking,
+            true,
+        )
+    }
+
+    pub fn local_dev() -> Self {
+        Self::dev_only_profile(RebornCompositionProfile::LocalDev)
+    }
+
+    pub fn local_dev_yolo() -> Self {
+        Self::dev_only_profile(RebornCompositionProfile::LocalDevYolo)
+    }
+
+    pub fn hosted_single_tenant_volume() -> Self {
+        Self::composition_profile(
+            RebornCompositionProfile::HostedSingleTenantVolume,
+            RebornReadinessDiagnosticReason::HostedSingleTenantVolumePreview,
+            RebornReadinessDiagnosticStatus::Warning,
+            true,
+        )
+    }
+
+    pub fn hosted_single_tenant() -> Self {
+        Self::composition_profile(
+            RebornCompositionProfile::HostedSingleTenant,
+            RebornReadinessDiagnosticReason::Unverified,
+            RebornReadinessDiagnosticStatus::Info,
+            false,
+        )
+    }
+
+    fn dev_only_profile(profile: RebornCompositionProfile) -> Self {
+        Self::composition_profile(
+            profile,
+            RebornReadinessDiagnosticReason::DevOnlyProfile,
+            RebornReadinessDiagnosticStatus::Blocking,
+            true,
+        )
+    }
+}
 
 /// Which runtime substrate a deployment assembles.
 ///

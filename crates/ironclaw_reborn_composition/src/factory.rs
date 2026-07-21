@@ -1048,6 +1048,23 @@ impl<'a> RebornRuntimeStoreGraph<'a> {
             (None, None) | (Some(_), Some(_)) => None,
         }
     }
+
+    pub(crate) fn trigger_repository(&self) -> Arc<dyn TriggerRepository> {
+        match self {
+            Self::Local(local_runtime) => Arc::clone(&local_runtime.trigger_repository),
+            Self::Production(production_runtime) => production_runtime.trigger_repository(),
+        }
+    }
+
+    pub(crate) fn turn_run_snapshot_source(
+        &self,
+    ) -> Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource> {
+        match self {
+            Self::Local(local_runtime) => Arc::clone(&local_runtime.turn_state)
+                as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+            Self::Production(production_runtime) => production_runtime.turn_run_snapshot_source(),
+        }
+    }
 }
 
 pub(crate) struct RebornProductionRuntimeStoreGraph<F>
@@ -1107,6 +1124,87 @@ impl RebornProductionRuntimeServices {
         match self {
             Self::LibSql(graph) => Arc::clone(&graph.turn_state) as _,
             Self::Postgres(graph) => Arc::clone(&graph.turn_state) as _,
+        }
+    }
+
+    pub(crate) fn reborn_user_directory(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        actor_user_id: UserId,
+        agent_id: ironclaw_host_api::AgentId,
+        project_id: Option<ironclaw_host_api::ProjectId>,
+    ) -> Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> {
+        match self {
+            Self::LibSql(graph) => Arc::new(
+                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+                    Arc::clone(&graph.scoped_filesystem),
+                    tenant_id,
+                    actor_user_id,
+                    agent_id,
+                    project_id,
+                ),
+            ),
+            Self::Postgres(graph) => Arc::new(
+                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+                    Arc::clone(&graph.scoped_filesystem),
+                    tenant_id,
+                    actor_user_id,
+                    agent_id,
+                    project_id,
+                ),
+            ),
+        }
+    }
+
+    pub(crate) fn reborn_identity_resolver(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        actor_user_id: UserId,
+        agent_id: ironclaw_host_api::AgentId,
+        project_id: Option<ironclaw_host_api::ProjectId>,
+    ) -> Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver> {
+        match self {
+            Self::LibSql(graph) => Arc::new(
+                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+                    Arc::clone(&graph.scoped_filesystem),
+                    tenant_id,
+                    actor_user_id,
+                    agent_id,
+                    project_id,
+                ),
+            ),
+            Self::Postgres(graph) => Arc::new(
+                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+                    Arc::clone(&graph.scoped_filesystem),
+                    tenant_id,
+                    actor_user_id,
+                    agent_id,
+                    project_id,
+                ),
+            ),
+        }
+    }
+
+    pub(crate) fn admin_secret_provisioner(
+        &self,
+    ) -> Arc<dyn crate::admin_secrets::AdminSecretProvisioner> {
+        match self {
+            Self::LibSql(graph) => Arc::clone(&graph.admin_secret_provisioner),
+            Self::Postgres(graph) => Arc::clone(&graph.admin_secret_provisioner),
+        }
+    }
+
+    pub(crate) fn project_service(&self) -> Arc<dyn ProjectService> {
+        match self {
+            Self::LibSql(graph) => Arc::clone(&graph.project_service),
+            Self::Postgres(graph) => Arc::clone(&graph.project_service),
+        }
+    }
+
+    pub(crate) fn trigger_conversation_services(&self) -> RebornFilesystemConversationServices {
+        match self {
+            Self::LibSql(graph) => graph.trigger_conversation_services.clone(),
+            Self::Postgres(graph) => graph.trigger_conversation_services.clone(),
         }
     }
 }
