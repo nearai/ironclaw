@@ -807,22 +807,6 @@ fn google_oauth_client_secret_from_store(
     })
 }
 
-pub(crate) fn resolve_slack_personal_oauth_redirect_uri_from_env()
--> anyhow::Result<Option<OAuthRedirectUri>> {
-    resolve_slack_personal_oauth_redirect_uri(optional_nonempty_env)
-}
-
-fn resolve_slack_personal_oauth_redirect_uri(
-    mut lookup: impl FnMut(&str) -> Option<String>,
-) -> anyhow::Result<Option<OAuthRedirectUri>> {
-    let Some(raw) = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI") else {
-        return Ok(None);
-    };
-    let uri = OAuthRedirectUri::new(raw)
-        .context("invalid IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI")?;
-    Ok(Some(uri))
-}
-
 /// Outcome of resolving Google OAuth config from env, the `[google]`
 /// config.toml section, and the encrypted client-secret store. Partial public
 /// configuration disables the backend without failing boot; the client secret

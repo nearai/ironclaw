@@ -350,9 +350,10 @@ impl ChannelPairingOutcomeObserver {
                     .await;
             }
             #[cfg(test)]
-            Self::Recording(outcomes) => {
-                outcomes.lock().expect("outcomes lock").push(outcome);
-            }
+            Self::Recording(outcomes) => match outcomes.lock() {
+                Ok(mut outcomes) => outcomes.push(outcome),
+                Err(poisoned) => poisoned.into_inner().push(outcome),
+            },
         }
     }
 }
