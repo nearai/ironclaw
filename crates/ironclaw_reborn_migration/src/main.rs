@@ -68,6 +68,10 @@ struct Cli {
     #[arg(long, env = "MIGRATION_SECRET_MASTER_KEY")]
     secret_master_key: Option<String>,
 
+    /// Resolve the v1 secrets master key from SECRETS_MASTER_KEY or OS keychain.
+    #[arg(long, conflicts_with = "secret_master_key")]
+    resolve_secret_master_key: bool,
+
     /// Report what would be migrated without writing to the Reborn store.
     #[arg(long)]
     dry_run: bool,
@@ -78,7 +82,7 @@ struct Cli {
 }
 
 impl Cli {
-    fn into_options(self) -> anyhow::Result<(MigrationOptions, Option<PathBuf>)> {
+    async fn into_options(self) -> anyhow::Result<(MigrationOptions, Option<PathBuf>)> {
         let source = match (self.source_libsql, self.source_postgres) {
             (Some(path), None) => SourceDb::LibSql { path },
             (None, Some(url)) => SourceDb::Postgres {
@@ -95,12 +99,26 @@ impl Cli {
         };
         let tenant_id = TenantId::new(self.tenant_id)?;
         let agent_id = AgentId::new(self.agent_id)?;
+        let secret_master_key = match (self.secret_master_key, self.resolve_secret_master_key) {
+            (Some(key), false) => Some(SecretString::from(key)),
+            (None, true) => match ironclaw_secrets::keychain::resolve_master_key_material().await {
+                Ok(key) => key,
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to resolve secrets master key; secrets will be reported as unmigrated: {error}"
+                    );
+                    None
+                }
+            },
+            (None, false) => None,
+            (Some(_), true) => unreachable!("clap conflict prevents both secret key sources"),
+        };
         let options = MigrationOptions {
             source,
             target,
             tenant_id,
             agent_id,
-            secret_master_key: self.secret_master_key.map(SecretString::from),
+            secret_master_key,
             dry_run: self.dry_run,
         };
         Ok((options, self.report))
@@ -128,7 +146,7 @@ async fn main() -> ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let (options, report_path) = cli.into_options()?;
+    let (options, report_path) = cli.into_options().await?;
     let dry_run = options.dry_run;
 
     let report = run_migration(options).await?;

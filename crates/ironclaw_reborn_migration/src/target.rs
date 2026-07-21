@@ -16,8 +16,11 @@ use ironclaw_host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_identity::{FilesystemRebornIdentityStore, RebornUserDirectory};
 
 use ironclaw_host_api::ProjectId;
-use ironclaw_memory::MemoryService;
-use ironclaw_memory_native::NativeMemoryService;
+use ironclaw_memory_native::{
+    ChunkingMemoryDocumentIndexer, DefaultPromptWriteSafetyPolicy,
+    FilesystemMemoryDocumentRepository, MemoryBackend, MemoryBackendCapabilities,
+    PromptProtectedPathRegistry, PromptSafetyPolicyVersion, RepositoryMemoryBackend,
+};
 use ironclaw_reborn_identity::RebornIdentityResolver;
 use ironclaw_secrets::{FilesystemSecretStore, SecretStore, SecretsCrypto};
 use ironclaw_threads::{FilesystemSessionThreadService, SessionThreadService};
@@ -57,7 +60,7 @@ pub(crate) struct RebornTarget {
     pub(crate) tenant_id: TenantId,
     pub(crate) agent_id: AgentId,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
-    pub(crate) memory_service: Arc<dyn MemoryService>,
+    pub(crate) memory_backend: Arc<dyn MemoryBackend>,
     pub(crate) trigger_repo: Arc<dyn TriggerRepository>,
     pub(crate) extension_store: Arc<dyn ExtensionInstallationStore>,
     /// Present only when a secrets master key was supplied.
@@ -119,11 +122,11 @@ impl RebornTarget {
         };
 
         let backend = open_backend(&options.target).await?;
-        let (thread_service, memory_service, secret_store) = match &backend {
+        let (thread_service, memory_backend, secret_store) = match &backend {
             #[cfg(feature = "libsql")]
-            Backend::LibSql { root, .. } => build_kv_services(root.clone(), crypto.clone()),
+            Backend::LibSql { root, .. } => build_kv_services(root.clone(), crypto.clone())?,
             #[cfg(feature = "postgres")]
-            Backend::Postgres { root, .. } => build_kv_services(root.clone(), crypto.clone()),
+            Backend::Postgres { root, .. } => build_kv_services(root.clone(), crypto.clone())?,
         };
         let trigger_repo = build_trigger_repo(&backend).await?;
 
@@ -147,7 +150,7 @@ impl RebornTarget {
             tenant_id: options.tenant_id.clone(),
             agent_id: options.agent_id.clone(),
             thread_service,
-            memory_service,
+            memory_backend,
             trigger_repo,
             extension_store,
             secret_store,
@@ -182,13 +185,16 @@ fn build_crypto(key: &SecretString) -> Result<SecretsCrypto, MigrationError> {
 /// The KV-substrate write services built over one backend.
 type KvServices = (
     Arc<dyn SessionThreadService>,
-    Arc<dyn MemoryService>,
+    Arc<dyn MemoryBackend>,
     Option<Arc<dyn SecretStore>>,
 );
 
 /// Build the filesystem-backed KV services over one concrete backend, returning
 /// them as trait objects.
-fn build_kv_services<F>(root: Arc<F>, crypto: Option<Arc<SecretsCrypto>>) -> KvServices
+fn build_kv_services<F>(
+    root: Arc<F>,
+    crypto: Option<Arc<SecretsCrypto>>,
+) -> Result<KvServices, MigrationError>
 where
     F: RootFilesystem + 'static,
 {
@@ -200,8 +206,7 @@ where
         Arc::new(FilesystemSessionThreadService::new(threads_scoped));
 
     let root_dyn: Arc<dyn RootFilesystem> = root.clone();
-    let memory_service: Arc<dyn MemoryService> =
-        Arc::new(NativeMemoryService::from_filesystem(root_dyn, None));
+    let memory_backend = build_memory_backend(root_dyn)?;
 
     let secret_store: Option<Arc<dyn SecretStore>> = crypto.map(|crypto| {
         let secrets_scoped = Arc::new(ScopedFilesystem::new(
@@ -213,7 +218,38 @@ where
         store
     });
 
-    (thread_service, memory_service, secret_store)
+    Ok((thread_service, memory_backend, secret_store))
+}
+
+fn build_memory_backend(
+    filesystem: Arc<dyn RootFilesystem>,
+) -> Result<Arc<dyn MemoryBackend>, MigrationError> {
+    let repository = Arc::new(FilesystemMemoryDocumentRepository::new(filesystem));
+    let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repository.clone()));
+    let empty_protected_paths = PromptProtectedPathRegistry::new(
+        PromptSafetyPolicyVersion::new("migration-empty-prompt-protected-paths:v1")
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?,
+        std::iter::empty::<String>(),
+    )
+    .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    Ok(Arc::new(
+        RepositoryMemoryBackend::new(repository)
+            .with_indexer(indexer)
+            .with_prompt_write_safety_policy(Arc::new(
+                DefaultPromptWriteSafetyPolicy::with_registry(empty_protected_paths.clone()),
+            ))
+            .with_prompt_protected_path_registry(empty_protected_paths)
+            .with_capabilities(
+                MemoryBackendCapabilities::default()
+                    .set_file_documents(true)
+                    .set_metadata(true)
+                    .set_versioning(true)
+                    .set_prompt_write_safety(true)
+                    .set_full_text_search(true)
+                    .set_delete(true)
+                    .set_transactions(true),
+            ),
+    ))
 }
 
 #[allow(dead_code)] // wired for the identity row-by-row follow-up

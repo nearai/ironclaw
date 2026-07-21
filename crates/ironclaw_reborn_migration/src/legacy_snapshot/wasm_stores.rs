@@ -15,6 +15,19 @@ pub(crate) enum WasmStorageError {
     Database(String),
 }
 
+fn is_missing_table_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("no such table")
+        || (lower.contains("relation") && lower.contains("does not exist"))
+}
+
+#[cfg(feature = "postgres")]
+fn is_missing_postgres_table_error(error: &tokio_postgres::Error) -> bool {
+    error
+        .as_db_error()
+        .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::UNDEFINED_TABLE)
+}
+
 /// Frozen mirror of `ironclaw::tools::wasm::ToolStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolStatus {
@@ -116,10 +129,10 @@ impl WasmToolStore for LibSqlWasmToolStore {
     async fn list(&self, user_id: &str) -> Result<Vec<StoredWasmTool>, WasmStorageError> {
         use super::libsql_helpers::{get_text, get_ts};
         let conn = self.connect().await?;
-        let mut rows = conn
+        let mut rows = match conn
             .query(
                 r#"
-                SELECT id, user_id, name, version, wit_version, description, parameters_schema,
+                SELECT id, user_id, name, version, description, parameters_schema,
                        source_url, trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = ?1
@@ -128,7 +141,11 @@ impl WasmToolStore for LibSqlWasmToolStore {
                 libsql::params![user_id],
             )
             .await
-            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+        {
+            Ok(rows) => rows,
+            Err(e) if is_missing_table_error(&e.to_string()) => return Ok(Vec::new()),
+            Err(e) => return Err(WasmStorageError::Database(e.to_string())),
+        };
 
         let mut tools = Vec::new();
         while let Some(row) = rows
@@ -137,16 +154,16 @@ impl WasmToolStore for LibSqlWasmToolStore {
             .map_err(|e| WasmStorageError::Database(e.to_string()))?
         {
             let id_str = get_text(&row, 0);
-            let status_str = get_text(&row, 9);
+            let status_str = get_text(&row, 8);
             tools.push(StoredWasmTool {
                 id: id_str
                     .parse()
                     .map_err(|e: uuid::Error| WasmStorageError::Database(e.to_string()))?,
                 name: get_text(&row, 2),
                 version: get_text(&row, 3),
-                description: get_text(&row, 5),
+                description: get_text(&row, 4),
                 status: status_str.parse().map_err(WasmStorageError::Database)?,
-                updated_at: get_ts(&row, 11),
+                updated_at: get_ts(&row, 10),
             });
         }
         Ok(tools)
@@ -157,7 +174,7 @@ impl WasmToolStore for LibSqlWasmToolStore {
         tool_id: Uuid,
     ) -> Result<Option<StoredCapabilities>, WasmStorageError> {
         let conn = self.connect().await?;
-        let mut rows = conn
+        let mut rows = match conn
             .query(
                 r#"
                 SELECT allowed_secrets
@@ -167,7 +184,11 @@ impl WasmToolStore for LibSqlWasmToolStore {
                 libsql::params![tool_id.to_string()],
             )
             .await
-            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+        {
+            Ok(rows) => rows,
+            Err(e) if is_missing_table_error(&e.to_string()) => return Ok(None),
+            Err(e) => return Err(WasmStorageError::Database(e.to_string())),
+        };
 
         match rows
             .next()
@@ -214,10 +235,10 @@ impl WasmChannelStore for LibSqlWasmChannelStore {
     async fn list(&self, user_id: &str) -> Result<Vec<StoredWasmChannel>, WasmStorageError> {
         use super::libsql_helpers::{get_text, parse_timestamp};
         let conn = self.connect().await?;
-        let mut rows = conn
+        let mut rows = match conn
             .query(
                 r#"
-                SELECT id, user_id, name, version, wit_version, description,
+                SELECT id, user_id, name, version, description,
                        capabilities_json, status, created_at, updated_at
                 FROM wasm_channels
                 WHERE user_id = ?1
@@ -226,7 +247,11 @@ impl WasmChannelStore for LibSqlWasmChannelStore {
                 libsql::params![user_id],
             )
             .await
-            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+        {
+            Ok(rows) => rows,
+            Err(e) if is_missing_table_error(&e.to_string()) => return Ok(Vec::new()),
+            Err(e) => return Err(WasmStorageError::Database(e.to_string())),
+        };
 
         let mut channels = Vec::new();
         while let Some(row) = rows
@@ -234,12 +259,12 @@ impl WasmChannelStore for LibSqlWasmChannelStore {
             .await
             .map_err(|e| WasmStorageError::Database(e.to_string()))?
         {
-            let updated_at_str = get_text(&row, 9);
+            let updated_at_str = get_text(&row, 8);
             channels.push(StoredWasmChannel {
                 name: get_text(&row, 2),
                 version: get_text(&row, 3),
-                description: get_text(&row, 5),
-                status: get_text(&row, 7),
+                description: get_text(&row, 4),
+                status: get_text(&row, 6),
                 updated_at: parse_timestamp(&updated_at_str).map_err(WasmStorageError::Database)?,
             });
         }
@@ -270,11 +295,11 @@ impl WasmToolStore for PostgresWasmToolStore {
             .get()
             .await
             .map_err(|e| WasmStorageError::Database(e.to_string()))?;
-        let rows = client
+        let rows = match client
             .query(
                 r#"
-                SELECT id, user_id, name, version, wit_version, description,
-                       parameters_schema, source_url, trust_level, status, created_at, updated_at
+                SELECT id, user_id, name, version, description, parameters_schema, source_url,
+                       trust_level, status, created_at, updated_at
                 FROM wasm_tools
                 WHERE user_id = $1
                 ORDER BY name
@@ -282,7 +307,11 @@ impl WasmToolStore for PostgresWasmToolStore {
                 &[&user_id],
             )
             .await
-            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+        {
+            Ok(rows) => rows,
+            Err(e) if is_missing_postgres_table_error(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(WasmStorageError::Database(e.to_string())),
+        };
 
         rows.iter()
             .map(|r| {
@@ -308,13 +337,17 @@ impl WasmToolStore for PostgresWasmToolStore {
             .get()
             .await
             .map_err(|e| WasmStorageError::Database(e.to_string()))?;
-        let row = client
+        let row = match client
             .query_opt(
                 "SELECT allowed_secrets FROM tool_capabilities WHERE wasm_tool_id = $1",
                 &[&tool_id],
             )
             .await
-            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+        {
+            Ok(row) => row,
+            Err(e) if is_missing_postgres_table_error(&e) => return Ok(None),
+            Err(e) => return Err(WasmStorageError::Database(e.to_string())),
+        };
         Ok(row.map(|r| StoredCapabilities {
             allowed_secrets: r.get("allowed_secrets"),
         }))
@@ -342,11 +375,11 @@ impl WasmChannelStore for PostgresWasmChannelStore {
             .get()
             .await
             .map_err(|e| WasmStorageError::Database(e.to_string()))?;
-        let rows = client
+        let rows = match client
             .query(
                 r#"
-                SELECT id, user_id, name, version, wit_version, description,
-                       capabilities_json, status, created_at, updated_at
+                SELECT id, user_id, name, version, description, capabilities_json, status,
+                       created_at, updated_at
                 FROM wasm_channels
                 WHERE user_id = $1
                 ORDER BY name
@@ -354,7 +387,11 @@ impl WasmChannelStore for PostgresWasmChannelStore {
                 &[&user_id],
             )
             .await
-            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+        {
+            Ok(rows) => rows,
+            Err(e) if is_missing_postgres_table_error(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(WasmStorageError::Database(e.to_string())),
+        };
 
         Ok(rows
             .iter()
