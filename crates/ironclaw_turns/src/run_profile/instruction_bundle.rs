@@ -134,19 +134,23 @@ pub trait InstructionMaterializationStore: Send + Sync {
     ) -> Result<Option<InstructionBundleMaterializedMessage>, AgentLoopHostError>;
 }
 
-/// In-memory, per-process materialization store for model-visible safe context.
+/// Ephemeral, per-process materialization store for model-visible prompt context.
+///
+/// This store intentionally has no filesystem-backed implementation: it stages
+/// raw model-visible prompt material between the prompt port and model port for
+/// a claimed run, and raw prompts must not be persisted by `ironclaw_turns`.
 #[derive(Default)]
-pub struct InMemoryInstructionMaterializationStore {
+pub struct EphemeralInstructionMaterializationStore {
     messages: Mutex<HashMap<String, InstructionBundleMaterializedMessage>>,
 }
 
-impl InMemoryInstructionMaterializationStore {
+impl EphemeralInstructionMaterializationStore {
     fn key(context: &LoopRunContext, content_ref: &LoopMessageRef) -> String {
         format!("{}:{}", context.run_id, content_ref.as_str())
     }
 }
 
-impl InstructionMaterializationStore for InMemoryInstructionMaterializationStore {
+impl InstructionMaterializationStore for EphemeralInstructionMaterializationStore {
     fn put_materialized_messages(
         &self,
         context: &LoopRunContext,

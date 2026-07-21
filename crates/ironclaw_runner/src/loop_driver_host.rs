@@ -114,19 +114,19 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityInvocation, CommunicationContextProvider,
-        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
-        InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelGateway, LoopModelPolicyGuard, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        EphemeralInstructionMaterializationStore, FinalizeAssistantMessage, HookMilestoneSink,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort, InstructionBundleMaterializedMessage,
+        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
+        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
+        LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
         RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
         UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -1633,7 +1633,7 @@ where
             event_subscription_started_at,
         );
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
-            Arc::new(InMemoryInstructionMaterializationStore::default());
+            Arc::new(EphemeralInstructionMaterializationStore::default());
         let surface_state = Arc::new(CapabilitySurfaceState::default());
         let mut capabilities: Arc<dyn LoopCapabilityPort> = Arc::new(
             SurfaceTrackingLoopCapabilityPort::new(capabilities, Arc::clone(&surface_state)),

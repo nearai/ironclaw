@@ -87,12 +87,6 @@ const FROZEN_DEBT_INMEMORY_STORES: &[&str] = &[
 /// §1.4 lock-step store duplicates. Each annotation states the reason; do not
 /// "consolidate" these without first invalidating that reason in review.
 const JUSTIFIED_KEEP_INMEMORY_STORES: &[&str] = &[
-    // --- Ephemeral per-run staging BY DESIGN. Constructed per claimed run /
-    //     model call (`ironclaw_runner` loop_driver_host + model_gateway) to
-    //     stage raw model-visible prompt content between the prompt and model
-    //     ports; the run_profile contract requires raw prompt text to stay
-    //     behind host implementations, so a durable variant must not exist. ---
-    "InMemoryInstructionMaterializationStore",
     // --- Embedded ENGINE, not a parallel implementation.
     //     `FilesystemExtensionInstallationStore` (reborn_composition) wraps
     //     this store as its in-memory working set and adds snapshot
