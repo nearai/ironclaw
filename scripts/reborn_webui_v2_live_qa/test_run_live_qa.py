@@ -5256,11 +5256,36 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         ),
                     ),
                 )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries(path, contents) VALUES (?, ?)",
+                    (
+                        "/tenants/reborn-cli/shared/channel-extensions/slack/"
+                        "product-workflow/idempotency/actions/event.json",
+                        json.dumps(
+                            {
+                                "fingerprint": {
+                                    "external_event_id": (
+                                        "slack-slack-EvREBORNQA7D456"
+                                    )
+                                },
+                                "dispatch_kind": {
+                                    "user_message_turn": {
+                                        "run_id": "run-from-generic-ingress"
+                                    }
+                                },
+                            }
+                        ),
+                    ),
+                )
                 db.commit()
 
             self.assertEqual(
                 run_live_qa._slack_event_run_id_for_event(home, "EvREBORNQA5D123"),
                 "run-from-dispatch",
+            )
+            self.assertEqual(
+                run_live_qa._slack_event_run_id_for_event(home, "EvREBORNQA7D456"),
+                "run-from-generic-ingress",
             )
 
     def test_wait_for_google_sheet_marker_after_slack_event_approves_gate(self):

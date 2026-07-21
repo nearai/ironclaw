@@ -2563,7 +2563,10 @@ def _slack_event_run_id_for_event(reborn_home: Path, event_id: str) -> str | Non
         row = db.execute(
             """
             SELECT contents FROM root_filesystem_entries
-            WHERE path LIKE '%/slack-product-workflow/idempotency/actions/%'
+            WHERE (
+                    path LIKE '%/slack-product-workflow/idempotency/actions/%'
+                 OR path LIKE '%/channel-extensions/slack/product-workflow/idempotency/actions/%'
+            )
               AND CAST(contents AS TEXT) LIKE '%' || ? || '%'
             ORDER BY updated_at DESC, path DESC
             LIMIT 1
