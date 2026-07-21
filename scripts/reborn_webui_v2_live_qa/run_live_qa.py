@@ -2194,11 +2194,17 @@ async def _webui_json(
             const response = await fetch(path, {
                 ...init,
             });
-            let body = null;
-            try {
-                body = await response.json();
-            } catch (_error) {
-                body = await response.text();
+            const rawBody = await response.text();
+            let body = rawBody;
+            if (rawBody) {
+                try {
+                    body = JSON.parse(rawBody);
+                } catch (_error) {
+                    // Preserve a non-JSON error body verbatim. The response
+                    // stream has already been consumed exactly once.
+                }
+            } else {
+                body = null;
             }
             return { status: response.status, body };
         }""",
@@ -2725,6 +2731,32 @@ def _extension_is_listed(extensions: list[object], package_id: str) -> bool:
         and isinstance(extension.get("package_ref"), dict)
         and extension["package_ref"].get("id") == package_id
         for extension in extensions
+    )
+
+
+def _extension_entry(
+    entries: list[object], package_id: str
+) -> dict[str, object] | None:
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        package_ref = entry.get("package_ref")
+        if isinstance(package_ref, dict) and package_ref.get("id") == package_id:
+            return entry
+    return None
+
+
+def _extension_channel_surface(entry: dict[str, object]) -> dict[str, object] | None:
+    surfaces = entry.get("surfaces")
+    if not isinstance(surfaces, list):
+        return None
+    return next(
+        (
+            surface
+            for surface in surfaces
+            if isinstance(surface, dict) and surface.get("kind") == "channel"
+        ),
+        None,
     )
 
 
@@ -3569,42 +3601,57 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
             wait_until="domcontentloaded",
         )  # type: ignore[attr-defined]
         await expect(page.locator("body")).to_contain_text("Channels", timeout=15000)  # type: ignore[attr-defined]
-        body = await _fetch_webui_json(page, "/api/webchat/v2/channels/connectable")
-        channels = body.get("channels")
-        if not isinstance(channels, list):
-            raise AssertionError(f"connectable channels body did not include a list: {body!r}")
-        slack_channels = [
-            channel
-            for channel in channels
-            if isinstance(channel, dict) and channel.get("channel") == "slack"
-        ]
-        observed["connectable_channel_count"] = len(channels)
-        observed["slack_strategy_count"] = len(slack_channels)
-        observed["slack_strategies"] = [
-            channel.get("strategy")
-            for channel in slack_channels
-            if isinstance(channel, dict)
-        ]
-        personal = next(
-            (
-                channel
-                for channel in slack_channels
-                if isinstance(channel, dict)
-                and channel.get("strategy") == "oauth"
-            ),
-            None,
+        await expect(page.locator("body")).to_contain_text("Slack", timeout=15000)  # type: ignore[attr-defined]
+        extensions_body = await _fetch_webui_json(page, "/api/webchat/v2/extensions")
+        extensions = extensions_body.get("extensions")
+        if not isinstance(extensions, list):
+            raise AssertionError(f"extensions body did not include a list: {extensions_body!r}")
+        registry_body = await _fetch_webui_json(
+            page, "/api/webchat/v2/extensions/registry"
         )
-        if not isinstance(personal, dict):
-            raise AssertionError(f"Slack oauth connect strategy missing: {channels!r}")
-        action_body = personal.get("action")
-        if not isinstance(action_body, dict):
-            raise AssertionError(f"Slack connect action missing: {personal!r}")
-        title = str(action_body.get("title") or "")
-        if not title:
-            raise AssertionError(f"Slack connect action title missing: {personal!r}")
-        instructions = str(action_body.get("instructions") or "")
+        registry_entries = registry_body.get("entries")
+        if not isinstance(registry_entries, list):
+            raise AssertionError(
+                f"extension registry body did not include a list: {registry_body!r}"
+            )
+        slack_extension = _extension_entry(extensions, "slack")
+        catalog_source = "installed"
+        if slack_extension is None:
+            slack_extension = _extension_entry(registry_entries, "slack")
+            catalog_source = "registry"
+        if slack_extension is None:
+            raise AssertionError("Slack extension missing from installed and registry catalogs")
+        channel_surface = _extension_channel_surface(slack_extension)
+        if channel_surface is None:
+            raise AssertionError(
+                f"Slack extension did not declare a channel surface: {slack_extension!r}"
+            )
+        connection = channel_surface.get("connection")
+        if not isinstance(connection, dict) or connection.get("strategy") != "oauth":
+            raise AssertionError(
+                f"Slack channel surface did not declare OAuth connection: {channel_surface!r}"
+            )
+        display_name = str(
+            connection.get("display_name")
+            or slack_extension.get("display_name")
+            or ""
+        )
+        if not display_name:
+            raise AssertionError(
+                f"Slack channel surface display name missing: {channel_surface!r}"
+            )
+        instructions = str(connection.get("instructions") or "")
         if not _slack_connect_instructions_look_valid(instructions):
             raise AssertionError(f"unexpected Slack connect instructions: {instructions!r}")
+        observed["extension_count"] = len(extensions)
+        observed["extension_registry_count"] = len(registry_entries)
+        observed["slack_catalog_source"] = catalog_source
+        observed["slack_surface_kinds"] = [
+            surface.get("kind")
+            for surface in slack_extension.get("surfaces", [])
+            if isinstance(surface, dict)
+        ]
+        observed["slack_connection_strategy"] = connection.get("strategy")
         # Extension-scoped OAuth deliberately rejects an absent installation.
         # Exercise the same global install transition as the product UI before
         # probing the OAuth start surface; do not manufacture per-user setup
@@ -3667,13 +3714,7 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
         authorization_url = str(oauth_start.get("authorization_url") or "")
         if not authorization_url.startswith("https://slack.com/oauth/"):
             raise AssertionError(f"Slack OAuth start returned unexpected URL: {oauth_start!r}")
-        if "admin_managed_channels" in observed["slack_strategies"]:
-            await expect(page.locator("body")).to_contain_text("Slack workspace setup", timeout=15000)  # type: ignore[attr-defined]
-        else:
-            await expect(page.locator("body")).to_contain_text(title, timeout=15000)  # type: ignore[attr-defined]
-            await expect(page.locator("body")).to_contain_text("Connect Slack with OAuth", timeout=15000)  # type: ignore[attr-defined]
-        observed["slack_display_name"] = personal.get("display_name")
-        observed["slack_connect_title"] = title
+        observed["slack_connect_display_name"] = display_name
         observed["slack_connect_instructions"] = instructions
         observed["slack_product_auth_account_count"] = len(accounts)
         observed["slack_product_auth_configured_account_count"] = len(configured_accounts)
