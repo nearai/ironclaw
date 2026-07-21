@@ -115,6 +115,116 @@ DEFAULT_RESPONSE = "I understand your request."
 EMULATE_GITHUB_BEARER = "ghp_emulate_github_token"
 EMULATE_SLACK_BEARER = "emulate-slack-token"
 
+
+def _new_llm_trace_state() -> dict:
+    return {
+        "source": None,
+        "responses": [],
+        "next_response": 0,
+        "user_input": None,
+        "error": None,
+    }
+
+
+def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
+    """Validate a recorded Reborn trace and make it executable by this mock."""
+    if not isinstance(trace, dict):
+        raise ValueError("trace must be an object")
+    steps = trace.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("trace.steps must be a non-empty list")
+
+    first = steps[0]
+    if not isinstance(first, dict) or not isinstance(first.get("response"), dict):
+        raise ValueError("trace.steps[0].response must be an object")
+    first_response = first["response"]
+    if first_response.get("type") != "user_input" or not isinstance(
+        first_response.get("content"), str
+    ):
+        raise ValueError("trace must start with a user_input response")
+
+    responses = []
+    for index, step in enumerate(steps[1:], start=1):
+        if not isinstance(step, dict) or not isinstance(step.get("response"), dict):
+            raise ValueError(f"trace.steps[{index}].response must be an object")
+        response = step["response"]
+        response_type = response.get("type")
+        if response_type == "text":
+            if not isinstance(response.get("content"), str):
+                raise ValueError(f"trace.steps[{index}] text content must be a string")
+        elif response_type == "tool_calls":
+            tool_calls = response.get("tool_calls")
+            if not isinstance(tool_calls, list) or not tool_calls:
+                raise ValueError(
+                    f"trace.steps[{index}] tool_calls must be a non-empty list"
+                )
+            for tool_index, tool_call in enumerate(tool_calls):
+                if (
+                    not isinstance(tool_call, dict)
+                    or not isinstance(tool_call.get("name"), str)
+                    or not isinstance(tool_call.get("arguments"), dict)
+                ):
+                    raise ValueError(
+                        f"trace.steps[{index}].tool_calls[{tool_index}] is invalid"
+                    )
+        else:
+            raise ValueError(
+                f"trace.steps[{index}] has unsupported response type {response_type!r}"
+            )
+        responses.append(response)
+
+    if not responses:
+        raise ValueError("trace must contain at least one model response")
+    return {
+        "source": source,
+        "responses": responses,
+        "next_response": 0,
+        "user_input": first_response["content"],
+        "error": None,
+    }
+
+
+def _next_llm_trace_response(
+    state: dict,
+    messages: list[dict],
+    available_tool_names: set[str],
+) -> dict | None:
+    """Return the next recorded response, failing loudly on replay drift."""
+    responses = state.get("responses") or []
+    if not responses:
+        return None
+    next_index = state["next_response"]
+    if next_index >= len(responses):
+        state["error"] = (
+            "recorded LLM trace is exhausted but the agent requested another response"
+        )
+        raise web.HTTPConflict(text=state["error"])
+
+    if next_index == 0:
+        expected_input = state["user_input"]
+        actual_input = _last_user_content(messages)
+        if expected_input not in actual_input:
+            state["error"] = (
+                "recorded LLM trace user input does not match the conversation"
+            )
+            raise web.HTTPConflict(text=state["error"])
+
+    response = responses[next_index]
+    if response["type"] == "tool_calls":
+        missing = {
+            tool_call["name"]
+            for tool_call in response["tool_calls"]
+            if tool_call["name"] not in available_tool_names
+        }
+        if missing:
+            state["error"] = "recorded LLM trace requested unavailable tools: " + ", ".join(
+                sorted(missing)
+            )
+            raise web.HTTPConflict(text=state["error"])
+
+    state["next_response"] += 1
+    return response
+
 TOOL_FAILURE_TRIGGER = re.compile(r"issue 1780 tool failure", re.IGNORECASE)
 TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
     r"issue 1780 truncated tool call",
@@ -2519,6 +2629,26 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     available_tool_names = _advertised_tool_names(tools)
     cid = f"mock-{uuid.uuid4().hex[:8]}"
 
+    trace_response = _next_llm_trace_response(
+        request.app["llm_trace_state"], messages, available_tool_names
+    )
+    if trace_response is not None:
+        if trace_response["type"] == "tool_calls":
+            calls = [
+                {
+                    "tool_name": tool_call["name"],
+                    "arguments": tool_call["arguments"],
+                }
+                for tool_call in trace_response["tool_calls"]
+            ]
+            if not stream:
+                return _tool_call_response(cid, calls)
+            return await _stream_tool_call(request, cid, calls)
+        text = trace_response["content"]
+        if not stream:
+            return _text_response(cid, text)
+        return await _stream_text(request, cid, text)
+
     fault_action = _next_llm_fault_action(messages)
     if fault_action:
         fault_response = await _apply_llm_fault_action(
@@ -3033,6 +3163,27 @@ async def oauth_state_handler(request: web.Request) -> web.Response:
     return web.json_response(request.app["oauth_state"])
 
 
+async def google_oauth_token(request: web.Request) -> web.Response:
+    """Minimal Google token endpoint for standalone Reborn OAuth tests."""
+    data = await request.post()
+    if data.get("grant_type") != "authorization_code":
+        return web.json_response({"error": "unsupported_grant_type"}, status=400)
+    if data.get("code") != "mock_auth_code":
+        return web.json_response({"error": "invalid_grant"}, status=400)
+    return web.json_response(
+        {
+            "access_token": "mock-token-mock_auth_code",
+            "refresh_token": "mock-refreshed-access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": (
+                "https://www.googleapis.com/auth/drive.readonly "
+                "https://www.googleapis.com/auth/drive"
+            ),
+        }
+    )
+
+
 async def oauth_reset(request: web.Request) -> web.Response:
     request.app["oauth_state"] = _new_oauth_state()
     return web.json_response({"ok": True})
@@ -3322,6 +3473,7 @@ def main():
     app["oauth_state"] = _new_oauth_state()
     app["mcp_state"] = _new_mcp_state()
     app["gmail_state"] = _new_gmail_state()
+    app["llm_trace_state"] = _new_llm_trace_state()
     # Register both /v1/ and non-/v1/ paths (rig-core omits the /v1/ prefix)
     app.router.add_post("/v1/chat/completions", chat_completions)
     app.router.add_post("/chat/completions", chat_completions)
@@ -3329,6 +3481,7 @@ def main():
     app.router.add_get("/models", models)
     app.router.add_post("/oauth/exchange", oauth_exchange)
     app.router.add_post("/oauth/refresh", oauth_refresh)
+    app.router.add_post("/token", google_oauth_token)
     app.router.add_get("/__mock/oauth/state", oauth_state_handler)
     app.router.add_post("/__mock/oauth/reset", oauth_reset)
     app.router.add_get("/__mock/mcp/state", mcp_state_handler)
@@ -3353,6 +3506,33 @@ def main():
         global _last_chat_request
         _last_chat_request = None
         _chat_requests.clear()
+        return web.json_response({"ok": True})
+
+    async def set_llm_trace(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            request.app["llm_trace_state"] = _parse_llm_trace(
+                body.get("trace"), body.get("source")
+            )
+        except ValueError as error:
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
+        return web.json_response({"ok": True})
+
+    async def get_llm_trace(request: web.Request) -> web.Response:
+        state = request.app["llm_trace_state"]
+        return web.json_response(
+            {
+                "source": state["source"],
+                "next_response": state["next_response"],
+                "response_count": len(state["responses"]),
+                "complete": bool(state["responses"])
+                and state["next_response"] == len(state["responses"]),
+                "error": state["error"],
+            }
+        )
+
+    async def reset_llm_trace(request: web.Request) -> web.Response:
+        request.app["llm_trace_state"] = _new_llm_trace_state()
         return web.json_response({"ok": True})
 
     async def set_llm_faults(request: web.Request) -> web.Response:
@@ -3410,6 +3590,9 @@ def main():
     app.router.add_get("/__mock/last_chat_request", get_last_chat_request)
     app.router.add_get("/__mock/chat_requests", get_chat_requests)
     app.router.add_post("/__mock/chat_requests/reset", reset_chat_requests)
+    app.router.add_post("/__mock/llm_trace", set_llm_trace)
+    app.router.add_get("/__mock/llm_trace", get_llm_trace)
+    app.router.add_post("/__mock/llm_trace/reset", reset_llm_trace)
     app.router.add_post("/__mock/llm_faults", set_llm_faults)
     app.router.add_get("/__mock/llm_faults", get_llm_faults)
     app.router.add_post("/__mock/llm_faults/reset", reset_llm_faults)

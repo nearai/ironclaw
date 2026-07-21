@@ -24,6 +24,8 @@ const MAX_REQWEST_CLIENT_CACHE_ENTRIES: usize = 128;
 pub struct ReqwestNetworkTransport {
     timeout: Duration,
     client_cache: Arc<Mutex<HashMap<ReqwestClientKey, reqwest::Client>>>,
+    #[cfg(debug_assertions)]
+    test_host_rewrites: Arc<HashMap<String, url::Url>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -53,6 +55,8 @@ impl ReqwestNetworkTransport {
         Self {
             timeout,
             client_cache: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(debug_assertions)]
+            test_host_rewrites: Arc::new(test_host_rewrites_from_env()),
         }
     }
 
@@ -102,6 +106,57 @@ impl ReqwestNetworkTransport {
         }
         Ok(cache.entry(key).or_insert(client).clone())
     }
+}
+
+#[cfg(debug_assertions)]
+fn test_host_rewrites_from_env() -> HashMap<String, url::Url> {
+    let Ok(raw) = std::env::var("IRONCLAW_TEST_HTTP_REWRITE_MAP") else {
+        return HashMap::new();
+    };
+    let Ok(entries) = serde_json::from_str::<HashMap<String, String>>(&raw) else {
+        tracing::warn!("ignored invalid IRONCLAW_TEST_HTTP_REWRITE_MAP; expected a JSON object");
+        return HashMap::new();
+    };
+    entries
+        .into_iter()
+        .filter_map(|(host, target)| match url::Url::parse(&target) {
+            Ok(url) if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() => {
+                Some((host.to_ascii_lowercase(), url))
+            }
+            _ => {
+                tracing::warn!(host, "ignored invalid test HTTP rewrite target");
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(debug_assertions)]
+fn apply_test_host_rewrite(
+    rewrites: &HashMap<String, url::Url>,
+    url: &mut url::Url,
+    resolved_ips: &mut Vec<std::net::IpAddr>,
+) {
+    let Some(host) = url.host_str().map(str::to_string) else {
+        return;
+    };
+    let Some(target) = rewrites.get(&host.to_ascii_lowercase()) else {
+        return;
+    };
+    if url.set_scheme(target.scheme()).is_err()
+        || url.set_host(target.host_str()).is_err()
+        || url.set_port(target.port()).is_err()
+    {
+        return;
+    }
+    tracing::debug!(
+        original_host = host,
+        target_host = target.host_str(),
+        target_port = target.port(),
+        target_scheme = target.scheme(),
+        "applied debug-only test HTTP host rewrite"
+    );
+    resolved_ips.clear();
 }
 
 fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwest::Error> {
@@ -160,7 +215,13 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let request_bytes = request.body.len() as u64;
         reject_caller_host_header(&request.headers)?;
-        let url = take_request_url(&mut request, request_bytes)?;
+        let mut url = take_request_url(&mut request, request_bytes)?;
+        #[cfg(debug_assertions)]
+        apply_test_host_rewrite(
+            &self.test_host_rewrites,
+            &mut url,
+            &mut request.resolved_ips,
+        );
         let host = url
             .host_str()
             .ok_or_else(|| NetworkHttpError::InvalidUrl {
@@ -440,6 +501,22 @@ mod tests {
             effective_request_timeout(None, Duration::from_secs(30)),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn test_host_rewrite_preserves_path_and_drops_public_dns_pins() {
+        let mut rewrites = HashMap::new();
+        rewrites.insert(
+            "api.example.test".to_string(),
+            url::Url::parse("http://127.0.0.1:43123").unwrap(),
+        );
+        let mut url = url::Url::parse("https://api.example.test/v1/items?q=one").unwrap();
+        let mut resolved_ips = vec![IpAddr::V4(std::net::Ipv4Addr::new(93, 184, 216, 34))];
+
+        apply_test_host_rewrite(&rewrites, &mut url, &mut resolved_ips);
+
+        assert_eq!(url.as_str(), "http://127.0.0.1:43123/v1/items?q=one");
+        assert!(resolved_ips.is_empty());
     }
 
     #[tokio::test]

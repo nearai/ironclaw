@@ -3975,8 +3975,10 @@ dependencies = [
  "ironclaw_host_api",
  "percent-encoding",
  "reqwest 0.12.28",
+ "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "url",
  "zeroize",
 ]

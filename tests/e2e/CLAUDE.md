@@ -173,7 +173,18 @@ create/read/list/files/review/comment/merge, branch/ref creation, Git
 blob/tree/commit read/write, fork create/list, and empty Actions route readback.
 
 Direct provider-contract tests prove the Emulate fixture layer itself. Full-path
-Reborn + Emulate tests should use `hosted_google_emulate_server` or a matching
+recorded-trace tests load harvested `LlmTrace` JSON through
+`mock_llm.py`'s `/__mock/llm_trace` endpoint, then execute the recorded tool
+decision through standalone `ironclaw serve`. See
+`test_reborn_qa_trace_emulate_replay.py`: it replays the provider-facing suffix
+of `qa_2c_drive_connect`, routes Google HTTP through `emulate_google_server`,
+and asserts Emulate-seeded Drive data rather than the model's final prose.
+Debug builds honor `IRONCLAW_TEST_HTTP_REWRITE_MAP` only after the original
+destination has passed the normal network policy and DNS checks; release builds
+do not compile this local rewrite seam.
+
+Legacy hosted full-path Reborn + Emulate tests use
+`hosted_google_emulate_server` or a matching
 provider fixture, install/auth the first-party extension through IronClaw, drive
 the scripted mock model through `/api/chat/send`, auto-resolve expected approval
 gates, and read provider state back from Emulate. This is the contract tier to

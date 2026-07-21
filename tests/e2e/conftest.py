@@ -675,6 +675,11 @@ async def reset_mock_llm_state(mock_llm_server):
         )
         response.raise_for_status()
         response = await client.post(
+            f"{mock_llm_server}/__mock/llm_trace/reset",
+            timeout=10,
+        )
+        response.raise_for_status()
+        response = await client.post(
             f"{mock_llm_server}/__mock/llm_faults/reset",
             timeout=10,
         )

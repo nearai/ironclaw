@@ -12,8 +12,10 @@ async-trait = "0.1"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
+serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
 url = "2"
 zeroize = "1"
 
