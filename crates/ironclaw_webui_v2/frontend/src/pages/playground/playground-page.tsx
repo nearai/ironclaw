@@ -35,6 +35,7 @@ import {
   TabsSection,
   TooltipSection,
 } from "./components/component-sections";
+import { STORYBOOK_URL, USAGE_DOCS, UsageBlock } from "./components/usage-docs";
 
 const THEME_STORAGE_KEY = "ironclaw:v2-theme";
 
@@ -168,11 +169,27 @@ export function PlaygroundPage() {
           </div>
         ))}
 
-        {/* Footer: pointer to the written rules. Styled like a quiet
-            card row (panel border, code-surface path chip, truncation)
-            with the full path in the hover tooltip. */}
+        {/* Footer: Storybook (the canonical hosted spec) + the written
+            rules. Quiet card rows with hover tooltips. */}
+        <a
+          href={STORYBOOK_URL}
+          target="_blank"
+          rel="noreferrer"
+          title="Full spec: every variant, props controls, a11y checks, and story source"
+          className="mt-auto mb-2 flex items-center gap-2.5 rounded-[var(--v2-radius-md)] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2.5 hover:border-[color-mix(in_srgb,var(--v2-accent)_30%,var(--v2-panel-border))]"
+        >
+          <Icon name="layers" className="h-4 w-4 shrink-0 text-[var(--v2-accent-text)]" />
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-[0.75rem] font-medium leading-tight text-[var(--v2-text-strong)]">
+              Storybook
+            </span>
+            <span className="truncate font-mono text-[0.625rem] leading-tight text-[var(--v2-text-faint)]">
+              hosted component spec
+            </span>
+          </div>
+        </a>
         <div
-          className="mt-auto flex items-center gap-2.5 rounded-[var(--v2-radius-md)] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2.5"
+          className="flex items-center gap-2.5 rounded-[var(--v2-radius-md)] border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] px-3 py-2.5"
           title="crates/ironclaw_webui_v2/DESIGN_SYSTEM.md"
         >
           <Icon
@@ -201,16 +218,32 @@ export function PlaygroundPage() {
               {item.blurb}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={toggleTheme}
-            title="Toggle theme"
-            className="flex shrink-0 items-center gap-2 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] px-3 py-1.5 text-[0.75rem] font-medium text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]"
-          >
-            <Icon name={theme === "dark" ? "moon" : "sun"} className="h-3.5 w-3.5" />
-            {theme === "dark" ? "Dark" : "Light"}
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            {USAGE_DOCS[item.id] && (
+              <a
+                href={`${STORYBOOK_URL}${USAGE_DOCS[item.id].storybook}`}
+                target="_blank"
+                rel="noreferrer"
+                title="Open the full spec in Storybook"
+                className="flex items-center gap-2 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] px-3 py-1.5 text-[0.75rem] font-medium text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]"
+              >
+                <Icon name="bookOpen" className="h-3.5 w-3.5" />
+                Storybook
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={toggleTheme}
+              title="Toggle theme"
+              className="flex items-center gap-2 rounded-full border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] px-3 py-1.5 text-[0.75rem] font-medium text-[var(--v2-text-muted)] hover:text-[var(--v2-text-strong)]"
+            >
+              <Icon name={theme === "dark" ? "moon" : "sun"} className="h-3.5 w-3.5" />
+              {theme === "dark" ? "Dark" : "Light"}
+            </button>
+          </div>
         </header>
+
+        <UsageBlock doc={USAGE_DOCS[item.id]} />
 
         <Body key={item.id + theme} theme={theme} />
       </main>
