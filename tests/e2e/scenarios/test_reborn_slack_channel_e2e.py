@@ -4,9 +4,11 @@ ONE scenario over the existing harness, driving the GENERIC surfaces of the
 `ironclaw-reborn serve` binary end to end — never the retiring per-vendor
 lane routes (`/api/webchat/v2/channels/slack/*`):
 
-  configure  — install + `[channel.config]` setup POST (bot token, signing
-               secret, workspace team id, OAuth client material) through
-               `/api/webchat/v2/extensions/slack/setup`.
+  configure  — save the manifest-declared deployment configuration through
+               the operator API while Slack is still uninstalled. The signed
+               ingress is live immediately and an unconnected DM gets a static
+               connect notice without admitting a model turn.
+  install    — the user installs Slack separately from deployment setup.
   connect    — the generic recipe-driven personal OAuth connect: start via
                `/api/webchat/v2/extensions/slack/setup/oauth/start`, complete
                via `/api/reborn/product-auth/oauth/slack/callback`; the token
@@ -22,8 +24,10 @@ lane routes (`/api/webchat/v2/channels/slack/*`):
                Slack API (`/__mock/sent_messages`), via the delivery
                coordinator and host-side credential injection. The MIG-5
                legacy alias `/webhooks/slack/events` round-trips too.
-  remove     — after `/api/webchat/v2/extensions/slack/remove`, a subsequent
-               signed event no longer admits and no new message is sent.
+  remove     — after `/api/webchat/v2/extensions/slack/remove`, deployment
+               ingress remains live, the user's personal connection is gone,
+               and a subsequent DM gets the static connect notice without a
+               new model reply.
 
 Vendor egress reaches the fake through `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP`
 (the loopback-only, debug-build-only transport rewrite seam in
@@ -53,6 +57,8 @@ SIGNING_SECRET = "e2e-reborn-slack-signing-secret"
 BOT_TOKEN = "xoxb-FAKE-REBORN-BOT-TOKEN"
 OAUTH_CLIENT_ID = "e2e-reborn-client-id"
 OAUTH_CLIENT_SECRET = "e2e-reborn-client-secret"
+APP_ID = "A0001"
+BOT_USER_ID = "U00BOT"
 # Identity minted by the fake Slack OAuth v2 token endpoint.
 OWNER_USER_ID = "U42OWNER"
 TEAM_ID = "T0001"
@@ -180,6 +186,28 @@ async def fake_sent_messages(client: httpx.AsyncClient, fake_slack_url: str) -> 
     return response.json().get("messages", [])
 
 
+async def wait_for_message_containing(
+    client: httpx.AsyncClient,
+    fake_slack_url: str,
+    needle: str,
+    min_count: int,
+    *,
+    timeout: float = 30,
+) -> list:
+    deadline = time.monotonic() + timeout
+    messages = []
+    while time.monotonic() < deadline:
+        messages = await fake_sent_messages(client, fake_slack_url)
+        matching = [message for message in messages if needle in message.get("text", "")]
+        if len(matching) >= min_count:
+            return matching
+        await asyncio.sleep(0.25)
+    raise TimeoutError(
+        f"expected at least {min_count} message(s) containing {needle!r}; "
+        f"got {messages}"
+    )
+
+
 MOCK_GREETING = "Hello! How can I help you today?"
 
 
@@ -219,7 +247,66 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
     async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
         await client.post(f"{fake_slack_server}/__mock/reset")
 
-        # ── configure: install → [channel.config] setup POST → activate ──
+        # ── configure: deployment-owned values, still zero installations ──
+        configured = await client.get(
+            f"{base_url}/api/webchat/v2/operator/extension-configuration",
+            timeout=30,
+        )
+        configured.raise_for_status()
+        slack_group = next(
+            group
+            for group in configured.json()["groups"]
+            if group["group_id"] == "extension.slack"
+        )
+        assert all(not usage["installed"] for usage in slack_group["used_by"])
+        setup = await client.put(
+            f"{base_url}/api/webchat/v2/operator/extension-configuration/extension.slack",
+            json={
+                "values": [
+                    {"handle": "slack_bot_token", "value": BOT_TOKEN},
+                    {"handle": "slack_signing_secret", "value": SIGNING_SECRET},
+                    {"handle": "slack_team_id", "value": TEAM_ID},
+                    {"handle": "slack_api_app_id", "value": APP_ID},
+                    {"handle": "slack_installation_id", "value": TEAM_ID},
+                    {"handle": "slack_bot_user_id", "value": BOT_USER_ID},
+                    {"handle": "slack_oauth_client_id", "value": OAUTH_CLIENT_ID},
+                    {
+                        "handle": "slack_oauth_client_secret",
+                        "value": OAUTH_CLIENT_SECRET,
+                    },
+                ],
+                "expected_revision": slack_group["revision"],
+                "idempotency_key": f"slack-e2e-{uuid.uuid4()}",
+            },
+            timeout=30,
+        )
+        setup.raise_for_status()
+        setup_body = setup.json()
+        assert setup_body["complete"] is True, setup_body
+        assert OAUTH_CLIENT_SECRET not in setup.text
+
+        installed_before = await client.get(
+            f"{base_url}/api/webchat/v2/extensions", timeout=30
+        )
+        installed_before.raise_for_status()
+        assert installed_before.json()["extensions"] == [], installed_before.text
+
+        # Admin configuration owns deployment ingress. An unconnected sender
+        # gets a static connect notice; the event must not reach the model.
+        unconnected = await post_signed_event(
+            client,
+            base_url,
+            CANONICAL_EVENTS_PATH,
+            dm_event("Ev-before-install", "hello before install"),
+        )
+        assert unconnected.status_code == 200, unconnected.text
+        notices = await wait_for_message_containing(
+            client, fake_slack_server, "connect it in the IronClaw web app", 1
+        )
+        assert notices[0]["channel"] == DM_CHANNEL, notices
+        assert final_replies(await fake_sent_messages(client, fake_slack_server)) == []
+
+        # ── install: user lifecycle remains separate from admin setup ──
         install = await client.post(
             f"{base_url}/api/webchat/v2/extensions/install",
             json={"package_ref": SLACK_PACKAGE_REF},
@@ -227,33 +314,6 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         )
         install.raise_for_status()
         assert install.json()["success"] is True
-
-        setup = await client.post(
-            f"{base_url}/api/webchat/v2/extensions/slack/setup",
-            json={
-                "action": "submit",
-                "payload": {
-                    "secrets": {
-                        "slack_bot_token": BOT_TOKEN,
-                        "slack_signing_secret": SIGNING_SECRET,
-                        "slack_oauth_client_secret": OAUTH_CLIENT_SECRET,
-                    },
-                    "fields": {
-                        "slack_team_id": TEAM_ID,
-                        "slack_oauth_client_id": OAUTH_CLIENT_ID,
-                    },
-                },
-            },
-            timeout=30,
-        )
-        setup.raise_for_status()
-        setup_body = setup.json()
-        provided = {
-            secret["name"]
-            for secret in setup_body.get("secrets", [])
-            if secret.get("provided")
-        }
-        assert {"slack_bot_token", "slack_signing_secret"} <= provided, setup_body
 
         # ── connect: generic personal OAuth → channel identity binding ──
         # Before activation: the lifecycle's activation credential gate
@@ -339,25 +399,23 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         replies = await wait_for_final_replies(client, fake_slack_server, 2)
         assert replies[1]["channel"] == DM_CHANNEL, replies
 
-        # ── remove: the extension disappears from the ingress surface ──
+        # ── remove: personal state clears; deployment ingress remains ──
         remove = await client.post(
             f"{base_url}/api/webchat/v2/extensions/slack/remove",
             timeout=60,
         )
         remove.raise_for_status()
-        removed_status = await wait_for_route_status(
-            client, base_url, CANONICAL_EVENTS_PATH, {401, 404}
-        )
-        assert removed_status in (401, 404)
         stale = await post_signed_event(
             client,
             base_url,
             CANONICAL_EVENTS_PATH,
             dm_event("Ev-after-remove", "hello after remove"),
         )
-        assert stale.status_code in (401, 404), stale.text
-        await asyncio.sleep(2)
+        assert stale.status_code == 200, stale.text
+        await wait_for_message_containing(
+            client, fake_slack_server, "connect it in the IronClaw web app", 2
+        )
         final_messages = await fake_sent_messages(client, fake_slack_server)
         assert len(final_replies(final_messages)) == 2, (
-            f"no reply may be delivered after removal: {final_messages}"
+            f"no model reply may be delivered after removal: {final_messages}"
         )
