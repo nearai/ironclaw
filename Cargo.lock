@@ -4972,6 +4972,7 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_secrets",
  "ironclaw_skills",
+ "ironclaw_slack_extension",
  "ironclaw_slack_v2_adapter",
  "ironclaw_telegram_extension",
  "ironclaw_threads",
@@ -5337,6 +5338,21 @@ dependencies = [
  "tokio",
  "tracing",
  "urlencoding",
+]
+
+[[package]]
+name = "ironclaw_slack_extension"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_attachments",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_slack_v2_adapter",
+ "serde",
+ "serde_json",
+ "tracing",
+ "url",
 ]
 
 [[package]]

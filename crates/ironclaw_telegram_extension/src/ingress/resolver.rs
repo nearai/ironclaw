@@ -365,7 +365,8 @@ impl DynamicTelegramInstallationResolver {
             NativeProductAdapterRunnerConfig::new(
                 TELEGRAM_WEBHOOK_WORKFLOW_TIMEOUT,
                 TELEGRAM_MAX_IN_FLIGHT_WEBHOOKS,
-            ),
+            )
+            .with_pre_ack_attachment_workflow_timeout(Duration::from_secs(15)),
         ));
         let dispatcher: Arc<dyn TelegramUpdatesWebhookDispatcher> =
             Arc::new(TelegramInboundPreRouter::new(

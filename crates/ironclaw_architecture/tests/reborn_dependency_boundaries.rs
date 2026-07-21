@@ -296,6 +296,50 @@ fn reborn_crate_dependency_boundaries_hold() {
 }
 
 #[test]
+fn slack_provider_transfer_stays_in_slack_extension() {
+    let root = workspace_root();
+    let composition_violations = production_composition_sources(&root)
+        .into_iter()
+        .filter_map(|(path, _)| {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            source
+                // This scan is an ownership guard for production composition
+                // code. Slack-host integration fixtures still run through the
+                // assembled route, but they are not a provider implementation.
+                .split("#[cfg(test)]")
+                .next()
+                .unwrap_or(&source)
+                .contains("/api/files.info")
+                .then(|| {
+                    path.strip_prefix(&root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        composition_violations.is_empty(),
+        "Slack provider transfer must live in ironclaw_slack_extension, not composition. Violations:\n{}",
+        composition_violations.join("\n")
+    );
+
+    let metadata = cargo_metadata();
+    let dependencies = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages")
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+    assert_no_normal_workspace_deps(
+        &dependencies,
+        "ironclaw_slack_extension",
+        ["ironclaw_reborn_composition"],
+    );
+}
+
+#[test]
 fn conversation_trusted_trigger_submitter_stays_conversation_or_composition_owned() {
     let root = workspace_root();
     let mut uses = Vec::new();
@@ -2813,6 +2857,13 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_engine",
                 "ironclaw_gateway",
             ],
+        },
+        BoundaryRule {
+            // Slack provider transfer is product-owned. Composition supplies
+            // mediated handles and assembles the workflow, but must not become
+            // a second Slack implementation surface.
+            crate_name: "ironclaw_slack_extension",
+            forbidden: vec!["ironclaw_reborn_composition"],
         },
         BoundaryRule {
             // Product-neutral delivery orchestration consumes channel-host

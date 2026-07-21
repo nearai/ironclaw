@@ -1,0 +1,25 @@
+[package]
+name = "ironclaw_slack_extension"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Slack-specific host behavior for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "products"
+
+[dependencies]
+async-trait = "0.1"
+ironclaw_attachments = { path = "../ironclaw_attachments" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+url = "2"

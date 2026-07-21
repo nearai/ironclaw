@@ -32,6 +32,7 @@ use ironclaw_product_workflow::{
     ProductInstallationScope, ProductWorkflowError, ProjectFilesystemReader, ResolveBindingRequest,
     ResolvedBinding, ResolvedProductActorUser, StaticProductInstallationResolver,
 };
+use ironclaw_slack_extension::SlackAttachmentMaterializer;
 use ironclaw_slack_v2_adapter::{
     SLACK_API_HOST, SLACK_FILES_HOST, SLACK_V2_ADAPTER_ID, SlackV2Adapter, SlackV2AdapterConfig,
     slack_request_signature_auth_requirement,
@@ -52,7 +53,6 @@ use crate::RebornRuntime;
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::product_auth::serve::SlackPersonalOAuthBindingConfig;
 use crate::slack::slack_actor_identity::SlackUserIdentityActorResolver;
-use crate::slack::slack_attachment_materializer::SlackAttachmentMaterializer;
 use crate::slack::slack_channel_routes::{
     SlackChannelRouteAdminRouteConfig, SlackChannelRouteStore, SlackChannelRouteSubjectResolver,
 };
@@ -1211,7 +1211,8 @@ fn build_slack_installation_record_with_resolvers(
             SLACK_WEBHOOK_WORKFLOW_TIMEOUT,
             NonZeroUsize::new(SLACK_MAX_IN_FLIGHT_WEBHOOKS)
                 .ok_or_else(|| invalid_config("max_in_flight", "must be non-zero".to_string()))?,
-        ),
+        )
+        .with_pre_ack_attachment_workflow_timeout(Duration::from_secs(15)),
     ));
 
     let outbound_store: Arc<dyn OutboundStateStore> =
@@ -1946,6 +1947,68 @@ mod tests {
                 .ends_with("/files-pri/T0HOST-F-JOURNEY/journey-notes.txt")
                 && request.method == NetworkMethod::Get
         }));
+        let final_reply = wait_for_slack_post_message(&egress, "ok").await;
+        assert_eq!(final_reply["channel"], "D0HOST");
+
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+
+    #[tokio::test]
+    async fn build_slack_host_beta_retries_transient_file_share_before_webhook_ack() {
+        let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+        let (runtime, _root) = runtime_with_host_egress_override(Some(Some(
+            host_egress_port_for_test(Arc::clone(&egress)),
+        )))
+        .await;
+        let mounts =
+            build_slack_host_beta_mounts(&runtime, config_without_legacy_actor()).expect("mounts");
+        bind_slack_oauth_user(&mounts).await;
+
+        let body = dm_file_share_event_body();
+        egress.set_files_info_failure(Some(503));
+        assert_eq!(
+            post_signed_slack_event_status(&mounts.events, &body).await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        egress.set_files_info_failure(None);
+        assert_eq!(
+            post_signed_slack_event_status(&mounts.events, &body).await,
+            StatusCode::OK
+        );
+        if let Some(drain) = mounts.events.drain.as_ref() {
+            drain.drain().await;
+        }
+
+        let history = wait_for_slack_thread_history(&runtime).await;
+        assert_eq!(
+            history
+                .messages
+                .iter()
+                .filter(|message| message.content.as_deref() == Some("Please review these notes"))
+                .count(),
+            1,
+            "provider redelivery must create one attachment-bearing message"
+        );
+        let requests = egress.requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.contains("/api/files.info?file=F-JOURNEY"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| {
+                    request
+                        .url
+                        .ends_with("/files-pri/T0HOST-F-JOURNEY/journey-notes.txt")
+                })
+                .count(),
+            1
+        );
         let final_reply = wait_for_slack_post_message(&egress, "ok").await;
         assert_eq!(final_reply["channel"], "D0HOST");
 
@@ -3629,6 +3692,13 @@ mod tests {
     }
 
     async fn post_signed_slack_event(mount: &PublicRouteMount, body: &str) {
+        assert_eq!(
+            post_signed_slack_event_status(mount, body).await,
+            StatusCode::OK
+        );
+    }
+
+    async fn post_signed_slack_event_status(mount: &PublicRouteMount, body: &str) -> StatusCode {
         let timestamp = current_unix_timestamp();
         let response = mount
             .router
@@ -3644,8 +3714,7 @@ mod tests {
             )
             .await
             .expect("router responds");
-
-        assert_eq!(response.status(), StatusCode::OK);
+        response.status()
     }
 
     async fn runtime() -> (RebornRuntime, tempfile::TempDir) {
@@ -4091,6 +4160,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingRuntimeHttpEgress {
         requests: std::sync::Mutex<Vec<NetworkHttpRequest>>,
+        /// While set, every files.info request returns this status.
+        files_info_failure_status: std::sync::Mutex<Option<u16>>,
         /// If set, returned for ALL conversations.open calls.
         conversations_open_response: Option<(u16, Vec<u8>)>,
         /// If set, conversations.open succeeds this many times then fails.
@@ -4104,11 +4175,21 @@ mod tests {
             request: NetworkHttpRequest,
         ) -> Result<NetworkHttpResponse, NetworkHttpError> {
             let (status, response) = if request.url.contains("/api/files.info") {
-                (
-                    200,
-                    br#"{"ok":true,"file":{"url_private_download":"https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt"}}"#
-                        .to_vec(),
-                )
+                match *self
+                    .files_info_failure_status
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                {
+                    Some(status) => (
+                        status,
+                        br#"{"ok":false,"error":"scripted_files_info_failure"}"#.to_vec(),
+                    ),
+                    None => (
+                        200,
+                        br#"{"ok":true,"file":{"url_private_download":"https://files.slack.com/files-pri/T0HOST-F-JOURNEY/journey-notes.txt"}}"#
+                            .to_vec(),
+                    ),
+                }
             } else if request
                 .url
                 .ends_with("/files-pri/T0HOST-F-JOURNEY/journey-notes.txt")
@@ -4233,9 +4314,17 @@ mod tests {
         fn conversations_open_response(status: u16, body: &[u8]) -> Self {
             Self {
                 requests: std::sync::Mutex::new(Vec::new()),
+                files_info_failure_status: std::sync::Mutex::new(None),
                 conversations_open_response: Some((status, body.to_vec())),
                 conversations_open_fail_after: None,
             }
+        }
+
+        fn set_files_info_failure(&self, status: Option<u16>) {
+            *self
+                .files_info_failure_status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = status;
         }
 
         fn requests(&self) -> Vec<NetworkHttpRequest> {

@@ -14,13 +14,16 @@ use ironclaw_slack_v2_adapter::{SLACK_API_HOST, SLACK_FILES_HOST, SLACK_V2_ADAPT
 use serde::Deserialize;
 use url::Url;
 
-pub(crate) struct SlackAttachmentMaterializer {
+/// Materializes Slack file descriptors through mediated provider egress.
+pub struct SlackAttachmentMaterializer {
     egress: Arc<dyn ProtocolHttpEgress>,
     credential_handle: EgressCredentialHandle,
 }
 
 impl SlackAttachmentMaterializer {
-    pub(crate) fn new(
+    /// Creates a materializer with the host-provided mediated egress and
+    /// credential handle for the selected Slack installation.
+    pub fn new(
         egress: Arc<dyn ProtocolHttpEgress>,
         credential_handle: EgressCredentialHandle,
     ) -> Self {
