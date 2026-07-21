@@ -1400,7 +1400,6 @@ pub struct RebornAuthAccount {
 #[serde(rename_all = "snake_case")]
 pub enum RebornAccountBindingSource {
     Default,
-    Explicit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

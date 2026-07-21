@@ -760,39 +760,6 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
 }
 
 #[tokio::test]
-async fn coordinator_rejects_new_deliveries_while_draining() {
-    let scope = scope();
-    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let validator = FakeReplyTargetBindingValidator::default();
-    validator.allow(validated_reply_target());
-    let preferences = FakePreferenceRepository::default();
-    seed_preference(&preferences, &scope);
-    let resolver = FakeProductOutboundTargetResolver;
-    let policy = configured_policy(&store, &validator);
-    let adapter = Arc::new(ScriptedChannelAdapter::new(
-        Arc::clone(&store),
-        scope.clone(),
-        Vec::new(),
-    ));
-    let coordinator = coordinator_over(&store, &adapter);
-    coordinator.begin_drain();
-
-    let error = coordinator
-        .deliver(
-            &policy,
-            &preferences,
-            &resolver,
-            coordinated_final_reply(scope.clone(), "vendorx"),
-        )
-        .await
-        .expect_err("draining rejects new work");
-    assert!(matches!(error, CoordinatedDeliveryError::Draining));
-    assert_eq!(adapter.deliver_calls(), 0);
-    let attempts = store.list_delivery_attempts(scope).await.unwrap();
-    assert!(attempts.is_empty(), "no attempt recorded while draining");
-}
-
-#[tokio::test]
 async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
     let scope = scope();
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
@@ -1085,33 +1052,6 @@ async fn coordinator_lazily_recovers_interrupted_attempts_before_a_scopes_first_
         ironclaw_outbound::OutboundDeliveryStatus::Unknown
     );
     assert_eq!(adapter.deliver_calls(), 1, "only the new notice was sent");
-}
-
-#[tokio::test]
-async fn coordinator_notice_rejected_while_draining() {
-    let scope = scope();
-    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
-    let adapter = Arc::new(ScriptedChannelAdapter::new(
-        Arc::clone(&store),
-        scope.clone(),
-        Vec::new(),
-    ));
-    let coordinator = coordinator_over(&store, &adapter);
-    coordinator.begin_drain();
-
-    let error = coordinator
-        .deliver_notice(working_notice(scope.clone(), "vendorx"))
-        .await
-        .expect_err("draining rejects notices");
-    assert!(matches!(error, CoordinatedDeliveryError::Draining));
-    assert_eq!(adapter.deliver_calls(), 0);
-    assert!(
-        store
-            .list_delivery_attempts(scope)
-            .await
-            .unwrap()
-            .is_empty()
-    );
 }
 
 #[tokio::test]

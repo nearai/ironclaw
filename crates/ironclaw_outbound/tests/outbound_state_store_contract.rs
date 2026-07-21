@@ -1288,7 +1288,6 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
         .find(|attempt| attempt.delivery_id == delivery_id)
         .expect("attempt persisted");
     assert_eq!(attempt.status, OutboundDeliveryStatus::Sending);
-    assert!(attempt.status.is_in_flight());
 
     // `Unknown` never carries a failure kind (the outcome is ambiguous, not
     // a known failure) — and a kind-carrying Unknown is rejected.
@@ -1322,7 +1321,6 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
         .find(|attempt| attempt.delivery_id == delivery_id)
         .expect("attempt persisted");
     assert_eq!(attempt.status, OutboundDeliveryStatus::Unknown);
-    assert!(!attempt.status.is_in_flight());
 }
 
 async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl OutboundStateStore) {

@@ -204,26 +204,6 @@ pub enum OutboundDeliveryStatus {
     DeadLettered,
 }
 
-#[allow(dead_code)] // retained for future debug/log surfaces — not yet wired
-impl OutboundDeliveryStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Prepared => "prepared",
-            Self::Sending => "sending",
-            Self::Pending => "pending",
-            Self::Delivered => "delivered",
-            Self::Failed => "failed",
-            Self::Unknown => "unknown",
-            Self::DeadLettered => "dead_lettered",
-        }
-    }
-
-    /// Whether the coordinator may still drive this attempt forward.
-    pub fn is_in_flight(self) -> bool {
-        matches!(self, Self::Prepared | Self::Sending | Self::Pending)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryFailureKind {

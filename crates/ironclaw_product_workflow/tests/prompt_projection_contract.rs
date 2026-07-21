@@ -6,7 +6,7 @@ use ironclaw_host_api::{
     ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, TenantId,
     ThreadId, UserId, VendorId,
 };
-use ironclaw_product_adapters::{AuthPromptChallengeKind, AuthPromptView};
+use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::{
     AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptRequest, approval_prompt_lookup,
     auth_prompt_view_for_blocked_auth,

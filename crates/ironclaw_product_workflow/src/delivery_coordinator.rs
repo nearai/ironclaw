@@ -46,14 +46,12 @@ use crate::outbound_delivery::{
     ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata,
 };
 
-/// The nine semantic intents (§5.4). Emitters express *what* is being
+/// The eight semantic intents (§5.4). Emitters express *what* is being
 /// communicated; the coordinator decides targeting, persistence, and retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryIntent {
     /// The assistant's final reply for a run.
     FinalReply,
-    /// Incremental progress for a running turn.
-    Progress,
     /// An approval gate needs the user.
     GatePrompt,
     /// An auth gate needs the user (authorization URL — DM-only).
@@ -77,11 +75,7 @@ impl DeliveryIntent {
     pub fn runs_outbound_policy(self) -> bool {
         matches!(
             self,
-            Self::FinalReply
-                | Self::Progress
-                | Self::GatePrompt
-                | Self::AuthPrompt
-                | Self::TriggeredDelivery
+            Self::FinalReply | Self::GatePrompt | Self::AuthPrompt | Self::TriggeredDelivery
         )
     }
 
@@ -95,7 +89,6 @@ impl DeliveryIntent {
     fn as_str(self) -> &'static str {
         match self {
             Self::FinalReply => "final-reply",
-            Self::Progress => "progress",
             Self::GatePrompt => "gate-prompt",
             Self::AuthPrompt => "auth-prompt",
             Self::FailureNotice => "failure-notice",
@@ -219,8 +212,6 @@ pub enum CoordinatedDeliveryError {
     ChannelUnavailable { extension_id: String },
     #[error("delivery is already in flight for this attempt")]
     AlreadyInFlight,
-    #[error("the coordinator is draining; new deliveries are rejected")]
-    Draining,
     #[error("intent {intent:?} does not belong to this delivery path")]
     IntentClassMismatch { intent: DeliveryIntent },
     #[error("notice request is invalid: {reason}")]
@@ -257,7 +248,6 @@ pub struct DeliveryCoordinator {
     /// have been reconciled this lifetime. The store enumerates attempts per
     /// scope only, so recovery runs lazily before a scope's first delivery.
     recovered_scopes: Mutex<HashSet<TurnScope>>,
-    draining: std::sync::atomic::AtomicBool,
 }
 
 impl DeliveryCoordinator {
@@ -277,7 +267,6 @@ impl DeliveryCoordinator {
             retry,
             in_flight: Mutex::new(HashSet::new()),
             recovered_scopes: Mutex::new(HashSet::new()),
-            draining: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -336,13 +325,6 @@ impl DeliveryCoordinator {
         Ok(recovered)
     }
 
-    /// Stop accepting new deliveries; in-flight sends finish on their own
-    /// futures (the caller awaits them).
-    pub fn begin_drain(&self) {
-        self.draining
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
     /// Deliver one policy-class intent end to end.
     ///
     /// `outbound_policy` stays borrow-based per call (it wraps this
@@ -355,9 +337,6 @@ impl DeliveryCoordinator {
         target_resolver: &dyn ProductOutboundTargetResolver,
         request: CoordinatedDeliveryRequest<'_>,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
-        if self.draining.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(CoordinatedDeliveryError::Draining);
-        }
         if !request.intent.runs_outbound_policy() {
             return Err(CoordinatedDeliveryError::IntentClassMismatch {
                 intent: request.intent,
@@ -419,9 +398,6 @@ impl DeliveryCoordinator {
         &self,
         request: NoticeDeliveryRequest<'_>,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
-        if self.draining.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(CoordinatedDeliveryError::Draining);
-        }
         if !request.intent.is_notice_class() {
             return Err(CoordinatedDeliveryError::IntentClassMismatch {
                 intent: request.intent,
