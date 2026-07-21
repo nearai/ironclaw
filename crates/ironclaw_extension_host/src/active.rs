@@ -120,12 +120,6 @@ impl ActiveSnapshot {
         })
     }
 
-    /// Resolve the channel adapter serving an ingress route suffix.
-    pub fn resolve_channel_by_route(&self, route_suffix: &str) -> Option<Arc<ActiveExtension>> {
-        let owner = self.route_owner.get(route_suffix)?;
-        self.extensions.get(owner).cloned()
-    }
-
     /// Resolve the active extension serving
     /// `/webhooks/extensions/{extension_id}/{route_suffix}` — the extension
     /// must be active, declare an inbound channel, and declare exactly this

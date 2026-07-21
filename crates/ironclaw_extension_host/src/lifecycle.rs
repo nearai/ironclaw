@@ -131,12 +131,6 @@ impl SnapshotWatch {
 pub enum LifecycleError {
     #[error("extension `{extension_id}` is not installed")]
     NotInstalled { extension_id: String },
-    #[error("extension `{extension_id}` cannot transition {from} → {to}")]
-    IllegalTransition {
-        extension_id: String,
-        from: &'static str,
-        to: &'static str,
-    },
     #[error(transparent)]
     Bind(#[from] BindError),
     #[error(transparent)]

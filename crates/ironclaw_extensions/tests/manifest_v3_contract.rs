@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use ironclaw_extensions::{
     CapabilityProviderHostApiContract, CapabilitySurfaceDeclV2, CapabilityVisibility,
-    ContractDelta, ExtensionManifestRecord, ExtensionRuntimeV2, HostApiContractRegistry,
-    MANIFEST_SCHEMA_VERSION_V3, ManifestSource, diff_resolved_contracts,
+    ExtensionManifestRecord, ExtensionRuntimeV2, HostApiContractRegistry,
+    MANIFEST_SCHEMA_VERSION_V3, ManifestSource,
 };
 use ironclaw_host_api::{
     CapabilitySurfaceKind, ConversationModel, EffectKind, HOST_RUNTIME_HTTP_EGRESS_PORT_ID,
@@ -635,56 +635,4 @@ fn resolved_contract_round_trips_through_serde() {
     let back: ironclaw_extensions::ResolvedExtensionManifest =
         serde_json::from_str(&json).expect("deserialize");
     assert_eq!(&back, record.resolved());
-}
-
-// ---------------------------------------------------------------------------
-// Widening diff (REC-4 groundwork)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn contract_diff_classifies_equal_narrowed_and_widened() {
-    let base = acme_record();
-
-    let equal = acme_record();
-    assert_eq!(
-        diff_resolved_contracts(base.resolved(), equal.resolved()),
-        ContractDelta::Equal
-    );
-
-    // Widen: a new scope on the tool credential and the recipe ceiling.
-    let widened_toml = ACME_MANIFEST.replace(
-        "scopes = [\"notes:write\"]",
-        "scopes = [\"notes:write\", \"notes:admin\"]",
-    );
-    let widened = parse_v3(&widened_toml).expect("widened parses");
-    let delta = diff_resolved_contracts(base.resolved(), widened.resolved());
-    assert!(
-        matches!(&delta, ContractDelta::Widened { reasons } if !reasons.is_empty()),
-        "expected widened, got {delta:?}"
-    );
-
-    // Narrow: the reverse direction.
-    assert_eq!(
-        diff_resolved_contracts(widened.resolved(), base.resolved()),
-        ContractDelta::Narrowed
-    );
-
-    // Widen: a new egress host.
-    let new_host = ACME_MANIFEST.replace(
-        "host = \"api.acme.example\"\nmethods = [\"post\"]",
-        "host = \"api2.acme.example\"\nmethods = [\"post\"]",
-    );
-    let moved = parse_v3(&new_host).expect("parses");
-    assert!(matches!(
-        diff_resolved_contracts(base.resolved(), moved.resolved()),
-        ContractDelta::Widened { .. }
-    ));
-
-    // Widen: an ingress route change.
-    let new_route = ACME_MANIFEST.replace("route_suffix = \"events\"", "route_suffix = \"hooks\"");
-    let rerouted = parse_v3(&new_route).expect("parses");
-    assert!(matches!(
-        diff_resolved_contracts(base.resolved(), rerouted.resolved()),
-        ContractDelta::Widened { .. }
-    ));
 }

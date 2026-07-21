@@ -409,8 +409,8 @@ pub use hosted_mcp_discovery::{
     package_with_discovered_hosted_mcp_tools,
 };
 pub use resolved::{
-    ContractDelta, ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedHostApiRef,
-    ResolvedMcpDeclaration, ResolvedSectionSurface, WideningReason, diff_resolved_contracts,
+    ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedHostApiRef, ResolvedMcpDeclaration,
+    ResolvedSectionSurface,
 };
 pub use v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestV2,

@@ -32,8 +32,8 @@ use thiserror::Error;
 use crate::resolved::{ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedMcpDeclaration};
 use crate::v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, ExtensionManifestV2, ExtensionRuntimeV2,
-    MAX_MANIFEST_BYTES, ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
-    RawCapabilityV2, RawRuntimeCredentialV2, requested_trust_to_descriptor_trust,
+    MAX_MANIFEST_BYTES, ManifestSource, RESERVED_HOST_BUNDLED_ID_PREFIX, RawCapabilityV2,
+    RawRuntimeCredentialV2, requested_trust_to_descriptor_trust,
 };
 
 /// Required value of the `schema_version` field for v3 manifests.
@@ -77,8 +77,6 @@ pub enum ManifestV3Error {
     McpZeroMaxTools,
     #[error(transparent)]
     Contract(#[from] HostApiError),
-    #[error(transparent)]
-    Internal(#[from] ManifestV2Error),
 }
 
 #[derive(Debug, Deserialize)]
@@ -365,11 +363,13 @@ pub(crate) fn parse_v3(
             runtime_credentials: template_credentials.clone(),
             resource_profile: None,
         };
-        capabilities.push(CapabilityDeclV2::from_raw(
-            raw_capability,
-            &id,
-            host_port_catalog,
-        )?);
+        capabilities.push(
+            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog).map_err(
+                |error| ManifestV3Error::Invalid {
+                    reason: error.to_string(),
+                },
+            )?,
+        );
         mcp_template_credentials = Some(template_credentials);
     }
     for tool in raw.tools {
@@ -444,11 +444,13 @@ pub(crate) fn parse_v3(
                 resource_profile: tool.resource_profile,
             },
         };
-        capabilities.push(CapabilityDeclV2::from_raw(
-            raw_capability,
-            &id,
-            host_port_catalog,
-        )?);
+        capabilities.push(
+            CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog).map_err(
+                |error| ManifestV3Error::Invalid {
+                    reason: error.to_string(),
+                },
+            )?,
+        );
     }
 
     // Every declared recipe must be referenced, and (checked inside

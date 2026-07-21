@@ -78,24 +78,6 @@ impl InstallationState {
             Self::Removed => "removed",
         }
     }
-
-    /// Whether a transition from `self` to `next` is legal for the working
-    /// record subset the `ExtensionHost` persists (`Installed` / `Active` /
-    /// `Failed`). The derived projection states (`Configured`, `Disabled`,
-    /// `Unsupported`, `Removed`) are never persisted and so never participate
-    /// in a host record transition.
-    pub fn can_transition_to(self, next: InstallationState) -> bool {
-        use InstallationState::*;
-        matches!(
-            (self, next),
-            (Installed, Active)   // activation published
-                | (Installed, Failed) // activation failed
-                | (Active, Installed) // deactivation
-                | (Active, Failed)    // re-activation failed
-                | (Failed, Active)    // retry succeeded
-                | (Failed, Installed) // deactivated after failure
-        )
-    }
 }
 
 #[cfg(test)]
@@ -119,22 +101,5 @@ mod tests {
                 serde_json::Value::String(expected.to_string())
             );
         }
-    }
-
-    #[test]
-    fn legal_host_record_transitions_only() {
-        use InstallationState::*;
-        assert!(Installed.can_transition_to(Active));
-        assert!(Installed.can_transition_to(Failed));
-        assert!(Active.can_transition_to(Installed));
-        assert!(Active.can_transition_to(Failed));
-        assert!(Failed.can_transition_to(Active));
-        assert!(Failed.can_transition_to(Installed));
-        // Illegal jumps / non-record states never transition.
-        assert!(!Installed.can_transition_to(Removed));
-        assert!(!Active.can_transition_to(Removed));
-        assert!(!Disabled.can_transition_to(Active));
-        assert!(!Configured.can_transition_to(Active));
-        assert!(!Unsupported.can_transition_to(Active));
     }
 }
