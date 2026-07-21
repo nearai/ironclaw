@@ -294,11 +294,6 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
     ),
     (
-        "crates/ironclaw_auth/src/lib.rs",
-        "slack",
-        "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
-    ),
-    (
         "crates/ironclaw_auth/src/oauth.rs",
         "gmail",
         "auth-engine OAuth provider-id vocabulary (persisted provider ids), not the extensions vendor",
