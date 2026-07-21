@@ -687,11 +687,28 @@ impl LlmConfigService for RebornLlmConfigService {
             // discovery is unsupported or default returned Ok([]) without I/O),
             // connectivity is not yet verified. Run a fallback completion probe.
             Ok(_) => {
+                let model = request
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty());
+
+                let Some(model) = model else {
+                    return Ok(LlmProbeResult {
+                        ok: false,
+                        message: format!(
+                            "could not verify {endpoint}: model is required when model discovery is unavailable"
+                        ),
+                    });
+                };
+
                 let probe_req =
                     ironclaw_llm::CompletionRequest::new(vec![ironclaw_llm::ChatMessage::user(
                         "ping",
                     )])
+                    .with_model(model)
                     .with_max_tokens(1);
+
                 match provider.complete(probe_req).await {
                     Ok(_) => Ok(LlmProbeResult {
                         ok: true,
@@ -706,7 +723,7 @@ impl LlmConfigService for RebornLlmConfigService {
                         );
                         Ok(LlmProbeResult {
                             ok: false,
-                            message: format!("could not reach {endpoint} with these settings"),
+                            message: format!("probe failed for {endpoint}: {error}"),
                         })
                     }
                 }
