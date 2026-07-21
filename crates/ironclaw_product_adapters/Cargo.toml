@@ -14,7 +14,6 @@ publish = false
 layer = "products"
 
 [features]
-default = []
 # Compile in-memory test fakes (FakeProductWorkflow, FakeProtocolHttpEgress,
 # FakeOutboundDeliverySink, FakeProjectionStream, etc.). Off by default so
 # production binaries don't carry the fake state machinery; downstream

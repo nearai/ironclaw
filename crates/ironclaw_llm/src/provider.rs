@@ -724,6 +724,24 @@ pub trait LlmProvider: Send + Sync {
 #[async_trait]
 pub trait CompletionStreamSink: Send + Sync {
     async fn text_delta(&self, delta: String);
+
+    /// Whether this sink can atomically replace text emitted by a failed
+    /// streaming attempt when the replacement attempt produces its first
+    /// delta. The default is deliberately false: retrying after visible text
+    /// without replacement semantics would append two attempts together.
+    fn supports_text_replacement(&self) -> bool {
+        false
+    }
+
+    /// Arrange for the next non-empty text delta to replace text from the
+    /// previous attempt. Callers must check [`Self::supports_text_replacement`]
+    /// first. The default is a no-op for sinks that only support append.
+    async fn replace_on_next_text_delta(&self) {}
+
+    /// Finish a replacement attempt. A sink uses this to clear the previous
+    /// attempt if the replacement succeeded without emitting text (for
+    /// example, a tool-call-only response). It is otherwise a no-op.
+    async fn finish_text_replacement(&self) {}
 }
 
 #[cfg(test)]

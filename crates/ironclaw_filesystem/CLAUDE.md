@@ -110,9 +110,8 @@ codified in `docs/reborn/2026-05-14-universal-fs-dispatch.md` (the new ADR).
      so they are not the convoy hazard `cas_update` was introduced to fix;
      migration to `cas_update`'s fail-closed semantics is a deferred
      follow-up tracked as a sibling to #5274.
-   - `ironclaw_conversations::filesystem_store::save_state`,
-     `ironclaw_runner::local_trigger_access::filesystem::deactivate_stale_record`
-     (via `put_record`), and `ironclaw_product_workflow::filesystem_ledger`
+   - `ironclaw_conversations::filesystem_store::save_state` and
+     `ironclaw_product_workflow::filesystem_ledger`
      (`begin_or_replay` / `settle` / `release` / `try_acquire_prune_lease`)
      are further pre-existing examples of the same lock-free retry-loop
      pattern, pending the same migration.
@@ -154,10 +153,8 @@ consumers of the legacy methods — new code should call `put`/`get`/
 
 ## When you're editing this crate
 
-- Run the full crate tests, both feature combinations:
-  `cargo test -p ironclaw_filesystem --all-features`,
-  `cargo check -p ironclaw_filesystem --no-default-features --features libsql`,
-  `cargo check -p ironclaw_filesystem --no-default-features --features postgres`.
+- Run the full crate tests:
+  `cargo test -p ironclaw_filesystem`.
 - New `Entry` shapes (record kinds, indexed projections) belong in the
   consumer crate, not here. This crate only owns the trait surface and
   shared primitives.

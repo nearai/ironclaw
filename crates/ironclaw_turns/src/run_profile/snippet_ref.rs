@@ -67,6 +67,30 @@ fn feed_hash(hash: &mut u64, bytes: &[u8]) {
     }
 }
 
+/// Sanitize an arbitrary ref/source string into a bounded (<=96 char),
+/// filesystem-and-model-safe suffix for a display reference. Non-`[A-Za-z0-9_.-]`
+/// characters collapse to `.`; a fully-stripped value falls back to `context`.
+/// Shared by the instruction-bundle and skill-context ref builders.
+pub(crate) fn sanitize_ref_suffix(value: &str) -> String {
+    let mut suffix = String::with_capacity(value.len().min(96));
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+            suffix.push(character);
+        } else {
+            suffix.push('.');
+        }
+        if suffix.len() >= 96 {
+            break;
+        }
+    }
+    let suffix = suffix.trim_matches('.');
+    if suffix.is_empty() {
+        "context".to_string()
+    } else {
+        suffix.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

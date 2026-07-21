@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_memory_native", "crates/ironclaw_memory_mem0", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_runner", "crates/ironclaw_reborn_config", "crates/ironclaw_reborn_composition", "crates/ironclaw_reborn_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_webui", "crates/ironclaw_reborn_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_context", "crates/ironclaw_product_workflow", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_wasm_product_adapters", "crates/ironclaw_channel_host", "crates/ironclaw_channel_delivery", "crates/ironclaw_telegram_extension", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_v2_adapter", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_embeddings", "crates/ironclaw_gateway", "crates/ironclaw_tui", "crates/ironclaw_reborn_migration", "tools/ironclaw_stress"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_observability", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_attachments", "crates/ironclaw_extractors", "crates/ironclaw_memory", "crates/ironclaw_memory_native", "crates/ironclaw_memory_mem0", "crates/ironclaw_events", "crates/ironclaw_event_projections", "crates/ironclaw_event_streams", "crates/ironclaw_reborn_event_store", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_process_sandbox", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_wasm_limiter", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_runtime_policy", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_auth", "crates/ironclaw_trust", "crates/ironclaw_turns", "crates/ironclaw_agent_loop", "crates/ironclaw_threads", "crates/ironclaw_prompt_envelope", "crates/ironclaw_hooks", "crates/ironclaw_loop_host", "crates/ironclaw_runner", "crates/ironclaw_reborn_config", "crates/ironclaw_reborn_composition", "crates/ironclaw_reborn_identity", "crates/ironclaw_first_party_extensions", "crates/ironclaw_reborn_cli", "crates/ironclaw_reborn_traces", "crates/ironclaw_webui", "crates/ironclaw_reborn_openai_compat", "crates/ironclaw_conversations", "crates/ironclaw_product_adapters", "crates/ironclaw_product_context", "crates/ironclaw_product_workflow", "crates/ironclaw_product_adapter_registry", "crates/ironclaw_wasm_product_adapters", "crates/ironclaw_channel_host", "crates/ironclaw_channel_delivery", "crates/ironclaw_telegram_extension", "crates/ironclaw_telegram_v2_adapter", "crates/ironclaw_slack_v2_adapter", "crates/ironclaw_outbound", "crates/ironclaw_triggers", "crates/ironclaw_projects", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_llm", "crates/ironclaw_embeddings", "crates/ironclaw_reborn_migration", "tools/ironclaw_stress"]
 exclude = [
     "channels-src/discord",
     "channels-src/feishu",
@@ -65,225 +65,59 @@ dead_code = "warn"
 unused_must_use = "deny"
 
 [package]
-name = "ironclaw"
-autobins = false
-version = "0.29.1"
+# Tier B (see docs/plans/2026-07-02-reborn-internal-module-refactor.md §8):
+# the v1 legacy monolith (`src/`, package `ironclaw_legacy`, binary
+# `ironclaw-legacy`) has been deleted. This package now exists solely to host
+# the Reborn integration test suite (`tests/integration/*`, the `reborn_*`
+# `[[test]]` targets below, and their shared `[dev-dependencies]`) — it has no
+# library or binary target of its own.
+name = "ironclaw_reborn_integration_tests"
+publish = false
+version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
-authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 
 [package.metadata.ironclaw]
-layer = "legacy"
+layer = "app"
 
-[[bin]]
-name = "ironclaw-legacy"
-path = "src/main.rs"
-
-[package.metadata.wix]
-upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"
-path-guid = "F90B6EA6-87F7-499B-BB19-CF55DE1EB339"
-license = false
-eula = false
-
-[dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["sync"] }
-tokio-util = { version = "0.7", features = ["compat"] }
-futures = "0.3"
-tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
-eventsource-stream = "0.2"
-
-# Agent Client Protocol (ACP) — standard communication with coding agents
-agent-client-protocol = "0.10"
-
-# HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# Database - PostgreSQL (default, feature-gated)
-deadpool-postgres = { version = "0.14", optional = true }
-tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"], optional = true }
-postgres-types = { version = "0.2", features = ["with-serde_json-1"], optional = true }
-refinery = { version = "0.9", features = ["tokio-postgres"], optional = true }
-tokio-postgres-rustls = { version = "0.13", optional = true }
-rustls = { version = "0.23", optional = true, default-features = false }
-rustls-native-certs = { version = "0.8", optional = true }
-webpki-roots = { version = "1.0", optional = true }
-
-# Database - libSQL/Turso (optional embedded database)
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-
-# Error handling
-thiserror = "2"
-anyhow = "1"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-
-# Configuration
-dotenvy = "0.15"
-toml = "1.1"
-
-# Core types
-uuid = { version = "1", features = ["v4", "v5", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
-chrono-tz = "0.10"
-iana-time-zone = "0.1"
-rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
-rust_decimal_macros = "1"
-
-# Async traits
-async-trait = "0.1"
-
-# CLI
-clap = { version = "4", features = ["derive", "env"] }
-
-# Terminal
-crossterm = "0.29"
-rustyline = { version = "17", features = ["custom-bindings", "derive", "with-file-history"] }
-termimad = "0.34"
-
-# Channel integrations
-axum = { version = "0.8", features = ["ws"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "set-header", "catch-panic"] }
-
-# Cron scheduling for routines
-cron = "0.17"
-
-# JSON Schema validation (workspace document metadata).
-# default-features disabled to avoid pulling a second `reqwest` major version
-# for remote $ref resolution (we only validate against in-memory schemas).
-jsonschema = { version = "0.46", default-features = false }
-
-# Shared types
-ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.2" }
-ironclaw_extractors = { path = "crates/ironclaw_extractors", version = "0.1.0" }
-ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
-ironclaw_loop_host = { path = "crates/ironclaw_loop_host", version = "0.1.0" }
-ironclaw_memory = { path = "crates/ironclaw_memory", version = "0.1.0" }
-ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0" }
-ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
-ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0" }
-
-# Safety/sanitization
-ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
-ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0" }
-ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0" }
-ironclaw_auth = { path = "crates/ironclaw_auth", version = "0.1.0" }
-ironclaw_reborn_traces = { path = "crates/ironclaw_reborn_traces", version = "0.1.0" }
-ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.2" }
-ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.3.0" }
-ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
-regex = "1"
-aho-corasick = "1"
-
-# YAML parsing for SKILL.md frontmatter
-serde_norway = "0.9"
-
-# Filesystem paths
-dirs = "6"
-fs4 = "1.1"
-glob = "0.3"
-
-# Semantic versioning
-semver = "1"
-
-# Secrecy for sensitive values
-secrecy = { version = "0.10", features = ["serde"] }
-
-# URL parsing and encoding
-url = "2"
-urlencoding = "2"
-
-# Open URLs in browser
-open = "5"
-
-# Vector embeddings for semantic search
-# The postgres feature provides ToSql/FromSql for postgres-types (shared by tokio-postgres)
-pgvector = { version = "0.4", features = ["postgres"], optional = true }
-
-wasmtime = { workspace = true }
-wasmtime-wasi = { workspace = true }  # WASI support for component model
-wasmparser = "0.250.0"  # WASM binary parsing for validation
-
-# Cryptography for secrets management
-aes = "0.9"
-aes-gcm = "0.10"
-hkdf = "0.13"
-hmac = "0.13"
-md-5 = "0.11"
-sha2 = "0.11"
-blake3 = "1"
-rand = "0.10"
-subtle = "2"  # Constant-time comparisons for token validation
-
-# Multi-provider LLM support
-rig-core = { version = "0.33", default-features = false, features = ["reqwest-rustls"] }
-
-# AWS Bedrock: deps now live in `ironclaw_llm` (LLM provider) and
-# `ironclaw_embeddings` (Titan embeddings); the top-level `bedrock` feature
-# (below) re-exposes both via crate-feature forwarding.
-
-# Docker sandbox
-bollard = "0.18"
-
-# Archive extraction for WASM extension bundles
-flate2 = "1"
-tar = "0.4"
-
-# Document text extraction lives in `crates/ironclaw_extractors` (pdf-extract,
-# etc.); `zip` is kept here because `src/tools/builtin/skill_tools.rs` uses it.
-zip = { version = "8", default-features = false, features = ["deflate"] }
-
-# HTTP proxy for sandboxed network access
-hyper = { version = "1.5", features = ["server", "http1", "http2"] }
-hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
-http-body-util = "0.1"
-bytes = "1"
-base64 = "0.22.1"
-cookie = "0.18"
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
-mime_guess = "2.0.5"
-clap_complete = "4.5.0"
-lru = "0.18.0"
-
-# HTML to Markdown conversion (feature gated)
-html-to-markdown-rs = { version = "3.7", optional = true }
-readabilityrs = { version = "0.1.2", optional = true }
-ed25519-dalek = { version = "2.2.0", features = ["std"] }
-bs58 = "0.5"
-hex = "0.4.3"
-
-# OpenClaw import (feature gated)
-json5 = { version = "1.3", optional = true }
-
-# macOS keychain
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = "3"
-
-# PTY allocation for Claude CLI stdout buffering fix (Unix only)
-[target.'cfg(unix)'.dependencies]
-pty-process = { version = "0.5", features = ["async"] }
-
-# Linux secret-service (GNOME Keyring, KWallet)
-[target.'cfg(target_os = "linux")'.dependencies]
-secret-service = { version = "5", features = ["rt-tokio-crypto-rust"] }
-zbus = "5"
-
-[build-dependencies]
-serde_json = "1"
+[package.metadata.dist]
+dist = false
 
 [dev-dependencies]
+# Common utility crates the Reborn integration tests (`tests/integration/*`,
+# `tests/reborn_*.rs`) reference directly — previously satisfied via the now-
+# deleted v1 `[dependencies]` block, since regular deps were visible to test
+# binaries too.
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+secrecy = { version = "0.10", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = { version = "0.8", features = ["ws"] }
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
+base64 = "0.22"
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+regex = "1"
+sha2 = "0.11"
+hex = "0.4"
+url = "2"
+toml = "1.1"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
+ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
+ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
+ironclaw_common = { path = "crates/ironclaw_common" }
+ironclaw_safety = { path = "crates/ironclaw_safety" }
+ironclaw_reborn_traces = { path = "crates/ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_loop_host = { path = "crates/ironclaw_loop_host", features = ["test-support"] }
 tokio-test = "0.4"
 tracing-test = "0.2"
@@ -334,7 +168,7 @@ ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0" }
 # composing them in int-tier tests. All 17 of those modules are recompiled
 # into every int-tier test binary — a real, one-time build-time cost for the
 # lane, behaviorally inert for suites that never reference Slack types.
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support", "libsql"] }
+ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare
 # `webui_v2_router`/`WebUiV2State` (facade-only rule), and the router smoke
 # drives the bare router, not the `webui_v2_app` wrapper. The v2 route surface
@@ -348,6 +182,12 @@ ironclaw_reborn_config = { path = "crates/ironclaw_reborn_config", version = "0.
 ironclaw_reborn_openai_compat = { path = "crates/ironclaw_reborn_openai_compat", version = "0.1.0"}
 ironclaw_run_state = { path = "crates/ironclaw_run_state", version = "0.1.0", features = ["test-support"] }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
+# `test-support` unlocks `ironclaw_turns::test_support::in_memory_turn_state_store`
+# — the shared `FilesystemTurnStateRowStore<InMemoryBackend>` double that replaced
+# the deleted public `InMemoryTurnStateStore` (refactor #6263). cfg(test) does not
+# propagate from an integration-test binary into its deps, so the feature is
+# explicit here.
+ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 # `InMemoryDurableEventLog` for the W5-WEBUI-API-1 SSE scenario's test-local
 # `ProjectionStream` wiring (`build_webui_event_stream_for_test`).
 ironclaw_events = { path = "crates/ironclaw_events", version = "0.1.0" }
@@ -370,31 +210,15 @@ ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", 
 rstest = "0.23"
 
 [features]
-default = ["postgres", "libsql", "html-to-markdown", "tui"]
-postgres = [
-    "dep:deadpool-postgres",
-    "dep:tokio-postgres",
-    "dep:tokio-postgres-rustls",
-    "dep:rustls",
-    "dep:rustls-native-certs",
-    "dep:webpki-roots",
-    "dep:postgres-types",
-    "dep:refinery",
-    "dep:pgvector",
-    "rust_decimal/db-tokio-postgres",
-]
-libsql = ["dep:libsql"]
+# Marker features (no dependency gating — every dev-dependency above is
+# unconditional) selecting which backend-specific test variants compile/run.
+# `--features libsql,postgres` mirrors the old default feature set.
+default = ["libsql", "postgres"]
+libsql = []
+postgres = []
 # Opt-in feature for especially heavy integration-test targets that run in a
 # dedicated CI job instead of the default Rust test matrix.
 integration = []
-# Replay-gate snapshot tests promoted out of `--ignored` into a dedicated CI
-# job. Enabled by `.github/workflows/replay-gate.yml`; implies `libsql` so the
-# test rig can spin up its embedded database.
-replay = ["libsql"]
-html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
-bedrock = ["ironclaw_llm/bedrock", "ironclaw_embeddings/bedrock"]
-tui = ["dep:ironclaw_tui"]
-import = ["dep:json5", "libsql"]
 
 [[test]]
 name = "reborn_group_approvals"
@@ -426,7 +250,7 @@ path = "tests/integration/group_journeys/main.rs"
 
 [[test]]
 name = "reborn_integration_oauth_refresh"
-path = "tests/integration/oauth_refresh.rs"
+path = "tests/integration/auth/oauth_refresh.rs"
 required-features = ["libsql"]
 
 [[test]]
@@ -443,11 +267,11 @@ path = "tests/integration/subagent_await_edge.rs"
 
 [[test]]
 name = "reborn_integration_auth_failure"
-path = "tests/integration/auth_failure.rs"
+path = "tests/integration/auth/auth_failure.rs"
 
 [[test]]
 name = "reborn_integration_auth_gate"
-path = "tests/integration/auth_gate.rs"
+path = "tests/integration/auth/auth_gate.rs"
 
 [[test]]
 name = "reborn_integration_backend_matrix"
@@ -507,7 +331,11 @@ path = "tests/integration/mcp.rs"
 
 [[test]]
 name = "reborn_integration_oauth_connect"
-path = "tests/integration/oauth_connect.rs"
+path = "tests/integration/auth/oauth_connect.rs"
+
+[[test]]
+name = "reborn_integration_oauth_popup_journeys"
+path = "tests/integration/auth/oauth_popup_journeys.rs"
 
 [[test]]
 name = "reborn_integration_outbound_store_durability"
@@ -535,7 +363,7 @@ path = "tests/integration/real_egress_pipeline.rs"
 
 [[test]]
 name = "reborn_integration_reopen_resume_through_gate"
-path = "tests/integration/reopen_resume_through_gate.rs"
+path = "tests/integration/auth/reopen_resume_through_gate.rs"
 
 [[test]]
 name = "reborn_integration_safety"
@@ -601,14 +429,6 @@ path = "tests/integration/wiring_parity.rs"
 name = "reborn_authenticated_actor_dispatch_parity"
 path = "tests/reborn_authenticated_actor_dispatch_parity.rs"
 
-[[test]]
-name = "e2e_thread_scheduling"
-required-features = ["libsql", "integration"]
-
-[[test]]
-name = "html_to_markdown"
-required-features = ["html-to-markdown"]
-
 [profile.release]
 strip = true          # Remove debug symbols from release binaries
 
@@ -621,12 +441,19 @@ lto = "thin"
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.31.0"
-# Ignore out-of-date generated CI so custom release.yml jobs are allowed
+# cargo-dist 0.31 grants `contents: write` to every generated job. Keep the
+# checked-in CI customized so only the host job can publish a GitHub Release.
 allow-dirty = ["ci"]
+# Release only the canonical Reborn CLI.
+packages = ["ironclaw"]
 # CI backends to support
 ci = "github"
+# Match the canonical `ironclaw-v*` release tags.
+tag-namespace = "ironclaw"
+# Install build-only prerequisites before cargo-dist compiles each target.
+github-build-setup = "../dist-build-setup.yml"
 # The installers to generate for each app
-installers = ["shell", "powershell", "npm", "msi"]
+installers = ["shell", "powershell", "msi"]
 # Publish jobs to run in CI
 publish-jobs = []
 # Target platforms to build apps for (Rust target-triple syntax)
@@ -660,3 +487,9 @@ x86_64-unknown-linux-musl = "ubuntu-22.04"
 x86_64-pc-windows-msvc = "windows-2022"
 x86_64-apple-darwin = "macos-15-intel"
 aarch64-apple-darwin = "macos-14"
+
+[workspace.metadata.dist.github-action-commits]
+"actions/checkout" = "df4cb1c069e1874edd31b4311f1884172cec0e10"
+"actions/download-artifact" = "37930b1c2abaa49bbe596cd826c3c89aef350131"
+"actions/upload-artifact" = "b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+"swatinem/rust-cache" = "e18b497796c12c097a38f9edb9d0641fb99eee32"

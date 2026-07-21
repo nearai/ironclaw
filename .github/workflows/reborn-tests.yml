@@ -34,7 +34,8 @@ concurrency:
 
 env:
   # Tests must never touch the real OS keychain (macOS Keychain auth dialog /
-  # Linux Secret Service). Guarded by src/secrets/keychain.rs::os_keychain_suppressed:
+  # Linux Secret Service). Guarded by
+  # crates/ironclaw_secrets/src/keychain.rs::os_keychain_suppressed:
   # cfg!(test) covers unit tests; this covers integration/e2e that link the
   # non-cfg(test) library.
   IRONCLAW_DISABLE_OS_KEYCHAIN: "1"
@@ -116,16 +117,30 @@ jobs:
                   [
                     .packages[]
                     | select(
-                        (.name == "ironclaw_runner")
-                        or (.name | startswith("ironclaw_reborn"))
-                        or (.name | startswith("ironclaw_product"))
-                        or (.name == "ironclaw_architecture")
-                        or (.name == "ironclaw_slack_v2_adapter")
-                        or (.name == "ironclaw_channel_host")
-                        or (.name == "ironclaw_telegram_extension")
-                        or (.name == "ironclaw_telegram_v2_adapter")
-                        or (.name == "ironclaw_wasm_product_adapters")
-                        or (.name | startswith("ironclaw_webui"))
+                        (
+                          (.name == "ironclaw")
+                          or (.name == "ironclaw_runner")
+                          or (.name | startswith("ironclaw_reborn"))
+                          or (.name | startswith("ironclaw_product"))
+                          or (.name == "ironclaw_architecture")
+                          or (.name == "ironclaw_slack_v2_adapter")
+                          or (.name == "ironclaw_channel_host")
+                          or (.name == "ironclaw_telegram_extension")
+                          or (.name == "ironclaw_telegram_v2_adapter")
+                          or (.name == "ironclaw_wasm_product_adapters")
+                          or (.name | startswith("ironclaw_webui"))
+                        )
+                        # The root workspace package (test-only host for the
+                        # reborn integration [[test]] targets) matches
+                        # startswith("ironclaw_reborn") by NAME only. Its
+                        # `[[test]]` suites run via the dedicated root /
+                        # integration-coverage / group jobs — never as a
+                        # per-crate bucket, where `--all-targets` would
+                        # redundantly (and, for env-sensitive integration
+                        # suites, incorrectly) re-run them. Pre-Tier-B this was
+                        # implicit: the host package was `ironclaw_legacy`,
+                        # which never matched the allowlist.
+                        and (.name != "ironclaw_reborn_integration_tests")
                       )
                     | .name
                   ]
@@ -133,7 +148,7 @@ jobs:
                 '
           )"
 
-          # The full ironclaw_reborn_cli dependency closure: every workspace
+          # The full canonical ironclaw dependency closure: every workspace
           # crate the shipped Reborn binary links (normal + build deps). Running
           # each crate's own suite on every PR is the "run everything on every
           # PR" gate -- a green reborn-tests run means the whole closure is
@@ -141,7 +156,7 @@ jobs:
           # extensions, ...) can no longer regress unnoticed.
           closure_packages="$(
             comm -12 \
-              <(cargo tree -p ironclaw_reborn_cli -e normal,build --prefix none \
+              <(cargo tree -p ironclaw -e normal,build --prefix none \
                 | grep -oE 'ironclaw_[a-z0-9_]+' \
                 | sort -u) \
               <(cargo metadata --no-deps --format-version 1 \
@@ -226,13 +241,13 @@ jobs:
             # These packages link `ironclaw_webui`, whose build script compiles
             # the Vite frontend and therefore needs a Node/pnpm toolchain.
             case "${package}" in
-              ironclaw_reborn_cli|ironclaw_reborn_composition)
+              ironclaw|ironclaw_reborn_composition)
                 needs_webui_node=true
                 ;;
             esac
 
             case "${package}" in
-              ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product_workflow|ironclaw_runner|ironclaw_reborn_cli|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
+              ironclaw|ironclaw_first_party_extension_ports|ironclaw_host_runtime|ironclaw_loop_host|ironclaw_product_workflow|ironclaw_runner|ironclaw_reborn_composition|ironclaw_webui|ironclaw_wasm|ironclaw_wasm_product_adapters|ironclaw_wasm_sandbox_core)
                 sccache_dist_enabled=false
                 ;;
             esac
@@ -333,7 +348,7 @@ jobs:
             echo "::endgroup::"
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
 
-          # Concat per-package lcov into one artifact per bucket (keeps artifact count at ~12, not ~60); merge script parses end_of_record blocks per file already, so `cat` is sufficient.
+          # Concat per-package lcov into one artifact per bucket (keeps artifact count bounded by the matrix, not ~60); merge script parses end_of_record blocks per file already, so `cat` is sufficient.
           cat coverage/*.lcov > "bucket-${BUCKET_NAME}.lcov"
 
       - name: Upload bucket lcov artifact

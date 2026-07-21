@@ -13,6 +13,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_host::{
     EmptyUserProfileSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -33,14 +34,15 @@ use ironclaw_threads::{
     SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::TurnRunWakeNotifier as _;
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AllowAllTurnAdmissionPolicy,
-    EventCursor, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopCheckpointStore, LoopExit,
-    LoopExitId, LoopFailed, LoopFailureKind, ReplyTargetBindingRef, RunProfileResolutionRequest,
-    RunProfileResolver, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnRunId, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
+    EventCursor, FilesystemTurnStateRowStore, GetRunStateRequest, IdempotencyKey,
+    InMemoryRunProfileResolver, LoopCheckpointStore, LoopExit, LoopExitId, LoopFailed,
+    LoopFailureKind, ReplyTargetBindingRef, RunProfileResolutionRequest, RunProfileResolver,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnRunId, TurnRunWake,
+    TurnScope, TurnStateStore, TurnStateStoreLimits, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopRunContext, PromptMode,
@@ -159,7 +161,7 @@ async fn submit_run_on_thread(
     thread_id: &ThreadId,
     thread_service: &InMemorySessionThreadService,
     thread_scope: &ThreadScope,
-    turn_store: &InMemoryTurnStateStore,
+    turn_store: &FilesystemTurnStateRowStore<InMemoryBackend>,
     resolver: &InMemoryRunProfileResolver,
     idempotency_key: &str,
     user_id: &UserId,
@@ -239,7 +241,7 @@ async fn submit_run_on_thread(
 }
 
 async fn wait_for_status(
-    store: &InMemoryTurnStateStore,
+    store: &FilesystemTurnStateRowStore<InMemoryBackend>,
     scope: &TurnScope,
     run_id: TurnRunId,
     expected: TurnStatus,
@@ -274,7 +276,7 @@ async fn submit_owned_run_on_thread(
     thread_id: &ThreadId,
     thread_service: &InMemorySessionThreadService,
     thread_scope: &ThreadScope,
-    turn_store: &InMemoryTurnStateStore,
+    turn_store: &FilesystemTurnStateRowStore<InMemoryBackend>,
     resolver: &InMemoryRunProfileResolver,
     idempotency_key: &str,
     user_id: &UserId,
@@ -355,17 +357,17 @@ async fn submit_owned_run_on_thread(
 }
 
 // ---------------------------------------------------------------------------
-// Config wiring test: TurnRunnerSettings → InMemoryTurnStateStoreLimits
+// Config wiring test: TurnRunnerSettings → TurnStateStoreLimits
 //
 // This is the caller-level C4 assertion. It directly verifies the mapping
-// inside build_reborn_runtime: build an InMemoryTurnStateStore with the limits
+// inside build_reborn_runtime: build a turn state store with the limits
 // that the composition would thread in, then exercise claim behavior to prove
 // the cap is applied.
 // ---------------------------------------------------------------------------
 
 /// Verify that config wiring correctly enforces per-user concurrency cap.
 ///
-/// C3 wires `runner.max_concurrent_runs_per_user` into `InMemoryTurnStateStoreLimits`
+/// C3 wires `runner.max_concurrent_runs_per_user` into `TurnStateStoreLimits`
 /// when building the store. This test builds the store with `cap = 1` (the value
 /// `build_reborn_runtime` would set from `TurnRunnerSettings`) and directly probes
 /// claim behavior to prove:
@@ -387,11 +389,11 @@ async fn config_wiring_per_user_cap_enforced_via_store_limits() {
 
     // Build the store with per-user cap = 1, mirroring what build_reborn_runtime
     // constructs from TurnRunnerSettings { max_concurrent_runs_per_user: NonZeroU32::new(1) }.
-    let limits = InMemoryTurnStateStoreLimits {
+    let limits = TurnStateStoreLimits {
         max_concurrent_runs_per_user: NonZeroU32::new(1),
-        ..InMemoryTurnStateStoreLimits::default()
+        ..TurnStateStoreLimits::default()
     };
-    let turn_store = Arc::new(InMemoryTurnStateStore::with_limits(limits));
+    let turn_store = Arc::new(in_memory_turn_state_store().with_limits(limits));
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let resolver = InMemoryRunProfileResolver::default();
 
@@ -544,9 +546,8 @@ async fn scheduler_executor_two_runs_concurrently() {
         mission_id: None,
     };
 
-    let turn_store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default(),
-    ));
+    let turn_store =
+        Arc::new(in_memory_turn_state_store().with_limits(TurnStateStoreLimits::default()));
     let resolver = InMemoryRunProfileResolver::default();
 
     // Submit run 1 on thread A.
@@ -800,9 +801,8 @@ async fn scheduler_executor_applies_loop_exit_end_to_end() {
         mission_id: None,
     };
 
-    let turn_store = Arc::new(InMemoryTurnStateStore::with_limits(
-        InMemoryTurnStateStoreLimits::default(),
-    ));
+    let turn_store =
+        Arc::new(in_memory_turn_state_store().with_limits(TurnStateStoreLimits::default()));
     let resolver = InMemoryRunProfileResolver::default();
 
     let thread_id = ThreadId::new("sched-e2e-thread").unwrap();

@@ -2499,7 +2499,94 @@ test("useChatEvents: typed failed event settles the run as not successful", () =
   ]);
 });
 
-test("useChatEvents: stream error event appends inline error and clears active state", () => {
+test("useChatEvents: retryable stream error preserves partial reply until reconnect completes", () => {
+  const callerStreamErrors = [];
+  const harness = createUseChatEventsHarness({
+    onStreamError: (input) => callerStreamErrors.push(input),
+  });
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          { run_status: { run_id: "run-replay", status: "running" } },
+          {
+            text: {
+              id: "text:run-replay",
+              run_id: "run-replay",
+              body: "partial",
+            },
+          },
+        ],
+      },
+    },
+  });
+
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "replay_unavailable",
+      retryable: true,
+    },
+  });
+
+  assert.equal(harness.isProcessing, true);
+  assert.deepEqual(plain(harness.activeRun), {
+    runId: "run-replay",
+    threadId: "thread-1",
+    status: "running",
+  });
+  assert.equal(harness.messages.length, 1);
+  assert.equal(harness.messages[0].content, "partial");
+  assert.deepEqual(plain(callerStreamErrors), []);
+
+  harness.handleEvent({
+    type: "projection_update",
+    frame: {
+      state: {
+        items: [
+          {
+            text: {
+              id: "text:run-replay",
+              run_id: "run-replay",
+              body: "partial reply continued",
+            },
+          },
+        ],
+      },
+    },
+  });
+  assert.equal(harness.isProcessing, true);
+  assert.equal(harness.messages[0].content, "partial reply continued");
+
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: "run-replay",
+        text: "The completed reply.",
+        generated_at: "2026-07-20T00:00:00Z",
+      },
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(plain(harness.messages), [
+    {
+      id: "reply-run-replay",
+      role: "assistant",
+      content: "The completed reply.",
+      timestamp: "2026-07-20T00:00:00Z",
+      turnRunId: "run-replay",
+      isFinalReply: true,
+    },
+  ]);
+});
+
+test("useChatEvents: terminal stream error appends inline error and clears active state", () => {
   const seenStreamErrors = [];
   const callerStreamErrors = [];
   const harness = createUseChatEventsHarness({
@@ -2520,7 +2607,7 @@ test("useChatEvents: stream error event appends inline error and clears active s
     frame: {
       error: "unavailable",
       kind: "service_unavailable",
-      retryable: true,
+      retryable: false,
     },
   });
   harness.handleEvent({
@@ -2528,7 +2615,7 @@ test("useChatEvents: stream error event appends inline error and clears active s
     frame: {
       error: "unavailable",
       kind: "service_unavailable",
-      retryable: true,
+      retryable: false,
     },
   });
 
@@ -2542,19 +2629,19 @@ test("useChatEvents: stream error event appends inline error and clears active s
     {
       error: "unavailable",
       kind: "service_unavailable",
-      retryable: true,
+      retryable: false,
     },
   ]);
   assert.deepEqual(plain(callerStreamErrors), [
     {
       error: "unavailable",
       kind: "service_unavailable",
-      retryable: true,
+      retryable: false,
     },
     {
       error: "unavailable",
       kind: "service_unavailable",
-      retryable: true,
+      retryable: false,
     },
   ]);
 });
@@ -2570,7 +2657,7 @@ test("useChatEvents: stream error dedupe only suppresses adjacent repeats", () =
   const streamErrorFrame = {
     error: "unavailable",
     kind: "service_unavailable",
-    retryable: true,
+    retryable: false,
   };
 
   harness.handleEvent({ type: "error", frame: streamErrorFrame });
@@ -2581,7 +2668,7 @@ test("useChatEvents: stream error dedupe only suppresses adjacent repeats", () =
   assert.equal(firstError.role, "error");
   assert.match(
     firstError.id,
-    /^err-stream-unavailable-service_unavailable-retryable-/,
+    /^err-stream-unavailable-service_unavailable-terminal-/,
   );
 
   harness.replaceMessages([
@@ -2596,7 +2683,7 @@ test("useChatEvents: stream error dedupe only suppresses adjacent repeats", () =
   assert.equal(secondError.role, "error");
   assert.match(
     secondError.id,
-    /^err-stream-unavailable-service_unavailable-retryable-/,
+    /^err-stream-unavailable-service_unavailable-terminal-/,
   );
   assert.notEqual(secondError.id, firstError.id);
   assert.equal(secondError.content, "stream:service_unavailable");
@@ -2615,7 +2702,7 @@ test("useChatEvents: stream error ids avoid timestamp collisions", () => {
   }
 
   const harness = createUseChatEventsHarness({ DateImpl: FixedDate });
-  const baseId = `${STREAM_FAILURE_ID_PREFIX}unavailable-service_unavailable-retryable`;
+  const baseId = `${STREAM_FAILURE_ID_PREFIX}unavailable-service_unavailable-terminal`;
   harness.replaceMessages([
     { id: `${baseId}-1788259200000`, role: "error", content: "first" },
     { id: "assistant-between-errors", role: "assistant", content: "between" },
@@ -2626,7 +2713,7 @@ test("useChatEvents: stream error ids avoid timestamp collisions", () => {
     frame: {
       error: "unavailable",
       kind: "service_unavailable",
-      retryable: true,
+      retryable: false,
     },
   });
 

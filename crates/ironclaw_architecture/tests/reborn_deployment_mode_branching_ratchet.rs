@@ -62,19 +62,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
          profile name becomes deployment data (§4.4). This entry stays.",
     ),
     (
-        "factory.rs",
-        "Storage-input/deployment pairing guards. Now read \
-         `DeploymentConfig::storage_shape()`; the variant paths that remain are \
-         test fixtures and the `local_dev_extension_installation_state_path` \
-         label argument.",
-    ),
-    (
-        "local_runtime_profile.rs",
-        "The composition edge itself: maps a profile to its config and rejects \
-         deployments this local-runtime helper does not assemble. Retires into \
-         `deployment.rs` when the build input carries a config.",
-    ),
-    (
         "memory_binding.rs",
         "Maps the composition profile to a typed `MemoryDeploymentProfile` for \
          the fail-closed memory profile-binding certification policy (#3537): \
@@ -88,11 +75,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "Readiness diagnostics carry a profile as an operator-facing **label** \
          on the wire (`RebornReadinessDiagnostic::profile`), not a branch. \
          Retires only if that wire field is reshaped.",
-    ),
-    (
-        "webui/facade.rs",
-        "Inline `#[cfg(test)]` fixtures constructing a production-profile \
-         readiness snapshot. Retires when those fixtures move under `tests/`.",
     ),
 ];
 

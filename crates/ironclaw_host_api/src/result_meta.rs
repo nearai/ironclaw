@@ -33,7 +33,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{DispatchInputIssueCode, HostApiError, SafeSummary};
+use crate::{DispatchInputIssueCode, HostApiError, HostRemediation, SafeSummary};
 
 /// Stable digest over a capability's normalized output content — the host_api
 /// mirror of `ironclaw_turns`' `ContentDigest` (a Blake3 keyed hash truncated to
@@ -560,6 +560,14 @@ pub enum ModelFailureDiagnostic {
     InvalidInput { issues: ModelInputIssues },
     /// A bounded, redacted free-text cause.
     Diagnostic { text: SafeSummary },
+    /// Host-authored operator remediation — the TRUSTED text channel.
+    ///
+    /// Separate from [`Self::Diagnostic`] by PROVENANCE: `Diagnostic` holds an
+    /// untrusted cause squeezed through the full [`SafeSummary`] contract (so a
+    /// URL- or path-shaped value degrades to the placeholder), while this arm
+    /// holds a host-authored instruction that must reach the model intact. Only
+    /// host code constructs the payload — see [`HostRemediation`].
+    HostRemediation { text: HostRemediation },
 }
 
 impl ModelFailureDiagnostic {
@@ -568,6 +576,19 @@ impl ModelFailureDiagnostic {
         match self {
             ModelFailureDiagnostic::InvalidInput { .. } => "invalid_input",
             ModelFailureDiagnostic::Diagnostic { .. } => "diagnostic",
+            ModelFailureDiagnostic::HostRemediation { .. } => "host_remediation",
+        }
+    }
+
+    /// The model-visible free text carried by whichever text arm is present —
+    /// the accessor a renderer wants, so a new text arm cannot be silently
+    /// dropped by a call site that only knew about `Diagnostic`.
+    pub fn model_visible_text(&self) -> Option<&str> {
+        // pub-api-exempt: consumed by ironclaw_reborn_composition's host_remediation_contract full-path test
+        match self {
+            ModelFailureDiagnostic::Diagnostic { text } => Some(text.as_str()),
+            ModelFailureDiagnostic::HostRemediation { text } => Some(text.as_str()),
+            ModelFailureDiagnostic::InvalidInput { .. } => None,
         }
     }
 
@@ -576,7 +597,8 @@ impl ModelFailureDiagnostic {
     pub fn issues(&self) -> Option<&[ModelInputIssue]> {
         match self {
             ModelFailureDiagnostic::InvalidInput { issues } => Some(issues.as_slice()),
-            ModelFailureDiagnostic::Diagnostic { .. } => None,
+            ModelFailureDiagnostic::Diagnostic { .. }
+            | ModelFailureDiagnostic::HostRemediation { .. } => None,
         }
     }
 
@@ -585,7 +607,8 @@ impl ModelFailureDiagnostic {
     pub fn diagnostic_text(&self) -> Option<&SafeSummary> {
         match self {
             ModelFailureDiagnostic::Diagnostic { text } => Some(text),
-            ModelFailureDiagnostic::InvalidInput { .. } => None,
+            ModelFailureDiagnostic::InvalidInput { .. }
+            | ModelFailureDiagnostic::HostRemediation { .. } => None,
         }
     }
 }

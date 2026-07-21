@@ -1,5 +1,6 @@
 import React from "react";
 import { openEventStream } from "../../../lib/api";
+import { authScope } from "../../../lib/auth-scope";
 import {
   CONNECTION_STATUS,
   type ConnectionStatus,
@@ -27,11 +28,36 @@ const V2_EVENT_NAMES = [
   "projection_snapshot",
   "projection_update",
   "keep_alive",
-  "error",
+  "stream_error",
 ];
 
 const EVENT_SOURCE_CLOSED = 2;
 const EVENT_SOURCE_OPEN = 1;
+const MAX_CACHED_CURSORS = 30;
+const lastEventIdByThread = new Map<string, string>();
+
+function cursorKey(threadId: string) {
+  return `${authScope()}:${threadId}`;
+}
+
+function getLastEventId(threadId: string) {
+  return lastEventIdByThread.get(cursorKey(threadId));
+}
+
+function setLastEventId(threadId: string, eventId: string) {
+  const key = cursorKey(threadId);
+  lastEventIdByThread.delete(key);
+  lastEventIdByThread.set(key, eventId);
+  while (lastEventIdByThread.size > MAX_CACHED_CURSORS) {
+    const oldestKey = lastEventIdByThread.keys().next().value;
+    if (oldestKey === undefined) break;
+    lastEventIdByThread.delete(oldestKey);
+  }
+}
+
+function deleteLastEventId(threadId: string) {
+  lastEventIdByThread.delete(cursorKey(threadId));
+}
 
 function eventSourceReadyStateConstant(staticValue: unknown, fallback: number) {
   return typeof staticValue === "number" ? staticValue : fallback;
@@ -61,67 +87,69 @@ export function useSSE({ threadId, onEvent, enabled }) {
   );
   const onEventRef = React.useRef(onEvent);
   onEventRef.current = onEvent;
-  // Last cursor we successfully received. EventSource sends
-  // `Last-Event-ID` automatically while a single instance reconnects
-  // internally, but a *fresh* EventSource (tab resume from hidden,
-  // explicit reconnect after threadId change) loses that memory. We
-  // pipe it through the v2 backend's `?after_cursor=` query fallback
-  // so resumption survives those cases too.
-  const lastEventIdRef = React.useRef(null);
-
   React.useEffect(() => {
     if (!enabled || !threadId) {
       setStatus(CONNECTION_STATUS.IDLE);
       return;
     }
-    // New thread → drop the prior thread's cursor before the first
-    // connect so we don't try to resume one thread's projection from
-    // another thread's id.
-    lastEventIdRef.current = null;
-
     let es = null;
     let reconnectTimer = null;
-    let reconnectWatchdog = null;
+    let openWatchdog = null;
     let reconnectAttempts = 0;
+    let disposed = false;
+    let terminalErrorReceived = false;
     const maxReconnectDelay = 30_000;
-    const nativeReconnectWatchdogDelay = 10_000;
+    const reconnectOpenDeadline = 10_000;
 
-    function clearReconnectWatchdog() {
-      if (reconnectWatchdog) {
-        clearTimeout(reconnectWatchdog);
-        reconnectWatchdog = null;
+    function clearOpenWatchdog() {
+      if (openWatchdog) {
+        clearTimeout(openWatchdog);
+        openWatchdog = null;
       }
     }
 
-    function reconnectWithTimer() {
+    function markConnected(source) {
+      if (disposed || terminalErrorReceived || es !== source) return;
+      clearOpenWatchdog();
+      reconnectAttempts = 0;
+      setStatus(CONNECTION_STATUS.CONNECTED);
+    }
+
+    function scheduleOpenWatchdog(source) {
+      if (openWatchdog) return;
+      openWatchdog = setTimeout(() => {
+        openWatchdog = null;
+        if (disposed || terminalErrorReceived || es !== source) return;
+        if (isEventSourceOpen(source)) {
+          markConnected(source);
+          return;
+        }
+        reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
+      }, reconnectOpenDeadline);
+    }
+
+    function reconnectWithTimer(
+      status: ConnectionStatus = CONNECTION_STATUS.DISCONNECTED,
+    ) {
+      if (disposed || terminalErrorReceived) return;
       if (es) {
         es.close();
         es = null;
       }
-      clearReconnectWatchdog();
-      setStatus(CONNECTION_STATUS.DISCONNECTED);
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      clearOpenWatchdog();
+      setStatus(status);
       reconnectAttempts++;
       const delay = Math.min(1000 * 2 ** reconnectAttempts, maxReconnectDelay);
       reconnectTimer = setTimeout(connect, delay);
     }
 
-    function scheduleNativeReconnectWatchdog(source) {
-      if (reconnectWatchdog) return;
-      reconnectWatchdog = setTimeout(() => {
-        reconnectWatchdog = null;
-        if (es !== source || !source) {
-          return;
-        }
-        if (isEventSourceOpen(source)) {
-          reconnectAttempts = 0;
-          setStatus(CONNECTION_STATUS.CONNECTED);
-          return;
-        }
-        reconnectWithTimer();
-      }, nativeReconnectWatchdogDelay);
-    }
-
     function connect() {
+      reconnectTimer = null;
+      if (disposed || terminalErrorReceived) return;
       if (document.visibilityState === "hidden") {
         setStatus(CONNECTION_STATUS.PAUSED);
         return;
@@ -134,26 +162,23 @@ export function useSSE({ threadId, onEvent, enabled }) {
 
       es = openEventStream({
         threadId,
-        afterCursor: lastEventIdRef.current || undefined,
+        afterCursor: getLastEventId(threadId) || undefined,
       });
+      const source = es;
 
-      es.onopen = () => {
-        clearReconnectWatchdog();
-        reconnectAttempts = 0;
-        setStatus(CONNECTION_STATUS.CONNECTED);
-      };
+      // A replacement EventSource can remain in CONNECTING forever without
+      // firing either callback when a proxy accepts the HTTP request but does
+      // not establish the event stream. Bound reconnect attempts explicitly;
+      // the initial connection remains browser-managed, while every recovery
+      // attempt must prove it opened within this deadline.
+      if (reconnectAttempts > 0) scheduleOpenWatchdog(source);
 
-      es.onerror = () => {
-        if (!es) return;
-        if (!isEventSourceClosed(es)) {
-          setStatus(CONNECTION_STATUS.RECONNECTING);
-          scheduleNativeReconnectWatchdog(es);
-          return;
-        }
-        reconnectWithTimer();
+      source.onopen = () => {
+        markConnected(source);
       };
 
       const dispatchFrame = (event, fallbackType) => {
+        if (disposed || es !== source) return;
         let frame = null;
         try {
           frame = JSON.parse(event.data);
@@ -162,17 +187,78 @@ export function useSSE({ threadId, onEvent, enabled }) {
         }
         if (!frame || typeof frame !== "object") return;
         if (event.lastEventId) {
-          lastEventIdRef.current = event.lastEventId;
+          setLastEventId(threadId, event.lastEventId);
         }
+        const rawType = frame.type || fallbackType;
+        const type = rawType === "stream_error" ? "error" : rawType;
+        // Some browsers resume an interrupted EventSource by delivering the
+        // next frame without a second `open` callback. A normal frame proves
+        // the transport recovered and must clear a stale reconnecting badge.
+        // Classified stream errors keep their own terminal/retry state below.
+        if (type !== "error") markConnected(source);
         onEventRef.current?.({
           // The frame's own `type` field is the canonical source;
           // `event.type` (from the SSE `event:` line) is the
           // fallback for forwards-compatibility if Rust adds an
           // event without setting `type` in the body.
-          type: frame.type || fallbackType,
+          type,
           frame,
           lastEventId: event.lastEventId || null,
         });
+        // The server has already classified this failure as permanent for
+        // this subscription (for example, a thread that no longer exists).
+        // EventSource reports the subsequent clean server close through
+        // `onerror`; remember the terminal frame and close locally so that
+        // callback cannot turn a non-retryable response into an infinite
+        // reconnect loop.
+        if (type === "error" && frame.retryable === false && es === source) {
+          terminalErrorReceived = true;
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
+          es = null;
+          source.close();
+          setStatus(CONNECTION_STATUS.DISCONNECTED);
+          return;
+        }
+        // A replay-unavailable response means retrying the same cursor can
+        // never make progress. Replace this EventSource so the browser drops
+        // its internal Last-Event-ID, and reconnect from the projection origin
+        // where durable run/final-reply state can be rebuilt.
+        if (
+          type === "error" &&
+          frame.kind === "replay_unavailable" &&
+          frame.retryable === true &&
+          es === source
+        ) {
+          deleteLastEventId(threadId);
+          reconnectWithTimer(CONNECTION_STATUS.RECONNECTING);
+        }
+      };
+
+      source.onerror = (event) => {
+        if (disposed || terminalErrorReceived || es !== source) return;
+        // Compatibility with servers that emitted application failures on
+        // the reserved `event: error` channel. Those arrive as MessageEvents
+        // with data; a native EventSource transport failure has no data.
+        // Parsing the former here prevents one browser event from also
+        // entering the transport reconnect state machine.
+        if (typeof event?.data === "string") {
+          dispatchFrame(event, "error");
+          return;
+        }
+        // Preserve EventSource's native retry for transient failures. Closing
+        // it immediately creates a fresh HTTP stream for every error, which can
+        // race server-side slot release behind a proxy and strand the client in
+        // a reconnect loop. The watchdog below remains the bounded fallback if
+        // native recovery never opens or delivers another frame.
+        if (!isEventSourceClosed(source)) {
+          setStatus(CONNECTION_STATUS.RECONNECTING);
+          scheduleOpenWatchdog(source);
+          return;
+        }
+        reconnectWithTimer();
       };
 
       // Cover anything emitted without an `event:` field — defensive
@@ -187,11 +273,12 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function disconnectForHiddenTab() {
+      if (disposed || terminalErrorReceived) return;
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
-      clearReconnectWatchdog();
+      clearOpenWatchdog();
       if (es) {
         es.close();
         es = null;
@@ -200,6 +287,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function handleVisibilityChange() {
+      if (disposed || terminalErrorReceived) return;
       if (document.visibilityState === "hidden") {
         disconnectForHiddenTab();
       } else if (!es) {
@@ -208,19 +296,19 @@ export function useSSE({ threadId, onEvent, enabled }) {
     }
 
     function handleNetworkOffline() {
+      if (disposed || terminalErrorReceived) return;
       setStatus(CONNECTION_STATUS.RECONNECTING);
     }
 
     function handleNetworkOnline() {
+      if (disposed || terminalErrorReceived) return;
       if (es && isEventSourceOpen(es)) {
-        clearReconnectWatchdog();
-        reconnectAttempts = 0;
-        setStatus(CONNECTION_STATUS.CONNECTED);
+        markConnected(es);
         return;
       }
       setStatus(CONNECTION_STATUS.RECONNECTING);
       if (es) {
-        scheduleNativeReconnectWatchdog(es);
+        scheduleOpenWatchdog(es);
         return;
       }
       if (reconnectTimer) {
@@ -236,12 +324,15 @@ export function useSSE({ threadId, onEvent, enabled }) {
     window.addEventListener("online", handleNetworkOnline);
 
     return () => {
+      disposed = true;
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("offline", handleNetworkOffline);
       window.removeEventListener("online", handleNetworkOnline);
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      clearReconnectWatchdog();
-      if (es) es.close();
+      clearOpenWatchdog();
+      const source = es;
+      es = null;
+      source?.close();
     };
   }, [enabled, threadId]);
 

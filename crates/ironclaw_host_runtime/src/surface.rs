@@ -16,8 +16,8 @@ use crate::{
         BUILTIN_FIRST_PARTY_PROVIDER, NATIVE_MEMORY_FIRST_PARTY_PROVIDER,
         resolve_builtin_input_schema_ref, resolve_native_memory_input_schema_ref,
     },
-    plan_capability,
 };
+use ironclaw_runtime_policy::plan_capability;
 
 const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
     RuntimeKind::Wasm,

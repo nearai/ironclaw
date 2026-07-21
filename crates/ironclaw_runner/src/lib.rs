@@ -30,15 +30,11 @@ pub mod retry_disposition;
 // ironclaw_reborn_composition; they classify runner-owned categories). Re-exported
 // at the crate root so intra-cluster `crate::FailureLane` refs resolve and
 // composition can re-export them through its facade for the CLI.
-#[cfg(any(
-    feature = "webui-user-store",
-    feature = "filesystem-local-trigger-access"
-))]
-pub mod local_trigger_access;
 pub mod loop_driver_host;
 pub mod loop_exit_applier;
 pub mod milestone_events;
 mod model_failure_mapping;
+mod model_gateway_error_mapping;
 pub mod model_routes;
 pub mod planned_driver;
 pub mod planned_driver_factory;
@@ -54,5 +50,3 @@ pub mod turn_runner;
 pub mod turn_scheduler;
 
 pub mod model_gateway;
-#[cfg(feature = "libsql-secrets")]
-pub mod secrets;

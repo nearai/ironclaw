@@ -7,6 +7,7 @@ use crate::TurnError;
 const ROW_ROOT: &str = "/turns/rows/v1";
 const META_DIR: &str = "meta";
 const META_FILE: &str = "state.json";
+const EVENTS_INDEX_MARKER_FILE: &str = "events-index.json";
 const DELTA_LOG: &str = "deltas/log";
 
 pub(super) fn row_dir(collection: &str) -> Result<ScopedPath, TurnError> {
@@ -19,6 +20,25 @@ pub(super) fn row_path(collection: &str, key: &str) -> Result<ScopedPath, TurnEr
 
 pub(super) fn meta_path() -> Result<ScopedPath, TurnError> {
     scoped_row_path(format!("{ROW_ROOT}/{META_DIR}/{META_FILE}"))
+}
+
+/// Durable marker that the one-time backfill of `Entry::indexed` projections
+/// onto pre-existing event rows has completed. Kept as its own record rather
+/// than a field on [`RowStoreMeta`](super::delta::RowStoreMeta) so it stays
+/// independent of the journal-seq/retention-floor forward-merge CAS logic that
+/// governs the main meta record.
+pub(super) fn events_index_marker_path() -> Result<ScopedPath, TurnError> {
+    scoped_row_path(format!("{ROW_ROOT}/{META_DIR}/{EVENTS_INDEX_MARKER_FILE}"))
+}
+
+/// State of the durable event-index backfill migration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(super) struct EventsIndexMarker {
+    /// `true` once every event row persisted before the indexed-projection
+    /// change has been re-projected, so the query-backed read path will find
+    /// historical events.
+    #[serde(default)]
+    pub(super) backfilled: bool,
 }
 
 pub(super) fn delta_log_path() -> Result<ScopedPath, TurnError> {

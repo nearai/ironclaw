@@ -1,8 +1,6 @@
 ---
 paths:
   - "crates/**/*.rs"
-  - "src/db/**"
-  - "src/history/**"
   - "migrations/**"
 ---
 # Reborn persistence rules

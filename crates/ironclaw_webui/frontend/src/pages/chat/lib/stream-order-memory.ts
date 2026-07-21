@@ -4,6 +4,16 @@ export function isFinalAssistantMessage(message) {
   return message?.role === "assistant" && message?.isFinalReply === true;
 }
 
+export function isLiveAssistantMessage(message) {
+  return (
+    message?.role === "assistant" &&
+    message?.isFinalReply === false &&
+    typeof message?.turnRunId === "string" &&
+    typeof message?.id === "string" &&
+    message.id.startsWith("text-")
+  );
+}
+
 export function isFinalAssistantForRun(message, runId) {
   return (
     isFinalAssistantMessage(message) &&

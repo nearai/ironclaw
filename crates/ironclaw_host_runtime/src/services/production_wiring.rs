@@ -12,7 +12,7 @@ use super::{
     DiskFilesystem, DurableAuditSink, DurableEventSink, EmptyWasmRuntimeCredentials,
     FilesystemSecretStore, HostProcessPort, InMemoryAuditSink, InMemoryCredentialBroker,
     InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink, InMemoryResourceGovernor,
-    InMemoryTurnStateStore, NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
+    NoopTurnRunWakeNotifier, RebornEventStoreError, RuntimeKind,
 };
 
 #[derive(Debug, Error)]
@@ -327,7 +327,6 @@ fn classify_component_type<T: ?Sized + 'static>() -> ProductionImplementationRea
             || type_id == TypeId::of::<FilesystemSecretStore<InMemoryBackend>>()
             || type_id == TypeId::of::<InMemoryCredentialBroker>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
-            || type_id == TypeId::of::<InMemoryTurnStateStore>()
             || type_id == TypeId::of::<NoopTurnRunWakeNotifier>()
             || type_id == TypeId::of::<HostProcessPort>() =>
         {

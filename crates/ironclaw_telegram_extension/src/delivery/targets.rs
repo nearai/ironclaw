@@ -25,6 +25,7 @@ use crate::pairing::{TelegramDmTarget, TelegramPairingError};
 use crate::setup::{TelegramSetupError, TelegramSetupService};
 use crate::state::FilesystemTelegramHostState;
 use ironclaw_channel_host::outbound_targets::OutboundDeliveryTargetEntry;
+use ironclaw_channel_host::outbound_targets::OutboundDeliveryTargetOwner;
 use ironclaw_channel_host::outbound_targets::OutboundDeliveryTargetProvider;
 
 /// Outbound delivery targets for the Telegram channel host: exactly one
@@ -84,6 +85,10 @@ impl TelegramOutboundTargetProvider {
             // threading for proactive DM delivery), built by the adapter crate
             // so it always round-trips through its render-time parser.
             reply_target_binding_ref: build_reply_target_binding(target.chat_id, None, None),
+            // Owner is the paired DM target's user in this provider's tenant,
+            // taken from the stored target rather than the caller, so the
+            // registry drops the entry if a lookup ever crosses users.
+            owner: OutboundDeliveryTargetOwner::new(self.tenant_id.clone(), target.user_id.clone()),
         })
     }
 }

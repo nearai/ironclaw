@@ -1574,12 +1574,14 @@ async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
     };
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert_eq!(failure.capability_id, capability_id("echo.say"));
+    // Message is the sanitized `DenyReason::PolicyDenied` form the kernel produces
+    // (see #6386): it conveys a policy denial and must not leak the internal
+    // `NetworkMode::` planner enum token.
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(message.contains("denied"), "unexpected message: {message}");
     assert!(
-        failure
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("NetworkMode::Deny")
+        !message.contains("NetworkMode::"),
+        "message leaked internal planner enum token: {message}"
     );
     assert!(
         !dispatcher.has_request(),
@@ -1618,12 +1620,13 @@ async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
     };
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert_eq!(failure.capability_id, capability_id("secret-tool.read"));
+    // Sanitized `DenyReason::PolicyDenied` message (see #6386): conveys a policy
+    // denial without leaking the internal `SecretMode::` planner enum token.
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(message.contains("denied"), "unexpected message: {message}");
     assert!(
-        failure
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("SecretMode::Deny")
+        !message.contains("SecretMode::"),
+        "message leaked internal planner enum token: {message}"
     );
     assert!(
         !dispatcher.has_request(),
@@ -1665,12 +1668,13 @@ async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_und
     };
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert_eq!(failure.capability_id, capability_id("mcp.search"));
+    // Sanitized `DenyReason::PolicyDenied` message (see #6386): conveys a policy
+    // denial without leaking the internal `NetworkMode::` planner enum token.
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(message.contains("denied"), "unexpected message: {message}");
     assert!(
-        failure
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("NetworkMode::Deny")
+        !message.contains("NetworkMode::"),
+        "message leaked internal planner enum token: {message}"
     );
     assert!(
         !dispatcher.has_request(),

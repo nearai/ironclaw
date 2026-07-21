@@ -66,7 +66,7 @@ impl RebornServices {
     /// `RebornServices`' own `local_runtime.turn_state` (e.g.
     /// `RebornIntegrationGroup`, whose runs execute against its own
     /// `shared.turn_store` via a separate `build_default_planned_runtime`).
-    /// Generic over `F` so any `FilesystemTurnStateStore<F>`-backed store can be
+    /// Generic over `F` so any `FilesystemTurnStateRowStore<F>`-backed store can be
     /// passed directly, without this crate exposing `TurnRunSnapshotSource`
     /// outside itself.
     ///
@@ -78,7 +78,7 @@ impl RebornServices {
     pub fn local_dev_approval_interaction_service_with_turn_state_for_test<F>(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
-        turn_state: Arc<ironclaw_turns::FilesystemTurnStateStore<F>>,
+        turn_state: Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
     ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError>
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
@@ -114,7 +114,7 @@ impl RebornServices {
     pub fn local_dev_auth_interaction_service_with_turn_state_for_test<F>(
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
-        turn_state: Arc<ironclaw_turns::FilesystemTurnStateStore<F>>,
+        turn_state: Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
     ) -> Option<Arc<dyn AuthInteractionService>>
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
