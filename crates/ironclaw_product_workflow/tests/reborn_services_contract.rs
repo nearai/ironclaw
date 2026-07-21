@@ -26,8 +26,9 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::{
     ActivityId, AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
-    PermissionMode, Principal, ProjectId, Resolution, ResourceScope, SecretHandle, TenantId,
-    ThreadId, UserId,
+    Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution, ResourceScope,
+    ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId,
+    TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState};
 use ironclaw_product_adapters::{
@@ -53,17 +54,18 @@ use ironclaw_product_workflow::{
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_LOGS_VIEW, OperatorLogsService,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_LOGS_VIEW, OperatorLogsService,
     OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
-    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductWorkflowError, ProjectCaller,
-    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
-    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornExtensionSurface,
-    RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
+    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
+    ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
+    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAddMemberRequest,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
+    RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
     RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
@@ -9170,12 +9172,76 @@ impl AutoApproveSettingStore for RecordingAutoApproveSettingStore {
     }
 }
 
-fn services_with_operator_approval_config() -> RebornServices {
+type OperatorConfigServices = RebornServices<OperatorConfigAutoApproveInvoker>;
+
+#[derive(Clone)]
+struct OperatorConfigAutoApproveInvoker {
+    auto_approve: Arc<dyn AutoApproveSettingStore>,
+}
+
+#[async_trait]
+impl ProductCapabilityInvoker for OperatorConfigAutoApproveInvoker {
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        assert_eq!(
+            capability.as_str(),
+            OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID
+        );
+        let enabled = input
+            .get("enabled")
+            .and_then(serde_json::Value::as_bool)
+            .expect("auto-approve capability input must carry enabled bool");
+        let scope = ResourceScope {
+            tenant_id: caller.tenant_id.clone(),
+            user_id: caller.user_id.clone(),
+            agent_id: caller.agent_id.clone(),
+            project_id: caller.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::from_uuid(activity_id.as_uuid()),
+        }
+        .tenant_user_settings_scope();
+        self.auto_approve
+            .set(AutoApproveSettingInput {
+                scope,
+                enabled,
+                updated_by: Principal::User(caller.user_id.clone()),
+            })
+            .await
+            .map_err(RebornServicesError::internal_from)?;
+        Ok(operator_config_success_resolution(activity_id))
+    }
+}
+
+fn operator_config_success_resolution(activity_id: ActivityId) -> Resolution {
+    Resolution::Done(Outcome {
+        refs: OutcomeRefs {
+            result: ResultRef::from_uuid(activity_id.as_uuid()),
+            byte_len: 0,
+            preview: None,
+            preview_meta: ResultPreviewMeta::default(),
+            origin: None,
+            output_digest: None,
+        },
+        verdict: ToolVerdict::Success,
+        summary: SafeSummary::new("operator config updated")
+            .expect("static summary is redaction-safe"),
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    })
+}
+
+fn services_with_operator_approval_config() -> OperatorConfigServices {
     services_with_operator_approval_config_parts().0
 }
 
 fn services_with_operator_approval_config_parts() -> (
-    RebornServices,
+    OperatorConfigServices,
     Arc<
         ironclaw_approvals::FilesystemPersistentApprovalPolicyStore<
             ironclaw_filesystem::InMemoryBackend,
@@ -9192,7 +9258,7 @@ fn services_with_operator_approval_config_parts() -> (
 
 fn services_with_operator_approval_config_policy_store(
     persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
-) -> RebornServices {
+) -> OperatorConfigServices {
     services_with_operator_approval_config_stores(
         Arc::new(ironclaw_approvals::test_support::in_memory_backed_auto_approve_setting_store()),
         persistent_policies,
@@ -9202,10 +9268,13 @@ fn services_with_operator_approval_config_policy_store(
 fn services_with_operator_approval_config_stores(
     auto_approve: Arc<dyn AutoApproveSettingStore>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
-) -> RebornServices {
-    RebornServices::new(
+) -> OperatorConfigServices {
+    RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
+        OperatorConfigAutoApproveInvoker {
+            auto_approve: Arc::clone(&auto_approve),
+        },
     )
     .with_operator_approval_config(
         Arc::new(

@@ -24,9 +24,9 @@ use ironclaw_auth::{
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
-    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId,
-    PermissionMode, Principal, ProjectId, Resolution, ResourceScope, SecretHandle, TenantId,
-    ThreadId, UserId,
+    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, FailureKind, GrantConstraints,
+    InvocationId, PermissionMode, Principal, ProjectId, Resolution, ResourceScope, SecretHandle,
+    TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -113,11 +113,11 @@ pub use fs_browse::{
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
 };
 use ironclaw_approvals::{
-    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingInput, AutoApproveSettingKey,
-    AutoApproveSettingStore, PersistentApprovalAction, PersistentApprovalPolicyError,
-    PersistentApprovalPolicyInput, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
-    ToolPermissionOverride, ToolPermissionOverrideInput, ToolPermissionOverrideKey,
-    ToolPermissionOverrideStore, ToolPermissionState, permission_mode_allows_persistent_approval,
+    AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStore,
+    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use llm_config::{
     ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
@@ -193,6 +193,8 @@ type SkillActivationClearer =
 
 const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
 const TOOL_CONFIG_PREFIX: &str = "tool.";
+pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
+    "builtin.operator_config_set_auto_approve";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornOperatorToolInfo {
@@ -1136,6 +1138,32 @@ fn operator_config_invalid_value(field: &'static str) -> RebornServicesError {
 // sanitized, so operator diagnostics survive without leaking over the wire.
 fn operator_config_store_error(error: impl std::fmt::Display) -> RebornServicesError {
     RebornServicesError::internal_from(error)
+}
+
+fn operator_config_capability_forbidden() -> RebornServicesError {
+    RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
+}
+
+fn operator_config_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput) => Err(operator_config_invalid_value("value")),
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(operator_config_capability_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(RebornServicesError::service_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "operator config capability returned a non-success result",
+            )),
+        },
+        Resolution::Denied(_) => Err(operator_config_capability_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => {
+            Err(RebornServicesError::service_unavailable(true))
+        }
+    }
 }
 
 async fn auto_approve_config_entry(
@@ -3713,24 +3741,27 @@ where
             return Err(RebornServicesError::service_unavailable(false));
         };
         let scope = caller_resource_scope(&caller);
-        let actor = caller.actor();
-        let entry = if key == AUTO_APPROVE_CONFIG_KEY {
+        if key == AUTO_APPROVE_CONFIG_KEY {
             let enabled = request
                 .value
                 .as_bool()
                 .ok_or_else(|| operator_config_invalid_value("value"))?;
-            let operator_scope = operator_tool_permission_scope(&scope);
-            config
-                .auto_approve
-                .set(AutoApproveSettingInput {
-                    scope: operator_scope,
-                    enabled,
-                    updated_by: Principal::User(actor.user_id.clone()),
-                })
-                .await
-                .map_err(operator_config_store_error)?;
-            auto_approve_config_entry(config, &scope).await?
-        } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
+            let capability = CapabilityId::new(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID)
+                .map_err(RebornServicesError::internal_from)?;
+            let resolution = self
+                .invoke(
+                    caller.clone(),
+                    capability,
+                    serde_json::json!({ "enabled": enabled }),
+                    ActivityId::new(),
+                )
+                .await?;
+            operator_config_mutation_succeeded(resolution)?;
+            return self.get_operator_config_key(caller, key).await;
+        }
+
+        let actor = caller.actor();
+        let entry = if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
             let tool = find_operator_tool(config, capability_id, &scope.user_id).await?;
             if tool_permission_locked(&tool) {
                 return Err(operator_config_invalid_value("state"));

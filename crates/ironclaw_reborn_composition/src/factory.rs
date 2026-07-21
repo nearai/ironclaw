@@ -31,6 +31,10 @@ use crate::extension_host::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
+    operator_config_capability::{
+        extend_builtin_first_party_package as extend_builtin_operator_config_package,
+        insert_handler as insert_operator_config_handler,
+    },
     provider_instance_readiness::{
         ProviderInstanceReadinessInput, provider_instance_readiness_map,
     },
@@ -2393,6 +2397,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("admin configuration handler is invalid: {error}"),
     })?;
+    let operator_auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        store_graph.local_runtime.auto_approve_settings.clone();
+    insert_operator_config_handler(&mut first_party_registry, operator_auto_approve_settings)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("operator configuration handler is invalid: {error}"),
+        })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     // Generic extension host (extension-runtime P2): loaders over the fully
@@ -4481,6 +4491,11 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
     let package = extend_builtin_admin_configuration_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("local-dev administrator configuration package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_operator_config_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev operator configuration package is invalid: {error}"),
         }
     })?;
     registry

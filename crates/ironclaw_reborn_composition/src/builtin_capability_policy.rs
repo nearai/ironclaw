@@ -523,6 +523,15 @@ mod tests {
             "the API-only operator save gesture must not open a second approval gate"
         );
         assert!(
+            policy
+                .approval_gate_exempt_capabilities()
+                .iter()
+                .any(|capability| {
+                    capability.as_str() == "builtin.operator_config_set_auto_approve"
+                }),
+            "the API-only operator auto-approve toggle must not open a second approval gate"
+        );
+        assert!(
             !policy
                 .approval_gate_exempt_capabilities()
                 .iter()

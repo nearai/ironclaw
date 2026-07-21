@@ -14,6 +14,15 @@ The first implementation slice should expose the LLM default route through the e
 | `model.default` | yes | yes | string model id or `null` | active LLM selection | not redacted |
 | `provider.api_key` | yes | yes when active provider accepts API keys | redacted secret state | secret store or env metadata only | value always serialized as `null` |
 
+## ProductSurface mutation path
+
+The global approval toggle `agent.auto_approve_tools` is supported as a boolean
+operator config key. Its WebUI route still returns the typed operator config
+projection, but the write itself must dispatch through `ProductSurface::invoke`
+using the API-only first-party capability
+`builtin.operator_config_set_auto_approve`, then read back the authoritative
+tenant/user-scoped setting.
+
 ## Precedence
 
 Responses should include precedence metadata in this order:

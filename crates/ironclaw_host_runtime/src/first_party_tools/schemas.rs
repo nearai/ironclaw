@@ -495,6 +495,25 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["group_id", "revision", "complete", "fields"],
             "additionalProperties": false
         }),
+        "schemas/builtin/operator_config_set_auto_approve.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "enabled": { "type": "boolean" }
+            },
+            "required": ["enabled"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/operator_config_set_auto_approve.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "key": { "const": "agent.auto_approve_tools" },
+                "enabled": { "type": "boolean" },
+                "tenant_id": { "type": "string", "maxLength": 128 },
+                "user_id": { "type": "string", "maxLength": 128 }
+            },
+            "required": ["key", "enabled", "tenant_id", "user_id"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},
@@ -732,6 +751,24 @@ mod tests {
             description
                 .contains("Do not describe creating, scheduling, or configuring the trigger"),
             "prompt description must warn against self-referential creation prompts: {description}"
+        );
+    }
+
+    #[test]
+    fn operator_config_auto_approve_schemas_are_registered() {
+        let input = resolve_builtin_input_schema_ref(
+            "schemas/builtin/operator_config_set_auto_approve.input.v1.json",
+        )
+        .expect("operator config auto-approve input schema is registered");
+        let output = resolve_builtin_input_schema_ref(
+            "schemas/builtin/operator_config_set_auto_approve.output.v1.json",
+        )
+        .expect("operator config auto-approve output schema is registered");
+
+        assert_eq!(input["required"], serde_json::json!(["enabled"]));
+        assert_eq!(
+            output["properties"]["key"]["const"],
+            "agent.auto_approve_tools"
         );
     }
 }
