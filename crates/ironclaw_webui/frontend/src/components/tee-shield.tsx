@@ -64,7 +64,7 @@ export function TeeShield() {
               <Icon name="shield" className="h-4 w-4" />
             </span>
             <div className="min-w-0">
-              <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+              <div className="text-sm font-medium text-[var(--v2-text-strong)]">
                 {t("tee.title")}
               </div>
               <div className="text-xs text-[var(--v2-text-muted)]">
@@ -77,7 +77,7 @@ export function TeeShield() {
             {rows.map(
               (row) => (
                 <div key={row.label} className="rounded-[10px] bg-[var(--v2-surface-soft)] px-3 py-2">
-                  <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--v2-text-faint)]">
+                  <div className="text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--v2-text-faint)]">
                     {row.label}
                   </div>
                   <div className="mt-1 break-all font-mono text-[11px] text-[var(--v2-text)]">

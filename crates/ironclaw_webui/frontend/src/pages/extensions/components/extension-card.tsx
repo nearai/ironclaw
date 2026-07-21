@@ -221,7 +221,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
     >
       <div className="flex items-start gap-2">
         <Badge tone={tone} label={label} size="sm" />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--v2-text-strong)]">
           {displayName}
         </span>
         {overflowActions.length > 0 &&
@@ -309,7 +309,7 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
           label={statusLabel || t("extensions.state.available") || "available"}
           size="sm"
         />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--v2-text-strong)]">
           {displayName}
         </span>
       </div>

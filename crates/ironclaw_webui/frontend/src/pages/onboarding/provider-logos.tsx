@@ -41,7 +41,7 @@ export function ProviderLogo({ id, name }) {
     const letter = (name || id || "?").trim().charAt(0).toUpperCase();
     return (
       <span
-        className={`${tileClass} bg-[var(--v2-surface-muted)] text-sm font-semibold text-[var(--v2-text-strong)]`}
+        className={`${tileClass} bg-[var(--v2-surface-muted)] text-sm font-medium text-[var(--v2-text-strong)]`}
       >
         {letter}
       </span>

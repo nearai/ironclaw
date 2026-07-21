@@ -36,7 +36,7 @@ export const Default: Story = {
   render: (args) => (
     <Card {...args} className="w-96">
       <CardLabel>Workspace</CardLabel>
-      <h3 className="mt-2 text-lg font-semibold text-[var(--v2-text-strong)]">
+      <h3 className="mt-2 text-lg font-medium text-[var(--v2-text-strong)]">
         Inbox triage
       </h3>
       <p className="mt-1 text-sm text-[var(--v2-text-muted)]">
@@ -68,7 +68,7 @@ export const Composed: Story = {
         <div className="flex items-center justify-between">
           <div>
             <CardLabel>Automation</CardLabel>
-            <h3 className="mt-1 font-semibold text-[var(--v2-text-strong)]">
+            <h3 className="mt-1 font-medium text-[var(--v2-text-strong)]">
               Morning digest
             </h3>
           </div>

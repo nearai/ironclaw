@@ -50,7 +50,7 @@ export function LoginPage({ initialToken, error, oauthRedirectAfter = "/", onSub
             {t("login.tagline")}
           </p>
           <h1
-            className="text-5xl font-semibold leading-none tracking-[-0.04em] text-[var(--v2-text-strong)]"
+            className="text-5xl font-medium leading-none tracking-[-0.04em] text-[var(--v2-text-strong)]"
           >
             {t("login.console")}
           </h1>

@@ -137,7 +137,7 @@ const TreeNode = React.memo(function WorkspaceTreeNode({
           style={{ paddingLeft: `${8 + depth * 16}px` }}
         >
           <span aria-hidden="true" className={["w-3 text-[10px]", isExpanded ? "rotate-90" : ""].join(" ")}>{">"}</span>
-          <span className="min-w-0 truncate font-semibold">{displayName}</span>
+          <span className="min-w-0 truncate font-medium">{displayName}</span>
         </div>
         {isExpanded && (
           <div role="group" className="space-y-1">

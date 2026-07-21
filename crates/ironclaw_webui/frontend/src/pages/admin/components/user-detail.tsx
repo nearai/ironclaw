@@ -90,7 +90,7 @@ export function UserDetail({ userId, onBack }) {
       <Panel className="p-5 sm:p-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <h2 className="text-2xl font-semibold tracking-tight text-white">{user.display_name || user.id}</h2>
+            <h2 className="text-2xl font-medium tracking-tight text-white">{user.display_name || user.id}</h2>
             <div className="mt-2 flex items-center gap-2">
               <StatusPill tone={roleTone(user.role)} label={formatUserRole(user.role, t)} />
               <StatusPill tone={statusTone(user.status)} label={formatUserStatus(user.status, t)} />
@@ -195,7 +195,7 @@ export function UserDetail({ userId, onBack }) {
       {confirmDelete && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setConfirmDelete(false)}>
           <div className="w-full max-w-md rounded-xl border border-white/10 bg-iron-900 p-6" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-white">{t("admin.users.deleteUserTitle")}</h3>
+            <h3 className="text-lg font-medium text-white">{t("admin.users.deleteUserTitle")}</h3>
             <p className="mt-2 text-sm text-iron-300">
               {t("admin.users.deleteUserDesc", { name: user.display_name })}
             </p>
@@ -203,7 +203,7 @@ export function UserDetail({ userId, onBack }) {
               <Button variant="ghost" onClick={() => setConfirmDelete(false)}>{t("admin.users.cancel")}</Button>
               <button
                 onClick={handleDelete}
-                className="v2-button inline-flex h-10 items-center justify-center rounded-md bg-red-500/20 px-4 text-sm font-semibold text-red-200 hover:bg-red-500/30"
+                className="v2-button inline-flex h-10 items-center justify-center rounded-md bg-red-500/20 px-4 text-sm font-medium text-red-200 hover:bg-red-500/30"
               >
                 {t("admin.users.delete")}
               </button>

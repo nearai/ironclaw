@@ -28,7 +28,7 @@ export function JobDetailShell({
           <div className="min-w-0">
             <button onClick={onBack} className="text-sm text-signal hover:text-white">Back to all jobs</button>
             <div className="mt-3 flex flex-wrap items-center gap-3">
-              <h2 className="text-3xl font-semibold tracking-tight text-white">{job.title || "Untitled job"}</h2>
+              <h2 className="text-3xl font-medium tracking-tight text-white">{job.title || "Untitled job"}</h2>
               <StatusPill tone={statusToneForState(job.state)} label={stateLabel(job.state)} />
             </div>
             <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">
@@ -44,7 +44,7 @@ export function JobDetailShell({
                 href={job.browse_url}
                 target="_blank"
                 rel="noreferrer noopener"
-                className="v2-button inline-flex h-10 items-center rounded-md border border-white/12 bg-white/[0.04] px-4 text-sm font-semibold text-iron-100 hover:border-signal/45 hover:bg-signal/10"
+                className="v2-button inline-flex h-10 items-center rounded-md border border-white/12 bg-white/[0.04] px-4 text-sm font-medium text-iron-100 hover:border-signal/45 hover:bg-signal/10"
               >
                 Browse files
               </a>

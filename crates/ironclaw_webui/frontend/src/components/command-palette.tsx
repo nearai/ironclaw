@@ -106,7 +106,7 @@ export function CommandPalette({ open, onClose, threadsState, onNewChat, onToggl
             return (
               <React.Fragment key={command.id}>
                 {showGroup &&
-                (<li key={`g-${command.group}`} className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">{command.group}</li>)}
+                (<li key={`g-${command.group}`} className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-[var(--v2-text-faint)]">{command.group}</li>)}
                 <li>
                   <button
                     type="button"

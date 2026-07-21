@@ -86,7 +86,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
         data-testid="onboarding-pairing-card"
         className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
       >
-        <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
+        <h3 className="text-sm font-medium text-iron-100">{copy.title}</h3>
         {instructions &&
         (<p className="mt-1 text-sm leading-6 text-iron-300">{instructions}</p>)}
         <TelegramPairingPanel compact />
@@ -114,7 +114,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
         data-testid="onboarding-pairing-card"
         className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
       >
-        <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
+        <h3 className="text-sm font-medium text-iron-100">{copy.title}</h3>
         <p className="mt-1 text-sm leading-6 text-iron-300">{copy.instructions}</p>
         <div className="mt-3 flex flex-wrap gap-2">
           {onConfigure &&
@@ -157,7 +157,7 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
       className="mx-auto mt-4 w-full max-w-lg rounded-lg border border-signal/25 bg-signal/5 p-4"
     >
       <div className="mb-3">
-        <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
+        <h3 className="text-sm font-medium text-iron-100">{copy.title}</h3>
         <p className="mt-1 text-sm leading-6 text-iron-300">{copy.instructions}</p>
       </div>
 

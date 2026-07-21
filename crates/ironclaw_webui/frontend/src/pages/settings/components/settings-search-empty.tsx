@@ -14,7 +14,7 @@ export function SettingsSearchEmpty({ query }) {
           <Icon name="search" className="h-4 w-4" />
         </span>
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-[var(--v2-text-strong)]">
+          <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">
             {t("settings.noMatchingSettings", { query })}
           </h3>
         </div>

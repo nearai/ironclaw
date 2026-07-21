@@ -171,7 +171,7 @@ export function ProviderCard({
             ].join(" ")}
           />
           <span className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
-            <span className="min-w-0 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+            <span className="min-w-0 truncate text-sm font-medium text-[var(--v2-text-strong)]">
               {provider.name || provider.id}
             </span>
             <span className="font-mono text-[11px] text-[var(--v2-text-faint)]">{provider.id}</span>

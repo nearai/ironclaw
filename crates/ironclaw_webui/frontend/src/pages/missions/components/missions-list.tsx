@@ -45,7 +45,7 @@ function MissionRow({ mission, selectedMissionId, onSelectMission, onOpenProject
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
-              <div className="min-w-0 truncate text-lg font-semibold text-iron-100">{mission.name}</div>
+              <div className="min-w-0 truncate text-lg font-medium text-iron-100">{mission.name}</div>
               <StatusPill tone={missionTone(mission.status)} label={mission.status} />
             </div>
             <p className="mt-2 line-clamp-2 text-sm leading-6 text-iron-300">{mission.goal || t("missions.noGoal")}</p>
@@ -96,7 +96,7 @@ export function MissionsList({
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("missions.title")}</div>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight text-iron-100">{t("missions.subtitle")}</h1>
+          <h1 className="mt-2 text-3xl font-medium tracking-tight text-iron-100">{t("missions.subtitle")}</h1>
           <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
             {t("missions.summary", { missions: totalMissions, projects: projectOptions.length })}
           </p>

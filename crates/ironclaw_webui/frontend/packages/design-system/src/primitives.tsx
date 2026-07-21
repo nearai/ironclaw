@@ -111,7 +111,7 @@ export function FlowList({ items }) {
               {String(index + 1).padStart(2, "0")}
             </div>
             <div className="min-w-0">
-              <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+              <div className="text-sm font-medium text-[var(--v2-text-strong)]">
                 {item.title}
               </div>
               <div className="mt-1 text-sm leading-6 text-[var(--v2-text-muted)]">

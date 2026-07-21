@@ -28,7 +28,7 @@ function EventCard({ event }) {
   if (type === "tool_use" || type === "tool_result") {
     return (
       <details className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3">
-        <summary className="cursor-pointer list-none text-sm font-semibold text-white">
+        <summary className="cursor-pointer list-none text-sm font-medium text-white">
           {type === "tool_use" ? data.tool_name || "Tool call" : data.tool_name || "Tool result"}
         </summary>
         <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded-md bg-iron-950/90 p-3 font-mono text-xs leading-6 text-iron-200">{prettyJson(type === "tool_use" ? data.input : data.output || data.error || data)}</pre>
@@ -90,7 +90,7 @@ export function JobActivityTab({ job, events, onSendPrompt, isSendingPrompt }) {
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Event stream</div>
-          <h3 className="mt-2 text-xl font-semibold text-white">Job activity</h3>
+          <h3 className="mt-2 text-xl font-medium text-white">Job activity</h3>
           <p className="mt-2 text-sm leading-6 text-iron-300">Persisted events are refreshed automatically so operators can follow tool calls, prompts, and worker output.</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">

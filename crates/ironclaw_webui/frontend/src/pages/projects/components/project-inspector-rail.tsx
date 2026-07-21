@@ -20,7 +20,7 @@ function ProjectSnapshot({ project, missions, threads, overview, t }) {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.snapshot.label")}</div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">{project.name}</h2>
+            <h2 className="mt-2 text-2xl font-medium tracking-tight text-white">{project.name}</h2>
           </div>
           <StatusPill
             tone={healthTone(overview?.health)}
@@ -57,7 +57,7 @@ function ProjectSnapshot({ project, missions, threads, overview, t }) {
               <div className="mt-4 space-y-3">
                 {project.metrics.map((metric, index) => (
                   <div key={index} className="rounded-2xl border border-white/8 bg-iron-950/60 p-3">
-                    <div className="text-sm font-semibold text-white">{metric.name}</div>
+                    <div className="text-sm font-medium text-white">{metric.name}</div>
                     <div className="mt-2 text-sm text-iron-200">{formatMetricValue(metric, t)}</div>
                     {metric.updated_at && (
                       <div className="mt-2 font-mono text-[10px] uppercase tracking-[0.16em] text-iron-400">

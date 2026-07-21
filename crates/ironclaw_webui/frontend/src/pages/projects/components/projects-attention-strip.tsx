@@ -30,7 +30,7 @@ export function ProjectsAttentionStrip({ items, onOpenItem }) {
           >
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-sm font-semibold text-white">{item.project_name}</div>
+                <div className="text-sm font-medium text-white">{item.project_name}</div>
                 <div className="mt-1 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">
                   {item.thread_id
                     ? t("projects.attention.threadLabel", { id: String(item.thread_id).slice(0, 8) })

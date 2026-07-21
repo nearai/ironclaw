@@ -74,7 +74,7 @@ export function AutomationsEmptyState() {
   return (
     <Panel className="p-6 sm:p-8">
       <div className="max-w-2xl">
-        <h2 className="mt-4 text-2xl font-semibold tracking-tight text-iron-100 flex items-center gap-3">
+        <h2 className="mt-4 text-2xl font-medium tracking-tight text-iron-100 flex items-center gap-3">
           {t("automations.empty.onboardingTitle")}
         </h2>
         <p className="mt-3 text-sm leading-6 text-iron-300">

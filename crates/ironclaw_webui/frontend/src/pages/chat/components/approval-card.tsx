@@ -96,7 +96,7 @@ export function ApprovalCard({
         <span className="grid h-8 w-8 place-items-center rounded-md border border-copper/25 bg-copper/10 text-copper">
           <Icon name="lock" className="h-4 w-4" />
         </span>
-        <span className="font-semibold text-white">{t("approval.title")}</span>
+        <span className="font-medium text-white">{t("approval.title")}</span>
         <Badge
           tone={risk.tone}
           label={t(risk.key)}

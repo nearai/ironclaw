@@ -22,7 +22,7 @@ export function MissionsSummaryStrip({ summary }) {
               <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{card.label}</div>
               <StatusPill tone={card.tone} label={card.key} />
             </div>
-            <div className="mt-4 text-3xl font-semibold tracking-tight text-white">{summary[card.key] || 0}</div>
+            <div className="mt-4 text-3xl font-medium tracking-tight text-white">{summary[card.key] || 0}</div>
             <p className="mt-2 text-sm leading-6 text-iron-300">
               {card.key === "total"
                 ? t("missions.summary.completedFailed", { completed: summary.completed || 0, failed: summary.failed || 0 })

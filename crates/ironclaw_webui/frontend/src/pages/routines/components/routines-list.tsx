@@ -46,7 +46,7 @@ export function RoutinesList({
             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">
               {t("routines.explorer")}
             </div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-iron-100">
+            <h2 className="mt-2 text-2xl font-medium tracking-tight text-iron-100">
               {t("routines.title")}
             </h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">

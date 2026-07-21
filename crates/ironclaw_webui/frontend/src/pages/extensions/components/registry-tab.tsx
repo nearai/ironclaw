@@ -94,7 +94,7 @@ export function RegistryTab({
     return (
       <div className="v2-panel rounded-[18px] p-6 sm:p-8">
         <div className="flex items-start justify-between gap-4">
-          <h3 className="text-lg font-semibold text-[var(--v2-text-strong)]">
+          <h3 className="text-lg font-medium text-[var(--v2-text-strong)]">
             {t("ext.registry.emptyTitle")}
           </h3>
           {importControl}

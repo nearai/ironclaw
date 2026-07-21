@@ -79,7 +79,7 @@ export function PageHeader({
 
       {breadcrumb
         ? (
-            <div className="flex min-w-0 items-center gap-2 text-[14px] font-semibold">
+            <div className="flex min-w-0 items-center gap-2 text-[14px] font-medium">
               <span className="shrink-0 text-[var(--v2-text-muted)]">
                 {breadcrumb.parent}
               </span>
@@ -94,7 +94,7 @@ export function PageHeader({
           )
         : (
             <span
-              className="truncate text-[14px] font-semibold text-[var(--v2-text-strong)]"
+              className="truncate text-[14px] font-medium text-[var(--v2-text-strong)]"
             >
               {title}
             </span>

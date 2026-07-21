@@ -44,7 +44,7 @@ export function ProjectMissionInspector({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.mission.dossier")}</div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">{mission.name}</h2>
+            <h2 className="mt-2 text-2xl font-medium tracking-tight text-white">{mission.name}</h2>
           </div>
           <StatusPill tone={missionTone(mission.status)} label={formatMissionStatus(mission.status, t)} />
         </div>
@@ -118,7 +118,7 @@ export function ProjectMissionInspector({
                       className="w-full rounded-2xl border border-white/8 bg-iron-950/60 p-4 text-left hover:border-signal/30 hover:bg-white/[0.05]"
                     >
                       <div className="flex items-center justify-between gap-3">
-                        <div className="min-w-0 truncate text-sm font-semibold text-white">{thread.goal}</div>
+                        <div className="min-w-0 truncate text-sm font-medium text-white">{thread.goal}</div>
                         <StatusPill tone={missionTone(status)} label={formatMissionStatus(status, t)} />
                       </div>
                     </button>

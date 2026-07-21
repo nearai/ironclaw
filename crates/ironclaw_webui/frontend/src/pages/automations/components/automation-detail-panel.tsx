@@ -178,7 +178,7 @@ export function AutomationDetailPanel({
                   <div className="flex min-w-0 items-center gap-2">
                     <h3
                       data-testid="automation-detail-title"
-                      className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight text-[var(--v2-text-strong)]"
+                      className="min-w-0 flex-1 truncate text-xl font-medium tracking-tight text-[var(--v2-text-strong)]"
                     >
                       {automation.display_name}
                     </h3>
@@ -263,7 +263,7 @@ export function AutomationDetailPanel({
 
         <div>
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h4 className="text-sm font-semibold text-[var(--v2-text-strong)]">
+            <h4 className="text-sm font-medium text-[var(--v2-text-strong)]">
               {t("automations.detail.recentRuns")}
             </h4>
             <div className="flex flex-col items-end gap-1">

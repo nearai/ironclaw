@@ -57,7 +57,7 @@ export function AuthGateShell({
           <Icon name={icon} className="h-4 w-4" />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block truncate font-semibold text-white">
+          <span className="block truncate font-medium text-white">
             {headline || t("authGate.title")}
           </span>
           {subtitle &&

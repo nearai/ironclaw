@@ -322,9 +322,12 @@ input:focus, select:focus, textarea:focus {
   overflow-wrap: anywhere;
 }
 .markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4 {
-  margin-top: 1em; margin-bottom: 0.5em; font-weight: 600;
+  margin-top: 1em; margin-bottom: 0.5em; font-weight: 500;
   color: var(--v2-text-strong);
 }
+/* Weight ceiling is semibold: browser-default bold on strong/b reads
+   too heavy in Geist. */
+.markdown-body strong,.markdown-body b { font-weight: 600; }
 .markdown-body                { font-size: 1em; line-height: 1.7; }
 .markdown-body p              { margin-bottom: 0.8em; line-height: inherit; }
 .markdown-body ul,.markdown-body ol { margin-bottom: 0.75em; padding-left: 1.5em; }
@@ -370,7 +373,7 @@ input:focus, select:focus, textarea:focus {
   border: 1px solid var(--v2-panel-border); padding: 0.4em 0.6em; text-align: left;
   overflow-wrap: anywhere;
 }
-.markdown-body th { background: var(--v2-surface-soft); font-weight: 600; }
+.markdown-body th { background: var(--v2-surface-soft); font-weight: 500; }
 .markdown-body hr { border: 0; border-top: 1px solid var(--v2-panel-border); margin: 1em 0; }
 .markdown-body pre code { color: var(--v2-text); }
 .markdown-body pre code.hljs {

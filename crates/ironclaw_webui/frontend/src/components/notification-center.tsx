@@ -28,7 +28,7 @@ function NotificationRow({ message, unread, onOpen }) {
       </span>
       <span className="min-w-0">
         <span className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--v2-text-strong)]">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium text-[var(--v2-text-strong)]">
             {message.title}
           </span>
           {unread &&
@@ -127,7 +127,7 @@ export function NotificationCenter({ state }) {
           >
             <div className="flex items-center justify-between gap-3 border-b border-[var(--v2-panel-border)] px-4 py-3">
               <div className="min-w-0">
-                <h2 className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                <h2 className="text-sm font-medium text-[var(--v2-text-strong)]">
                   {t("notifications.title")}
                 </h2>
                 <p className="mt-0.5 text-xs text-[var(--v2-text-muted)]">
@@ -152,7 +152,7 @@ export function NotificationCenter({ state }) {
               {messages.length === 0
                 ? (
                     <div className="px-4 py-8 text-center">
-                      <div className="text-sm font-semibold text-[var(--v2-text-strong)]">
+                      <div className="text-sm font-medium text-[var(--v2-text-strong)]">
                         {t("notifications.emptyTitle")}
                       </div>
                       <div className="mt-1 text-sm text-[var(--v2-text-muted)]">

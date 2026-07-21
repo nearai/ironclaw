@@ -68,7 +68,7 @@ export function AutomationsPage() {
                     role="status"
                     className="rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3"
                   >
-                    <div className="text-sm font-semibold text-amber-200">
+                    <div className="text-sm font-medium text-amber-200">
                       {t("automations.schedulerOff.title")}
                     </div>
                     <div className="mt-0.5 text-xs leading-5 text-amber-200/80">

@@ -17,7 +17,7 @@ export function ProjectMissionsColumn({ missions, selectedMissionId, onSelectMis
       <div className="flex items-end justify-between gap-4">
         <div>
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.missions.label")}</div>
-          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">{t("projects.missions.title")}</h2>
+          <h2 className="mt-2 text-2xl font-medium tracking-tight text-white">{t("projects.missions.title")}</h2>
         </div>
         <div className="text-right text-xs uppercase tracking-[0.16em] text-iron-400">
           <div>{t("projects.missions.activePaused", { active: counts.active, paused: counts.paused })}</div>
@@ -40,7 +40,7 @@ export function ProjectMissionsColumn({ missions, selectedMissionId, onSelectMis
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="truncate text-lg font-semibold text-white">{mission.name}</div>
+                    <div className="truncate text-lg font-medium text-white">{mission.name}</div>
                     <p className="mt-2 line-clamp-2 text-sm leading-6 text-iron-300">{mission.goal}</p>
                   </div>
                   <StatusPill tone={missionTone(mission.status)} label={formatMissionStatus(mission.status, t)} />

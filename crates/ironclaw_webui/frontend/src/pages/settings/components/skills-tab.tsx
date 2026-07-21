@@ -139,7 +139,7 @@ export function SkillsTab({ searchQuery = "" }) {
     if (skills.length === 0) {
       body = (
         <Card padding="lg">
-          <h3 className="text-lg font-semibold text-[var(--v2-text-strong)]">{t("skills.noInstalled")}</h3>
+          <h3 className="text-lg font-medium text-[var(--v2-text-strong)]">{t("skills.noInstalled")}</h3>
           <p className="mt-2 max-w-md text-sm leading-6 text-[var(--v2-text-muted)]">
             {t("skills.noInstalledDesc")}
           </p>

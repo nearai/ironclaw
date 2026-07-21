@@ -153,7 +153,7 @@ function FeaturedProviderRow({ entry, provider, configured, isBusy, login, t, on
         <ProviderLogo id={entry.id} name={name} />
         <div className="min-w-0">
           <div className="flex items-center gap-2">
-            <span className="truncate text-sm font-semibold text-[var(--v2-text-strong)]">{name}</span>
+            <span className="truncate text-sm font-medium text-[var(--v2-text-strong)]">{name}</span>
             {configured &&
             (<Badge tone="positive" label={t("onboarding.ready")} size="sm" />)}
           </div>
@@ -238,7 +238,7 @@ function OperatorOnboardingPage() {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto flex min-h-full max-w-2xl flex-col justify-center gap-6 p-6">
         <div className="text-center">
-          <h1 className="text-2xl font-semibold text-[var(--v2-text-strong)]">
+          <h1 className="text-2xl font-medium text-[var(--v2-text-strong)]">
             {t("onboarding.title")}
           </h1>
           <p className="mt-2 text-sm text-[var(--v2-text-muted)]">{t("onboarding.subtitle")}</p>

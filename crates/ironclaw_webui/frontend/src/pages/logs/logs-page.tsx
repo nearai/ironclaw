@@ -62,7 +62,7 @@ function LogEntry({ entry }) {
         ].join(" ")}
       >
         <span className="text-[var(--v2-text-muted)] tabular-nums">{ts}</span>
-        <span className={["font-semibold uppercase", levelColor].join(" ")}>
+        <span className={["font-medium uppercase", levelColor].join(" ")}>
           {entry.level}
         </span>
         <span className="truncate text-[var(--v2-text-muted)]">{entry.target}</span>

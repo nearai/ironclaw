@@ -22,7 +22,7 @@ import {
 export function SectionTitle({ children }) {
   return (
     <h3
-      className="mb-3 mt-8 font-mono text-[0.6875rem] font-semibold uppercase tracking-[0.14em] text-[var(--v2-text-muted)] first:mt-0"
+      className="mb-3 mt-8 font-mono text-[0.6875rem] font-medium uppercase tracking-[0.14em] text-[var(--v2-text-muted)] first:mt-0"
     >
       {children}
     </h3>
@@ -176,7 +176,7 @@ export function TypographySection({ theme }) {
       <div className="flex flex-wrap gap-x-8 gap-y-2 text-xl text-[var(--v2-text-strong)]">
         <span className="font-normal">Regular 400</span>
         <span className="font-medium">Medium 500</span>
-        <span className="font-semibold">Semibold 600</span>
+        <span className="font-medium">Semibold 600</span>
       </div>
     </div>
   );
@@ -371,7 +371,7 @@ export function ZIndexSection({ theme }) {
                 key={token.var + theme}
                 className="flex items-center gap-4 rounded-[10px] border border-[var(--v2-panel-border)] bg-[var(--v2-card-bg)] px-4 py-3"
               >
-                <span className="w-10 text-right font-mono text-[0.9rem] font-semibold text-[var(--v2-accent-text)]">
+                <span className="w-10 text-right font-mono text-[0.9rem] font-medium text-[var(--v2-accent-text)]">
                   {value}
                 </span>
                 <TokenName>{token.var}</TokenName>

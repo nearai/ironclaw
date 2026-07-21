@@ -63,7 +63,7 @@ function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
   return (
     <Card padding="md" className="flex items-center justify-between gap-6">
       <div className="min-w-0">
-        <h3 className="text-sm font-semibold text-[var(--v2-text-strong)]">
+        <h3 className="text-sm font-medium text-[var(--v2-text-strong)]">
           {label}
         </h3>
         <p className="mt-1 text-sm text-[var(--v2-text-muted)]">

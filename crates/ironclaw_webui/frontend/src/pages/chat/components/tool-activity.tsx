@@ -345,7 +345,7 @@ function ToolResult({ text }) {
               {columns.map(
                 (col) => (<th
                   key={col}
-                  className="border-b border-iron-700/60 bg-iron-900 px-2 py-1 font-semibold text-iron-100"
+                  className="border-b border-iron-700/60 bg-iron-900 px-2 py-1 font-medium text-iron-100"
                 >{col}</th>)
               )}
             </tr>

@@ -31,7 +31,7 @@ function CatalogErrorBanner({ isCatalogError = true, isRefetching, onRetry }) {
       className={`rounded-lg border px-4 py-4 ${toneClass}`}
       role="alert"
     >
-      <p className="text-sm font-semibold">{t(titleKey)}</p>
+      <p className="text-sm font-medium">{t(titleKey)}</p>
       <p className="mt-1 text-sm">{t(descriptionKey)}</p>
       <button
         type="button"

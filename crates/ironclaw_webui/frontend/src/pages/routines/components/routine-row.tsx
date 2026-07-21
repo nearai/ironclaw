@@ -28,7 +28,7 @@ export function RoutineRow({
       <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
         <button onClick={() => onSelectRoutine(routine.id)} className="min-w-0 text-left">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="truncate text-lg font-semibold text-iron-100">{routine.name}</h3>
+            <h3 className="truncate text-lg font-medium text-iron-100">{routine.name}</h3>
             <StatusPill
               tone={routineStatusTone(routine.status, routine.enabled)}
               label={routine.enabled ? routine.status : "disabled"}

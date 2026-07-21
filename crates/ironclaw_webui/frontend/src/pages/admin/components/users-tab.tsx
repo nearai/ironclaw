@@ -43,7 +43,7 @@ function TokenBanner({ token, onDismiss }) {
     <div className="rounded-xl border border-signal/30 bg-signal/10 p-4 sm:p-5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-iron-100">{t("admin.users.tokenCreated")}</p>
+          <p className="text-sm font-medium text-iron-100">{t("admin.users.tokenCreated")}</p>
           <p className="mt-1 text-xs text-iron-300">{t("admin.users.tokenCreatedDesc")}</p>
           <div className="mt-3 flex items-center gap-2">
             <code className="min-w-0 flex-1 truncate rounded-md border border-iron-700 bg-iron-800/70 px-3 py-2 font-mono text-xs text-iron-100">
@@ -143,13 +143,13 @@ function ConfirmModal({ title, message, confirmLabel, onConfirm, onCancel }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onCancel}>
       <div className="w-full max-w-md rounded-xl border border-iron-700 bg-iron-900 p-6" onClick={(e) => e.stopPropagation()}>
-        <h3 className="text-lg font-semibold text-iron-100">{title}</h3>
+        <h3 className="text-lg font-medium text-iron-100">{title}</h3>
         <p className="mt-2 text-sm text-iron-300">{message}</p>
         <div className="mt-5 flex justify-end gap-2">
           <Button variant="ghost" onClick={onCancel}>{t("admin.users.cancel")}</Button>
           <button
             onClick={onConfirm}
-            className="v2-button inline-flex h-10 items-center justify-center rounded-md bg-[var(--v2-danger-soft)] px-4 text-sm font-semibold text-[var(--v2-danger-text)] hover:bg-[color-mix(in_srgb,var(--v2-danger-soft)_65%,var(--v2-danger-text))]"
+            className="v2-button inline-flex h-10 items-center justify-center rounded-md bg-[var(--v2-danger-soft)] px-4 text-sm font-medium text-[var(--v2-danger-text)] hover:bg-[color-mix(in_srgb,var(--v2-danger-soft)_65%,var(--v2-danger-text))]"
           >
             {confirmLabel}
           </button>
@@ -244,7 +244,7 @@ export function AdminUsersTab({ selectedUserId, onSelectUser }) {
       <Panel className="p-6 sm:p-8">
         <div className="flex items-center gap-3">
           <Icon name="lock" className="h-5 w-5 text-iron-700" />
-          <h3 className="text-lg font-semibold text-iron-100">{t("users.adminRequired")}</h3>
+          <h3 className="text-lg font-medium text-iron-100">{t("users.adminRequired")}</h3>
         </div>
         <p className="mt-2 max-w-md text-sm leading-6 text-iron-300">
           {t("users.adminRequiredDesc")}

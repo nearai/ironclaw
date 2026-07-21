@@ -214,7 +214,7 @@ export function CardSection() {
       <Card className="max-w-lg">
         <CardHeader divider>
           <CardLabel>Channels</CardLabel>
-          <h3 className="mt-1 text-[1.2rem] font-semibold tracking-[-0.02em] text-[var(--v2-text-strong)]">
+          <h3 className="mt-1 text-[1.2rem] font-medium tracking-[-0.02em] text-[var(--v2-text-strong)]">
             Slack workspace
           </h3>
         </CardHeader>

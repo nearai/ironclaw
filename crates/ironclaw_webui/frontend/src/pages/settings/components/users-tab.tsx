@@ -163,7 +163,7 @@ export function UsersTab({ searchQuery = "" }) {
       <Card padding="lg">
         <div className="flex items-center gap-3">
           <Icon name="lock" className="h-5 w-5 text-[var(--v2-text-faint)]" />
-          <h3 className="text-lg font-semibold text-[var(--v2-text-strong)]">
+          <h3 className="text-lg font-medium text-[var(--v2-text-strong)]">
             {t("users.adminRequired")}
           </h3>
         </div>

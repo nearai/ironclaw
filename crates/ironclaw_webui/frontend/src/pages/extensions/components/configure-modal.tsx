@@ -487,7 +487,7 @@ function ModalShell({ onClose, title, children }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-5 flex items-center justify-between">
-          <h3 id={titleId} className="text-lg font-semibold text-white">{title}</h3>
+          <h3 id={titleId} className="text-lg font-medium text-white">{title}</h3>
           <button
             onClick={onClose}
             aria-label={t("common.close")}

@@ -49,7 +49,7 @@ export const WorkspaceSettings: Story = {
       <Card padding="none" className="w-[36rem]">
         <CardHeader divider>
           <CardLabel>Settings</CardLabel>
-          <h3 className="mt-1 text-lg font-semibold text-[var(--v2-text-strong)]">
+          <h3 className="mt-1 text-lg font-medium text-[var(--v2-text-strong)]">
             Agent behavior
           </h3>
         </CardHeader>
@@ -119,7 +119,7 @@ export const AutomationsTable: Story = {
         <Card variant="flat" padding="none">
           <CardHeader divider className="!py-3">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="font-semibold text-[var(--v2-text-strong)]">Automations</h3>
+              <h3 className="font-medium text-[var(--v2-text-strong)]">Automations</h3>
               <div className="flex items-center gap-2">
                 <SelectMenu
                   prefix="Status"
@@ -169,7 +169,7 @@ export const MarketingHero: Story = {
   render: () => (
     <div className="flex w-[40rem] flex-col items-center py-10 text-center">
       <Badge tone="accent" label="Private by design" />
-      <h1 className="mt-5 text-[length:var(--v2-font-size-display)] font-semibold leading-tight tracking-[var(--v2-tracking-display)] text-[var(--v2-text-strong)]">
+      <h1 className="mt-5 text-[length:var(--v2-font-size-display)] font-medium leading-tight tracking-[var(--v2-tracking-display)] text-[var(--v2-text-strong)]">
         An agent that runs
         <br />
         your routine work.
@@ -209,7 +209,7 @@ export const OnboardingProposal: Story = {
             </span>
             <div>
               <CardLabel>Suggested automation</CardLabel>
-              <h3 className="mt-0.5 font-semibold text-[var(--v2-text-strong)]">
+              <h3 className="mt-0.5 font-medium text-[var(--v2-text-strong)]">
                 Morning digest
               </h3>
             </div>

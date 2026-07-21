@@ -31,7 +31,7 @@ function ProjectCard({ project, onOpen, t }) {
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="truncate font-serif text-2xl font-semibold tracking-[-0.03em] text-iron-100">{project.name}</h3>
+          <h3 className="truncate font-serif text-2xl font-medium tracking-[-0.03em] text-iron-100">{project.name}</h3>
           <p className="mt-2 line-clamp-3 text-sm leading-6 text-iron-300">
             {project.description || t("projects.noDescription")}
           </p>
@@ -109,7 +109,7 @@ function GeneralProjectCard({ project, onOpen, t }) {
       <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
         <div className="max-w-3xl">
           <div className="font-mono text-[11px] uppercase tracking-[0.18em] text-signal">{t("projects.general.label")}</div>
-          <h2 className="mt-3 font-serif text-4xl font-semibold tracking-[-0.04em] text-iron-100">{t("projects.general.title")}</h2>
+          <h2 className="mt-3 font-serif text-4xl font-medium tracking-[-0.04em] text-iron-100">{t("projects.general.title")}</h2>
           <p className="mt-3 text-sm leading-6 text-iron-200">
             {t("projects.general.desc")}
           </p>
@@ -164,7 +164,7 @@ export function ProjectsGrid({
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.explorer")}</div>
-            <h2 className="mt-2 font-serif text-3xl font-semibold tracking-[-0.04em] text-iron-100">{t("projects.scoped.title")}</h2>
+            <h2 className="mt-2 font-serif text-3xl font-medium tracking-[-0.04em] text-iron-100">{t("projects.scoped.title")}</h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
               {t("projects.scoped.desc")}
             </p>

@@ -50,7 +50,7 @@ export function JobsList({
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("jobs.list.explorer")}</div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-iron-100">{t("jobs.list.queueTitle")}</h2>
+            <h2 className="mt-2 text-2xl font-medium tracking-tight text-iron-100">{t("jobs.list.queueTitle")}</h2>
             <p className="mt-2 max-w-2xl text-sm leading-6 text-iron-300">
               {t("jobs.list.queueDesc")}
             </p>
@@ -93,7 +93,7 @@ export function JobsList({
             <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
               <button onClick={() => onSelectJob(job.id)} className="min-w-0 text-left">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="truncate text-lg font-semibold text-iron-100">{job.title || t("jobs.list.untitled")}</h3>
+                  <h3 className="truncate text-lg font-medium text-iron-100">{job.title || t("jobs.list.untitled")}</h3>
                   <StatusPill tone={statusToneForState(job.state)} label={stateLabel(job.state)} />
                 </div>
                 <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px] uppercase tracking-[0.14em] text-iron-300">

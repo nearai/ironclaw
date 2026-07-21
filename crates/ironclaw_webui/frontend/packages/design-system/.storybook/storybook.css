@@ -23,3 +23,24 @@ body {
 .docs-story {
   background: var(--v2-canvas);
 }
+
+/* Docs shell typography: Storybook pins its own stack (Nunito Sans) on
+   docs prose, overriding the body font — force the brand stack. Scoped
+   to prose/table elements so story canvases (.docs-story) keep their
+   component-level font choices (e.g. the pixel tag face). */
+.sbdocs :is(h1, h2, h3, h4, h5, h6, p, li, td, th) {
+  font-family: var(--font-sans) !important;
+}
+.sbdocs :is(code, pre) {
+  font-family: var(--font-mono) !important;
+}
+
+/* Weight ceiling is semibold (600): Storybook's docs typography defaults
+   to bold+ headings, which reads too heavy in Geist. Titles/headings drop
+   to 600, everything Storybook sets to 600 reads as medium. */
+.sbdocs :is(h1, h2, strong, b) {
+  font-weight: 600 !important;
+}
+.sbdocs :is(h3, h4, h5, h6) {
+  font-weight: 500 !important;
+}

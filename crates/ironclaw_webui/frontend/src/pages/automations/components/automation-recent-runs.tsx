@@ -112,7 +112,7 @@ export function RecentRunRow({ run }) {
         <StatusPill tone={run.status_tone} label={run.status_label} />
       </div>
       <div className="min-w-0">
-        <div className="text-sm font-semibold text-iron-100">{run.fired_label}</div>
+        <div className="text-sm font-medium text-iron-100">{run.fired_label}</div>
         <div className="mt-1 truncate font-mono text-[11px] text-iron-400">
           {run.thread_id
             ? `${t("automations.detail.thread")} ${run.thread_id}`

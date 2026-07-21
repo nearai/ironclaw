@@ -28,7 +28,7 @@ export function JobOverviewTab({ job }) {
         <div className="flex items-center justify-between gap-4">
           <div>
             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Execution context</div>
-            <h3 className="mt-2 text-xl font-semibold text-white">Timing, state, and runtime shape</h3>
+            <h3 className="mt-2 text-xl font-medium text-white">Timing, state, and runtime shape</h3>
           </div>
           <StatusPill tone={statusToneForState(job.state)} label={stateLabel(job.state)} />
         </div>
@@ -46,7 +46,7 @@ export function JobOverviewTab({ job }) {
       <div className="space-y-5">
         <Panel className="p-5 sm:p-6">
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Description</div>
-          <h3 className="mt-2 text-xl font-semibold text-white">Mission brief</h3>
+          <h3 className="mt-2 text-xl font-medium text-white">Mission brief</h3>
           {job.description
             ? (<MarkdownRenderer content={job.description} className="mt-4 text-sm leading-7 text-iron-200" />)
             : (<p className="mt-4 text-sm leading-6 text-iron-300">This job did not record a long-form description.</p>)}
@@ -56,7 +56,7 @@ export function JobOverviewTab({ job }) {
           ? (
               <Panel className="p-5 sm:p-6">
                 <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">Transitions</div>
-                <h3 className="mt-2 text-xl font-semibold text-white">State timeline</h3>
+                <h3 className="mt-2 text-xl font-medium text-white">State timeline</h3>
                 <div className="mt-3">
                   <FlowList items={transitions} />
                 </div>

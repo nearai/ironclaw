@@ -137,10 +137,10 @@ export function PlaygroundPage() {
           <span
             className="grid h-8 w-8 place-items-center rounded-[10px] border border-[var(--v2-accent-soft)] bg-[var(--v2-accent-soft)]"
           >
-            <span className="font-mono text-sm font-semibold text-[var(--v2-accent-text)]">IC</span>
+            <span className="font-mono text-sm font-medium text-[var(--v2-accent-text)]">IC</span>
           </span>
           <div className="flex flex-col">
-            <span className="text-[0.8125rem] font-semibold leading-tight text-[var(--v2-text-strong)]">
+            <span className="text-[0.8125rem] font-medium leading-tight text-[var(--v2-text-strong)]">
               IronClaw UI
             </span>
             <span className="text-[0.625rem] leading-tight text-[var(--v2-text-muted)]">
@@ -211,7 +211,7 @@ export function PlaygroundPage() {
       <main className="min-w-0 flex-1 overflow-y-auto px-6 pb-16 pt-7 lg:px-10">
         <header className="mb-7 flex items-start justify-between gap-6">
           <div>
-            <h1 className="text-xl font-semibold tracking-[-0.02em] text-[var(--v2-text-strong)]">
+            <h1 className="text-xl font-medium tracking-[-0.02em] text-[var(--v2-text-strong)]">
               {item.name}
             </h1>
             <p className="mt-1 max-w-[60ch] text-[0.8125rem] leading-relaxed text-[var(--v2-text-muted)]">

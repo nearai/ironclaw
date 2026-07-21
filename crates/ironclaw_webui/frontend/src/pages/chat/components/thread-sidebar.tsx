@@ -33,7 +33,7 @@ export function ThreadSidebar({
         <button
           onClick={onCreate}
           disabled={createDisabled}
-          className="v2-button h-9 shrink-0 rounded-md border border-signal/25 bg-signal/10 px-3 text-xs font-semibold text-signal disabled:opacity-50"
+          className="v2-button h-9 shrink-0 rounded-md border border-signal/25 bg-signal/10 px-3 text-xs font-medium text-signal disabled:opacity-50"
         >
           {isCreating ? t("chat.creating") : t("chat.newThread")}
         </button>
@@ -69,7 +69,7 @@ export function ThreadSidebar({
         className="flex items-center justify-between border-b border-white/10 px-5 py-5"
       >
         <div>
-          <span className="text-sm font-semibold text-white"
+          <span className="text-sm font-medium text-white"
             >{t("chat.conversations")}</span
           >
           <p

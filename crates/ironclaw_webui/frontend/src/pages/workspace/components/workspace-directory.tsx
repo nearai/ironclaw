@@ -55,7 +55,7 @@ export function WorkspaceDirectory({ path, entries, isLoading, filter, onOpen, o
             <span className={["w-4 text-center text-xs", entry.is_dir ? "text-signal" : "text-iron-400"].join(" ")}>
               {entry.is_dir ? "□" : "·"}
             </span>
-            <span className={["min-w-0 truncate", entry.is_dir ? "font-semibold" : ""].join(" ")}>{displayName(entry)}</span>
+            <span className={["min-w-0 truncate", entry.is_dir ? "font-medium" : ""].join(" ")}>{displayName(entry)}</span>
           </button>
         ))}
       </div>

@@ -40,7 +40,7 @@ export function EmptyState({
     >
       <div className="w-full max-w-5xl text-center">
         <h2
-          className="mx-auto max-w-[16ch] text-4xl font-semibold leading-[1.04] text-white sm:text-5xl lg:text-6xl"
+          className="mx-auto max-w-[16ch] text-4xl font-medium leading-[1.04] text-white sm:text-5xl lg:text-6xl"
         >
           {t("chat.heroTitle")}
         </h2>
@@ -82,7 +82,7 @@ export function EmptyState({
                 <Icon name={item.icon} className="h-4 w-4" />
               </span>
               <span className="min-w-0">
-                <span className="block text-sm font-semibold text-iron-100">
+                <span className="block text-sm font-medium text-iron-100">
                   {item.title}
                 </span>
                 <span className="mt-0.5 block text-sm text-iron-300">

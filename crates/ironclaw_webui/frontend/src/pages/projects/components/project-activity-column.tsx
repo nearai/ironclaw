@@ -25,7 +25,7 @@ export function ProjectActivityColumn({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{t("projects.activity.label")}</div>
-          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">{t("projects.activity.title")}</h2>
+          <h2 className="mt-2 text-2xl font-medium tracking-tight text-white">{t("projects.activity.title")}</h2>
         </div>
         {onNewConversation &&
         (
@@ -52,7 +52,7 @@ export function ProjectActivityColumn({
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="truncate text-base font-semibold text-white">{presentation.title}</div>
+                      <div className="truncate text-base font-medium text-white">{presentation.title}</div>
                       <div className="mt-1 text-xs uppercase tracking-[0.16em] text-iron-400">{presentation.subtitle}</div>
                       {presentation.brief
                         ? (<p className="mt-3 line-clamp-2 text-sm leading-6 text-iron-300">{presentation.brief}</p>)

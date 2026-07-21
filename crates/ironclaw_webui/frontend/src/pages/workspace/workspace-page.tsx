@@ -33,7 +33,7 @@ export function WorkspacePage() {
               <div className="flex items-center gap-2">
                 <h1
                   data-testid="workspace-heading"
-                  className="text-lg font-semibold text-white"
+                  className="text-lg font-medium text-white"
                 >{t("workspace.title")}</h1>
                 <StatusPill tone="muted" label={t("workspace.readOnly")} />
               </div>

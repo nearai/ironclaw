@@ -59,7 +59,7 @@ export function SidebarFooter({ theme, toggleTheme, profile, onSignOut }) {
         title={name}
       >
         <div
-          className="grid h-8 w-8 shrink-0 overflow-hidden rounded-full bg-[var(--v2-accent-soft)] text-[11px] font-bold text-[var(--v2-accent-text)]"
+          className="grid h-8 w-8 shrink-0 overflow-hidden rounded-full bg-[var(--v2-accent-soft)] text-[11px] font-semibold text-[var(--v2-accent-text)]"
         >
           {profile?.avatar_url
           ? (<img

@@ -24,7 +24,7 @@ export function ProviderLoginStatus({ login }) {
       <div className="text-xs text-[var(--v2-text-muted)]">
         {t("onboarding.codexEnterCode")}
       </div>
-      <div className="mt-2 font-mono text-2xl font-semibold tracking-[0.3em] text-[var(--v2-text-strong)]">
+      <div className="mt-2 font-mono text-2xl font-medium tracking-[0.3em] text-[var(--v2-text-strong)]">
         {codexCode.userCode}
       </div>
       <a

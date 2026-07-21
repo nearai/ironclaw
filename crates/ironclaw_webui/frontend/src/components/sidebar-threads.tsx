@@ -202,7 +202,7 @@ function ThreadGroup({ label, items, activeThreadId, states, pinnedIds, onSelect
   if (items.length === 0) return null;
   return (
     <div className="flex flex-col gap-1">
-      <span className="px-3 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]">
+      <span className="px-3 pt-1 text-[10px] font-medium uppercase tracking-wider text-[var(--v2-text-faint)]">
         {label}
       </span>
       {items.map(
@@ -282,7 +282,7 @@ export function SidebarThreads({
         className="flex w-full items-center gap-1 rounded-[6px] px-2 py-1.5 hover:bg-[var(--v2-surface-muted)]"
       >
         <span
-          className="flex-1 text-left text-[11px] font-semibold uppercase tracking-wider text-[var(--v2-text-faint)]"
+          className="flex-1 text-left text-[11px] font-medium uppercase tracking-wider text-[var(--v2-text-faint)]"
         >
           {t("chat.conversations")}
         </span>

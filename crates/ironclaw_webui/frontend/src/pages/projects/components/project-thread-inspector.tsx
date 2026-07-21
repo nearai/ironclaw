@@ -31,7 +31,7 @@ export function ProjectThreadInspector({ thread }) {
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-iron-300">{presentation.subtitle}</div>
-            <h2 className="mt-2 text-2xl font-semibold tracking-tight text-white">{presentation.title}</h2>
+            <h2 className="mt-2 text-2xl font-medium tracking-tight text-white">{presentation.title}</h2>
           </div>
           <StatusPill tone={threadTone(thread.state)} label={formatThreadState(thread.state, t)} />
         </div>
