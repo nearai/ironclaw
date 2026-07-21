@@ -2726,6 +2726,16 @@ pub trait RebornServicesApi: Send + Sync {
     }
 }
 
+/// Transitional name for the §5.2 product boundary.
+///
+/// `RebornServicesApi` is the current proto-ProductSurface while the migration
+/// ratchet shrinks per-feature methods into capability descriptors and view
+/// descriptors. Product adapters should depend on this trait name so the
+/// eventual method-set collapse is localized to the facade owner.
+pub trait ProductSurface: RebornServicesApi {}
+
+impl<T> ProductSurface for T where T: RebornServicesApi + ?Sized {}
+
 /// Lands inbound attachment bytes into durable, agent-accessible storage and
 /// returns the transcript references to persist on the user message.
 ///

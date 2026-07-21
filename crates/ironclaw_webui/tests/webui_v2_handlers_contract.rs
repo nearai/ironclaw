@@ -30,20 +30,21 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     FsMount, LOGS_VIEW, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_LOGS_VIEW,
-    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
-    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat,
+    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -94,12 +95,12 @@ fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
     )
 }
 
-fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
+fn router_with(services: Arc<dyn ProductSurface>) -> Router {
     router_with_caller(services, WebUiV2Capabilities::default(), caller())
 }
 
 fn router_with_caller(
-    services: Arc<dyn RebornServicesApi>,
+    services: Arc<dyn ProductSurface>,
     capabilities: WebUiV2Capabilities,
     caller: WebUiAuthenticatedCaller,
 ) -> Router {
@@ -115,13 +116,13 @@ fn router_with_caller(
 }
 
 fn router_with_capabilities(
-    services: Arc<dyn RebornServicesApi>,
+    services: Arc<dyn ProductSurface>,
     capabilities: WebUiV2Capabilities,
 ) -> Router {
     router_with_caller(services, capabilities, caller())
 }
 
-fn router_with_caller_only(services: Arc<dyn RebornServicesApi>) -> Router {
+fn router_with_caller_only(services: Arc<dyn ProductSurface>) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
@@ -4956,7 +4957,7 @@ fn url_encode(value: &str) -> String {
 // upgrade attempt returns 429 until the SSE body is dropped.
 #[tokio::test]
 async fn stream_events_ws_shares_capacity_with_sse_streams() {
-    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
     // Pool size 1: any one open stream (SSE or WS) must exhaust the
     // budget for the caller.
     let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
@@ -5065,7 +5066,7 @@ async fn stream_events_ws_shares_capacity_with_sse_streams() {
 // backend `stream_events` drains at `connections × poll-interval`.
 #[tokio::test]
 async fn stream_events_caps_concurrent_streams_per_caller() {
-    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
     // Use a low custom cap so the test runs without burning resources.
     let router = webui_v2_router(WebUiV2State::new(services, 2)).layer(axum::Extension(caller()));
 
@@ -5318,7 +5319,7 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
 
     // Cap of 1 so we can observe slot release directly: a second open
     // returns 429 while the first is held, and 200 once it's released.
-    let services: Arc<dyn RebornServicesApi> = Arc::new(StallingServices);
+    let services: Arc<dyn ProductSurface> = Arc::new(StallingServices);
     let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
 
     let open_stream = || {
@@ -5938,7 +5939,7 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
 async fn missing_caller_extension_returns_500() {
     // No `Extension(caller)` layer — exercises the failure mode if host
     // composition forgets to run the bearer middleware.
-    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
     let router = webui_v2_router(WebUiV2State::new(
         services,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
@@ -6255,7 +6256,7 @@ async fn stream_events_ws_resumes_from_last_event_id_before_query_cursor() {
 async fn stream_events_ws_releases_slot_on_peer_close() {
     use futures::SinkExt;
 
-    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let services: Arc<dyn ProductSurface> = Arc::new(StubServices::default());
     let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

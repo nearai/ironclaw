@@ -52,6 +52,7 @@ use ratchet_support::{strip_comments_and_strings, workspace_root};
 /// trait — the §-referenced contract owner (`type-placement.md` rule 3).
 const FACADE_SOURCE: &str = "crates/ironclaw_product_workflow/src/reborn_services.rs";
 const FACADE_TRAIT: &str = "RebornServicesApi";
+const PRODUCT_SURFACE_TRAIT: &str = "ProductSurface";
 
 /// The frozen inventory of `RebornServicesApi` methods, as of the §5.2.5 freeze.
 /// Grouped by the product domain each method serves, so a reviewer can see which
@@ -300,6 +301,21 @@ fn reborn_facade_method_allowlist_is_frozen_and_only_shrinks() {
          {removed:?}. A facade method was removed (good — §5.2 migration progress!) — trim it from \
          the allowlist in the same PR so the ratchet keeps shrinking toward the turn-lifecycle + \
          `invoke`/`query` end-state (§10)."
+    );
+}
+
+#[test]
+fn product_surface_names_the_transitional_product_boundary() {
+    let source_path = workspace_root().join(FACADE_SOURCE);
+    let source = std::fs::read_to_string(&source_path)
+        .unwrap_or_else(|e| panic!("failed to read facade source {source_path:?}: {e}"));
+    let stripped = strip_comments_and_strings(&source);
+    let needle = format!("pub trait {PRODUCT_SURFACE_TRAIT}: {FACADE_TRAIT}");
+
+    assert!(
+        stripped.contains(&needle),
+        "`{PRODUCT_SURFACE_TRAIT}` must remain the named §5.2 product boundary over the frozen \
+         proto-facade while the method-set migration is in progress."
     );
 }
 

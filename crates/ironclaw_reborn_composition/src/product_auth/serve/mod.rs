@@ -53,7 +53,7 @@ use ironclaw_host_api::{
     AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, RebornServicesApi, RebornServicesError, WebUiAuthenticatedCaller,
+    LifecyclePackageKind, ProductSurface, RebornServicesError, WebUiAuthenticatedCaller,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -188,7 +188,7 @@ trait InstalledExtensionLookup: Send + Sync {
 }
 
 struct RebornServicesInstalledExtensionLookup {
-    api: Arc<dyn RebornServicesApi>,
+    api: Arc<dyn ProductSurface>,
 }
 
 #[async_trait::async_trait]
@@ -244,7 +244,7 @@ impl ProductAuthRouteState {
 
     /// Wire the WebUI facade as the installed-extension inventory source for
     /// the extension OAuth start guard.
-    pub fn with_webui_api(mut self, webui_api: Arc<dyn RebornServicesApi>) -> Self {
+    pub fn with_webui_api(mut self, webui_api: Arc<dyn ProductSurface>) -> Self {
         self.installed_extension_lookup = Some(Arc::new(RebornServicesInstalledExtensionLookup {
             api: webui_api,
         }));

@@ -11,10 +11,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_product_workflow::{
-    ChannelConnectionFacade, OperatorStatusService, RebornOperatorStatusCheck,
+    ChannelConnectionFacade, OperatorStatusService, ProductSurface, RebornOperatorStatusCheck,
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
     RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices as ProductRebornServices,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
@@ -153,7 +153,7 @@ impl RebornOperatorToolCatalog for ActiveRegistryOperatorToolCatalog {
 /// the existing Reborn runtime / composition services.
 #[derive(Clone)]
 pub struct RebornWebuiBundle {
-    pub api: Arc<dyn RebornServicesApi>,
+    pub api: Arc<dyn ProductSurface>,
     pub product_auth: Option<Arc<RebornProductAuthServices>>,
     pub readiness: RebornReadiness,
 }
@@ -162,7 +162,7 @@ impl std::fmt::Debug for RebornWebuiBundle {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RebornWebuiBundle")
-            .field("api", &"Arc<dyn RebornServicesApi>")
+            .field("api", &"Arc<dyn ProductSurface>")
             .field("product_auth", &self.product_auth.is_some())
             .field("readiness", &self.readiness)
             .finish()

@@ -282,7 +282,7 @@ impl RebornServicesApi for RecordingServices {
     }
 }
 
-fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
+fn router_with(services: Arc<dyn ProductSurface>) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
