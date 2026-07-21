@@ -79,6 +79,7 @@ mod fs_browse;
 mod lifecycle_setup;
 mod llm_config;
 mod log_views;
+mod operator_command_views;
 mod project_fs;
 mod projects;
 mod run_artifact;
@@ -127,6 +128,7 @@ pub use llm_config::{
     UpsertLlmProviderRequest,
 };
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
+pub use operator_command_views::{OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_STATUS_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
@@ -4170,6 +4172,26 @@ where
                     next_cursor: None,
                 })
             }
+            id if id == OPERATOR_DIAGNOSTICS_VIEW.id => {
+                operator_command_views::parse_empty_operator_view_params(query.params)?;
+                let response = self.build_operator_diagnostics_view(caller).await?;
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_STATUS_VIEW.id => {
+                operator_command_views::parse_empty_operator_view_params(query.params)?;
+                let response = self.build_operator_status_view(caller).await?;
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor: None,
+                })
+            }
             _ => Err(RebornServicesError::not_found()),
         }
     }
@@ -5111,85 +5133,34 @@ where
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let mut diagnostics = Vec::new();
-        let mut operator_status = None;
-
-        match self.operator_status.status(caller.clone()).await {
-            Ok(status) => {
-                diagnostics.extend(
-                    status
-                        .checks
-                        .iter()
-                        .filter_map(operator_doctor_status_diagnostic),
-                );
-                operator_status = Some(operator_doctor_status_response(status));
-            }
-            Err(err) => {
-                tracing::debug!(
-                    error = ?err,
-                    "Failed to retrieve operator status for diagnostics"
-                );
-                diagnostics.push(operator_doctor_status_unavailable_diagnostic());
-            }
-        }
-
-        if let Some(llm_config) = &self.llm_config {
-            match llm_config.snapshot(caller).await {
-                Ok(snapshot) => {
-                    diagnostics.extend(
-                        setup_response_from_llm_snapshot(
-                            snapshot,
-                            Vec::new(),
-                            OperatorSetupHostState::default(),
-                        )
-                        .diagnostics,
-                    );
-                }
-                Err(err) => {
-                    tracing::debug!(
-                        error = ?err,
-                        "Failed to retrieve LLM config snapshot for diagnostics"
-                    );
-                    diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
-                        "operator_setup_snapshot_unavailable",
-                        "Operator setup state could not be inspected.",
-                    ));
-                }
-            }
-        } else {
-            diagnostics.push(operator_doctor_setup_unavailable_diagnostic(
-                "operator_setup_service_not_wired",
-                "Operator setup diagnostics are unavailable because the LLM config service is not wired.",
-            ));
-        }
-
-        diagnostics.push(operator_config_surface_not_wired_diagnostic());
-
-        Ok(RebornOperatorCommandPlaneResponse {
-            area: RebornOperatorArea::Diagnostics,
-            status: operator_diagnostics_surface_status(&diagnostics),
-            message: "operator diagnostics completed".to_string(),
-            operator_status,
-            logs: None,
-            service_lifecycle: None,
-            diagnostics,
-        })
+        let page = self
+            .query(
+                caller,
+                RebornViewQuery {
+                    view_id: OPERATOR_DIAGNOSTICS_VIEW.id.to_string(),
+                    params: serde_json::json!({}),
+                    cursor: None,
+                },
+            )
+            .await?;
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
     }
 
     async fn get_operator_status(
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let status = self.operator_status.status(caller).await?;
-        Ok(RebornOperatorCommandPlaneResponse {
-            area: RebornOperatorArea::Status,
-            status: RebornOperatorSurfaceStatus::Available,
-            message: "operator status is available".to_string(),
-            operator_status: Some(status),
-            logs: None,
-            service_lifecycle: None,
-            diagnostics: Vec::new(),
-        })
+        let page = self
+            .query(
+                caller,
+                RebornViewQuery {
+                    view_id: OPERATOR_STATUS_VIEW.id.to_string(),
+                    params: serde_json::json!({}),
+                    cursor: None,
+                },
+            )
+            .await?;
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
     }
 
     async fn run_operator_service_lifecycle(

@@ -55,17 +55,18 @@ use ironclaw_product_workflow::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_LOGS_VIEW, OperatorLogsService,
-    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
-    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
-    ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAddMemberRequest,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_STATUS_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
+    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
+    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
+    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
+    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornExtensionSurface,
+    RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
     RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
@@ -9902,6 +9903,59 @@ async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
     );
     assert_eq!(status_service.callers(), vec![diagnostics_caller.clone()]);
     assert_eq!(llm_config.snapshot_callers(), vec![diagnostics_caller]);
+}
+
+#[tokio::test]
+async fn operator_command_plane_reads_are_available_as_product_views() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services =
+        services_with_setup_llm_config(llm_config).with_operator_status_service(Arc::new(
+            StaticOperatorStatusService::new(RebornOperatorStatusResponse {
+                generated_at: Utc::now(),
+                overall: RebornOperatorStatusState::Ready,
+                checks: Vec::new(),
+            }),
+        ));
+
+    let diagnostics_page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: OPERATOR_DIAGNOSTICS_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("operator diagnostics view");
+    let diagnostics: RebornOperatorCommandPlaneResponse =
+        serde_json::from_value(diagnostics_page.payload).expect("diagnostics payload");
+    assert_eq!(diagnostics.area.as_str(), "diagnostics");
+    assert_eq!(diagnostics.status, RebornOperatorSurfaceStatus::Unavailable);
+    assert!(
+        diagnostics
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.reason_code == "operator_config_service_not_wired")
+    );
+
+    let status_page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: OPERATOR_STATUS_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("operator status view");
+    let status: RebornOperatorCommandPlaneResponse =
+        serde_json::from_value(status_page.payload).expect("status payload");
+    assert_eq!(status.area.as_str(), "status");
+    assert_eq!(status.status, RebornOperatorSurfaceStatus::Available);
+    assert!(status.operator_status.is_some());
 }
 
 #[tokio::test]
