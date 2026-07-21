@@ -643,43 +643,6 @@ where
             .await?;
         Ok(record)
     }
-
-    async fn cancel_superseded_setup_flows(
-        &self,
-        scope: &ironclaw_auth::AuthProductScope,
-        provider: &ironclaw_auth::AuthProviderId,
-    ) -> Result<Vec<AuthFlowId>, AuthProductError> {
-        // Setup flows live under the owner+surface+session flow root, keyed by
-        // flow id only — thread/mission/invocation are not part of the durable
-        // path (see `product_auth::durable::paths`). Listing that root therefore
-        // yields every prior setup flow for this owner+provider regardless of the
-        // per-request invocation that started it. Filter to non-terminal
-        // `SetupOnly` flows so an in-flight extension (`LifecycleActivation`) or
-        // turn-gate flow is never disturbed. Idempotent, records already sorted
-        // by flow id by the listing.
-        let mut superseded = Vec::new();
-        for (flow, _version) in self.flow_records_under_scope_root(scope).await? {
-            if is_terminal_status(flow.status)
-                || flow.provider != *provider
-                || !matches!(
-                    flow.continuation,
-                    ironclaw_auth::AuthContinuationRef::SetupOnly
-                )
-            {
-                continue;
-            }
-            match self.cancel_flow(&flow.scope, flow.id).await {
-                Ok(_) => superseded.push(flow.id),
-                // A concurrent claim/cancel/expiry that already moved the flow
-                // terminal is the desired end state, not a fault.
-                Err(AuthProductError::Canceled)
-                | Err(AuthProductError::FlowAlreadyTerminal)
-                | Err(AuthProductError::UnknownOrExpiredFlow) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(superseded)
-    }
 }
 
 #[async_trait]

@@ -81,6 +81,8 @@ The itemized changes since 0.29.1 follow.
 
 ### Fixed
 
+- *(reborn)* OAuth setup flows survive service restarts and replica hand-offs: the setup-lane PKCE verifier is stored durably per flow (secret store, flow-scoped TTL) instead of only process-locally, terminal callback outcomes discard it, and lifecycle cleanup drops verifiers for canceled flows eagerly.
+- *(reborn)* `ironclaw serve` rejects populated legacy `[slack]` setup fields at startup with a pointer to the WebUI extensions page instead of silently ignoring them (`[slack].enabled` alone stays tolerated).
 - *(reborn)* route Rig-backed model calls through provider streaming for WebUI v2 runs, cover delayed/broken/cancelled/transient mock LLM behavior in served E2E tests, and verify failed runs can retry after a transient checkpoint-state outage, including failures before the first checkpoint.
 - *(reborn)* activating an extension whose OAuth provider was never configured on the instance now fails immediately with the exact `ironclaw config set` commands and restart step, instead of parking an unresolvable auth gate ([#6335](https://github.com/nearai/ironclaw/issues/6335)).
 - *(reborn)* host-authored remediation text reaches the model intact again instead of degrading to "capability summary unavailable" ([#6335](https://github.com/nearai/ironclaw/issues/6335)).

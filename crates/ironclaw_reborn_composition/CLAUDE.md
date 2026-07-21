@@ -22,17 +22,19 @@
   handler must claim the scoped flow/state/provider through `AuthFlowManager`
   before exchanging provider material through `AuthProviderClient`, then
   complete the flow and emit typed continuations.
-- The WebUI-mounted OAuth setup routes keep raw PKCE verifiers in a bounded,
-  expiring process-local cache because `ironclaw_auth` durable records may
-  store hashes only. Do not treat those routes as multi-replica/restart-safe
-  until the durable per-flow verifier port lands. Follow-up (#6169 port): main
-  moved setup-path verifiers into the injected `SecretStore` under a per-flow
-  handle (`product-auth-setup-pkce-{flow_id}`, TTL = the flow's `expires_at`,
-  one-shot `lease_once`/`consume` read-back, mirroring the blocked-turn gate
-  driver `oauth_gate.rs`) with the write at the shared start seam before
-  `create_flow`; porting that model onto this branch's engine-based serve path
-  (and consuming `SecretCleanupReport::canceled_flows` to eagerly drop dead
-  verifiers) is an explicit remaining follow-up recorded in the PR body.
+- Setup-lane OAuth PKCE verifiers are durable (#6169 port):
+  `start_setup_oauth_flow` writes the raw verifier to the injected
+  `SecretStore` under `product-auth-setup-pkce-{flow_id}` (TTL = the flow's
+  `expires_at`) BEFORE `create_flow`; the callback read is one-shot
+  (`lease_once`/`consume`, setup handle first, blocked-turn gate store as
+  fallback — mirroring `oauth_gate.rs`); terminal callback outcomes discard
+  the durable copy, and `cleanup_credentials_for_lifecycle` eagerly drops
+  verifiers for `SecretCleanupReport::canceled_flows`. The serve routes'
+  bounded process-local verifier cache is a same-process fast path only —
+  never treat it as the source of truth; restart/replica safety is pinned by
+  `vendor_oauth_callback_completes_after_route_state_restart`. Early
+  defensive cache evictions (unknown flow, cross-vendor path) must NOT
+  discard the durable copy — the legitimate callback may still need it.
 - Manual-token setup routes should call
   `RebornProductAuthServices::request_manual_token_setup` for the typed
   challenge and `RebornProductAuthServices::submit_manual_token` with a

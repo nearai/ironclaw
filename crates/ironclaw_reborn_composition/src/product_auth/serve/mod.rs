@@ -343,6 +343,21 @@ impl ProductAuthRouteState {
     fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
         self.pkce_verifiers.remove(&flow_id);
     }
+
+    /// Terminal-outcome cleanup: drop the same-process cached verifier AND
+    /// the durable per-flow copy (best-effort). Early defensive cache
+    /// removals (unknown flow, cross-vendor path) must NOT use this — the
+    /// legitimate callback may still need the durable copy.
+    async fn forget_pkce_verifier_everywhere(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+    ) {
+        self.remove_pkce_verifier(flow_id);
+        self.product_auth
+            .discard_setup_pkce_verifier(scope, flow_id)
+            .await;
+    }
 }
 
 impl std::fmt::Debug for ProductAuthRouteState {
@@ -1978,6 +1993,129 @@ mod tests {
 
         assert_eq!(account.status, CredentialAccountStatus::Configured);
         assert_eq!(account.provider.as_str(), "vendorco");
+    }
+
+    /// Restart/replica regression for the durable setup-PKCE port: the
+    /// process-local verifier cache dies with the route state, so a callback
+    /// arriving after a restart (or on another replica) can only complete
+    /// through the per-flow verifier `start_setup_oauth_flow` wrote to the
+    /// injected secret store before creating the flow.
+    #[tokio::test]
+    async fn vendor_oauth_callback_completes_after_route_state_restart() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+        let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
+        let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+        let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+        let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+        let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
+        let engine = test_engine(
+            test_vendor_recipe(true, None),
+            Arc::new(PanickingDcrEgress),
+            Arc::new(FilesystemSecretStore::ephemeral()),
+        );
+        let product_auth = Arc::new(
+            RebornProductAuthServices::new(
+                flow_manager,
+                interaction_service,
+                credential_setup_service,
+                credential_account_service,
+                provider_client,
+                cleanup_service,
+                Arc::new(NoopDispatcher),
+            )
+            .with_auth_engine(engine),
+        );
+        let started_state = ProductAuthRouteState::new(
+            Arc::clone(&product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_test_installed_extension_lookup();
+        let app = product_auth_route_mount(started_state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let flow_invocation_id = InvocationId::new();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/vendorco-tools/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": "vendorco",
+                            "account_label": "work account",
+                            "scopes": ["items:read"],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": flow_invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        let authorization_url = json["authorization_url"]
+            .as_str()
+            .expect("authorization url");
+        let state_value = Url::parse(authorization_url)
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let uri = format!(
+            "/api/reborn/product-auth/oauth/vendorco/callback?state={encoded_state}&code=vendor-auth-code&scope=items:read"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        // Simulated restart: a FRESH route state over the same product-auth
+        // services. Its process-local PKCE cache is empty by construction.
+        let restarted_state = ProductAuthRouteState::new(
+            Arc::clone(&product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_test_installed_extension_lookup();
+
+        let response = oauth::vendor_oauth_callback_handler(
+            State(restarted_state),
+            Path("vendorco".to_string()),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect("callback must complete from the durable setup verifier");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut flow_resource = test_resource_scope();
+        flow_resource.invocation_id = flow_invocation_id;
+        let flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Callback);
+        let completed_flow = shared
+            .get_flow(&flow_scope, flow_id)
+            .await
+            .expect("completed flow lookup")
+            .expect("completed flow");
+        assert_eq!(completed_flow.status, AuthFlowStatus::Completed);
+        assert!(
+            completed_flow.credential_account_id.is_some(),
+            "callback should persist an account id"
+        );
     }
 
     #[tokio::test]

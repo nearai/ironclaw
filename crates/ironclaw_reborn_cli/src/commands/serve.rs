@@ -133,6 +133,9 @@ impl ServeCommand {
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
                 .map_err(anyhow::Error::from)?;
+        if let Some(file) = config_file.as_ref() {
+            reject_legacy_slack_config(file, &boot_config.home().config_file_path())?;
+        }
 
         // Tenant id is host-trusted (operator-owned config), never
         // browser-influenced. Falls back to the same default the CLI's
@@ -865,6 +868,46 @@ fn trigger_fire_access_policy(
     policy
 }
 
+/// The legacy `[slack]` setup fields are a retired configuration surface:
+/// Slack is configured by installing the Slack extension and completing
+/// workspace OAuth in the WebUI (`/extensions`). A populated setup field
+/// means the operator is following retired instructions — fail closed with
+/// the migration pointer instead of silently ignoring it. `[slack].enabled`
+/// is not rejected: the flag is unused, but existing installs may still
+/// carry it and must keep booting.
+fn reject_legacy_slack_config(
+    config_file: &ironclaw_reborn_config::RebornConfigFile,
+    config_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let Some(slack) = config_file.slack.as_ref() else {
+        return Ok(());
+    };
+    let offending = [
+        ("installation_id", slack.installation_id.is_some()),
+        ("team_id", slack.team_id.is_some()),
+        ("api_app_id", slack.api_app_id.is_some()),
+        ("slack_user_id", slack.slack_user_id.is_some()),
+        ("user_id", slack.user_id.is_some()),
+        (
+            "shared_subject_user_id",
+            slack.shared_subject_user_id.is_some(),
+        ),
+        ("channel_routes", !slack.channel_routes.is_empty()),
+        ("signing_secret_env", slack.signing_secret_env.is_some()),
+        ("bot_token_env", slack.bot_token_env.is_some()),
+    ];
+    if let Some((field, _)) = offending.iter().find(|(_, set)| *set) {
+        anyhow::bail!(
+            "`[slack].{field}` in {path} is a retired configuration surface: Slack is \
+             configured by installing the Slack extension and completing workspace OAuth \
+             in the WebUI (/extensions). Remove the `[slack]` section to continue.",
+            field = field,
+            path = config_path.display(),
+        );
+    }
+    Ok(())
+}
+
 fn resolve_webui_default_agent(
     identity_section: Option<&IdentitySection>,
     runtime_identity: &RebornRuntimeIdentity,
@@ -1320,6 +1363,54 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("reborn-cli"), "message: {message}");
         assert!(message.contains("local-user"), "message: {message}");
+    }
+
+    #[test]
+    fn serve_startup_rejects_loaded_config_with_legacy_slack_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+api_version = "ironclaw.runtime/v1"
+
+[slack]
+enabled = true
+slack_user_id = "U123"
+"#,
+        )
+        .expect("write config");
+        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+
+        let error = reject_legacy_slack_config(&config_file, &config_path)
+            .expect_err("serve startup must reject legacy Slack config fields");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("[slack].slack_user_id"),
+            "message: {message}"
+        );
+        assert!(
+            message.contains(&config_path.display().to_string()),
+            "message: {message}"
+        );
+        assert!(message.contains("/extensions"), "message: {message}");
+
+        // Boundary: `enabled` alone is not a setup field. It is unused, but
+        // existing installs may still carry it — a boot refusal over an
+        // inert flag would strand them.
+        std::fs::write(
+            &config_path,
+            "api_version = \"ironclaw.runtime/v1\"\n\n[slack]\nenabled = true\n",
+        )
+        .expect("write config");
+        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+        reject_legacy_slack_config(&config_file, &config_path)
+            .expect("an inert [slack].enabled must not block startup");
     }
 
     #[test]

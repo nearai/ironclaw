@@ -154,6 +154,10 @@ pub(crate) struct RebornOAuthStartFlowRequest {
     pub(crate) authorization_url: OAuthAuthorizationUrl,
     pub(crate) opaque_state_hash: OpaqueStateHash,
     pub(crate) pkce_verifier_hash: PkceVerifierHash,
+    /// Raw PKCE verifier for the durable per-flow write (one-shot, in-process
+    /// input only — `AuthFlowRecord` serializes the hash, never this value;
+    /// `SecretString`'s `Debug` stays redacted).
+    pub(crate) pkce_verifier: secrecy::SecretString,
     pub(crate) update_binding: Option<CredentialAccountUpdateBinding>,
     pub(crate) expires_at: ironclaw_auth::Timestamp,
 }
@@ -1037,11 +1041,13 @@ impl RebornProductAuthServices {
                 .await
                 .map_err(RebornCredentialLifecycleError::from)?;
         }
-        // #6169 follow-up: `report.canceled_flows` names the flows whose
-        // durable setup PKCE verifiers should be dropped eagerly. This branch
-        // still stores setup verifiers process-locally (see the serve-layer
-        // PKCE cache), so there is no durable secret to drop yet; the eager
-        // drop lands with the durable setup-PKCE port.
+        // `report.canceled_flows` names the flows whose durable setup PKCE
+        // verifiers are now dead — drop them eagerly rather than waiting for
+        // the per-flow expiry to lapse.
+        for canceled in &report.canceled_flows {
+            self.discard_setup_pkce_verifier(&canceled.scope, canceled.flow_id)
+                .await;
+        }
         Ok(report)
     }
 
@@ -1318,6 +1324,16 @@ impl RebornProductAuthServices {
         flow_id: AuthFlowId,
     ) -> Result<Option<SecretString>, RebornOAuthCallbackError> {
         let _ = provider;
+        // Setup lane first: `start_setup_oauth_flow` writes the verifier
+        // durably before the flow exists, so callbacks survive restarts and
+        // replica hand-offs without the serve-layer cache.
+        if let Some(verifier) = self
+            .consume_setup_pkce_verifier(scope, flow_id)
+            .await
+            .map_err(RebornOAuthCallbackError::from)?
+        {
+            return Ok(Some(verifier));
+        }
         let Some(driver) = &self.oauth_gate_driver else {
             return Ok(None);
         };
@@ -1335,21 +1351,27 @@ impl RebornProductAuthServices {
         &self,
         request: RebornOAuthStartFlowRequest,
     ) -> Result<AuthFlowRecord, AuthProductError> {
-        // A1 · Supersede-on-start (RFC 9700 §4.7.1). Before minting a new setup
-        // flow, cancel any prior non-terminal `SetupOnly` flow for the same
-        // owner+provider so a re-opened connect popup cannot leave two live
-        // authorization requests racing to write the same credential. This is
-        // the durable analogue of the gate path's reusable-flow supersede.
-        // Best-effort + idempotent; `create_flow` below keeps
-        // `CasExpectation::Absent`, so a genuinely concurrent create still races
-        // cleanly on the new flow id.
-        self.flow_manager
-            .cancel_superseded_setup_flows(&request.scope, &request.provider)
-            .await?;
-        self.flow_manager
+        // The durable PKCE write is keyed by flow id and must land BEFORE the
+        // flow record exists: a callback can never observe a flow whose
+        // verifier is unreadable after a restart or on another replica.
+        let flow_id = request.flow_id.unwrap_or_default();
+        self.store_setup_pkce_verifier(
+            &request.scope,
+            flow_id,
+            request.pkce_verifier,
+            request.expires_at,
+        )
+        .await?;
+        // A1 · Supersede-on-start (RFC 9700 §4.7.1) is `create_flow`'s own
+        // contract: the manager cancels any prior non-terminal setup-class
+        // flow for the same owner+provider inside the creation seam, so a
+        // re-opened connect popup cannot leave two live authorization
+        // requests racing to write the same credential.
+        let created = self
+            .flow_manager
             .create_flow(NewAuthFlow {
-                id: request.flow_id,
-                scope: request.scope,
+                id: Some(flow_id),
+                scope: request.scope.clone(),
                 kind: AuthFlowKind::IntegrationCredential,
                 provider: request.provider,
                 challenge: AuthChallenge::OAuthUrl {
@@ -1362,7 +1384,117 @@ impl RebornProductAuthServices {
                 pkce_verifier_hash: Some(request.pkce_verifier_hash),
                 expires_at: request.expires_at,
             })
+            .await;
+        match created {
+            Ok(flow) => Ok(flow),
+            Err(error) => {
+                self.discard_setup_pkce_verifier(&request.scope, flow_id)
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    fn setup_pkce_secret_handle(
+        flow_id: AuthFlowId,
+    ) -> Result<ironclaw_host_api::SecretHandle, AuthProductError> {
+        ironclaw_host_api::SecretHandle::new(format!("product-auth-setup-pkce-{flow_id}")).map_err(
+            |error| {
+                tracing::warn!(
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to build setup PKCE secret handle"
+                );
+                AuthProductError::BackendUnavailable
+            },
+        )
+    }
+
+    /// Durably store a setup flow's raw PKCE verifier under its per-flow
+    /// handle, bounded by the flow's own expiry. The write must precede
+    /// `create_flow` (see `start_setup_oauth_flow`).
+    async fn store_setup_pkce_verifier(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+        verifier: secrecy::SecretString,
+        expires_at: ironclaw_auth::Timestamp,
+    ) -> Result<(), AuthProductError> {
+        self.secret_store
+            .put(
+                scope.resource.clone(),
+                Self::setup_pkce_secret_handle(flow_id)?,
+                verifier,
+                Some(expires_at),
+            )
             .await
+            .map(|_| ())
+            .map_err(|error| {
+                tracing::warn!(
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to store setup PKCE verifier"
+                );
+                AuthProductError::BackendUnavailable
+            })
+    }
+
+    /// One-shot durable read of a setup flow's PKCE verifier
+    /// (`lease_once` + `consume`); `None` when no setup-lane verifier exists
+    /// for the flow.
+    async fn consume_setup_pkce_verifier(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<Option<SecretString>, AuthProductError> {
+        let handle = Self::setup_pkce_secret_handle(flow_id)?;
+        let lease = match self.secret_store.lease_once(&scope.resource, &handle).await {
+            Ok(lease) => lease,
+            Err(error) if error.is_unknown_secret() => return Ok(None),
+            Err(error) => {
+                tracing::warn!(
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to lease setup PKCE verifier"
+                );
+                return Err(AuthProductError::BackendUnavailable);
+            }
+        };
+        self.secret_store
+            .consume(&scope.resource, lease.id)
+            .await
+            .map(Some)
+            .map_err(|error| {
+                tracing::warn!(
+                    flow_id = %flow_id,
+                    error = %error,
+                    "failed to consume setup PKCE verifier"
+                );
+                AuthProductError::BackendUnavailable
+            })
+    }
+
+    /// Best-effort removal of a setup flow's durable PKCE verifier once the
+    /// flow reached a terminal outcome (or never came into existence).
+    pub(crate) async fn discard_setup_pkce_verifier(
+        &self,
+        scope: &AuthProductScope,
+        flow_id: AuthFlowId,
+    ) {
+        let Ok(handle) = Self::setup_pkce_secret_handle(flow_id) else {
+            return;
+        };
+        if self
+            .secret_store
+            .delete(&scope.resource, &handle)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                flow_id = %flow_id,
+                "failed to discard setup PKCE verifier"
+            );
+        }
     }
 
     pub async fn request_manual_token_setup(

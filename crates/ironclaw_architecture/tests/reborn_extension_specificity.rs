@@ -244,9 +244,34 @@ const PATH_TERM_COLLISIONS: &[(&str, &str, &str)] = &[
         "credential-prefix redaction (github_pat_)",
     ),
     (
-        "crates/ironclaw_turns/src/run_profile/host.rs",
+        "crates/ironclaw_turns/src/run_profile/host/validate.rs",
         "github",
-        "credential-prefix redaction (github_pat_)",
+        "credential-prefix redaction (github_pat_) — relocated here when \
+         run_profile/host.rs was decomposed (#6391)",
+    ),
+    (
+        "crates/ironclaw_turns/src/run_profile/host/validate.rs",
+        "google",
+        "credential-prefix redaction (Google/GCP key shapes) at the \
+         model-visible boundary — vendor-specific safety detection",
+    ),
+    (
+        "crates/ironclaw_loop_host/src/model_visible_scrub.rs",
+        "github",
+        "model-visible Diagnostic scrub knows GitHub token prefixes \
+         (ghp_/gho_/github_pat_) — the leak-scanner carve-out domain (#5965)",
+    ),
+    (
+        "crates/ironclaw_loop_host/src/model_visible_scrub.rs",
+        "google",
+        "model-visible Diagnostic scrub knows Google/GCP credential shapes — \
+         the leak-scanner carve-out domain (#5965)",
+    ),
+    (
+        "crates/ironclaw_loop_host/src/model_visible_scrub.rs",
+        "slack",
+        "model-visible Diagnostic scrub knows Slack token shapes (xox…) — \
+         the leak-scanner carve-out domain (#5965)",
     ),
     (
         "crates/ironclaw_turns/src/run_profile/prompt_text.rs",
@@ -707,6 +732,11 @@ const SANCTIONED_SCAN_EXEMPT_CRATES: &[&str] = &[
     "ironclaw_first_party_extensions",
     // The binary assembles the native factory registry (overview §4.0).
     "ironclaw",
+    // The post-Tier-B workspace root: a test-only host for the Reborn
+    // integration [[test]] suite (no lib/bin). Tests may name concrete
+    // products (module header), and its manifest's workspace `exclude`
+    // list names the WASM source dirs by path — assembly, not generic code.
+    "ironclaw_reborn_integration_tests",
     // One-time forward migrations name what they fold forward.
     // This crate's tests name every term on purpose.
     "ironclaw_architecture",

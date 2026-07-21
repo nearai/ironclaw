@@ -48,11 +48,14 @@ pub(super) async fn oauth_start_handler(
                     .map_err(ProductAuthRouteFailure::from)?,
                 opaque_state_hash,
                 pkce_verifier_hash,
+                pkce_verifier: pkce_verifier.clone(),
                 update_binding: None,
                 expires_at: request.expires_at,
             }),
     )
     .await?;
+    // Same-process fast path only; the durable per-flow copy written by
+    // `start_setup_oauth_flow` is the source of truth across restarts.
     state.store_pkce_verifier(flow.id, pkce_verifier, flow.expires_at)?;
     let authorization_url = compose_authorization_url(authorization_endpoint, flow.id, &scope)?;
 
@@ -169,11 +172,14 @@ pub(super) async fn extension_oauth_start_handler(
             authorization_url: prepared.authorization_url.clone(),
             opaque_state_hash: prepared.opaque_state_hash.clone(),
             pkce_verifier_hash: prepared.pkce_verifier_hash.clone(),
+            pkce_verifier: prepared.pkce_verifier.clone(),
             update_binding,
             expires_at: request.expires_at,
         },
     ))
     .await?;
+    // Same-process fast path only; the durable per-flow copy written by
+    // `start_setup_oauth_flow` is the source of truth across restarts.
     state.store_pkce_verifier(flow.id, prepared.pkce_verifier.clone(), flow.expires_at)?;
 
     let response = ProductOAuthStartResponse {
@@ -201,7 +207,9 @@ pub(super) async fn extension_oauth_start_handler(
                 .cancel_flow(&scope, response.flow_id),
         )
         .await?;
-        state.remove_pkce_verifier(response.flow_id);
+        state
+            .forget_pkce_verifier_everywhere(&scope, response.flow_id)
+            .await;
         return Err(error);
     }
     Ok(Json(response))
@@ -248,7 +256,7 @@ pub(super) async fn oauth_callback_handler(
 
     let response = match run_with_backend_timeout(state.product_auth.handle_oauth_callback(
         RebornOAuthCallbackRequest {
-            scope,
+            scope: scope.clone(),
             flow_id,
             opaque_state_hash: state_hash,
             outcome,
@@ -257,12 +265,12 @@ pub(super) async fn oauth_callback_handler(
     .await
     {
         Ok(response) => {
-            state.remove_pkce_verifier(flow_id);
+            state.forget_pkce_verifier_everywhere(&scope, flow_id).await;
             response
         }
         Err(error) => {
             if should_forget_pkce_verifier(error.body.code) {
-                state.remove_pkce_verifier(flow_id);
+                state.forget_pkce_verifier_everywhere(&scope, flow_id).await;
             }
             return Err(error);
         }
@@ -372,7 +380,9 @@ async fn vendor_oauth_callback_attempt(
             },
         ))
         .await;
-        state.remove_pkce_verifier(flow_id);
+        state
+            .forget_pkce_verifier_everywhere(callback_scope, flow_id)
+            .await;
         return oauth_callback_route_result_response(headers, response);
     }
 
@@ -417,7 +427,9 @@ async fn vendor_oauth_callback_attempt(
         match resolve_callback_scopes(callback_state.requested_scopes(), query.scopes.as_deref()) {
             Ok(CallbackScopeOutcome::Scopes(scopes)) => scopes,
             Ok(CallbackScopeOutcome::ProviderDenied) => {
-                state.remove_pkce_verifier(flow_id);
+                state
+                    .forget_pkce_verifier_everywhere(callback_scope, flow_id)
+                    .await;
                 let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
                     RebornOAuthCallbackRequest {
                         scope: callback_scope.clone(),
@@ -469,12 +481,16 @@ async fn vendor_oauth_callback_attempt(
     .await
     {
         Ok(response) => {
-            state.remove_pkce_verifier(flow_id);
+            state
+                .forget_pkce_verifier_everywhere(callback_scope, flow_id)
+                .await;
             response
         }
         Err(error) => {
             if should_forget_pkce_verifier(error.body.code) {
-                state.remove_pkce_verifier(flow_id);
+                state
+                    .forget_pkce_verifier_everywhere(callback_scope, flow_id)
+                    .await;
             }
             return Err(error);
         }

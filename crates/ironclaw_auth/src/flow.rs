@@ -337,27 +337,6 @@ pub trait AuthFlowManager: Send + Sync {
         flow_id: AuthFlowId,
         error: AuthErrorCode,
     ) -> Result<AuthFlowRecord, AuthProductError>;
-
-    /// Supersede-on-start (RFC 9700 §4.7.1). Cancel any prior non-terminal
-    /// `SetupOnly` flow for the same owner+provider before a fresh setup flow is
-    /// minted, so a re-opened "Connect" popup cannot leave two live
-    /// authorization requests racing to write the same credential.
-    ///
-    /// Owner granularity is tenant/user/agent/project + surface + session (setup
-    /// flows are thread-less), matching the durable flow-root layout. Idempotent
-    /// and best-effort: an already-terminal or concurrently-canceled prior flow
-    /// is skipped, never an error. Returns the ids that were superseded.
-    ///
-    /// The default is a no-op for narrow flow stores and test doubles that never
-    /// hold more than one concurrent setup flow; the durable store and the
-    /// in-memory fake override it.
-    async fn cancel_superseded_setup_flows(
-        &self,
-        _scope: &AuthProductScope,
-        _provider: &AuthProviderId,
-    ) -> Result<Vec<AuthFlowId>, AuthProductError> {
-        Ok(Vec::new())
-    }
 }
 
 /// Whether a continuation belongs to the setup surface — the class a new setup
