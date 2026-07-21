@@ -558,6 +558,94 @@ impl RebornServices {
             .map(|issue| issue.code.as_str().to_string())
     }
 
+    /// Mint the full product-safe pairing presentation through the composed
+    /// generic service — tests only. Mirrors `PairingIssueBody::from` in the
+    /// production `pairing/mint` route so caller-level tests can pin the code,
+    /// deep-link, and expiry inputs consumed by the QR/countdown UI.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn pairing_issue_for_test(
+        &self,
+        extension_id: &str,
+        user_id: &ironclaw_host_api::UserId,
+    ) -> Option<(String, Option<String>, chrono::DateTime<chrono::Utc>)> {
+        let service = self.channel_pairing.as_ref()?.get(extension_id)?;
+        service.issue_or_rotate(user_id).await.ok().map(|issue| {
+            (
+                issue.code.as_str().to_string(),
+                issue.deep_link,
+                issue.expires_at,
+            )
+        })
+    }
+
+    /// Consume a pairing code through the composed generic service — tests
+    /// only. Mirrors the production channel-ingress pairing interceptor and
+    /// dispatches the same provider-keyed auth continuation. Integration
+    /// groups supply their separately-built shared turn world so the
+    /// continuation can see the runs that group actually executes; production
+    /// composition uses one coordinator/store and needs no override.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn pairing_consume_for_test<F>(
+        &self,
+        extension_id: &str,
+        authenticated_installation_id: &str,
+        raw_code: &str,
+        actor: (&str, &str, Option<&str>, &str),
+        turn_world: (
+            Arc<dyn ironclaw_turns::TurnCoordinator>,
+            Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
+            ironclaw_host_api::TenantId,
+        ),
+    ) -> Result<Option<ironclaw_host_api::UserId>, String>
+    where
+        F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
+    {
+        let (actor_kind, external_actor_id, conversation_space_id, conversation_id) = actor;
+        let Some(service) = self
+            .channel_pairing
+            .as_ref()
+            .and_then(|registry| registry.get(extension_id))
+        else {
+            return Ok(None);
+        };
+        let installation_id =
+            ironclaw_product_adapters::AdapterInstallationId::new(authenticated_installation_id)
+                .map_err(|error| error.to_string())?;
+        let outcome = service
+            .consume(
+                &installation_id,
+                raw_code,
+                actor_kind,
+                external_actor_id,
+                conversation_space_id,
+                conversation_id,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+        let paired_user = match outcome {
+            crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::Paired {
+                user_id,
+            }
+            | crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyPairedSameUser {
+                user_id,
+            } => Some(user_id),
+            crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
+            | crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
+        };
+        if let Some(user_id) = paired_user.as_ref() {
+            let (turn_coordinator, turn_state, tenant_id) = turn_world;
+            let continuation = auth_continuation_dispatcher(
+                turn_coordinator,
+                Some(turn_state as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
+            );
+            service
+                .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(paired_user)
+    }
+
     /// The caller's pairing connection state through the composed generic
     /// pairing service — tests only. Mirrors the production `pairing/status`
     /// route handler and the channel-connection facade read.

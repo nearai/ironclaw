@@ -804,6 +804,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
                     "telegram_webhook_secret".to_string(),
                     TELEGRAM_WEBHOOK_SECRET.to_string(),
                 ),
+                ("bot_username".to_string(), "itest_delivery_bot".to_string()),
             ],
         )
         .await
@@ -831,10 +832,99 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
         "the bot token is a secret field: {status:?}"
     );
 
-    lifecycle
-        .submit_turn("activate telegram")
+    let (activation_run_id, _activation_gate_ref) = lifecycle
+        .submit_turn_until_auth_blocked("activate telegram")
         .await
-        .expect("telegram activate completes");
+        .expect("unpaired Telegram activation parks on its pairing requirement");
+    let activation_state = lifecycle
+        .wait_for_status(activation_run_id, ironclaw_turns::TurnStatus::BlockedAuth)
+        .await
+        .expect("Telegram activation remains blocked while the caller is unpaired");
+    assert!(
+        activation_state
+            .credential_requirements
+            .iter()
+            .any(|requirement| matches!(
+                (&requirement.setup, requirement.provider.as_str()),
+                (
+                    ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
+                    "telegram"
+                )
+            )),
+        "Telegram activation gate must preserve the manifest-declared pairing setup and provider: {:?}",
+        activation_state.credential_requirements
+    );
+    let paired_user = inbound
+        .binding
+        .subject_user_id
+        .clone()
+        .expect("binding subject user id");
+    assert_eq!(
+        activation_state.scope.explicit_owner_user_id(),
+        Some(&paired_user),
+        "pairing completion and lifecycle activation must share the explicit owner scope"
+    );
+    let installation_store = services
+        .extension_installation_store_for_test()
+        .expect("extension delivery profile carries the lifecycle store");
+    let installation_id = ironclaw_extensions::ExtensionInstallationId::new(TELEGRAM_INSTALLATION)
+        .expect("Telegram installation id");
+    let installation = installation_store
+        .get_installation(&installation_id)
+        .await
+        .expect("Telegram installation state reads")
+        .expect("Telegram remains installed while activation is blocked");
+    assert_eq!(
+        installation.activation_state(),
+        ironclaw_extensions::ExtensionActivationState::Installed,
+        "unpaired activation must not publish or enable Telegram"
+    );
+    assert!(
+        inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .all(|request| !request.url.ends_with("/setWebhook")),
+        "the activation hook must not run before pairing"
+    );
+
+    // The pairing surface remains usable while activation is parked. These
+    // are the exact product-safe inputs the WebGeneratedCode UI turns into
+    // the code, deep-link/QR, and expiry countdown.
+    let (pairing_code, pairing_deep_link, pairing_expires_at) = services
+        .pairing_issue_for_test("telegram", &paired_user)
+        .await
+        .expect("installed Telegram exposes its WebGeneratedCode pairing issue");
+    let expected_deep_link = format!("https://t.me/itest_delivery_bot?start={pairing_code}");
+    assert_eq!(
+        pairing_deep_link.as_deref(),
+        Some(expected_deep_link.as_str()),
+        "the manifest template and configured username must survive activation gating"
+    );
+    let now = Utc::now();
+    assert!(
+        pairing_expires_at > now && pairing_expires_at <= now + chrono::Duration::minutes(16),
+        "pairing expiry must remain a live countdown input: {pairing_expires_at}"
+    );
+
+    let paired = services
+        .pairing_consume_for_test(
+            "telegram",
+            TELEGRAM_INSTALLATION,
+            &pairing_code,
+            ("user", "9911", None, "8675309"),
+            (
+                lifecycle.turn_coordinator_for_test(),
+                lifecycle.turn_state_store_for_test(),
+                inbound.binding.tenant_id.clone(),
+            ),
+        )
+        .await
+        .expect("pairing consume dispatches its continuation");
+    assert_eq!(paired.as_ref(), Some(&paired_user));
+    lifecycle
+        .wait_for_status(activation_run_id, ironclaw_turns::TurnStatus::Completed)
+        .await
+        .expect("pairing continuation resumes the exact blocked activation");
     lifecycle
         .assert_tool_result_contains("\"activated\":true")
         .await
@@ -902,47 +992,6 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
             .extension_ingress_parts()
             .expect("composition built the generic ingress"),
     );
-
-    // Pair the sending actor first (§5.5): with telegram's account-setup
-    // descriptor declared, verified inbound actors resolve through the
-    // generic identity bindings and an unbound sender cannot open a turn.
-    // The pairing journey itself is proven end-to-end by
-    // `unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user`.
-    let paired_user = inbound
-        .binding
-        .subject_user_id
-        .clone()
-        .expect("binding subject user id");
-    let pairing_code = services
-        .pairing_mint_for_test("telegram", &paired_user)
-        .await
-        .expect("telegram pairing service composes from the declared descriptor");
-    let pair_status = ingress
-        .post(
-            TELEGRAM_ROUTE,
-            &json!({
-                "update_id": 500,
-                "message": {
-                    "message_id": 10,
-                    "date": 1709999999,
-                    "text": format!("/start {pairing_code}"),
-                    "from": {"id": 9911, "is_bot": false, "first_name": "Ada"},
-                    "chat": {"id": 8675309, "type": "private"}
-                }
-            })
-            .to_string(),
-            vec![(
-                "X-Telegram-Bot-Api-Secret-Token",
-                TELEGRAM_WEBHOOK_SECRET.to_string(),
-            )],
-        )
-        .await;
-    assert_eq!(
-        pair_status,
-        StatusCode::OK,
-        "pairing consume must be admitted"
-    );
-    ingress.drain().await;
 
     let body = json!({
         "update_id": 501,
@@ -1212,6 +1261,39 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         )
         .await
         .expect("telegram configures through the production port");
+
+    // Bootstrap one caller-scoped account connection through the same
+    // generic pairing service before activation. The sibling Telegram test
+    // drives the blocked-run continuation itself; this journey keeps its
+    // existing focus on the post-activation behavior of a second, unbound
+    // external actor.
+    let paired_user = inbound
+        .binding
+        .subject_user_id
+        .clone()
+        .expect("binding subject user id");
+    let bootstrap_code = services
+        .pairing_mint_for_test("telegram", &paired_user)
+        .await
+        .expect("installed Telegram exposes pairing before activation");
+    assert_eq!(
+        services
+            .pairing_consume_for_test(
+                "telegram",
+                TELEGRAM_INSTALLATION,
+                &bootstrap_code,
+                ("user", "activation-bootstrap", None, "activation-bootstrap"),
+                (
+                    lifecycle.turn_coordinator_for_test(),
+                    lifecycle.turn_state_store_for_test(),
+                    inbound.binding.tenant_id.clone(),
+                ),
+            )
+            .await
+            .expect("bootstrap pairing completes")
+            .as_ref(),
+        Some(&paired_user)
+    );
     lifecycle
         .submit_turn("activate telegram")
         .await
@@ -1309,22 +1391,10 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
 
     // 2. Web-side mint for the paired user (the production pairing service —
     //    the exact instance the pairing routes and connection facade hold).
-    let paired_user = inbound
-        .binding
-        .subject_user_id
-        .clone()
-        .expect("binding subject user id");
     let code = services
         .pairing_mint_for_test("telegram", &paired_user)
         .await
         .expect("telegram's descriptor composes a pairing service; the channel is active");
-    assert_eq!(
-        services
-            .pairing_connected_for_test("telegram", &paired_user)
-            .await,
-        Some(false),
-        "minting alone must not connect"
-    );
 
     // 3. The verified webhook consumes the deep-link payload: the
     //    pre-admission gate services it (no turn) and binds the sender.

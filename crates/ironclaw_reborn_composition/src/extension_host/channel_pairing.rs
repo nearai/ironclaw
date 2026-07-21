@@ -942,6 +942,20 @@ impl ChannelPairingService {
         &self,
         user_id: &UserId,
     ) -> Result<(), ChannelPairingError> {
+        self.dispatch_pairing_completion_with(
+            user_id,
+            self.tenant_id.clone(),
+            Arc::clone(&self.continuation),
+        )
+        .await
+    }
+
+    async fn dispatch_pairing_completion_with(
+        &self,
+        user_id: &UserId,
+        tenant_id: TenantId,
+        continuation: Arc<dyn RebornAuthContinuationDispatcher>,
+    ) -> Result<(), ChannelPairingError> {
         let provider = AuthProviderId::new(self.extension_id.as_str()).map_err(|error| {
             ChannelPairingError::ContinuationDispatch {
                 reason: error.to_string(),
@@ -951,7 +965,7 @@ impl ChannelPairingService {
             flow_id: AuthFlowId::new(),
             scope: AuthProductScope::new(
                 ResourceScope {
-                    tenant_id: self.tenant_id.clone(),
+                    tenant_id,
                     user_id: user_id.clone(),
                     agent_id: Some(self.agent_id.clone()),
                     project_id: self.project_id.clone(),
@@ -966,12 +980,27 @@ impl ChannelPairingService {
             credential_account_id: None,
             emitted_at: Utc::now(),
         };
-        self.continuation
+        continuation
             .dispatch_auth_continuation(event)
             .await
             .map_err(|error| ChannelPairingError::ContinuationDispatch {
                 reason: error.to_string(),
             })
+    }
+
+    /// Re-dispatch pairing completion through the caller's real turn world.
+    /// Integration groups execute runs in a shared turn store created after
+    /// this composed service, unlike production where both use one store.
+    /// Test-only: zero production bytes.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn dispatch_pairing_completion_with_for_test(
+        &self,
+        user_id: &UserId,
+        tenant_id: TenantId,
+        continuation: Arc<dyn RebornAuthContinuationDispatcher>,
+    ) -> Result<(), ChannelPairingError> {
+        self.dispatch_pairing_completion_with(user_id, tenant_id, continuation)
+            .await
     }
 }
 

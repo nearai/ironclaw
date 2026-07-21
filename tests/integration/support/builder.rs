@@ -882,6 +882,16 @@ impl RebornIntegrationHarness {
         Arc::clone(&self.coordinator)
     }
 
+    /// The group-shared turn-state store paired with
+    /// [`Self::turn_coordinator_for_test`]. Composition test seams that must
+    /// inspect or resume the caller's real runs use this pair instead of the
+    /// capability harness's disjoint bootstrap store.
+    pub(crate) fn turn_state_store_for_test(
+        &self,
+    ) -> Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>> {
+        Arc::clone(&self._shared.turn_store)
+    }
+
     /// Register a scripted model gateway for a scope OTHER than this
     /// harness thread's own (which is registered at build time): delivery
     /// proofs pre-resolve the vendor conversation's binding and register its
