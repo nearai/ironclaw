@@ -7,9 +7,9 @@
 //! vendor.
 
 use ironclaw_reborn_composition::{
-    ChannelConnectionRequirement, ExtensionAccountSetupDescriptor, ExtensionId,
-    RebornChannelConnectStrategy, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
-    VendorId,
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    ExtensionId, RebornChannelConnectStrategy, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, VendorId,
 };
 
 /// Every account-setup declaration the binary assembles.
@@ -42,6 +42,13 @@ fn telegram_account_setup_descriptor() -> ExtensionAccountSetupDescriptor {
             input_placeholder: String::new(),
             submit_label: "Open pairing".to_string(),
             error_message: "Telegram pairing failed. Get a fresh code and try again.".to_string(),
+        },
+        connection_notices: ChannelConnectionNoticePolicy {
+            connect_required: "👋 Pair your Telegram account in the Ironclaw web app, then message me here again.".to_string(),
+            paired: "✅ Telegram is paired. You can talk to Ironclaw right here.".to_string(),
+            already_paired_same_user: "✅ This Telegram account is already paired to you. You can talk to Ironclaw right here.".to_string(),
+            already_bound_to_other_user: "This Telegram account is already paired to another Ironclaw user.".to_string(),
+            expired_or_unknown: "That Telegram pairing code is invalid or expired. Get a fresh link or code from Ironclaw and try again.".to_string(),
         },
         activation_success_message: "Telegram is installed as an inbound entrypoint. If WebChat \
                                      shows a Telegram pairing panel, tell the user to pair via \
@@ -89,5 +96,20 @@ mod tests {
             .expect("telegram declares a deep-link template");
         assert!(template.contains("{code}"));
         assert!(template.contains("{bot_username}"));
+        for text in [
+            &descriptor.connection_notices.connect_required,
+            &descriptor.connection_notices.paired,
+            &descriptor.connection_notices.already_paired_same_user,
+            &descriptor.connection_notices.already_bound_to_other_user,
+            &descriptor.connection_notices.expired_or_unknown,
+        ] {
+            assert!(!text.trim().is_empty());
+        }
+        assert!(
+            descriptor
+                .connection_notices
+                .connect_required
+                .contains("Telegram")
+        );
     }
 }

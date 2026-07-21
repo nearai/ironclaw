@@ -35,6 +35,36 @@ pub trait AccountConnectionStatusSource: Send + Sync + std::fmt::Debug {
     async fn connected(&self, user_id: &UserId) -> Result<bool, AccountConnectionStatusError>;
 }
 
+/// Product-owned copy for a channel account's pairing lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelConnectionNoticePolicy {
+    pub connect_required: String,
+    pub paired: String,
+    pub already_paired_same_user: String,
+    pub already_bound_to_other_user: String,
+    pub expired_or_unknown: String,
+}
+
+impl ChannelConnectionNoticePolicy {
+    pub fn generic(display_name: &str) -> Self {
+        Self {
+            connect_required: format!(
+                "👋 To use {display_name}, connect it in the Ironclaw web app, then message me here again."
+            ),
+            paired: format!("✅ {display_name} is paired. You can talk to Ironclaw here."),
+            already_paired_same_user: format!(
+                "✅ This {display_name} account is already paired to you."
+            ),
+            already_bound_to_other_user: format!(
+                "This {display_name} account is already paired to another Ironclaw user."
+            ),
+            expired_or_unknown: format!(
+                "That {display_name} pairing code is invalid or expired. Get a fresh code from Ironclaw and try again."
+            ),
+        }
+    }
+}
+
 /// Immutable product metadata for an extension whose activation depends on a
 /// user-scoped external-account connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +72,7 @@ pub struct ExtensionAccountSetupDescriptor {
     pub extension_id: ExtensionId,
     pub auth_requirement: RuntimeCredentialAuthRequirement,
     pub connection_requirement: ChannelConnectionRequirement,
+    pub connection_notices: ChannelConnectionNoticePolicy,
     pub activation_success_message: String,
     /// `WebGeneratedCode` presentation: an optional deep-link template with
     /// `{code}` plus non-secret `[channel.config]` field-handle placeholders

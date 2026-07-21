@@ -119,7 +119,8 @@ pub use ironclaw_host_api::{
 pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
 pub use ironclaw_product_workflow::PreferenceTargetCodec;
 pub use ironclaw_product_workflow::{
-    ChannelConnectionRequirement, ExtensionAccountSetupDescriptor, RebornChannelConnectStrategy,
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    RebornChannelConnectStrategy,
 };
 pub use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,

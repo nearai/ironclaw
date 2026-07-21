@@ -740,6 +740,18 @@ fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExte
 fn telegram_account_setup_descriptor() -> ironclaw_product_workflow::ExtensionAccountSetupDescriptor
 {
     let extension_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
+    let connection_requirement = ironclaw_product_workflow::ChannelConnectionRequirement {
+        channel: "telegram".to_string(),
+        display_name: "Telegram".to_string(),
+        strategy: ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode,
+        instructions: "Pair your Telegram account from the pairing panel.".to_string(),
+        input_placeholder: String::new(),
+        submit_label: "Open pairing".to_string(),
+        error_message: "Telegram pairing failed. Get a fresh code and try again.".to_string(),
+    };
+    let connection_notices = ironclaw_product_workflow::ChannelConnectionNoticePolicy::generic(
+        &connection_requirement.display_name,
+    );
     ironclaw_product_workflow::ExtensionAccountSetupDescriptor {
         extension_id: extension_id.clone(),
         auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
@@ -748,15 +760,8 @@ fn telegram_account_setup_descriptor() -> ironclaw_product_workflow::ExtensionAc
             requester_extension: extension_id,
             provider_scopes: Vec::new(),
         },
-        connection_requirement: ironclaw_product_workflow::ChannelConnectionRequirement {
-            channel: "telegram".to_string(),
-            display_name: "Telegram".to_string(),
-            strategy: ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode,
-            instructions: "Pair your Telegram account from the pairing panel.".to_string(),
-            input_placeholder: String::new(),
-            submit_label: "Open pairing".to_string(),
-            error_message: "Telegram pairing failed. Get a fresh code and try again.".to_string(),
-        },
+        connection_requirement,
+        connection_notices,
         activation_success_message:
             "Telegram is installed as an inbound entrypoint; pair via the pairing panel."
                 .to_string(),

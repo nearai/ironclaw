@@ -115,8 +115,8 @@ pub use conversation_binding::{
 };
 pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 pub use extension_account_setup::{
-    AccountConnectionStatusError, AccountConnectionStatusSource, ExtensionAccountSetupDescriptor,
-    ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
+    AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
