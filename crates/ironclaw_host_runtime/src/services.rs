@@ -64,7 +64,7 @@ use ironclaw_turns::{
     runner::TurnRunTransitionPort,
 };
 use ironclaw_wasm::{
-    DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
+    DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError, WasmHostSecrets,
     WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
     WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
     WitToolRuntimeConfig,

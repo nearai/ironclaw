@@ -6,6 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::FutureExt;
+use ironclaw_host_api::SecretHandle;
 
 use super::wasm_execution::{ReservationGuard, execute_prepared_wasm, run_wasm_prepare_blocking};
 use super::{
@@ -15,9 +16,10 @@ use super::{
     PlannerError, PreparedWitTool, ResourceGovernor, ResourceReservationId, ResourceScope,
     RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult,
     RuntimeDispatchErrorKind, RuntimeExecutor, RuntimeKind, RuntimeLane, ScriptError,
-    ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, WasmError,
-    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
-    WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
+    ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SecretStore, SharedRuntimeHttpEgress,
+    WasmError, WasmHostSecrets, WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter,
+    WasmRuntimePolicyDiscarder, WitToolHost, WitToolRuntime, WitToolRuntimeConfig, plan_capability,
+    runtime_http_egress,
 };
 use crate::{
     FirstPartyCapabilityError,
@@ -25,6 +27,7 @@ use crate::{
         RuntimeLatencyFields, RuntimeLatencyMetrics, started_at as latency_started_at,
         trace_runtime_error, trace_runtime_ok,
     },
+    obligations::secret_owner_scope,
 };
 
 type FirstPartyLatencyFields = RuntimeLatencyFields;
@@ -818,6 +821,19 @@ pub(super) struct WasmRuntimeAdapter {
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
     credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
+    /// Backs the per-invocation `WasmHostSecrets` swap in `host_for_scope`. A
+    /// WASM guest's own `secret-exists`/`secret-get` host calls (e.g.
+    /// `tools-src/web-search`'s `near::agent::host::secret_exists`) are a
+    /// SEPARATE mechanism from `credential_provider` above (which only injects
+    /// credentials into the tool's own outbound HTTP headers per its manifest's
+    /// declared `runtime_credentials`) — without this, `self.host`'s base
+    /// `WasmHostSecrets` (`WitToolHost::deny_all()`'s `DenyWasmHostSecrets`)
+    /// answers every `secret-exists` call with `false` regardless of what's
+    /// actually in the secret store, so any WASM tool that pre-flights its own
+    /// credential before attempting a call (as ironclaw's own `web_search`
+    /// Brave tool does) can never proceed even when the secret is genuinely
+    /// provisioned and the credential-injection path above would have worked.
+    secret_store: Option<Arc<dyn SecretStore>>,
     prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
 }
 
@@ -828,6 +844,7 @@ impl WasmRuntimeAdapter {
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
+        secret_store: Option<Arc<dyn SecretStore>>,
     ) -> Self {
         Self {
             runtime,
@@ -835,6 +852,7 @@ impl WasmRuntimeAdapter {
             network_policy_store,
             runtime_http_egress,
             credential_provider,
+            secret_store,
             prepared: Mutex::new(HashMap::new()),
         }
     }
@@ -845,6 +863,7 @@ impl WasmRuntimeAdapter {
         network_policy_store: Arc<NetworkObligationPolicyStore>,
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
+        secret_store: Option<Arc<dyn SecretStore>>,
     ) -> Result<Self, WasmError> {
         Ok(Self::new(
             WitToolRuntime::new(config)?,
@@ -852,6 +871,7 @@ impl WasmRuntimeAdapter {
             network_policy_store,
             runtime_http_egress,
             credential_provider,
+            secret_store,
         ))
     }
 
@@ -866,25 +886,41 @@ impl WasmRuntimeAdapter {
 
     fn host_for_scope(&self, scope: &ResourceScope, capability_id: &CapabilityId) -> WitToolHost {
         let egress = runtime_http_egress(&self.runtime_http_egress);
-        let Some(policy) = self.network_policy_store.get(scope, capability_id) else {
-            return if egress.is_some() {
-                self.host.clone().with_http(Arc::new(DenyWasmHostHttp))
-            } else {
-                self.host.clone()
-            };
-        };
-        let Some(egress) = egress else {
-            return self.host.clone().with_http(Arc::new(DenyWasmHostHttp));
-        };
-        let mut adapter =
-            WasmRuntimeHttpAdapter::new(egress, scope.clone(), capability_id.clone(), policy)
+        let host = if let Some(policy) = self.network_policy_store.get(scope, capability_id) {
+            if let Some(egress) = egress {
+                let mut adapter = WasmRuntimeHttpAdapter::new(
+                    egress,
+                    scope.clone(),
+                    capability_id.clone(),
+                    policy,
+                )
                 .with_policy_discarder(Arc::new(NetworkPolicyDiscarder {
                     store: Arc::clone(&self.network_policy_store),
                 }));
-        if let Some(provider) = &self.credential_provider {
-            adapter = adapter.with_credential_provider(Arc::clone(provider));
+                if let Some(provider) = &self.credential_provider {
+                    adapter = adapter.with_credential_provider(Arc::clone(provider));
+                }
+                self.host.clone().with_http(Arc::new(adapter))
+            } else {
+                self.host.clone().with_http(Arc::new(DenyWasmHostHttp))
+            }
+        } else if egress.is_some() {
+            self.host.clone().with_http(Arc::new(DenyWasmHostHttp))
+        } else {
+            self.host.clone()
+        };
+        // Independent of the HTTP swap above: a WASM guest's own
+        // `secret-exists`/`secret-get` host calls (see the `secret_store`
+        // field doc) are scoped the same way secret-store reads/leases are
+        // everywhere else in this crate — this caller's own scope, falling
+        // back to the tenant-shared managed scope.
+        match &self.secret_store {
+            Some(store) => host.with_secrets(Arc::new(WasmRuntimeSecretsAdapter {
+                store: Arc::clone(store),
+                scope: scope.clone(),
+            })),
+            None => host,
         }
-        self.host.clone().with_http(Arc::new(adapter))
     }
 }
 
@@ -965,6 +1001,42 @@ struct NetworkPolicyDiscarder {
 impl WasmRuntimePolicyDiscarder for NetworkPolicyDiscarder {
     fn discard(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
         self.store.discard_for_capability(scope, capability_id);
+    }
+}
+
+/// Backs a WASM guest's own `secret-exists`/`secret-get` host calls (e.g.
+/// ironclaw's own `web_search` Brave tool: `near::agent::host::secret_exists`).
+/// Resolved the SAME way every other secret-store read in this crate is
+/// resolved (`secret_owner_scope`: this invocation's own scope, falling back
+/// to the tenant-shared managed scope) — a WASM tool that pre-flights its own
+/// credential before attempting a call must see the same answer the
+/// credential-injection path (`WasmRuntimeCredentialProvider`) and the
+/// dispatch-time `AuthRequired` pre-flight already agree on, or it can never
+/// proceed even when the secret is genuinely provisioned.
+///
+/// `WasmHostSecrets::exists` is a synchronous guest-facing call, but the
+/// secret store is async; this runs inside the WASM guest's own
+/// `tokio::task::spawn_blocking` execution (see `wasm_execution.rs`), which
+/// is a dedicated blocking-thread-pool context — blocking on
+/// `Handle::block_on` there is the standard, safe bridge (unlike on a normal
+/// async worker thread, it cannot starve other tasks).
+struct WasmRuntimeSecretsAdapter {
+    store: Arc<dyn SecretStore>,
+    scope: ResourceScope,
+}
+
+impl WasmHostSecrets for WasmRuntimeSecretsAdapter {
+    fn exists(&self, name: &str) -> bool {
+        let Ok(handle) = SecretHandle::new(name) else {
+            return false;
+        };
+        let store = Arc::clone(&self.store);
+        let scope = self.scope.clone();
+        tokio::runtime::Handle::current()
+            .block_on(async move { secret_owner_scope(store.as_ref(), &scope, &handle).await })
+            .ok()
+            .flatten()
+            .is_some()
     }
 }
 
