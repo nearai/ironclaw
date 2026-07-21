@@ -28,7 +28,12 @@ function AuthLoading() {
   );
 }
 
-function AuthSessionError({ onRetry }) {
+interface AuthSessionErrorProps {
+  onRetry: () => void;
+  onSignOut: () => void;
+}
+
+function AuthSessionError({ onRetry, onSignOut }: AuthSessionErrorProps) {
   const t = useT();
   return (
     <main className="grid min-h-[100dvh] place-items-center bg-[var(--v2-canvas)] px-6">
@@ -43,14 +48,23 @@ function AuthSessionError({ onRetry }) {
         <p className="mt-2 text-sm text-[var(--v2-text-muted)]">
           {t("app.sessionCheckFailedDescription")}
         </p>
-        <Button
-          type="button"
-          className="mt-5"
-          data-testid="session-check-retry"
-          onClick={onRetry}
-        >
-          {t("app.retrySession")}
-        </Button>
+        <div className="mt-5 flex flex-col justify-center gap-2 sm:flex-row">
+          <Button
+            type="button"
+            data-testid="session-check-retry"
+            onClick={onRetry}
+          >
+            {t("app.retrySession")}
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            data-testid="session-check-sign-out"
+            onClick={onSignOut}
+          >
+            {t("header.signOut")}
+          </Button>
+        </div>
       </div>
     </main>
   );
@@ -78,7 +92,12 @@ function LoginPage({ auth }) {
   }
 
   if (auth.sessionCheckFailed) {
-    return (<AuthSessionError onRetry={auth.retrySessionCheck} />);
+    return (
+      <AuthSessionError
+        onRetry={auth.retrySessionCheck}
+        onSignOut={auth.signOut}
+      />
+    );
   }
 
   if (auth.isAuthenticated) {
@@ -101,7 +120,12 @@ function RequireAuth({ auth, children }) {
   }
 
   if (auth.sessionCheckFailed) {
-    return (<AuthSessionError onRetry={auth.retrySessionCheck} />);
+    return (
+      <AuthSessionError
+        onRetry={auth.retrySessionCheck}
+        onSignOut={auth.signOut}
+      />
+    );
   }
 
   if (!auth.isAuthenticated) {
