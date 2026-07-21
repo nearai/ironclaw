@@ -1094,6 +1094,154 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
     runtime.shutdown().await.expect("runtime shuts down");
 }
 
+/// The public save path must cross the production generic invoke conduit and
+/// then return the authoritative redacted query state. A successful first
+/// replacement advances revision zero to one; the subsequent GET must observe
+/// the same revision without exposing any submitted secret material.
+#[tokio::test]
+async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision() {
+    let root = tempdir().expect("runtime storage tempdir");
+    let tenant_id = TenantId::new("webui-admin-save-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-admin-save-agent").expect("agent id");
+    let user_id = UserId::new("webui-admin-save-operator").expect("user id");
+    let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-admin-save-source".to_string(),
+                reply_target_binding_id: "webui-admin-save-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id,
+        user_id,
+        Some(agent_id),
+        None,
+    )
+    .with_operator_webui_config(true);
+    let operator_router = || {
+        webui_v2_router(WebUiV2State::new(
+            Arc::clone(&webui.api),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(caller.clone()))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: true,
+        }))
+    };
+    let submitted_secret = "xoxb-redaction-sentinel-never-return";
+
+    let (save_status, saved) = put_json(
+        operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.slack",
+        serde_json::json!({
+            "values": slack_admin_configuration_values(submitted_secret, "T-SAVED"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-save-1",
+        }),
+    )
+    .await;
+    let (read_status, read_body) = get_json(
+        operator_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+
+    assert_eq!(save_status, StatusCode::OK, "save response: {saved}");
+    assert_eq!(
+        saved["group_id"], "extension.slack",
+        "save response: {saved}"
+    );
+    assert_eq!(saved["revision"], 1, "save response: {saved}");
+    assert_eq!(read_status, StatusCode::OK, "read response: {read_body}");
+    let slack = read_body["groups"]
+        .as_array()
+        .and_then(|groups| {
+            groups
+                .iter()
+                .find(|group| group["group_id"] == "extension.slack")
+        })
+        .unwrap_or_else(|| panic!("Slack configuration missing after save: {read_body}"));
+    assert_eq!(slack["revision"], 1, "read response: {read_body}");
+    assert_eq!(slack["complete"], true, "read response: {read_body}");
+    assert!(
+        !saved.to_string().contains(submitted_secret)
+            && !read_body.to_string().contains(submitted_secret),
+        "secret material must be redacted from save and read responses"
+    );
+    let bot_token = slack["fields"]
+        .as_array()
+        .and_then(|fields| {
+            fields
+                .iter()
+                .find(|field| field["handle"] == "slack_bot_token")
+        })
+        .unwrap_or_else(|| panic!("Slack bot-token field missing: {read_body}"));
+    assert_eq!(bot_token["provided"], true, "read response: {read_body}");
+    assert!(
+        bot_token.get("value").is_none_or(Value::is_null),
+        "stored secret value must not be returned: {bot_token}"
+    );
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+}
+
+async fn put_json(router: Router, path: &str, body: Value) -> (StatusCode, Value) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "response body is not valid JSON ({error}): {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    };
+    (status, body)
+}
+
+fn slack_admin_configuration_values(bot_token: &str, team_id: &str) -> Value {
+    serde_json::json!([
+        {"handle": "slack_bot_token", "value": bot_token},
+        {"handle": "slack_signing_secret", "value": "signing-secret"},
+        {"handle": "slack_team_id", "value": team_id},
+        {"handle": "slack_api_app_id", "value": "A-APP"},
+        {"handle": "slack_installation_id", "value": "I-INSTALL"},
+        {"handle": "slack_bot_user_id", "value": "U-BOT"},
+        {"handle": "slack_oauth_client_id", "value": "oauth-client"},
+        {"handle": "slack_oauth_client_secret", "value": "oauth-secret"}
+    ])
+}
+
 async fn post_raw(router: Router, path: &str, body: Vec<u8>) -> (StatusCode, Value) {
     let response = router
         .oneshot(
