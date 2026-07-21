@@ -50,7 +50,7 @@ async fn exact_idempotency_replay_survives_later_revisions_without_preparing_aga
     let first_digest = request_digest(1);
 
     let first_reservation = match store
-        .reserve(&scope, &group_id, &first_key, first_digest)
+        .reserve(&scope, &group_id, &first_key, first_digest, 0)
         .await
         .expect("first reserve")
     {
@@ -77,7 +77,7 @@ async fn exact_idempotency_replay_survives_later_revisions_without_preparing_aga
     assert_eq!(second.revision, 2);
 
     let replayed = store
-        .reserve(&scope, &group_id, &first_key, first_digest)
+        .reserve(&scope, &group_id, &first_key, first_digest, 0)
         .await
         .expect("exact replay must succeed");
 
@@ -102,7 +102,7 @@ async fn idempotency_key_reuse_with_different_input_fails_closed() {
     let key = idempotency_key("save-1");
 
     let reservation = match store
-        .reserve(&scope, &group_id, &key, request_digest(1))
+        .reserve(&scope, &group_id, &key, request_digest(1), 0)
         .await
         .unwrap()
     {
@@ -119,7 +119,7 @@ async fn idempotency_key_reuse_with_different_input_fails_closed() {
         .unwrap();
 
     let error = store
-        .reserve(&scope, &group_id, &key, request_digest(2))
+        .reserve(&scope, &group_id, &key, request_digest(2), 1)
         .await
         .expect_err("same key with different digest must fail");
     assert_eq!(error, AdminConfigurationStoreError::IdempotencyConflict);
@@ -143,6 +143,7 @@ async fn concurrent_reservations_are_unique_and_serialized_by_backend_cas() {
                     &group_id,
                     &idempotency_key(&format!("save-{index}")),
                     request_digest(index),
+                    0,
                 )
                 .await
         }));
@@ -158,6 +159,110 @@ async fn concurrent_reservations_are_unique_and_serialized_by_backend_cas() {
     }
     revisions.sort_unstable();
     assert_eq!(revisions, (1_u64..=12).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn stale_concurrent_writer_cannot_overwrite_a_committed_revision() {
+    let store = in_memory_store();
+    let scope = sample_scope("tenant-a", "operator-a");
+    let group_id = group_id("vendor.example");
+    let first = match store
+        .reserve(
+            &scope,
+            &group_id,
+            &idempotency_key("writer-a"),
+            request_digest(1),
+            0,
+        )
+        .await
+        .unwrap()
+    {
+        AdminConfigurationReserveOutcome::Reserved(reservation) => reservation,
+        AdminConfigurationReserveOutcome::Replay(_) => panic!("new key cannot replay"),
+    };
+    let stale = match store
+        .reserve(
+            &scope,
+            &group_id,
+            &idempotency_key("writer-b"),
+            request_digest(2),
+            0,
+        )
+        .await
+        .unwrap()
+    {
+        AdminConfigurationReserveOutcome::Reserved(reservation) => reservation,
+        AdminConfigurationReserveOutcome::Replay(_) => panic!("new key cannot replay"),
+    };
+    store
+        .commit(
+            &scope,
+            &first,
+            values_for_revision(first.revision, "client-a"),
+        )
+        .await
+        .unwrap();
+
+    let error = store
+        .commit(
+            &scope,
+            &stale,
+            values_for_revision(stale.revision, "client-b"),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        AdminConfigurationStoreError::RevisionConflict {
+            expected: 0,
+            actual: 1,
+        }
+    );
+    assert_eq!(
+        store.get(&scope, &group_id).await.unwrap().unwrap().values,
+        values_for_revision(first.revision, "client-a"),
+    );
+}
+
+#[tokio::test]
+async fn repeated_large_saves_do_not_multiply_values_inside_the_group_record() {
+    let store = in_memory_store();
+    let scope = sample_scope("tenant-a", "operator-a");
+    let group_id = group_id("vendor.example");
+    let large_value = "x".repeat(16 * 1024);
+
+    for index in 0_u8..80 {
+        let reservation = reserve(
+            &store,
+            &scope,
+            &group_id,
+            &format!("large-save-{index}"),
+            index,
+        )
+        .await;
+        store
+            .commit(
+                &scope,
+                &reservation,
+                BTreeMap::from([(
+                    SecretHandle::new("client_id").unwrap(),
+                    AdminConfigurationValueRef::Inline(large_value.clone()),
+                )]),
+            )
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        store
+            .get(&scope, &group_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .revision,
+        80
+    );
 }
 
 #[tokio::test]
@@ -255,6 +360,11 @@ where
             group_id,
             &idempotency_key(key),
             request_digest(digest),
+            store
+                .get(scope, group_id)
+                .await
+                .expect("revision read")
+                .map_or(0, |record| record.revision),
         )
         .await
         .expect("reservation must succeed")
