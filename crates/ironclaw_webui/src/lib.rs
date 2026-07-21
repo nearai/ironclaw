@@ -70,19 +70,14 @@ pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
     OidcAuthenticatorError,
 };
-pub use session::{SessionAuthenticator, SessionRecord, SessionStore, SessionStoreError};
+pub use session::{SessionAuthenticator, SessionRecord, SessionStoreError};
 // Host-owned signed-token login surface (production-suitable, non-dev):
 // the standalone `serve` binary supplies env config and calls the
 // builder; the auth/session model lives here, not in the command crate.
 pub use signed_session_login::{
     CompositeAuthenticator, SignedSessionLoginConfig, SignedSessionLoginWiring,
-    build_signed_session_login, signed_session_store,
+    SignedTokenSessionStore, build_signed_session_login, signed_session_store,
 };
-// `InMemorySessionStore` is gated behind `test-support` so a
-// production binary cannot accidentally wire a process-local store as
-// a `SessionStore` impl. Local dev and tests opt in via the feature.
-#[cfg(any(test, feature = "test-support"))]
-pub use session::InMemorySessionStore;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;

@@ -436,7 +436,7 @@ pub use installations::{
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
-    ExtensionRemovalCleanupRequirement, InMemoryExtensionInstallationStore, InstallationOwner,
+    ExtensionRemovalCleanupRequirement, FilesystemExtensionInstallationStore, InstallationOwner,
     ManifestHash,
 };
 pub use lifecycle::{
@@ -735,6 +735,7 @@ fn capability_descriptors_from_manifest(
                 runtime_credentials: capability.runtime_credentials.clone(),
                 network_targets: capability.network_targets.clone(),
                 resource_profile: capability.resource_profile.clone(),
+                origin_gate_matrix: capability.origin_gate_matrix.clone(),
             })
         })
         .collect()

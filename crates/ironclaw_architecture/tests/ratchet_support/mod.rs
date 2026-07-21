@@ -1,5 +1,4 @@
-//! Shared scanner machinery for the §10 anti-slippage ratchets
-//! (`reborn_inmemory_store_ratchet.rs`, `reborn_localdev_typename_ratchet.rs`).
+//! Shared scanner machinery for the §10 anti-slippage ratchets.
 //!
 //! One hardened implementation of the walk/strip/match pipeline, so every
 //! ratchet gets the same guarantees: comment/string stripping, restricted

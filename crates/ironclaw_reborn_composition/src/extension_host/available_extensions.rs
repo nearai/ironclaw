@@ -1095,8 +1095,9 @@ mod tests {
         FilesystemOperation, InMemoryBackend,
     };
     use ironclaw_host_api::{
-        EffectKind, HostPortCatalog, PermissionMode, RuntimeCredentialAccountSetup,
-        RuntimeCredentialRequirementSource,
+        EffectKind, HostPortCatalog, OriginGatePolicy, PermissionMode,
+        RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
+        UNGATED_LOOP_RUN_CAPABILITIES,
     };
 
     use super::*;
@@ -1870,6 +1871,68 @@ input_schema_ref = "schemas/static-mcp/dynamic/run.input.v1.json"
 
         let upload_file = capabilities["google-drive.upload_file"];
         assert!(upload_file.effects.contains(&EffectKind::ExternalWrite));
+    }
+
+    /// §5.3 S3 (behavior-neutral): a bundled extension's manifest capabilities
+    /// carry a declared `origin_gate_matrix` that survives derivation into the
+    /// kernel `CapabilityDescriptor`. Every extension capability declares the
+    /// `network` effect, so all are GATED-today and thus
+    /// `loop_run = GatedUnlessGranted`; none is in the Ungated allowlist.
+    /// `Product`/`Automation` are deny-by-default. Driven through the real asset
+    /// (`include_str!` manifest.toml) so a TOML typo or dropped field fails here.
+    #[test]
+    fn bundled_extension_capabilities_carry_behavior_neutral_origin_gate_matrix() {
+        let catalog = AvailableExtensionCatalog::from_first_party_assets().unwrap();
+        for id in [
+            "github",
+            "gmail",
+            "google-calendar",
+            "google-docs",
+            "google-drive",
+            "google-sheets",
+            "google-slides",
+            "slack",
+            "notion",
+            "web-access",
+        ] {
+            let package_ref =
+                LifecyclePackageRef::new(LifecyclePackageKind::Extension, id).unwrap();
+            let package = catalog.resolve(&package_ref).unwrap();
+            // Assert on the derived kernel descriptors, proving the matrix
+            // survives `capability_descriptors_from_manifest`.
+            assert!(
+                !package.package.capabilities.is_empty(),
+                "{id} must declare capabilities"
+            );
+            for descriptor in &package.package.capabilities {
+                let matrix = descriptor.origin_gate_matrix.as_ref().unwrap_or_else(|| {
+                    panic!("{} must declare an origin_gate_matrix", descriptor.id)
+                });
+                assert_eq!(
+                    matrix.loop_run,
+                    OriginGatePolicy::GatedUnlessGranted,
+                    "{} is a credentialed/networked extension cap and must gate LoopRun",
+                    descriptor.id
+                );
+                assert_eq!(
+                    matrix.product,
+                    OriginGatePolicy::Forbidden,
+                    "{}",
+                    descriptor.id
+                );
+                assert_eq!(
+                    matrix.automation,
+                    OriginGatePolicy::Forbidden,
+                    "{}",
+                    descriptor.id
+                );
+                assert!(
+                    !UNGATED_LOOP_RUN_CAPABILITIES.contains(&descriptor.id.as_str()),
+                    "no extension capability may appear in the Ungated allowlist: {}",
+                    descriptor.id
+                );
+            }
+        }
     }
 
     #[test]

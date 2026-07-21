@@ -34,9 +34,9 @@ use ironclaw_first_party_extensions::coding::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
-    PermissionMode, ProcessBackendKind, RequestedTrustClass, ResourceCeiling, ResourceEstimate,
-    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
-    RuntimeHttpEgressResponse, TrustClass, VirtualPath,
+    OriginGateMatrix, PermissionMode, ProcessBackendKind, RequestedTrustClass, ResourceCeiling,
+    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    RuntimeHttpEgressError, RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
 use crate::{
@@ -477,6 +477,11 @@ fn first_party_capability_manifest(
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
         resource_profile,
+        // §5.3 S3 (behavior-neutral): the per-origin gate matrix mirrors today's
+        // effect gate for `LoopRun` (Ungated iff id is in the reviewed
+        // `UNGATED_LOOP_RUN_CAPABILITIES` allowlist), Product/Automation
+        // deny-by-default. Nothing reads this yet (fold is S4).
+        origin_gate_matrix: Some(OriginGateMatrix::builtin_loop_run_seed(id)),
     })
 }
 

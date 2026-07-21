@@ -19,6 +19,7 @@ fields = [
 ]
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.create_presentation"
 description = "Create a new presentation."
 effects = ["network", "use_secret", "external_write"]
@@ -35,6 +36,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.get_presentation"
 description = "Get presentation metadata."
 effects = ["network", "use_secret"]
@@ -51,6 +53,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.get_thumbnail"
 description = "Get a slide thumbnail URL."
 effects = ["network", "use_secret"]
@@ -67,6 +70,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.create_slide"
 description = "Create a new slide."
 effects = ["network", "use_secret", "external_write"]
@@ -83,6 +87,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.delete_object"
 description = "Delete a slide or page element."
 effects = ["network", "use_secret", "external_write"]
@@ -99,6 +104,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.insert_text"
 description = "Insert text into a shape."
 effects = ["network", "use_secret", "external_write"]
@@ -115,6 +121,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.delete_text"
 description = "Delete text from a shape."
 effects = ["network", "use_secret", "external_write"]
@@ -131,6 +138,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.replace_all_text"
 description = "Find and replace text."
 effects = ["network", "use_secret", "external_write"]
@@ -147,6 +155,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.create_shape"
 description = "Create a shape or text box."
 effects = ["network", "use_secret", "external_write"]
@@ -163,6 +172,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.insert_image"
 description = "Insert an image on a slide."
 effects = ["network", "use_secret", "external_write"]
@@ -179,6 +189,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.format_text"
 description = "Format text in a shape."
 effects = ["network", "use_secret", "external_write"]
@@ -195,6 +206,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.format_paragraph"
 description = "Set paragraph alignment."
 effects = ["network", "use_secret", "external_write"]
@@ -211,6 +223,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.replace_shapes_with_image"
 description = "Replace matching shapes with an image."
 effects = ["network", "use_secret", "external_write"]
@@ -227,6 +240,7 @@ audience = { scheme = "https", host = "slides.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.batch_update"
 description = "Execute raw Slides API batchUpdate requests."
 effects = ["network", "use_secret", "external_write"]

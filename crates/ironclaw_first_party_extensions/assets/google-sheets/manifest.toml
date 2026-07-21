@@ -19,6 +19,7 @@ fields = [
 ]
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.create_spreadsheet"
 description = "Create a new spreadsheet."
 effects = ["network", "use_secret", "external_write"]
@@ -35,6 +36,7 @@ audience = { scheme = "https", host = "sheets.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.get_spreadsheet"
 description = "Get spreadsheet metadata by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
 effects = ["network", "use_secret"]
@@ -51,6 +53,7 @@ audience = { scheme = "https", host = "sheets.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.read_values"
 description = "Read cell values from a range by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
 effects = ["network", "use_secret"]
@@ -67,6 +70,7 @@ audience = { scheme = "https", host = "sheets.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.batch_read_values"
 description = "Read values from multiple ranges."
 effects = ["network", "use_secret"]
@@ -83,6 +87,7 @@ audience = { scheme = "https", host = "sheets.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.write_values"
 description = "Write values to a range."
 effects = ["network", "use_secret", "external_write"]
@@ -99,6 +104,7 @@ audience = { scheme = "https", host = "sheets.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.append_values"
 description = "Append rows after existing data by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
 effects = ["network", "use_secret", "external_write"]
@@ -115,6 +121,7 @@ audience = { scheme = "https", host = "sheets.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.clear_values"
 description = "Clear values from a range."
 effects = ["network", "use_secret", "external_write"]
@@ -131,6 +138,7 @@ audience = { scheme = "https", host = "sheets.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.add_sheet"
 description = "Add a sheet tab."
 effects = ["network", "use_secret", "external_write"]
@@ -147,6 +155,7 @@ audience = { scheme = "https", host = "sheets.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.delete_sheet"
 description = "Delete a sheet tab."
 effects = ["network", "use_secret", "external_write"]
@@ -163,6 +172,7 @@ audience = { scheme = "https", host = "sheets.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.rename_sheet"
 description = "Rename a sheet tab."
 effects = ["network", "use_secret", "external_write"]
@@ -179,6 +189,7 @@ audience = { scheme = "https", host = "sheets.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.format_cells"
 description = "Format cells in a range."
 effects = ["network", "use_secret", "external_write"]

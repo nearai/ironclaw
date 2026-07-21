@@ -1040,7 +1040,7 @@ async fn create_provider_flow(
             expires_at: Utc::now() + Duration::minutes(5),
         })
         .await
-        .expect("auth flow")
+        .expect("auth flow") // safety: auth_tests.rs is included only by `#[cfg(test)] mod auth_tests`.
         .id
 }
 
@@ -1098,12 +1098,12 @@ fn authorized_provider_request(
                 authorization_code: OAuthAuthorizationCode::new(SecretString::from(
                     "raw-auth-code".to_string(),
                 ))
-                .unwrap(),
+                .unwrap(), // safety: auth_tests.rs is included only by `#[cfg(test)] mod auth_tests`.
                 authorization_code_hash: code_hash(),
                 pkce_verifier: PkceVerifierSecret::new(SecretString::from(
                     "raw-pkce-verifier".to_string(),
                 ))
-                .unwrap(),
+                .unwrap(), // safety: auth_tests.rs is included only by `#[cfg(test)] mod auth_tests`.
                 pkce_verifier_hash: pkce_hash(),
                 scopes,
             },

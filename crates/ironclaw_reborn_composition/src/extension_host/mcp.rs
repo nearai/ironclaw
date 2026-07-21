@@ -546,6 +546,7 @@ mod tests {
                             ],
                             network_targets: Vec::new(),
                             resource_profile: None,
+                            origin_gate_matrix: None,
                         }],
                     },
                     VirtualPath::new(format!("/system/extensions/{provider}")).unwrap(),

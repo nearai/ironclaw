@@ -19,6 +19,7 @@ fields = [
 ]
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.list_messages"
 description = "List Gmail messages."
 effects = ["network", "use_secret"]
@@ -35,6 +36,7 @@ audience = { scheme = "https", host = "gmail.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.get_message"
 description = "Get a Gmail message."
 effects = ["network", "use_secret"]
@@ -51,6 +53,7 @@ audience = { scheme = "https", host = "gmail.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.send_message"
 description = "Send a Gmail message as the user — a side effect inside the current job (the email comes from their account). Never use this to deliver your final answer to the user: the host delivers final replies on the conversation's outbound channel."
 effects = ["network", "use_secret", "external_write"]
@@ -67,6 +70,7 @@ audience = { scheme = "https", host = "gmail.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.create_draft"
 description = "Create a Gmail draft."
 effects = ["network", "use_secret", "external_write"]
@@ -83,6 +87,7 @@ audience = { scheme = "https", host = "gmail.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.reply_to_message"
 description = "Reply to a Gmail message as the user — a side effect inside the current job, not a way to deliver your final answer."
 effects = ["network", "use_secret", "external_write"]
@@ -99,6 +104,7 @@ audience = { scheme = "https", host = "gmail.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.trash_message"
 description = "Move a Gmail message to trash."
 effects = ["network", "use_secret", "external_write"]

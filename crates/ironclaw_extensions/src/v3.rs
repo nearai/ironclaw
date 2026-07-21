@@ -22,9 +22,9 @@ use std::collections::BTreeMap;
 use ironclaw_host_api::{
     ChannelDescriptor, ChannelDescriptorError, EffectKind, ExtensionId,
     HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostApiError, HostPortCatalog, NetworkScheme,
-    NetworkTargetPattern, PermissionMode, RecipeValidationError, RequestedTrustClass,
-    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
-    VendorAuthRecipe, VendorId,
+    NetworkTargetPattern, OriginGateMatrix, PermissionMode, RecipeValidationError,
+    RequestedTrustClass, RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource,
+    RuntimeCredentialTarget, VendorAuthRecipe, VendorId,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -123,6 +123,8 @@ enum RawRuntimeV3 {
 #[serde(deny_unknown_fields)]
 struct RawToolV3 {
     id: String,
+    #[serde(default)]
+    origin_gate_matrix: Option<OriginGateMatrix>,
     description: String,
     #[serde(default)]
     effects: Vec<EffectKind>,
@@ -180,6 +182,8 @@ struct RawAudienceV3 {
 #[serde(deny_unknown_fields)]
 struct RawMcpV3 {
     server: ironclaw_host_api::HttpsEndpoint,
+    #[serde(default)]
+    origin_gate_matrix: Option<OriginGateMatrix>,
     namespace: String,
     max_tools: u32,
     #[serde(default = "default_mcp_permission")]
@@ -387,6 +391,7 @@ pub(crate) fn parse_v3(
             required_host_ports: derived_host_ports(&mcp.effects, true),
             runtime_credentials: template_credentials.clone(),
             resource_profile: None,
+            origin_gate_matrix: mcp.origin_gate_matrix.clone(),
         };
         capabilities.push(
             CapabilityDeclV2::from_raw(raw_capability, &id, host_port_catalog).map_err(
@@ -436,6 +441,7 @@ pub(crate) fn parse_v3(
                     required_host_ports: derived_host_ports(&mcp.effects, true),
                     runtime_credentials: template_credentials.clone(),
                     resource_profile: None,
+                    origin_gate_matrix: mcp.origin_gate_matrix.clone(),
                 }
             }
             _ => RawCapabilityV2 {
@@ -467,6 +473,7 @@ pub(crate) fn parse_v3(
                     })
                     .collect::<Result<Vec<_>, _>>()?,
                 resource_profile: tool.resource_profile,
+                origin_gate_matrix: tool.origin_gate_matrix,
             },
         };
         capabilities.push(

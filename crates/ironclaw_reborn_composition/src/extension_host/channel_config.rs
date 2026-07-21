@@ -626,7 +626,7 @@ mod tests {
     };
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-        ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+        ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
         ManifestSource,
     };
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
@@ -754,8 +754,8 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
     async fn installed_store(
         manifest_toml: &str,
         id: &str,
-    ) -> Arc<InMemoryExtensionInstallationStore> {
-        let store = Arc::new(InMemoryExtensionInstallationStore::default());
+    ) -> Arc<FilesystemExtensionInstallationStore> {
+        let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             manifest_toml,
             ManifestSource::HostBundled,
@@ -794,7 +794,7 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 
     struct Fixture {
         service: ChannelConfigService,
-        installation_store: Arc<InMemoryExtensionInstallationStore>,
+        installation_store: Arc<FilesystemExtensionInstallationStore>,
         secrets: Arc<FilesystemSecretStore<ironclaw_filesystem::InMemoryBackend>>,
         scope: ResourceScope,
         reactivation: Arc<RecordingReactivation>,

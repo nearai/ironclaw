@@ -184,6 +184,7 @@ fn auth_execution_context(
         project_id: resource_scope.project_id.clone(),
         mission_id: resource_scope.mission_id.clone(),
         thread_id: resource_scope.thread_id.clone(),
+        origin: None,
         extension_id: ExtensionId::new("ironclaw_auth")
             .map_err(|_| AuthProductError::BackendUnavailable)?,
         runtime: RuntimeKind::System,

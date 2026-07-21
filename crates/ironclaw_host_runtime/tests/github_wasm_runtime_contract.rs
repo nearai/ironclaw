@@ -2313,6 +2313,7 @@ fn execution_context_with_dispatch_grant_for_scope(
 ) -> ExecutionContext {
     let context = ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

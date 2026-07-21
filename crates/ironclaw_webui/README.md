@@ -73,11 +73,10 @@ attach under their feature flag.
   and run `axum::serve` with graceful shutdown.
 - **Authenticators** (`WebuiAuthenticator` impls): `EnvBearerAuthenticator`
   (single operator token for the standalone binary / local dev),
-  `SessionAuthenticator` (bearer → `SessionStore` lookup, non-operator),
+  `SessionAuthenticator` (bearer → `SignedTokenSessionStore` lookup),
   `OidcAuthenticator` (JWKS + standard-claim verifier, non-operator).
-- **Sessions:** the `SessionStore` trait (durable impl is the host's;
-  `InMemorySessionStore` behind `test-support` for dev/tests) plus the
-  signed-token login surface (`build_signed_session_login`).
+- **Sessions:** `SignedTokenSessionStore` plus the signed-token login surface
+  (`build_signed_session_login`).
 - **OAuth login surface:** `webui_v2_auth_router` mounts `/auth/*` and mints
   sessions from Google / GitHub logins. Providers plug in through the
   `OAuthProvider` trait. Full security model (PKCE, CSRF state, canonical host,
@@ -100,8 +99,11 @@ attach under their feature flag.
 | Feature | Effect |
 |---|---|
 | `default` | Route surface + SPA + serve loop + auth. |
-| `dev-in-memory-session` | Compile in `InMemorySessionStore` + `EmailUserDirectory` for local dev / tests. |
-| `openai-compat-beta` | Stamp an `OpenAiCompatActorScope` onto verified callers for protected OpenAI-compatible mounts (forwards to composition + `ironclaw_reborn_openai_compat`). |
+| `test-support` | Compile in `EmailUserDirectory` for local dev / tests. |
+
+The generic extension administration surface and the `OpenAiCompatActorScope`
+stamping for protected OpenAI-compatible mounts are unconditional parts of
+`webui_v2_app`; both forward to composition.
 
 ## Build & test
 

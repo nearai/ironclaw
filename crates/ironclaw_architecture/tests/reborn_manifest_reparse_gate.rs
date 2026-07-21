@@ -47,6 +47,12 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
         "the canonical manifest-file loader/parser in the manifest-owning crate (load_package_entry)",
     ),
     (
+        "crates/ironclaw_extensions/src/installations.rs",
+        1,
+        ReparseCategory::Compiler,
+        "one-time CAS migration compiles pre-resolved filesystem rows before the store opens",
+    ),
+    (
         "crates/ironclaw_product_adapter_registry/src/lib.rs",
         1,
         ReparseCategory::Compiler,
@@ -54,7 +60,7 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        3,
+        4,
         ReparseCategory::BundledAsset,
         "bundled first-party package + filesystem-root catalog compile",
     ),

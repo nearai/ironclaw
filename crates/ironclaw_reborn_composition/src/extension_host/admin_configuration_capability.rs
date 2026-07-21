@@ -13,9 +13,9 @@ use ironclaw_extensions::{
     ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, PermissionMode,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, SecretHandle,
-    UserId,
+    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, OriginGateMatrix,
+    OriginGatePolicy, PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage,
+    RuntimeDispatchErrorKind, SecretHandle, UserId,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -77,6 +77,11 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
                 .set_wall_clock_ms(500)
                 .set_output_bytes(64 * 1024),
             hard_ceiling: None,
+        }),
+        origin_gate_matrix: Some(OriginGateMatrix {
+            loop_run: OriginGatePolicy::Forbidden,
+            product: OriginGatePolicy::ConsentSufficient,
+            automation: OriginGatePolicy::Forbidden,
         }),
     })
 }

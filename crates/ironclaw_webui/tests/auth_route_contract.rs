@@ -14,7 +14,7 @@
 //! 3. `Bearer` prefix parsing is case-insensitive — parity with v1's
 //!    `auth.rs` extractor (documented as a KEEP in
 //!    `docs/reborn/security-parity/01-auth.md`).
-//! 4. A session revoked directly through `SessionStore::revoke` stops
+//! 4. A session revoked directly through `SignedTokenSessionStore::revoke` stops
 //!    authenticating, isolated from the OAuth round-trip.
 //! 5. An expired session is rejected at the route layer (the
 //!    `session.rs` unit test only covers `authenticate()` in isolation).
@@ -30,6 +30,7 @@
 #![cfg(feature = "test-support")]
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
@@ -37,8 +38,8 @@ use chrono::Duration as ChronoDuration;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_webui::{
-    EnvBearerAuthenticator, InMemorySessionStore, OidcAuthenticator, OidcAuthenticatorConfig,
-    SessionAuthenticator, SessionStore,
+    EnvBearerAuthenticator, OidcAuthenticator, OidcAuthenticatorConfig, SessionAuthenticator,
+    SignedTokenSessionStore, signed_session_store,
 };
 use ironclaw_webui::{WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use secrecy::{ExposeSecret, SecretString};
@@ -97,8 +98,19 @@ fn env_bearer_app() -> (axum::Router, Arc<StubServices>) {
     compose(authenticator)
 }
 
-fn session_app() -> (axum::Router, Arc<StubServices>, Arc<InMemorySessionStore>) {
-    let store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+fn signed_store_for(tenant_id: &TenantId) -> Arc<SignedTokenSessionStore> {
+    signed_session_store(
+        &SecretString::from("operator-secret".to_string()),
+        tenant_id,
+    )
+}
+
+fn session_app() -> (
+    axum::Router,
+    Arc<StubServices>,
+    Arc<SignedTokenSessionStore>,
+) {
+    let store = signed_store_for(&TenantId::new(TENANT).expect("tenant"));
     let authenticator = Arc::new(SessionAuthenticator::new(store.clone()));
     let (app, services) = compose(authenticator);
     (app, services, store)
@@ -281,8 +293,11 @@ async fn revoked_session_bearer_rejected() {
     );
     assert_eq!(callers_len(&services), 1);
 
-    store.revoke(&bearer).await.expect("revoke");
-    assert_eq!(store.len(), 0, "revoke must drop the session");
+    store.revoke(&bearer).await;
+    assert!(
+        store.lookup(&bearer).await.expect("lookup").is_none(),
+        "revoke must denylist the session",
+    );
 
     let after_revoke = app
         .oneshot(create_thread_request(Some(&format!("Bearer {bearer}"))))
@@ -302,7 +317,7 @@ async fn revoked_session_bearer_rejected() {
 
 #[tokio::test]
 async fn expired_session_bearer_rejected_on_route() {
-    // The `session.rs` unit test checks expiry inside `authenticate()`;
+    // The signed-session unit tests check expiry inside `lookup()`;
     // this drives the full route to confirm an expired session yields a
     // 401 at the gateway, not just inside the authenticator.
     let (app, services, store) = session_app();
@@ -310,15 +325,15 @@ async fn expired_session_bearer_rejected_on_route() {
         .create_session(
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
-            // Already expired: `SessionRecord::is_expired` is `now >=
-            // expires_at`, so a negative lifetime is unambiguously past.
-            ChronoDuration::seconds(-1),
+            ChronoDuration::seconds(1),
             false,
         )
         .await
         .expect("create_session")
         .expose_secret()
         .to_string();
+
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
 
     let response = app
         .oneshot(create_thread_request(Some(&format!("Bearer {bearer}"))))
@@ -345,13 +360,13 @@ fn callers_len(services: &Arc<StubServices>) -> usize {
 #[tokio::test]
 async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment() {
     // v2 isolates tenants two ways: each deployment owns a separate
-    // `SessionStore`, and `caller.tenant_id` is always stamped from host
+    // signed session store, and `caller.tenant_id` is always stamped from host
     // config — never from the bearer. A session minted against tenant-a's
     // store must therefore fail on a tenant-b deployment backed by its own
     // (different) store: the lookup misses and the bearer is rejected. If
     // the tenant binding were ever loosened to trust a shared store, this
     // would catch it.
-    let tenant_a_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let tenant_a_store = signed_store_for(&TenantId::new(TENANT).expect("tenant"));
     let bearer = tenant_a_store
         .create_session(
             TenantId::new(TENANT).expect("tenant"),
@@ -365,7 +380,7 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
         .to_string();
 
     // A distinct deployment: tenant-b, its own empty store.
-    let tenant_b_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+    let tenant_b_store = signed_store_for(&TenantId::new("tenant-b").expect("tenant"));
     let authenticator = Arc::new(SessionAuthenticator::new(tenant_b_store.clone()));
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
@@ -407,10 +422,13 @@ async fn session_minted_for_one_tenant_does_not_authenticate_another_deployment(
             .is_empty(),
         "a cross-deployment bearer must never reach the facade",
     );
-    assert_eq!(
-        tenant_a_store.len(),
-        1,
-        "the tenant-a session stays intact in its own store",
+    assert!(
+        tenant_a_store
+            .lookup(&bearer)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "the tenant-a session stays valid in its own store",
     );
 }
 
@@ -539,20 +557,22 @@ async fn expired_query_token_rejected_on_sse_route() {
     // not just the `Authorization: Bearer` path. If the shim were ever
     // widened or the expiry check skipped on the query path, an expired
     // session could keep streaming over `?token=` while bearer-header
-    // tests still pass. Mint a session that is already expired and
+    // tests still pass. Mint a short-lived session, wait until it expires, and
     // present it through the query string.
     let (app, services, store) = session_app();
     let expired_bearer = store
         .create_session(
             TenantId::new(TENANT).expect("tenant"),
             UserId::new("session-user").expect("user"),
-            ChronoDuration::seconds(-1),
+            ChronoDuration::seconds(1),
             false,
         )
         .await
         .expect("create_session")
         .expose_secret()
         .to_string();
+
+    tokio::time::sleep(Duration::from_millis(2_100)).await;
 
     let response = app
         .oneshot(sse_events_request(Some(&expired_bearer)))

@@ -14,9 +14,9 @@ publish = false
 layer = "products"
 
 [features]
-# Compile in `InMemorySessionStore` + `EmailUserDirectory` as public crate
-# items. Off by default so production cannot accidentally wire process-local
-# identity/session stores whose contents vanish on restart.
+# Compile in `EmailUserDirectory` as a public crate item. Off by default so a
+# production deployment cannot accidentally trust provider identities without a
+# host-owned user join. Local dev and tests opt in.
 test-support = []
 
 [dependencies]
@@ -59,12 +59,8 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 url = "2"
 urlencoding = "2"
-# `uuid` is consumed by `InMemorySessionStore` (session.rs) and the
-# library's internal tests under `#[cfg(test)]`. The earlier attempt
-# to mark it `optional = true` broke `cargo test` because the
-# `cfg(test)` gate activated the `use uuid::Uuid;` import without
-# pulling in the optional crate.
-uuid = { version = "1", features = ["v4", "v5"] }
+# `uuid` is consumed by the signed session token store and library tests.
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["macros"] }

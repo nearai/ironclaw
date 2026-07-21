@@ -171,7 +171,15 @@ ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0", fe
 ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
-ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0" }
+ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features = ["test-support"] }
+# `ironclaw_webui` + `ironclaw_reborn_identity` sit on the int-tier coverage
+# lane (identity_resolution_smoke / webui_v2_router_smoke); they compile into
+# every int-tier build, behaviorally inert for suites that never call them.
+# W5-SLACK-PAIR: the Slack host surface grows the lcov denominator by ~42k
+# lines of slack_*.rs modules (previously invisible, not 0%) and unlocks
+# composing them in int-tier tests. All 17 of those modules are recompiled
+# into every int-tier test binary — a real, one-time build-time cost for the
+# lane, behaviorally inert for suites that never reference Slack types.
 ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0", features = ["test-support"] }
 ironclaw_loop_host = { path = "crates/ironclaw_loop_host", features = ["test-support"] }
 # Direct dev-dep: composition deliberately does NOT re-export the bare

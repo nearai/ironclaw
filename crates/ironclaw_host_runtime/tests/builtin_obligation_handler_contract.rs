@@ -1220,6 +1220,7 @@ fn execution_context(grants: CapabilitySet) -> ExecutionContext {
     };
     ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,

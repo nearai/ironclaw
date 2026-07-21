@@ -576,7 +576,7 @@ mod tests {
 
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-        ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+        ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
         ManifestSource,
     };
     use ironclaw_host_api::{InvocationId, ResourceScope};
@@ -663,8 +663,8 @@ app_id = "/app_id"
 
     const FIXTURE_INSTALLATION_ID: &str = "acmechat-install-1";
 
-    async fn installed_fixture_store() -> Arc<InMemoryExtensionInstallationStore> {
-        let store = Arc::new(InMemoryExtensionInstallationStore::default());
+    async fn installed_fixture_store() -> Arc<FilesystemExtensionInstallationStore> {
+        let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             CHANNEL_AUTH_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,
@@ -694,7 +694,7 @@ app_id = "/app_id"
         store
     }
 
-    async fn store_scoping_values(store: &InMemoryExtensionInstallationStore) {
+    async fn store_scoping_values(store: &FilesystemExtensionInstallationStore) {
         store
             .set_channel_config(
                 &ExtensionId::new("acmechat").expect("extension id"),
@@ -727,7 +727,7 @@ app_id = "/app_id"
     struct Fixture {
         config: ChannelIdentityBindingConfig,
         identity_store: Arc<RecordingIdentityStore>,
-        installation_store: Arc<InMemoryExtensionInstallationStore>,
+        installation_store: Arc<FilesystemExtensionInstallationStore>,
     }
 
     async fn fixture() -> Fixture {

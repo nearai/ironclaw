@@ -34,8 +34,7 @@ use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-    ExtensionInstallationStore as _, ExtensionManifestRecord, ExtensionManifestRef,
-    InMemoryExtensionInstallationStore, ManifestSource,
+    ExtensionInstallationStore as _, ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
 };
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
@@ -496,7 +495,8 @@ fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
 /// the REAL slack manifest is installed into a durable installation store
 /// and the ingress verification secret is saved under its manifest handle.
 async fn configured_channel_config() -> Arc<ChannelConfigService> {
-    let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+    let installation_store =
+        Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
     let record = ExtensionManifestRecord::from_toml(
         slack_manifest_from_bundled_inventory(),
         ManifestSource::HostBundled,

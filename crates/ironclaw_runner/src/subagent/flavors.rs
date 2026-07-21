@@ -441,7 +441,7 @@ mod tests {
         use crate::subagent::capability_surface::SubagentCapabilitySurfaceResolver;
         use crate::subagent::flavors::{SubagentFlavorId, lookup_flavor};
         use crate::subagent::goal_store::{
-            InMemoryBoundedSubagentGoalStore, SubagentGoal, SubagentGoalStore,
+            SubagentGoal, SubagentGoalStore, in_memory_backed_subagent_goal_store,
         };
         use crate::subagent::prompt_material::RebornSubagentPromptMaterialSource;
 
@@ -572,7 +572,7 @@ mod tests {
             ironclaw_loop_host::CapabilitySurfaceProfileFilter,
             Arc<HostSurfaceSpy>,
         ) {
-            let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+            let goal_store = Arc::new(in_memory_backed_subagent_goal_store());
             let mut context = test_run_context("caller-level-attenuation");
             context.resolved_run_profile.profile_id =
                 RunProfileId::new(SUBAGENT_PLANNED_PROFILE_ID).expect("subagent profile id");
@@ -790,7 +790,7 @@ mod tests {
 
         #[tokio::test]
         async fn non_subagent_surface_preserves_outer_profile_surface() {
-            let goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+            let goal_store = Arc::new(in_memory_backed_subagent_goal_store());
             let context = test_run_context("caller-level-non-subagent");
             let base_allow_set =
                 CapabilityAllowSet::allowlist([cap("builtin.read_file"), cap("builtin.http")]);

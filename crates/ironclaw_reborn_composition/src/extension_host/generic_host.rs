@@ -491,7 +491,7 @@ mod tests {
     use ironclaw_extension_host::test_support::{FakeEntrypoint, FakeToolAdapter};
     use ironclaw_extensions::{
         ExtensionInstallation, ExtensionInstallationId, ExtensionManifestRecord,
-        ExtensionManifestRef, ExtensionRegistry, InMemoryExtensionInstallationStore,
+        ExtensionManifestRef, ExtensionRegistry, FilesystemExtensionInstallationStore,
         MANIFEST_SCHEMA_VERSION, ManifestSource,
     };
     use ironclaw_filesystem::DiskFilesystem;
@@ -561,7 +561,7 @@ input_schema_ref = "schemas/echo.input.json"
     }
 
     async fn seed_installation(
-        store: &InMemoryExtensionInstallationStore,
+        store: &FilesystemExtensionInstallationStore,
         id: &str,
         state: ExtensionActivationState,
     ) {
@@ -611,7 +611,7 @@ input_schema_ref = "schemas/echo.input.json"
     /// while a durable `Disabled` installation never activates.
     #[tokio::test]
     async fn boot_hydration_activates_enabled_and_skips_disabled_installations() {
-        let store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
         seed_installation(&store, "h5-enabled", ExtensionActivationState::Enabled).await;
         seed_installation(&store, "h5-disabled", ExtensionActivationState::Disabled).await;
 

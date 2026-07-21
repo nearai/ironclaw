@@ -41,6 +41,7 @@ expires_in = "/expires_in"
 scope = { path = "/scope" }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.create_document"
 description = "Create a new Google Docs document."
 effects = ["network", "use_secret", "external_write"]
@@ -57,6 +58,7 @@ audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.get_document"
 description = "Get document metadata and structure."
 effects = ["network", "use_secret"]
@@ -73,6 +75,7 @@ audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.read_content"
 description = "Read the document body as plain text."
 effects = ["network", "use_secret"]
@@ -89,6 +92,7 @@ audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.insert_text"
 description = "Insert text at a document position."
 effects = ["network", "use_secret", "external_write"]
@@ -105,6 +109,7 @@ audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.delete_content"
 description = "Delete document content in a range."
 effects = ["network", "use_secret", "external_write"]
@@ -121,6 +126,7 @@ audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.replace_text"
 description = "Find and replace text."
 effects = ["network", "use_secret", "external_write"]
@@ -137,6 +143,7 @@ audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.format_text"
 description = "Format text in a range."
 effects = ["network", "use_secret", "external_write"]
@@ -153,6 +160,7 @@ audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.format_paragraph"
 description = "Set paragraph style."
 effects = ["network", "use_secret", "external_write"]
@@ -169,6 +177,7 @@ audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.insert_table"
 description = "Insert a table."
 effects = ["network", "use_secret", "external_write"]
@@ -185,6 +194,7 @@ audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.create_list"
 description = "Create a bulleted or numbered list."
 effects = ["network", "use_secret", "external_write"]
@@ -201,6 +211,7 @@ audience = { scheme = "https", host = "docs.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-docs.batch_update"
 description = "Execute raw Docs API batchUpdate requests."
 effects = ["network", "use_secret", "external_write"]

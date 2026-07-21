@@ -8,8 +8,8 @@ use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStore, ReplayPayloadStor
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
-    ExecutionContext, ExtensionId, GateRecord, GateRef, InvocationId, MountView, Principal,
-    ProviderToolName, Resolution, ResolutionBatch, ResourceEstimate, ResourceScope,
+    ExecutionContext, ExtensionId, GateRecord, GateRef, InvocationId, InvocationOrigin, MountView,
+    Principal, ProviderToolName, Resolution, ResolutionBatch, ResourceEstimate, ResourceScope,
     RuntimeDispatchErrorKind, RuntimeKind, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
@@ -2980,9 +2980,13 @@ fn invocation_context_from_visible(
     // Prompt-visible run identity: tool calls within the same turn-run share
     // it, so run-scoped policy state (e.g. coding read-before-edit) carries
     // across tool calls of one run but never leaks into a later run.
-    context.run_id = Some(ironclaw_host_api::RunId::from_uuid(
-        request.run_context.run_id.as_uuid(),
-    ));
+    let run_id = ironclaw_host_api::RunId::from_uuid(request.run_context.run_id.as_uuid());
+    context.run_id = Some(run_id);
+    // Authoritative origin (§5.2.1): a tool call inside an agent loop turn-run is
+    // model-initiated, so the loop ingress seals `LoopRun`. The kernel would also
+    // reconstruct this from `run_id`, but stamping `origin` explicitly makes the
+    // loop the authoritative source rather than relying on the compat fallback.
+    context.origin = Some(InvocationOrigin::LoopRun(run_id));
     context.authenticated_actor_user_id = request
         .run_context
         .actor()
@@ -8298,6 +8302,16 @@ mod tests {
             )),
             "invocation context must be stamped with the loop turn-run identity"
         );
+        // The loop ingress is the authoritative origin source: it seals
+        // `LoopRun` explicitly so the kernel does not have to fall back to
+        // reconstructing origin from `run_id`.
+        assert_eq!(
+            invocation_context.origin,
+            Some(InvocationOrigin::LoopRun(
+                ironclaw_host_api::RunId::from_uuid(run_context.run_id.as_uuid())
+            )),
+            "loop invocation context must stamp a LoopRun origin"
+        );
     }
 
     #[tokio::test]
@@ -9239,6 +9253,7 @@ mod tests {
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
                 resource_profile: None,
+                origin_gate_matrix: None,
             },
             access: VisibleCapabilityAccess::Available,
             estimated_resources: ResourceEstimate::default(),

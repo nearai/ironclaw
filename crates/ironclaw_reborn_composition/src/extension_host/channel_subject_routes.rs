@@ -235,8 +235,7 @@ impl ProductConversationSubjectRouteResolver for ChannelConfigSubjectRouteResolv
 mod tests {
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-        ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-        InMemoryExtensionInstallationStore, ManifestSource,
+        ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
     };
     use ironclaw_host_api::{InvocationId, ResourceScope};
     use ironclaw_product_workflow::ProductConversationRouteKey;
@@ -310,7 +309,7 @@ supports_threads = false
     }
 
     async fn fixture() -> Fixture {
-        let store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             ADMISSION_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,

@@ -6,6 +6,7 @@ description = "Notion MCP tools for creating, searching, fetching, querying, and
 trust = "third_party"
 
 [mcp]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 server = "https://mcp.notion.com/mcp"
 namespace = "notion"
 max_tools = 256

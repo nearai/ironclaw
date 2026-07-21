@@ -319,7 +319,7 @@ impl WebuiServeConfig {
     /// design — they implement the same protocol on two
     /// independent listeners. Merging the v1 router here would
     /// conflict with the v2-native router and, more importantly,
-    /// would route v1 traffic into the v2 host-owned `SessionStore`
+    /// would route v1 traffic into the v2 host-owned signed session store
     /// it never had access to. The v2 listener is exclusively for
     /// `webui_v2_auth_router` (and any future host-native public
     /// surface that follows the same boundary rules).

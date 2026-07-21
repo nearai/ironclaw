@@ -65,6 +65,7 @@ pub fn package_with_discovered_hosted_mcp_tools(
             runtime_credentials: capability.runtime_credentials.clone(),
             network_targets: capability.network_targets.clone(),
             resource_profile: capability.resource_profile.clone(),
+            origin_gate_matrix: capability.origin_gate_matrix.clone(),
         })
         .collect();
 
@@ -136,6 +137,7 @@ fn hosted_mcp_capability_template(
         required_host_ports: first.required_host_ports.clone(),
         runtime_credentials: first.runtime_credentials.clone(),
         resource_profile: first.resource_profile.clone(),
+        origin_gate_matrix: first.origin_gate_matrix.clone(),
     })
 }
 
@@ -144,6 +146,7 @@ struct HostedMcpCapabilityTemplate {
     required_host_ports: Vec<ironclaw_host_api::HostPortId>,
     runtime_credentials: Vec<ironclaw_host_api::RuntimeCredentialRequirement>,
     resource_profile: Option<ironclaw_host_api::ResourceProfile>,
+    origin_gate_matrix: Option<ironclaw_host_api::OriginGateMatrix>,
 }
 
 fn discovered_capability_manifest(
@@ -201,6 +204,7 @@ fn discovered_capability_manifest(
         // not a manifest-declared allowlist.
         network_targets: Vec::new(),
         resource_profile: template.resource_profile.clone(),
+        origin_gate_matrix: template.origin_gate_matrix.clone(),
     })
 }
 

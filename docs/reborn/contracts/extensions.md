@@ -54,6 +54,16 @@ V1 installed extensions live under:
 /system/extensions/<extension_id>/
 ```
 
+Generic installation state lives in filesystem record rows under:
+
+```text
+/system/extensions/.installations/manifests/<hashed_extension_id>.json
+/system/extensions/.installations/installations/<hashed_installation_id>.json
+```
+
+The store declares exact indexes for extension id, installation id, and
+activation state, and uses row CAS for activation/health updates and deletes.
+
 Recommended package layout:
 
 ```text

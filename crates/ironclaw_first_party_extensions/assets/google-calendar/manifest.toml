@@ -19,6 +19,7 @@ fields = [
 ]
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.list_calendars"
 description = "List Google calendars."
 effects = ["network", "use_secret"]
@@ -35,6 +36,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.list_events"
 description = "List Google Calendar events. Defaults to upcoming expanded events ordered by start time; use include_all_calendars or calendar_ids to cover more than the primary calendar."
 effects = ["network", "use_secret"]
@@ -51,6 +53,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.get_event"
 description = "Get a Google Calendar event."
 effects = ["network", "use_secret"]
@@ -67,6 +70,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.find_free_slots"
 description = "Find Google Calendar free slots."
 effects = ["network", "use_secret"]
@@ -83,6 +87,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.create_event"
 description = "Create a Google Calendar event."
 effects = ["network", "use_secret", "external_write"]
@@ -99,6 +104,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.update_event"
 description = "Update a Google Calendar event."
 effects = ["network", "use_secret", "external_write"]
@@ -115,6 +121,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.delete_event"
 description = "Delete a Google Calendar event."
 effects = ["network", "use_secret", "external_write"]
@@ -131,6 +138,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.add_attendees"
 description = "Add attendees to a Google Calendar event."
 effects = ["network", "use_secret", "external_write"]
@@ -147,6 +155,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.set_reminder"
 description = "Set Google Calendar event reminders."
 effects = ["network", "use_secret", "external_write"]

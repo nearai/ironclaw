@@ -3365,6 +3365,7 @@ dependencies = [
 name = "ironclaw_architecture"
 version = "0.1.0"
 dependencies = [
+ "ironclaw_host_api",
  "serde_json",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
@@ -4041,6 +4042,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "ironclaw_extensions",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
  "serde",
@@ -4505,6 +4507,7 @@ dependencies = [
  "ironclaw_reborn_event_store",
  "ironclaw_resources",
  "ironclaw_run_state",
+ "ironclaw_runner",
  "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_skills",

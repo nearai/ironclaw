@@ -6,6 +6,7 @@ description = "NEAR AI MCP tools for web search and hosted agent capabilities."
 trust = "first_party_requested"
 
 [mcp]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 server = "https://private.near.ai/mcp"
 namespace = "nearai"
 max_tools = 64
@@ -25,6 +26,7 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 # tools/list discovery replaces the static set with the server's live catalog.
 # Credentials/effects inherit the [mcp] connection template.
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "nearai.web_search"
 description = "Search through the NEAR AI MCP server."
 default_permission = "ask"

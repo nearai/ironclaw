@@ -11,10 +11,11 @@ use ironclaw_filesystem::{
 use ironclaw_host_api::{
     ActivityId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId,
     CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, ExecutionContext, ExtensionId,
-    FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId, MountView, NetworkPolicy,
-    Outcome, OutcomeRefs, Principal, ProcessRef, ProcessWaypoint, Resolution, ResourceEstimate,
-    ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, ResumeToken, RuntimeKind,
-    SafeSummary, ScopedPath, Suspension, TerminateHint, ToolVerdict, TrustClass,
+    FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId, InvocationOrigin,
+    MountView, NetworkPolicy, Outcome, OutcomeRefs, Principal, ProcessRef, ProcessWaypoint,
+    ProductKind, Resolution, ResourceEstimate, ResourceScope, ResultPreviewMeta, ResultProgress,
+    ResultRef, ResumeToken, RuntimeKind, SafeSummary, ScopedPath, Suspension, TerminateHint,
+    ToolVerdict, TrustClass,
 };
 use ironclaw_host_runtime::{
     HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
@@ -157,6 +158,9 @@ fn product_execution_context(
         mission_id: None,
         thread_id: None,
         run_id: None,
+        origin: Some(InvocationOrigin::Product(
+            ProductKind::new("webui").map_err(RebornServicesError::internal_from)?,
+        )),
         extension_id,
         // Both are provisional input to the kernel. Resolve/authorize derives
         // the real lane and effective trust from the capability descriptor.
@@ -520,6 +524,7 @@ mod tests {
             runtime_credentials,
             network_targets,
             resource_profile: None,
+            origin_gate_matrix: None,
         }
     }
 }

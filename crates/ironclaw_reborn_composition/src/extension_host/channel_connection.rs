@@ -916,8 +916,7 @@ mod tests {
     async fn discovered_extension_disconnect_drops_the_callers_dm_target() {
         use ironclaw_extensions::{
             ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
-            ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
-            ManifestSource,
+            ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
         };
         use ironclaw_filesystem::InMemoryBackend;
 
@@ -991,7 +990,8 @@ account_id = "/authed_user/id"
 team_id = "/team/id"
 "#;
 
-        let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+        let installation_store =
+            Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
         let record = ExtensionManifestRecord::from_toml(
             DISCOVERED_FIXTURE_MANIFEST,
             ManifestSource::HostBundled,

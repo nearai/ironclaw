@@ -19,6 +19,7 @@ fields = [
 ]
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.list_files"
 description = "Search or list files and folders, including Google Sheets/spreadsheets by name or title."
 effects = ["network", "use_secret"]
@@ -35,6 +36,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.get_file"
 description = "Get file metadata."
 effects = ["network", "use_secret"]
@@ -51,6 +53,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.download_file"
 description = "Download a file's content as text — including binary documents (PDF, PPTX, DOCX, XLSX), which are converted to extracted text automatically — or export a Google Workspace file. No shell or separate downloader needed."
 effects = ["network", "use_secret"]
@@ -67,6 +70,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.upload_file"
 description = "Upload a new text file."
 effects = ["network", "use_secret", "external_write"]
@@ -83,6 +87,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.update_file"
 description = "Update file metadata or move/star a file."
 effects = ["network", "use_secret", "external_write"]
@@ -99,6 +104,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.create_folder"
 description = "Create a folder."
 effects = ["network", "use_secret", "external_write"]
@@ -115,6 +121,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.delete_file"
 description = "Permanently delete a file or folder."
 effects = ["network", "use_secret", "external_write"]
@@ -131,6 +138,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.trash_file"
 description = "Move a file or folder to trash."
 effects = ["network", "use_secret", "external_write"]
@@ -147,6 +155,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.share_file"
 description = "Share a file or folder with someone."
 effects = ["network", "use_secret", "external_write"]
@@ -163,6 +172,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.list_permissions"
 description = "List file permissions."
 effects = ["network", "use_secret"]
@@ -179,6 +189,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.remove_permission"
 description = "Revoke a file permission."
 effects = ["network", "use_secret", "external_write"]
@@ -195,6 +206,7 @@ audience = { scheme = "https", host = "www.googleapis.com" }
 injection = { type = "header", name = "authorization", prefix = "Bearer " }
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-drive.list_shared_drives"
 description = "List shared drives."
 effects = ["network", "use_secret"]

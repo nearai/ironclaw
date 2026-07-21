@@ -7,8 +7,8 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityDisplayOutputPreview, CapabilityId, CapabilityProfileSchemaRef, CredentialStageError,
-    EffectKind, HostApiError, PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    EffectKind, HostApiError, OriginGateMatrix, PermissionMode, ResourceEstimate, ResourceProfile,
+    ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -123,6 +123,11 @@ fn lifecycle_manifest(
                 .set_output_bytes(16 * 1024),
             hard_ceiling: None,
         }),
+        // §5.3 S3 (behavior-neutral): mirror today's effect gate for `LoopRun`
+        // (Ungated iff id is in the reviewed `UNGATED_LOOP_RUN_CAPABILITIES`
+        // allowlist — only `extension_search` qualifies), Product/Automation
+        // deny-by-default. Nothing reads this yet (fold is S4).
+        origin_gate_matrix: Some(OriginGateMatrix::builtin_loop_run_seed(id)),
     })
 }
 
@@ -409,7 +414,8 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
         ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
-        PermissionMode, Principal, ResourceScope, RuntimeKind, SecretHandle, TrustClass, UserId,
+        OriginGatePolicy, PermissionMode, Principal, ResourceScope, RuntimeKind, SecretHandle,
+        TrustClass, UNGATED_LOOP_RUN_CAPABILITIES, UserId,
     };
     use ironclaw_host_runtime::{
         CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeFailureKind, SurfaceKind,
@@ -460,6 +466,54 @@ mod tests {
                 visible_capability_ids: Vec::new(),
                 connection_required: Some(requirement),
             }),
+        }
+    }
+
+    /// §5.3 S3 (behavior-neutral): the four extension-lifecycle capabilities
+    /// declare an `origin_gate_matrix`. `extension_search` is read-only and thus
+    /// Ungated for LoopRun (it is in the reviewed allowlist); install/activate/
+    /// remove carry write/network effects and gate. Product/Automation are
+    /// deny-by-default.
+    #[test]
+    fn extension_lifecycle_capabilities_declare_behavior_neutral_origin_gate_matrix() {
+        let manifests = manifests().expect("lifecycle manifests build");
+        for manifest in &manifests {
+            let matrix = manifest
+                .origin_gate_matrix
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", manifest.id));
+            assert_eq!(
+                matrix.product,
+                OriginGatePolicy::Forbidden,
+                "{}",
+                manifest.id
+            );
+            assert_eq!(
+                matrix.automation,
+                OriginGatePolicy::Forbidden,
+                "{}",
+                manifest.id
+            );
+            let expected = if manifest.id.as_str() == EXTENSION_SEARCH_CAPABILITY_ID {
+                OriginGatePolicy::Ungated
+            } else {
+                OriginGatePolicy::GatedUnlessGranted
+            };
+            assert_eq!(matrix.loop_run, expected, "{}", manifest.id);
+        }
+        assert!(
+            UNGATED_LOOP_RUN_CAPABILITIES.contains(&EXTENSION_SEARCH_CAPABILITY_ID),
+            "extension_search must be in the Ungated allowlist"
+        );
+        for gated in [
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            EXTENSION_REMOVE_CAPABILITY_ID,
+        ] {
+            assert!(
+                !UNGATED_LOOP_RUN_CAPABILITIES.contains(&gated),
+                "{gated} must not be in the Ungated allowlist"
+            );
         }
     }
 
