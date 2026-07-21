@@ -925,11 +925,7 @@ pub(crate) struct RebornRuntimeSubstrate {
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
-    /// Admin per-user secret provisioner (target-user-scoped secret store over
-    /// the shared root + crypto). `None` when no filesystem secret store was
-    /// built. Read only by the WebUI v2 admin surface.
-    pub(crate) admin_secret_provisioner:
-        Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>>,
+    pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
     /// Raw libSQL substrate handle backing `reborn-local-dev.db`. Carried ONLY
     /// for the one-time legacy WebUI `user_identities` fold (a substrate-level
     /// read that belongs in this host layer, not the identity crate); the
@@ -1056,6 +1052,91 @@ impl<'a> RebornRuntimeStoreGraph<'a> {
             Self::Production(production_runtime) => production_runtime.turn_run_snapshot_source(),
         }
     }
+
+    pub(crate) fn reborn_user_directory(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        actor_user_id: UserId,
+        agent_id: ironclaw_host_api::AgentId,
+        project_id: Option<ironclaw_host_api::ProjectId>,
+    ) -> Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> {
+        match self {
+            Self::Local(local_runtime) => filesystem_reborn_identity_store(
+                Arc::clone(&local_runtime.scoped_filesystem),
+                tenant_id,
+                actor_user_id,
+                agent_id,
+                project_id,
+            ),
+            Self::Production(production_runtime) => production_runtime.reborn_user_directory(
+                tenant_id,
+                actor_user_id,
+                agent_id,
+                project_id,
+            ),
+        }
+    }
+
+    pub(crate) fn reborn_identity_resolver(
+        &self,
+        tenant_id: ironclaw_host_api::TenantId,
+        actor_user_id: UserId,
+        agent_id: ironclaw_host_api::AgentId,
+        project_id: Option<ironclaw_host_api::ProjectId>,
+    ) -> Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver> {
+        match self {
+            Self::Local(local_runtime) => filesystem_reborn_identity_store(
+                Arc::clone(&local_runtime.scoped_filesystem),
+                tenant_id,
+                actor_user_id,
+                agent_id,
+                project_id,
+            ),
+            Self::Production(production_runtime) => production_runtime.reborn_identity_resolver(
+                tenant_id,
+                actor_user_id,
+                agent_id,
+                project_id,
+            ),
+        }
+    }
+
+    pub(crate) fn legacy_webui_identity_substrate_db(&self) -> Option<&Arc<libsql::Database>> {
+        match self {
+            Self::Local(local_runtime) => local_runtime.identity_substrate_db.as_ref(),
+            Self::Production(_) => None,
+        }
+    }
+
+    pub(crate) fn admin_secret_provisioner(
+        &self,
+    ) -> Arc<dyn crate::admin_secrets::AdminSecretProvisioner> {
+        match self {
+            Self::Local(local_runtime) => Arc::clone(&local_runtime.admin_secret_provisioner),
+            Self::Production(production_runtime) => production_runtime.admin_secret_provisioner(),
+        }
+    }
+}
+
+fn filesystem_reborn_identity_store<F>(
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    tenant_id: ironclaw_host_api::TenantId,
+    actor_user_id: UserId,
+    agent_id: ironclaw_host_api::AgentId,
+    project_id: Option<ironclaw_host_api::ProjectId>,
+) -> Arc<ironclaw_reborn_identity::FilesystemRebornIdentityStore<F>>
+where
+    F: RootFilesystem + 'static,
+{
+    Arc::new(
+        ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+            scoped_filesystem,
+            tenant_id,
+            actor_user_id,
+            agent_id,
+            project_id,
+        ),
+    )
 }
 
 pub(crate) struct RebornProductionRuntimeStoreGraph<F>
@@ -1075,10 +1156,6 @@ where
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
     pub(crate) event_log: Arc<dyn DurableEventLog>,
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
-    /// Admin per-user secret provisioner over the production secret substrate
-    /// (raw root + the runtime's own crypto). Backs the WebUI admin
-    /// user-management surface for production profiles where `local_runtime` is
-    /// None; mirrors the local substrate's `admin_secret_provisioner`.
     pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
     /// First-class projects + membership (ACL) facade over the production scoped
     /// filesystem. Backs the WebUI project surface for production profiles where
@@ -1126,23 +1203,19 @@ impl RebornProductionRuntimeServices {
         project_id: Option<ironclaw_host_api::ProjectId>,
     ) -> Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> {
         match self {
-            Self::LibSql(graph) => Arc::new(
-                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-                    Arc::clone(&graph.scoped_filesystem),
-                    tenant_id,
-                    actor_user_id,
-                    agent_id,
-                    project_id,
-                ),
+            Self::LibSql(graph) => filesystem_reborn_identity_store(
+                Arc::clone(&graph.scoped_filesystem),
+                tenant_id,
+                actor_user_id,
+                agent_id,
+                project_id,
             ),
-            Self::Postgres(graph) => Arc::new(
-                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-                    Arc::clone(&graph.scoped_filesystem),
-                    tenant_id,
-                    actor_user_id,
-                    agent_id,
-                    project_id,
-                ),
+            Self::Postgres(graph) => filesystem_reborn_identity_store(
+                Arc::clone(&graph.scoped_filesystem),
+                tenant_id,
+                actor_user_id,
+                agent_id,
+                project_id,
             ),
         }
     }
@@ -1155,23 +1228,19 @@ impl RebornProductionRuntimeServices {
         project_id: Option<ironclaw_host_api::ProjectId>,
     ) -> Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver> {
         match self {
-            Self::LibSql(graph) => Arc::new(
-                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-                    Arc::clone(&graph.scoped_filesystem),
-                    tenant_id,
-                    actor_user_id,
-                    agent_id,
-                    project_id,
-                ),
+            Self::LibSql(graph) => filesystem_reborn_identity_store(
+                Arc::clone(&graph.scoped_filesystem),
+                tenant_id,
+                actor_user_id,
+                agent_id,
+                project_id,
             ),
-            Self::Postgres(graph) => Arc::new(
-                ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-                    Arc::clone(&graph.scoped_filesystem),
-                    tenant_id,
-                    actor_user_id,
-                    agent_id,
-                    project_id,
-                ),
+            Self::Postgres(graph) => filesystem_reborn_identity_store(
+                Arc::clone(&graph.scoped_filesystem),
+                tenant_id,
+                actor_user_id,
+                agent_id,
+                project_id,
             ),
         }
     }
@@ -1238,6 +1307,7 @@ struct RebornStoreGraphInput {
     default_system_prompt_path: PathBuf,
     trigger_repository: Arc<dyn TriggerRepository>,
     project_repository: Arc<dyn ProjectRepository>,
+    admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
     /// Concurrency limits for the in-memory (or filesystem-backed) turn-state store.
     turn_state_store_limits: ironclaw_turns::TurnStateStoreLimits,
     postgres_resource_governor_singleton: Option<bool>,
@@ -1599,6 +1669,19 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let trigger_repository =
         local_dev_trigger_repository(&filesystem_bundle.durable_backend).await?;
     let filesystem = filesystem_bundle.filesystem;
+    let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    let local_dev_secret_bundle = build_secret_store(
+        &root,
+        Arc::clone(&local_dev_product_auth_filesystem),
+        secret_master_key,
+    )
+    .await?;
+    let secret_store: Arc<dyn SecretStore> = local_dev_secret_bundle.0.clone();
+    let admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner> =
+        Arc::new(crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
+            Arc::clone(&filesystem),
+            Arc::clone(&local_dev_secret_bundle.1),
+        ));
     // Projects persist over the control-plane `ScopedFilesystem` substrate (no
     // SQL in the crate); the backend is whatever the local-dev root filesystem
     // dispatches to. Tenant is supplied per call, so the scope carries only the
@@ -1640,6 +1723,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         default_system_prompt_path,
         trigger_repository,
         project_repository,
+        admin_secret_provisioner,
         turn_state_store_limits,
         postgres_resource_governor_singleton,
         identity_substrate_db,
@@ -1649,23 +1733,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
     );
-    let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
-    let local_dev_secret_bundle = build_secret_store(
-        &root,
-        Arc::clone(&local_dev_product_auth_filesystem),
-        secret_master_key,
-    )
-    .await?;
-    let secret_store: Arc<dyn SecretStore> = local_dev_secret_bundle.0.clone();
-    // Admin per-user secret provisioner over the shared root + the SAME crypto
-    // as the runtime's own secret store.
-    let admin_secret_provisioner: Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>> =
-        Some(Arc::new(
-            crate::admin_secrets::FilesystemAdminSecretProvisioner::new(
-                Arc::clone(&filesystem),
-                local_dev_secret_bundle.1,
-            ),
-        ));
     let local_dev_trust_policy = Arc::new(builtin_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
@@ -1973,9 +2040,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         let host_runtime_http_egress =
             host_runtime_http_egress_for_test.unwrap_or(host_runtime_http_egress);
         local_runtime.host_runtime_http_egress = host_runtime_http_egress;
-        // Attach the admin secret provisioner now the secret-store crypto is
-        // built (the store graph was constructed before it existed).
-        local_runtime.admin_secret_provisioner = admin_secret_provisioner;
     } else {
         return Err(RebornBuildError::InvalidConfig {
             reason: "local-dev extension lifecycle facade could not be attached".to_string(),
@@ -2359,6 +2423,7 @@ async fn build_local_runtime_store_graph(
         default_system_prompt_path,
         trigger_repository,
         project_repository,
+        admin_secret_provisioner,
         turn_state_store_limits,
         postgres_resource_governor_singleton,
         identity_substrate_db,
@@ -2511,9 +2576,7 @@ async fn build_local_runtime_store_graph(
         workspace_filesystem,
         host_state_filesystem,
         telegram_host_state_filesystem,
-        // Set later in `build_local_runtime`, once the secret-store crypto
-        // exists, via `Arc::get_mut` on this services value.
-        admin_secret_provisioner: None,
+        admin_secret_provisioner,
         identity_substrate_db,
         extension_filesystem: Arc::clone(&filesystem),
         workspace_mounts,
