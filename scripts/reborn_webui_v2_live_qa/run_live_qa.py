@@ -4695,7 +4695,12 @@ async def case_qa_5d_slack_strategy_doc_answer(ctx: LiveQaContext) -> ProbeResul
             ctx,
             channel_id=channel_id,
             user_id=slack_user_id,
-            text=f"{_qa_sheet_prompt('qa_5d_slack_strategy_doc_answer')}\nGoogle doc link: {doc_url}",
+            text=(
+                "What is the strategy north star described in this Google Docs "
+                f"document? {doc_url} Read the document, answer the question "
+                "directly in your reply to this message, and include the exact "
+                f"nonce {nonce} plus the word strategy."
+            ),
             event_id=f"EvREBORNQA5D{suffix}",
         )
         observed["signed_event"] = post_result

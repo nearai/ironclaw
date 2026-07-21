@@ -4652,6 +4652,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_slack_side_effect_setup_prompts_avoid_connect_action_trigger(self):
         captured_prompts: dict[str, str] = {}
         captured_slack_required_text: list[str] = []
+        captured_slack_event_texts: list[str] = []
         document_id = "1DocCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
         spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
 
@@ -4671,7 +4672,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 details={"text_excerpt": f"Created {file_url}"},
             )
 
-        async def fake_post_signed_slack_dm_event(*_args, **_kwargs):
+        async def fake_post_signed_slack_dm_event(*_args, **kwargs):
+            captured_slack_event_texts.append(kwargs["text"])
             return {"ok": True}
 
         async def fake_slack_history_contains_marker(*_args, **kwargs):
@@ -4742,6 +4744,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(
             any(text.startswith("QA5D-NONCE-") for text in captured_slack_required_text)
         )
+        qa_5d_event_text = captured_slack_event_texts[0]
+        self.assertNotIn("In Slack", qa_5d_event_text)
+        self.assertNotIn("Expected result", qa_5d_event_text)
+        self.assertIn("What is the strategy north star", qa_5d_event_text)
+        self.assertIn(f"https://docs.google.com/document/d/{document_id}/edit", qa_5d_event_text)
 
     def test_signed_slack_event_cases_resolve_inbound_user_without_legacy_config(self):
         for case_name in (
