@@ -177,11 +177,16 @@ fn product_gesture_grant(
     product_ingress: &ExtensionId,
 ) -> CapabilityGrant {
     let mut secrets = Vec::new();
+    let mut network_targets = descriptor.network_targets.clone();
     for credential in &descriptor.runtime_credentials {
         if !secrets.contains(&credential.handle) {
             secrets.push(credential.handle.clone());
         }
+        if !network_targets.contains(&credential.audience) {
+            network_targets.push(credential.audience.clone());
+        }
     }
+    let has_network_targets = !network_targets.is_empty();
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: descriptor.id.clone(),
@@ -191,8 +196,14 @@ fn product_gesture_grant(
             allowed_effects: descriptor.effects.clone(),
             mounts: MountView::default(),
             network: NetworkPolicy {
-                allowed_targets: descriptor.network_targets.clone(),
-                deny_private_ip_ranges: true,
+                allowed_targets: network_targets,
+                // An empty policy must remain unconstrained. Marking it as
+                // private-range constrained would synthesize an
+                // `ApplyNetworkPolicy` obligation for a capability that has
+                // no network surface, and fail before dispatch when no
+                // network-policy store is composed. Networked capabilities
+                // retain the private-IP guard on their manifest allowlist.
+                deny_private_ip_ranges: has_network_targets,
                 max_egress_bytes: None,
             },
             secrets,
@@ -416,5 +427,99 @@ fn product_runtime_unavailable() -> RebornServicesError {
         retryable: false,
         field: None,
         validation_code: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{
+        EffectKind, NetworkScheme, NetworkTargetPattern, PermissionMode,
+        RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
+        RuntimeKind, SecretHandle, TrustClass,
+    };
+
+    use super::*;
+
+    #[test]
+    fn product_gesture_grant_keeps_no_egress_policy_unconstrained() {
+        let descriptor = descriptor_with_network(Vec::new(), Vec::new());
+
+        let grant = product_gesture_grant(
+            &descriptor,
+            &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+        );
+
+        assert_eq!(grant.constraints.network, NetworkPolicy::default());
+    }
+
+    #[test]
+    fn product_gesture_grant_constrains_manifest_declared_egress() {
+        let target = NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.com".to_string(),
+            port: None,
+        };
+        let descriptor = descriptor_with_network(vec![target.clone()], Vec::new());
+
+        let grant = product_gesture_grant(
+            &descriptor,
+            &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+        );
+
+        assert_eq!(grant.constraints.network.allowed_targets, vec![target]);
+        assert!(grant.constraints.network.deny_private_ip_ranges);
+        assert_eq!(grant.constraints.network.max_egress_bytes, None);
+    }
+
+    #[test]
+    fn product_gesture_grant_folds_credential_audience_into_egress_policy() {
+        let target = NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "oauth.example.com".to_string(),
+            port: None,
+        };
+        let credential = RuntimeCredentialRequirement {
+            handle: SecretHandle::new("oauth_token").unwrap(),
+            source: RuntimeCredentialRequirementSource::SecretHandle,
+            provider_scopes: Vec::new(),
+            audience: target.clone(),
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        };
+        let descriptor = descriptor_with_network(Vec::new(), vec![credential]);
+
+        let grant = product_gesture_grant(
+            &descriptor,
+            &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+        );
+
+        assert_eq!(grant.constraints.network.allowed_targets, vec![target]);
+        assert!(grant.constraints.network.deny_private_ip_ranges);
+        assert_eq!(
+            grant.constraints.secrets,
+            vec![SecretHandle::new("oauth_token").unwrap()]
+        );
+    }
+
+    fn descriptor_with_network(
+        network_targets: Vec<NetworkTargetPattern>,
+        runtime_credentials: Vec<RuntimeCredentialRequirement>,
+    ) -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            id: CapabilityId::new("builtin.product-gesture-test").unwrap(),
+            provider: ExtensionId::new("builtin").unwrap(),
+            runtime: RuntimeKind::FirstParty,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "product gesture test".to_string(),
+            parameters_schema: serde_json::json!({}),
+            effects: vec![EffectKind::DispatchCapability],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials,
+            network_targets,
+            resource_profile: None,
+        }
     }
 }
