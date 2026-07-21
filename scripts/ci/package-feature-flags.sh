@@ -9,8 +9,8 @@ fi
 package="$1"
 
 # Default flags for closure crates without an explicit recipe above: opt into
-# `default` and `libsql` when the crate declares them, so storage-backed crates
-# build their libSQL paths. Crates with no matching features build bare.
+# `default` when the crate declares it. Crates with no matching features build
+# bare; database backends compile unconditionally.
 fallback_feature_flags() {
   local metadata
   metadata="$(cargo metadata --no-deps --format-version 1)"
@@ -29,10 +29,6 @@ fallback_feature_flags() {
   if printf '%s\n' "${feature_list}" | grep -Fxq "default"; then
     features+=("default")
   fi
-  if printf '%s\n' "${feature_list}" | grep -Fxq "libsql"; then
-    features+=("libsql")
-  fi
-
   if [ "${#features[@]}" -gt 0 ]; then
     local IFS=,
     printf '%s\n' "--features ${features[*]}"

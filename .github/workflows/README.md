@@ -97,14 +97,14 @@ pull-request workflows.
 | `x86_64-pc-windows-msvc` | `windows-2022` |
 
 The cargo-dist release and manual preflight both build the `ironclaw` package
-and binary with the explicit release feature contract
-`libsql,postgres`. In the manual preflight, each matrix
-entry performs a final `cargo build --locked --profile dist` link and executes
-that exact native binary with `--version`, `--help`, and
-`profile list --json`. Its musl entries also use `readelf` to reject a program
-interpreter or dynamic-library dependency, which prevents an installed musl
-loader on the build runner from hiding a non-portable artifact. This is shallow
-CLI startup coverage; it does not validate `serve` or external services.
+and binary without backend feature flags; database backends compile
+unconditionally. In the manual preflight, each matrix entry performs a final
+`cargo build --locked --profile dist` link and executes that exact native binary
+with `--version`, `--help`, and `profile list --json`. Its musl entries also use
+`readelf` to reject a program interpreter or dynamic-library dependency, which
+prevents an installed musl loader on the build runner from hiding a non-portable
+artifact. This is shallow CLI startup coverage; it does not validate `serve` or
+external services.
 
 ## Deep tier (nightly)
 

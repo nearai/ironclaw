@@ -769,7 +769,7 @@ jobs:
               python3 scripts/live-canary/validate_reborn_binary_artifact.py \
                 artifacts/prepared-reborn-webui-v2-binary \
                 "${TARGET_REF}" \
-                "libsql"
+                ""
             ); then
               echo "::warning::The Reborn E2E artifact could not be downloaded or validated; using the canary fallback build."
               rm -rf artifacts/prepared-reborn-webui-v2-binary
@@ -834,7 +834,7 @@ jobs:
           )
           jq -n \
             --arg product_ref "${TARGET_REF}" \
-            --argjson features '["libsql"]' \
+            --argjson features '[]' \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
             > artifacts/prepared-reborn-webui-v2-binary/manifest.json
           echo "source=canary-fallback" >> "${GITHUB_OUTPUT}"
@@ -1110,7 +1110,7 @@ jobs:
           python3 scripts/live-canary/validate_reborn_binary_artifact.py \
             .live-qa-binary \
             "${TARGET_REF}" \
-            "libsql"
+            ""
           mkdir -p target/debug
           tar -C target/debug -xzf .live-qa-binary/ironclaw-reborn.tar.gz
           chmod 755 target/debug/ironclaw target/debug/ironclaw-reborn

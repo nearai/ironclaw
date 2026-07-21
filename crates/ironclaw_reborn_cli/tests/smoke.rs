@@ -121,13 +121,13 @@ fn write_sparse_reborn_config(reborn_home: &Path) {
 }
 
 #[test]
-fn dockerfile_reborn_builds_with_production_features() {
+fn dockerfile_reborn_builds_without_backend_feature_flags() {
     let dockerfile =
         std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
 
     assert!(
-        dockerfile.matches("libsql,postgres").count() >= 2,
-        "Dockerfile must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
+        !dockerfile.contains("libsql,postgres") && !dockerfile.contains("postgres,libsql"),
+        "Dockerfile must not pass removed backend Cargo features: {dockerfile}"
     );
     assert!(
         dockerfile.contains("--bin ironclaw")
@@ -200,8 +200,6 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         ("aarch64-apple-darwin", "macos-15"),
         ("x86_64-pc-windows-msvc", "windows-2022"),
     ];
-    let release_features = "libsql,postgres";
-
     assert_eq!(
         compile_workflow.matches("          - target: ").count(),
         target_runners.len(),
@@ -222,10 +220,11 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && compile_workflow.contains("            --bin ironclaw \\\n")
             && !compile_workflow.contains("--bin ironclaw-reborn")
             && compile_workflow.contains("--target \"$TARGET\"")
-            && compile_workflow
-                .contains(&format!("  REBORN_RELEASE_FEATURES: {release_features}\n"))
-            && compile_workflow.contains("            --features \"$REBORN_RELEASE_FEATURES\""),
-        "Reborn release CI must fully link the shipping binary and keep all target results"
+            && !compile_workflow.contains("REBORN_RELEASE_FEATURES")
+            && !compile_workflow.contains("--features \"$REBORN_RELEASE_FEATURES\"")
+            && !compile_workflow.contains("--features libsql")
+            && !compile_workflow.contains("--features postgres"),
+        "Reborn release CI must fully link the shipping binary without removed backend feature flags and keep all target results"
     );
     assert!(
         compile_workflow.matches("musl: true").count() == 2
@@ -370,10 +369,10 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     assert!(
         cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
             && cli_manifest.contains("[package.metadata.dist]\ndist = true")
-            && cli_manifest.contains("features = [\"libsql\", \"postgres\"]")
+            && !cli_manifest.contains("features = [\"libsql\", \"postgres\"]")
             && cli_manifest.contains("[package.metadata.wix]")
             && cli_manifest.contains("[[bin]]\nname = \"ironclaw\""),
-        "the canonical Reborn package must be cargo-dist enabled with production features and WiX metadata"
+        "the canonical Reborn package must be cargo-dist enabled without removed backend feature flags and with WiX metadata"
     );
 }
 

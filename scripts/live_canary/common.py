@@ -106,9 +106,6 @@ def cargo_build() -> None:
             "ironclaw_legacy",
             "--bin",
             "ironclaw-legacy",
-            "--no-default-features",
-            "--features",
-            "libsql",
         ],
         cwd=ROOT,
     )
