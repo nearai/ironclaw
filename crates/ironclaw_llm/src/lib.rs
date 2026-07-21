@@ -27,6 +27,7 @@ pub mod host;
 pub mod nearai_chat;
 pub mod openai_codex_provider;
 pub(crate) mod openai_codex_session;
+mod openai_responses_session;
 mod provider;
 mod reasoning;
 pub mod recording;

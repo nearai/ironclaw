@@ -228,6 +228,28 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 
 **Env vars:** `OPENAI_CODEX_MODEL` (default: `gpt-5.5` — must be a model the ChatGPT account is entitled to; codex-only slugs like `gpt-5.3-codex` are rejected with HTTP 400 in subscription mode), `OPENAI_CODEX_CLIENT_ID`, `OPENAI_CODEX_AUTH_URL`, `OPENAI_CODEX_API_URL`.
 
+**Responses session planning:** The provider contains a bounded, in-memory
+request planner for a future retained-transport lane. IronClaw's complete
+normalized transcript remains authoritative; the planner stores only a
+provider response ID and structural SHA-256 item fingerprints. It may send
+`previous_response_id` plus an append-only suffix only when an explicit,
+UUID-valid `agent_loop_session_id` metadata discriminator selects the same
+parent-loop session and the new transcript structurally extends the acknowledged
+prefix. Generic `run_id` / `turn_id` metadata is deliberately insufficient
+because system-inference calls can share those IDs. Missing identity, missing
+cursor/output, desynchronization, unsupported response output, incomplete
+responses, failures, account changes, and a fully occupied session bound all
+fall back to full replay. The bounded registry never evicts an active session,
+so concurrent calls cannot split one identity across two cursor states.
+
+The current production Codex HTTP constructor leaves this optimization disabled:
+it uses stateless HTTP with `store: false`, which does not establish the retention
+contract needed for reliable response-ID chaining. Do not enable it or change
+`store` as a shortcut. A future persistent Responses transport must explicitly
+enable the provider-private capability and the runner must supply the dedicated
+parent-loop session identity. This lane is same-run tool-loop state only and does
+not imply cross-turn continuity.
+
 ## Provider Chain Construction
 
 `build_provider_chain()` in `lib.rs` is the entry point for chain construction: it creates the base provider (dispatching to `create_openai_codex_provider()` for codex, `create_llm_provider()` for everything else), then delegates the decorator stack to `pub(crate) async fn apply_decorator_chain(raw, config, session)` — the single source of truth for decorator assembly. Assemble the chain only through `apply_decorator_chain`; never apply these decorators inline or at a higher seam. It is crate-internal; the integration-test harness wraps a scripted raw provider beneath the real chain via the test-only `testing::provider_chain_over` re-export (gated by the `testing` feature), so the production API is not widened. The decorators `apply_decorator_chain` assembles, in order (`RecordingLlm` is appended afterward by `build_provider_chain`, not by `apply_decorator_chain`):

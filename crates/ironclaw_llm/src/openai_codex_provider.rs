@@ -6,6 +6,8 @@
 //!
 //! This mirrors OpenClaw's Responses API flow translated to Rust.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
@@ -13,6 +15,7 @@ use serde::Deserialize;
 use tokio::sync::RwLock;
 
 use crate::error::LlmError;
+use crate::openai_responses_session::ResponsesSessionRegistry;
 use crate::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, ContentPart, FinishReason, LlmProvider,
     ModelMetadata, Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition,
@@ -33,6 +36,13 @@ pub struct OpenAiCodexProvider {
     model: String,
     api_base_url: String,
     auth: RwLock<AuthState>,
+    /// Present only when the transport can reliably retain Responses state.
+    ///
+    /// The current production HTTP lane uses `store: false`, so constructors
+    /// leave this disabled. Keeping the planner behind this provider-private
+    /// capability gate prevents `previous_response_id` from becoming durable
+    /// conversational truth or being used without a retention guarantee.
+    responses_sessions: Option<ResponsesSessionRegistry>,
 }
 
 impl OpenAiCodexProvider {
@@ -60,16 +70,25 @@ impl OpenAiCodexProvider {
                 token: token.to_string(),
                 account_id,
             }),
+            responses_sessions: None,
         })
     }
 
     /// Update the access token after a refresh.
     pub async fn update_token(&self, token: &str) -> Result<(), LlmError> {
         let account_id = extract_account_id(token)?;
-        *self.auth.write().await = AuthState {
-            token: token.to_string(),
-            account_id,
+        let account_changed = {
+            let mut auth = self.auth.write().await;
+            let account_changed = auth.account_id != account_id;
+            *auth = AuthState {
+                token: token.to_string(),
+                account_id,
+            };
+            account_changed
         };
+        if account_changed && let Some(registry) = &self.responses_sessions {
+            registry.clear().await;
+        }
         tracing::debug!("Updated Codex provider token");
         Ok(())
     }
@@ -118,10 +137,21 @@ impl OpenAiCodexProvider {
     }
 
     /// Build the request body for the Responses API.
+    #[cfg(test)]
     fn build_request_body(
         &self,
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
+    ) -> serde_json::Value {
+        self.build_request_body_with_input(messages, tools, normalized_input(messages), None)
+    }
+
+    fn build_request_body_with_input(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+        input: Vec<serde_json::Value>,
+        previous_response_id: Option<&str>,
     ) -> serde_json::Value {
         // Separate system messages into `instructions`
         let instructions: String = messages
@@ -130,14 +160,6 @@ impl OpenAiCodexProvider {
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
             .join("\n\n");
-
-        // Convert non-system messages to Responses API format
-        let input: Vec<serde_json::Value> = messages
-            .iter()
-            .filter(|m| m.role != Role::System)
-            .enumerate()
-            .flat_map(|(i, m)| convert_message(m, i))
-            .collect();
 
         let mut body = serde_json::json!({
             "model": self.model,
@@ -156,6 +178,11 @@ impl OpenAiCodexProvider {
             body["instructions"] = serde_json::Value::String(instructions);
         }
 
+        if let Some(previous_response_id) = previous_response_id {
+            body["previous_response_id"] =
+                serde_json::Value::String(previous_response_id.to_string());
+        }
+
         if let Some(tools) = tools
             && !tools.is_empty()
         {
@@ -167,6 +194,53 @@ impl OpenAiCodexProvider {
         }
 
         body
+    }
+
+    async fn send_completion_request(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+        metadata: &HashMap<String, String>,
+    ) -> Result<ParsedResponse, LlmError> {
+        let full_input = normalized_input(messages);
+        let Some(registry) = &self.responses_sessions else {
+            let body = self.build_request_body_with_input(messages, tools, full_input, None);
+            return self.send_request(body).await;
+        };
+        let Some(session) = registry.session_for_metadata(metadata).await else {
+            let body = self.build_request_body_with_input(messages, tools, full_input, None);
+            return self.send_request(body).await;
+        };
+
+        // Serialize requests only within the same explicitly-discriminated
+        // agent-loop session. Generic run/turn IDs are intentionally ignored:
+        // system-inference calls may share them with the parent loop.
+        let mut state = session.lock().await;
+        let plan = state.plan(&full_input);
+        let body = self.build_request_body_with_input(
+            messages,
+            tools,
+            plan.input,
+            plan.previous_response_id.as_deref(),
+        );
+
+        match self.send_request(body).await {
+            Ok(response) => {
+                state.commit(
+                    &full_input,
+                    response.response_id.as_deref(),
+                    response.response_status.as_deref(),
+                    response.output_items.as_deref(),
+                );
+                Ok(response)
+            }
+            Err(error) => {
+                // A failed or truncated attempt may have consumed unknown
+                // server-side state. The next attempt must replay in full.
+                state.reset();
+                Err(error)
+            }
+        }
     }
 
     /// Send a request and parse the SSE response stream.
@@ -270,8 +344,9 @@ impl LlmProvider for OpenAiCodexProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let mut messages = request.messages;
         crate::provider::sanitize_tool_messages(&mut messages);
-        let body = self.build_request_body(&messages, None);
-        let parsed = self.send_request(body).await?;
+        let parsed = self
+            .send_completion_request(&messages, None, &request.metadata)
+            .await?;
 
         Ok(CompletionResponse {
             content: parsed.text_content,
@@ -306,8 +381,9 @@ impl LlmProvider for OpenAiCodexProvider {
             })
             .collect();
 
-        let body = self.build_request_body(&messages, Some(&request.tools));
-        let mut parsed = self.send_request(body).await?;
+        let mut parsed = self
+            .send_completion_request(&messages, Some(&request.tools), &request.metadata)
+            .await?;
 
         // Reverse-map sanitized tool names back to originals so the caller
         // can look them up in the tool registry.
@@ -427,6 +503,15 @@ fn extract_account_id(token: &str) -> Result<String, LlmError> {
 // ---------------------------------------------------------------------------
 // Message conversion (matching OpenClaw's convertResponsesMessages)
 // ---------------------------------------------------------------------------
+
+fn normalized_input(messages: &[ChatMessage]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .filter(|message| message.role != Role::System)
+        .enumerate()
+        .flat_map(|(index, message)| convert_message(message, index))
+        .collect()
+}
 
 /// Convert a single `ChatMessage` to Responses API `input` items.
 ///
@@ -556,6 +641,9 @@ struct ParsedResponse {
     input_tokens: u32,
     output_tokens: u32,
     finish_reason: FinishReason,
+    response_id: Option<String>,
+    response_status: Option<String>,
+    output_items: Option<Vec<serde_json::Value>>,
 }
 
 /// SSE event data from the Responses API.
@@ -585,7 +673,9 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
     let mut finish_reason = FinishReason::Stop;
     let mut active_function_calls: std::collections::HashMap<String, FunctionCallState> =
         std::collections::HashMap::new();
+    let mut response_id: Option<String> = None;
     let mut response_status: Option<String> = None;
+    let mut output_items: Option<Vec<serde_json::Value>> = None;
     // Whether a terminal `response.completed` event was observed. A stream
     // that ends without it (mid-stream disconnect) is truncated and must not
     // be reported as a successful `Stop` — see the truncated-stream guard
@@ -755,6 +845,14 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
             "response.completed" => {
                 saw_completed = true;
                 if let Some(response) = event.data.get("response") {
+                    response_id = response
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    output_items = response
+                        .get("output")
+                        .and_then(|value| value.as_array())
+                        .cloned();
                     // Extract usage
                     if let Some(usage) = response.get("usage") {
                         input_tokens = usage
@@ -882,12 +980,19 @@ fn parse_sse_response(body: &str) -> Result<ParsedResponse, LlmError> {
         input_tokens,
         output_tokens,
         finish_reason,
+        response_id,
+        response_status,
+        output_items,
     })
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "openai_codex_provider_session_tests.rs"]
+mod session_tests;
 
 #[cfg(test)]
 mod tests {
