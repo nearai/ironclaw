@@ -202,7 +202,7 @@ fn expected_table() -> Vec<Expected> {
             auth_schemes: &[IngressAuthScheme::BearerToken],
             scope_source: IngressScopeSource::AuthenticatedCaller,
             body_limit: BodyLimitPolicy::NoBody,
-            rate_limit_max: 120,
+            rate_limit_max: 6,
             rate_limit_window_seconds: 60,
             rate_limit_scope: RateLimitScope::PerCaller,
             cors: CorsPolicy::SameOriginOnly,
