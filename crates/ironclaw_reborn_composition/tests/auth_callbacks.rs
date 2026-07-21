@@ -431,6 +431,8 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
     );
 
     let serialized = serde_json::to_string(&response).unwrap();
+    let serialized_value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(serialized_value["status"], serde_json::json!("completed"));
     let parsed: RebornOAuthCallbackResponse = serde_json::from_str(&serialized).unwrap();
     assert_eq!(parsed, response);
     assert!(!serialized.contains("raw-auth-code"));
@@ -448,6 +450,35 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
         dispatcher.events().len(),
         1,
         "completed callback replay must not redispatch continuations"
+    );
+}
+
+#[tokio::test]
+async fn oauth_callback_handler_rejects_wrong_state_on_completed_replay() {
+    let dispatcher = Arc::new(RecordingContinuationDispatcher::default());
+    let provider_client = Arc::new(SuccessfulCountingProviderClient::default());
+    let services = auth_services(dispatcher.clone()).with_provider_client(provider_client.clone());
+    let owner = scope("alice");
+    let flow_id = create_flow(&services, owner.clone()).await;
+
+    services
+        .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
+        .await
+        .expect("first callback completes");
+    let mut replay = authorized_request(owner, flow_id);
+    replay.opaque_state_hash = state_hash("wrong-state");
+
+    let error = services
+        .handle_oauth_callback(replay)
+        .await
+        .expect_err("terminal callback replay still requires the original state proof");
+
+    assert_eq!(error.code, AuthErrorCode::CrossScopeDenied);
+    assert_eq!(provider_client.calls(), 1);
+    assert_eq!(
+        dispatcher.events().len(),
+        1,
+        "invalid terminal replay cannot dispatch another resolution",
     );
 }
 
@@ -528,10 +559,7 @@ async fn oauth_callback_handler_retries_authorized_lifecycle_dispatch_failure() 
         .await
         .expect("authorized lifecycle outcome remains retryable");
 
-    assert!(matches!(
-        retry.status,
-        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
-    ));
+    assert_eq!(retry.status, ironclaw_auth::AuthFlowStatus::Completed);
     assert_eq!(provider_client.calls(), 0);
     assert_eq!(dispatcher.events().len(), 1);
 }
@@ -580,10 +608,7 @@ async fn oauth_callback_handler_keeps_non_lifecycle_continuation_failure_retryab
         .handle_oauth_callback(authorized_request(owner, flow_id))
         .await
         .expect("non-lifecycle continuation can be retried");
-    assert!(matches!(
-        retry.status,
-        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
-    ));
+    assert_eq!(retry.status, ironclaw_auth::AuthFlowStatus::Completed);
     assert_eq!(provider_client.calls(), 0);
     assert_eq!(dispatcher.events().len(), 1);
 }
@@ -640,10 +665,7 @@ async fn concurrent_lifecycle_callbacks_safely_redeliver_and_never_reexchange() 
         .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
         .await
         .expect("retry observes the acknowledged success");
-    assert!(matches!(
-        winner.status,
-        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
-    ));
+    assert_eq!(winner.status, ironclaw_auth::AuthFlowStatus::Completed);
     assert_eq!(replay.status, winner.status);
     assert_eq!(provider_client.calls(), 1);
     assert_eq!(dispatcher.calls(), 2);
@@ -652,7 +674,10 @@ async fn concurrent_lifecycle_callbacks_safely_redeliver_and_never_reexchange() 
         .await
         .unwrap()
         .expect("completed flow");
-    assert_eq!(flow.state, winner.status);
+    assert!(matches!(
+        flow.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+    ));
     assert!(flow.resolution_delivered_at.is_some());
 }
 

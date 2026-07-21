@@ -3,16 +3,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use ironclaw_auth::{
-    AuthContinuationRef, AuthFlowId, AuthFlowOutcome, AuthProductScope, AuthProviderId,
-    AuthResolved, AuthSurface, CredentialAccountId,
-};
+use ironclaw_auth::{AuthProviderId, CredentialAccountOwnerScope};
 use ironclaw_conversations::{
     AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner,
     ExternalActorBindingEpoch, ExternalActorRef,
 };
-use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
+use ironclaw_turns::IdempotencyKey;
 
 use crate::setup::TelegramSetupService;
 use crate::state::FilesystemTelegramHostState;
@@ -251,9 +249,10 @@ impl TelegramPairingService {
         installation_id: &AdapterInstallationId,
         user_id: &UserId,
         chat_id: i64,
-        flow_id: AuthFlowId,
+        resolution_key: IdempotencyKey,
     ) -> Result<(), TelegramPairingError> {
-        self.dispatch_pairing_completion(user_id, flow_id).await?;
+        self.dispatch_pairing_completion(user_id, resolution_key.clone())
+            .await?;
         self.state
             .upsert_dm_target(
                 installation_id,
@@ -264,7 +263,7 @@ impl TelegramPairingService {
             )
             .await?;
         self.state
-            .finish_pairing_completion(installation_id, user_id, chat_id, flow_id)
+            .finish_pairing_completion(installation_id, user_id, chat_id, resolution_key)
             .await
     }
 
@@ -387,36 +386,24 @@ impl TelegramPairingService {
     async fn dispatch_pairing_completion(
         &self,
         user_id: &UserId,
-        flow_id: AuthFlowId,
+        resolution_key: IdempotencyKey,
     ) -> Result<(), TelegramPairingError> {
         let provider = AuthProviderId::new(TELEGRAM_IDENTITY_PROVIDER).map_err(|error| {
             TelegramPairingError::ContinuationDispatch {
                 reason: error.to_string(),
             }
         })?;
-        let event = AuthResolved {
-            flow_id,
-            scope: AuthProductScope::new(
-                ResourceScope {
-                    tenant_id: self.tenant_id.clone(),
-                    user_id: user_id.clone(),
-                    agent_id: Some(self.agent_id.clone()),
-                    project_id: self.project_id.clone(),
-                    mission_id: None,
-                    thread_id: None,
-                    invocation_id: InvocationId::new(),
-                },
-                AuthSurface::Callback,
-            ),
-            continuation: AuthContinuationRef::SetupOnly,
-            provider,
-            outcome: AuthFlowOutcome::Authorized {
-                account_id: CredentialAccountId::from_uuid(flow_id.as_uuid()),
-            },
-            resolved_at: Utc::now(),
+        let owner = CredentialAccountOwnerScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: user_id.clone(),
+            agent_id: Some(self.agent_id.clone()),
+            project_id: self.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            session_id: None,
         };
         self.continuation
-            .dispatch_auth_resolved(event)
+            .dispatch_provider_connection(resolution_key, owner, provider)
             .await
             .map_err(|error| TelegramPairingError::ContinuationDispatch {
                 reason: error.to_string(),

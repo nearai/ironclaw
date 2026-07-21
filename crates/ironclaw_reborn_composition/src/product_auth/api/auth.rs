@@ -6,17 +6,17 @@ use chrono::Utc;
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthFlowManager,
     AuthFlowOutcome, AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowState,
-    AuthGateRef, AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope,
-    AuthProviderClient, AuthProviderId, AuthResolved, CredentialAccountChoiceRequest,
-    CredentialAccountId, CredentialAccountLabel, CredentialAccountListPage,
-    CredentialAccountListRequest, CredentialAccountLookupRequest, CredentialAccountProjection,
-    CredentialAccountRecordSource, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, CredentialSetupService,
-    InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow, OAuthAuthorizationUrl,
-    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    OAuthExchangeCleanupRequest, OAuthProviderCallbackRequest, OAuthProviderExchangeContext,
-    OAuthProviderIdentity, OpaqueStateHash, PkceVerifierHash,
+    AuthFlowStatus, AuthGateRef, AuthInteractionId, AuthInteractionService, AuthProductError,
+    AuthProductScope, AuthProviderClient, AuthProviderId, AuthResolved,
+    CredentialAccountChoiceRequest, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
+    CredentialAccountProjection, CredentialAccountRecordSource, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialRecoveryProjection,
+    CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
+    CredentialSetupService, InMemoryAuthProductServices, ManualTokenSetupRequest, NewAuthFlow,
+    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, OAuthExchangeCleanupRequest, OAuthProviderCallbackRequest,
+    OAuthProviderExchangeContext, OAuthProviderIdentity, OpaqueStateHash, PkceVerifierHash,
     ProviderBackedCredentialAccountService, ProviderCallbackOutcome, ProviderScope,
     SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
     SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, TurnRunRef, scope_matches,
@@ -143,7 +143,7 @@ pub enum RebornOAuthCallbackOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornOAuthCallbackResponse {
     pub flow_id: AuthFlowId,
-    pub status: AuthFlowState,
+    pub status: AuthFlowStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_account_id: Option<CredentialAccountId>,
     pub continuation: AuthContinuationRef,
@@ -1100,6 +1100,13 @@ impl RebornProductAuthServices {
             .map_err(RebornOAuthCallbackAttemptError::from)?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)
             .map_err(RebornOAuthCallbackAttemptError::from)?;
+        if !existing
+            .opaque_state_hash
+            .as_ref()
+            .is_some_and(|expected| expected.constant_time_eq(&request.opaque_state_hash))
+        {
+            return Err(AuthProductError::CrossScopeDenied.into());
+        }
         let existing = self
             .settle_expired_flow(existing, Utc::now())
             .await
@@ -1944,7 +1951,7 @@ fn callback_response_from_record(
     };
     Ok(RebornOAuthCallbackResponse {
         flow_id: record.id,
-        status: record.state,
+        status: record.state.into(),
         credential_account_id: account_id,
         continuation: record.continuation,
         provider_identity,

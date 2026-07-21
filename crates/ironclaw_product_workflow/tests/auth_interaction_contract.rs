@@ -305,6 +305,7 @@ impl AuthFlowManager for RecordingFlowManager {
 
 struct RecordingTurnCoordinator {
     actor: TurnActor,
+    omit_actor: Mutex<bool>,
     status: Mutex<TurnStatus>,
     gate_ref: Mutex<Option<GateRef>>,
     resumes: Mutex<Vec<ResumeTurnRequest>>,
@@ -325,6 +326,7 @@ impl RecordingTurnCoordinator {
     fn blocked_auth(actor: TurnActor, gate_ref: GateRef) -> Self {
         Self {
             actor,
+            omit_actor: Mutex::new(false),
             status: Mutex::new(TurnStatus::BlockedAuth),
             gate_ref: Mutex::new(Some(gate_ref)),
             resumes: Mutex::new(Vec::new()),
@@ -353,6 +355,10 @@ impl RecordingTurnCoordinator {
 
     fn set_get_run_state_error(&self, error: TurnError) {
         *self.get_run_state_error.lock().expect("lock") = Some(error);
+    }
+
+    fn omit_actor(&self) {
+        *self.omit_actor.lock().expect("lock") = true;
     }
 
     fn set_resume_error(&self, error: TurnError) {
@@ -496,7 +502,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
         }
         Ok(TurnRunState {
             scope: request.scope,
-            actor: Some(self.actor.clone()),
+            actor: (!*self.omit_actor.lock().expect("lock")).then(|| self.actor.clone()),
             turn_id: TurnId::new(),
             run_id: request.run_id,
             status: *self.status.lock().expect("lock"),
@@ -2186,6 +2192,91 @@ async fn user_aborted_dispatches_one_exact_compare_and_cancel() {
         cancellations[0].precondition,
         Some(CancelRunPrecondition::BlockedAuthGate { gate_ref })
     );
+}
+
+#[tokio::test]
+async fn malformed_auth_resolution_metadata_fails_closed_without_mutating_the_run() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let scope = turn_scope("alice", "dispatcher-malformed");
+    let run_id = TurnRunId::new();
+    let gate_ref = make_gate_ref("gate:dispatcher-malformed");
+
+    let invalid_run_coordinator = Arc::new(RecordingTurnCoordinator::blocked_auth(
+        actor.clone(),
+        gate_ref.clone(),
+    ));
+    let mut invalid_run = auth_resolution(
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        AuthFlowOutcome::ProviderDenied,
+    );
+    invalid_run.continuation = AuthContinuationRef::TurnGateResume {
+        turn_run_ref: TurnRunRef::new("not-a-uuid").unwrap(),
+        gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
+    };
+    let error = ProductAuthTurnGateResumeDispatcher::new(invalid_run_coordinator.clone())
+        .dispatch_auth_resolved(invalid_run)
+        .await
+        .expect_err("invalid run reference must fail closed");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthContinuationRejected {
+            kind: ironclaw_product_workflow::AuthContinuationRejectionKind::InvalidTurnRunRef
+        }
+    ));
+    assert!(invalid_run_coordinator.resumes().is_empty());
+    assert!(invalid_run_coordinator.cancellations().is_empty());
+
+    let missing_thread_coordinator = Arc::new(RecordingTurnCoordinator::blocked_auth(
+        actor.clone(),
+        gate_ref.clone(),
+    ));
+    let mut missing_thread = auth_resolution(
+        &scope,
+        &actor,
+        run_id,
+        &gate_ref,
+        AuthFlowOutcome::ProviderDenied,
+    );
+    missing_thread.scope.resource.thread_id = None;
+    let error = ProductAuthTurnGateResumeDispatcher::new(missing_thread_coordinator.clone())
+        .dispatch_auth_resolved(missing_thread)
+        .await
+        .expect_err("missing thread scope must fail closed");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthContinuationRejected {
+            kind: ironclaw_product_workflow::AuthContinuationRejectionKind::MissingThreadScope
+        }
+    ));
+    assert!(missing_thread_coordinator.resumes().is_empty());
+    assert!(missing_thread_coordinator.cancellations().is_empty());
+
+    let missing_actor_coordinator = Arc::new(RecordingTurnCoordinator::blocked_auth(
+        actor.clone(),
+        gate_ref.clone(),
+    ));
+    missing_actor_coordinator.omit_actor();
+    let error = ProductAuthTurnGateResumeDispatcher::new(missing_actor_coordinator.clone())
+        .dispatch_auth_resolved(auth_resolution(
+            &scope,
+            &actor,
+            run_id,
+            &gate_ref,
+            AuthFlowOutcome::ProviderDenied,
+        ))
+        .await
+        .expect_err("missing durable actor must fail closed");
+    assert!(matches!(
+        error,
+        ProductWorkflowError::AuthContinuationRejected {
+            kind: ironclaw_product_workflow::AuthContinuationRejectionKind::UnauthorizedBlockedGate
+        }
+    ));
+    assert!(missing_actor_coordinator.resumes().is_empty());
+    assert!(missing_actor_coordinator.cancellations().is_empty());
 }
 
 #[tokio::test]

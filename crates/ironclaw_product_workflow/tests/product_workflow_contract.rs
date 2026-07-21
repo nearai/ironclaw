@@ -399,7 +399,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
                 run_id: self.run_id,
                 auth_request_ref: self.gate_ref.clone(),
                 flow_id: ironclaw_auth::AuthFlowId::new(),
-                status: AuthInteractionStatus::Open,
+                status: AuthInteractionStatus::AwaitingUser,
                 provider: ironclaw_auth::AuthProviderId::new("gmail").expect("provider"),
                 summary: "Authentication required".to_string(),
                 challenge: None,

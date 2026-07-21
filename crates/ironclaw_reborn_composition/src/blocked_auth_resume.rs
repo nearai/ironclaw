@@ -26,7 +26,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthContinuationRef, AuthFlowOutcome, AuthProductError, AuthResolved};
+use ironclaw_auth::{
+    AuthContinuationRef, AuthFlowOutcome, AuthProductError, AuthProviderId, AuthResolved,
+    CredentialAccountOwnerScope,
+};
+use ironclaw_common::hashing::sha256_hex;
 use ironclaw_turns::{
     IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
     TurnPersistenceSnapshot, TurnRunId, TurnStatus,
@@ -83,23 +87,27 @@ impl BlockedAuthResumeFanout {
         }
     }
 
-    async fn fan_out(&self, event: &AuthResolved) -> Result<(), AuthProductError> {
-        let primary_run_id = primary_run_id(&event.continuation);
+    async fn fan_out(
+        &self,
+        delivery_key: &IdempotencyKey,
+        owner: &CredentialAccountOwnerScope,
+        provider: &AuthProviderId,
+        primary_run_id: Option<TurnRunId>,
+    ) -> Result<(), AuthProductError> {
         let Some(snapshot) = self.snapshot_source.snapshot().await else {
             tracing::debug!("blocked-auth fan-out could not read the durable turn snapshot");
             return Err(AuthProductError::BackendUnavailable);
         };
-        let tenant_id = &event.scope.resource.tenant_id;
-        let user_id = &event.scope.resource.user_id;
         let mut resumed = 0usize;
         let mut incomplete = false;
+        let delivery_key_hash = sha256_hex(delivery_key.as_str().as_bytes());
         for run in &snapshot.runs {
             if run.status != TurnStatus::BlockedAuth {
                 continue;
             }
             // Strict caller scoping: same tenant and same explicit owner user.
-            if run.scope.tenant_id != *tenant_id
-                || run.scope.explicit_owner_user_id() != Some(user_id)
+            if run.scope.tenant_id != owner.tenant_id
+                || run.scope.explicit_owner_user_id() != Some(&owner.user_id)
             {
                 continue;
             }
@@ -114,7 +122,7 @@ impl BlockedAuthResumeFanout {
             if !run
                 .credential_requirements
                 .iter()
-                .any(|requirement| requirement.provider.as_str() == event.provider.as_str())
+                .any(|requirement| requirement.provider.as_str() == provider.as_str())
             {
                 continue;
             }
@@ -137,7 +145,7 @@ impl BlockedAuthResumeFanout {
             };
             let Ok(idempotency_key) = IdempotencyKey::new(format!(
                 "blocked-auth-fanout-{}-{}",
-                event.flow_id, run.run_id
+                delivery_key_hash, run.run_id
             )) else {
                 tracing::debug!(
                     run_id = %run.run_id,
@@ -167,7 +175,7 @@ impl BlockedAuthResumeFanout {
                     incomplete = true;
                     tracing::debug!(
                         run_id = %run.run_id,
-                        flow_id = %event.flow_id,
+                        delivery_key_hash,
                         %error,
                         "blocked-auth fan-out failed to resume a parked run"
                     );
@@ -176,8 +184,8 @@ impl BlockedAuthResumeFanout {
         }
         if resumed > 0 {
             tracing::debug!(
-                flow_id = %event.flow_id,
-                provider = %event.provider,
+                delivery_key_hash,
+                provider = %provider,
                 resumed,
                 "blocked-auth fan-out resumed additional parked runs"
             );
@@ -212,11 +220,30 @@ impl RebornAuthResolutionDispatcher for BlockedAuthResumeFanout {
         // exists once this event is emitted, and the caller's other parked
         // runs deserve the resume even if the primary run's own resume hit a
         // conflict.
-        let fan_out = self.fan_out(&event).await;
+        let delivery_key = IdempotencyKey::new(format!("auth-flow-{}", event.flow_id))
+            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        let owner = CredentialAccountOwnerScope::from_scope(&event.scope);
+        let fan_out = self
+            .fan_out(
+                &delivery_key,
+                &owner,
+                &event.provider,
+                primary_run_id(&event.continuation),
+            )
+            .await;
         match (primary, fan_out) {
             (Err(error), _) | (Ok(()), Err(error)) => Err(error),
             (Ok(()), Ok(())) => Ok(()),
         }
+    }
+
+    async fn dispatch_provider_connection(
+        &self,
+        delivery_key: IdempotencyKey,
+        owner: CredentialAccountOwnerScope,
+        provider: AuthProviderId,
+    ) -> Result<(), AuthProductError> {
+        self.fan_out(&delivery_key, &owner, &provider, None).await
     }
 }
 
@@ -596,6 +623,42 @@ mod tests {
             run_ids, expected,
             "a Settings-page connect resumes every blocked chat"
         );
+    }
+
+    #[tokio::test]
+    async fn non_oauth_provider_connection_resumes_matching_blocked_runs_without_fake_auth_ids() {
+        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
+        let snapshot = TurnPersistenceSnapshot {
+            turns: vec![parent_turn(OWNER, &waiting)],
+            runs: vec![waiting.clone()],
+            ..Default::default()
+        };
+        let (fanout, coordinator, inner) = fanout_with(snapshot, false);
+
+        fanout
+            .dispatch_provider_connection(
+                IdempotencyKey::new("provider-connection-1").expect("delivery key"),
+                CredentialAccountOwnerScope {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(OWNER).expect("user"),
+                    agent_id: None,
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    session_id: None,
+                },
+                AuthProviderId::new("slack_personal").expect("provider"),
+            )
+            .await
+            .expect("dispatch succeeds");
+
+        assert!(
+            inner.events.lock().expect("events").is_empty(),
+            "a provider connection has no synthetic OAuth event"
+        );
+        let resumed = coordinator.resumed.lock().expect("resumed");
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].run_id, waiting.run_id);
     }
 
     #[tokio::test]

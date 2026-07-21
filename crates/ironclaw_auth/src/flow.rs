@@ -41,6 +41,41 @@ pub enum AuthFlowState {
     Resolved(AuthFlowOutcome),
 }
 
+/// Legacy-compatible status projection for existing Web, CLI, and API wire
+/// contracts.
+///
+/// This is presentation vocabulary, not the durable auth state machine. New
+/// domain code should use [`AuthFlowState`]. The otherwise-unreachable
+/// `Pending` and `Completing` variants remain deserializable so older clients
+/// and persisted response fixtures keep their established schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthFlowStatus {
+    Pending,
+    AwaitingUser,
+    CallbackReceived,
+    Completing,
+    Completed,
+    Failed,
+    Expired,
+    Canceled,
+}
+
+impl From<AuthFlowState> for AuthFlowStatus {
+    fn from(state: AuthFlowState) -> Self {
+        match state {
+            AuthFlowState::Open => Self::AwaitingUser,
+            AuthFlowState::Processing => Self::CallbackReceived,
+            AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. }) => Self::Completed,
+            AuthFlowState::Resolved(
+                AuthFlowOutcome::ProviderDenied | AuthFlowOutcome::Failed { .. },
+            ) => Self::Failed,
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted) => Self::Canceled,
+            AuthFlowState::Resolved(AuthFlowOutcome::Expired) => Self::Expired,
+        }
+    }
+}
+
 /// Stable recoverable auth challenge rendered by product adapters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -220,6 +255,7 @@ fn decode_auth_flow_lifecycle<E: serde::de::Error>(
     legacy_status: Option<LegacyAuthFlowStatus>,
     legacy_account_id: Option<CredentialAccountId>,
     legacy_error: Option<AuthErrorCode>,
+    legacy_lifecycle_delivery_had_committed_secret: bool,
 ) -> Result<AuthFlowState, E> {
     let has_canonical_fields = canonical_state.is_some() || canonical_outcome.is_some();
     let has_legacy_fields =
@@ -271,12 +307,20 @@ fn decode_auth_flow_lifecycle<E: serde::de::Error>(
             })?;
             AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id })
         }
-        LegacyAuthFlowStatus::Failed => match legacy_error {
-            Some(AuthErrorCode::ProviderDenied) => {
+        LegacyAuthFlowStatus::Failed => match (legacy_error, legacy_account_id) {
+            (Some(AuthErrorCode::ProviderDenied), _) => {
                 AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
             }
-            Some(error) => AuthFlowState::Resolved(AuthFlowOutcome::Failed { error }),
-            None => {
+            (Some(_), Some(account_id)) if legacy_lifecycle_delivery_had_committed_secret => {
+                // The legacy state machine collapsed a successful provider
+                // authorization and a later lifecycle-delivery failure into
+                // `Failed`. Preserve the fact the provider actually granted
+                // this account and leave delivery unacknowledged so the
+                // canonical retry path can activate the extension.
+                AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id })
+            }
+            (Some(error), _) => AuthFlowState::Resolved(AuthFlowOutcome::Failed { error }),
+            (None, _) => {
                 return Err(E::custom("legacy failed auth flow is missing its error"));
             }
         },
@@ -291,12 +335,18 @@ fn decode_auth_flow_lifecycle<E: serde::de::Error>(
 impl<'de> Deserialize<'de> for AuthFlowRecord {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let wire = AuthFlowRecordWire::deserialize(deserializer)?;
+        let legacy_lifecycle_delivery_had_committed_secret =
+            matches!(
+                &wire.continuation,
+                AuthContinuationRef::LifecycleActivation { .. }
+            ) && wire.credential_secret_fingerprint.is_some();
         let state = decode_auth_flow_lifecycle::<D::Error>(
             wire.state,
             wire.outcome,
             wire.status,
             wire.credential_account_id,
             wire.error,
+            legacy_lifecycle_delivery_had_committed_secret,
         )?;
         Ok(Self {
             id: wire.id,

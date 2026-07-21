@@ -31,9 +31,10 @@ use ironclaw_auth::{
     AuthFlowOutcome, AuthFlowOwnerScope, AuthFlowRecordSource, AuthFlowState, AuthGateRef,
     AuthInteractionId, AuthInteractionService, AuthProductError, AuthProductScope, AuthProviderId,
     AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest,
-    CredentialAccountLabel, CredentialAccountListRequest, CredentialAccountLookupRequest,
-    CredentialAccountRecordSource, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, CredentialSecretFingerprint, LifecyclePackageRef,
+    CredentialAccountId, CredentialAccountLabel, CredentialAccountListRequest,
+    CredentialAccountLookupRequest, CredentialAccountRecordSource,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialOwnership, CredentialSecretFingerprint, LifecyclePackageRef,
     ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
     OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
     OAuthCallbackInput, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderScope,
@@ -2288,11 +2289,11 @@ async fn filesystem_oauth_callback_claim_is_one_shot_and_completion_persists() {
 }
 
 #[tokio::test]
-async fn filesystem_lifecycle_callback_replay_preserves_failed_committed_flow() {
+async fn filesystem_reopens_legacy_failed_lifecycle_delivery_as_authorized_for_retry() {
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
     let scope = test_scope();
-    let service = test_service(filesystem, secret_store);
+    let service = test_service(Arc::clone(&filesystem), secret_store);
     let mut flow = service
         .create_flow(NewAuthFlow {
             id: None,
@@ -2319,17 +2320,40 @@ async fn filesystem_lifecycle_callback_replay_preserves_failed_committed_flow() 
         .await
         .expect("read flow")
         .expect("flow exists");
-    flow.state = AuthFlowState::Resolved(AuthFlowOutcome::Failed {
-        error: AuthErrorCode::TokenExchangeFailed,
-    });
+    let account_id = CredentialAccountId::new();
     flow.credential_secret_fingerprint =
         Some(CredentialSecretFingerprint::new("c".repeat(64)).expect("credential fingerprint"));
-    service
-        .write_flow(&scope, &flow, CasExpectation::Version(version))
+    let mut legacy = serde_json::to_value(&flow).expect("serialize flow");
+    let object = legacy.as_object_mut().expect("flow object");
+    object.remove("state");
+    object.remove("outcome");
+    object.insert("status".to_string(), serde_json::json!("failed"));
+    object.insert(
+        "credential_account_id".to_string(),
+        serde_json::to_value(account_id).expect("account id"),
+    );
+    object.insert(
+        "error".to_string(),
+        serde_json::to_value(AuthErrorCode::BackendUnavailable).expect("error code"),
+    );
+    let path = super::paths::flow_path(&scope, flow.id).expect("flow path");
+    filesystem
+        .put(
+            &scope.resource,
+            &path,
+            Entry::bytes(serde_json::to_vec(&legacy).expect("legacy flow bytes"))
+                .with_content_type(ContentType::json()),
+            CasExpectation::Version(version),
+        )
         .await
-        .expect("persist failed committed lifecycle flow");
+        .expect("persist legacy failed lifecycle flow");
 
-    let replay = service
+    let reopened = test_service(
+        Arc::clone(&filesystem),
+        Arc::new(FilesystemSecretStore::ephemeral()),
+    );
+
+    let replay = reopened
         .claim_oauth_callback(
             &scope,
             OAuthCallbackClaimRequest {
@@ -2340,13 +2364,17 @@ async fn filesystem_lifecycle_callback_replay_preserves_failed_committed_flow() 
             },
         )
         .await
-        .expect("committed lifecycle callback replay remains idempotent");
+        .expect("legacy committed lifecycle callback reopens for retry");
 
-    assert_eq!(replay.state, flow.state);
+    assert_eq!(
+        replay.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id })
+    );
     assert_eq!(
         replay.credential_secret_fingerprint,
         flow.credential_secret_fingerprint
     );
+    assert_eq!(replay.resolution_delivered_at, None);
 }
 
 #[tokio::test]

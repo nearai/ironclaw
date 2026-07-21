@@ -94,11 +94,12 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_auth::{AuthContinuationRef, AuthProductError, AuthResolved};
+use ironclaw_auth::{AuthProductError, AuthProviderId, AuthResolved, CredentialAccountOwnerScope};
 use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
 use ironclaw_host_api::{AgentId, TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_secrets::FilesystemSecretStore;
+use ironclaw_turns::IdempotencyKey;
 use secrecy::SecretString;
 
 use super::*;
@@ -109,8 +110,8 @@ use crate::test_support::{RecordingBotApi, fault_injected_telegram_state, telegr
 
 #[derive(Debug, Default)]
 struct RecordingDispatcher {
-    events: StdMutex<Vec<AuthResolved>>,
-    attempts: StdMutex<Vec<AuthResolved>>,
+    events: StdMutex<Vec<(IdempotencyKey, CredentialAccountOwnerScope, AuthProviderId)>>,
+    attempts: StdMutex<Vec<(IdempotencyKey, CredentialAccountOwnerScope, AuthProviderId)>>,
     fail_remaining: std::sync::atomic::AtomicUsize,
 }
 
@@ -126,7 +127,17 @@ impl RecordingDispatcher {
 
 #[async_trait]
 impl RebornAuthResolutionDispatcher for RecordingDispatcher {
-    async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
+    async fn dispatch_auth_resolved(&self, _event: AuthResolved) -> Result<(), AuthProductError> {
+        Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn dispatch_provider_connection(
+        &self,
+        delivery_key: IdempotencyKey,
+        owner: CredentialAccountOwnerScope,
+        provider: AuthProviderId,
+    ) -> Result<(), AuthProductError> {
+        let event = (delivery_key, owner, provider);
         self.attempts.lock().expect("lock").push(event.clone());
         if self
             .fail_remaining
@@ -304,12 +315,8 @@ async fn consume_happy_path_binds_targets_and_dispatches() {
 
     let events = fixture.dispatcher.events.lock().expect("lock").clone();
     assert_eq!(events.len(), 1, "exactly one continuation dispatch");
-    assert_eq!(events[0].provider.as_str(), "telegram");
-    assert!(matches!(
-        events[0].continuation,
-        AuthContinuationRef::SetupOnly
-    ));
-    assert_eq!(events[0].scope.resource.user_id, ben);
+    assert_eq!(events[0].2.as_str(), "telegram");
+    assert_eq!(events[0].1.user_id, ben);
 
     let replay = fixture
         .service
@@ -525,14 +532,15 @@ async fn status_poll_retries_durable_completion_after_dispatch_failure() {
     assert!(status.connected, "completion retry publishes the DM target");
     let events = fixture.dispatcher.events.lock().expect("lock").clone();
     assert_eq!(events.len(), 1, "repair re-dispatches the continuation");
-    assert_eq!(events[0].scope.resource.user_id, ben);
+    assert_eq!(events[0].1.user_id, ben);
     let attempts = fixture.dispatcher.attempts.lock().expect("lock").clone();
     assert_eq!(attempts.len(), 2, "the durable outbox was attempted twice");
     assert_eq!(
-        attempts[0].flow_id, attempts[1].flow_id,
-        "outbox retries preserve one auth-resolution id"
+        attempts[0].0, attempts[1].0,
+        "outbox retries preserve one provider-connection delivery key"
     );
-    assert_eq!(attempts[0].outcome, attempts[1].outcome);
+    assert_eq!(attempts[0].1, attempts[1].1);
+    assert_eq!(attempts[0].2, attempts[1].2);
 }
 
 #[tokio::test]

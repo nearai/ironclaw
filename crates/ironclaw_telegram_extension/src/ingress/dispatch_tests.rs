@@ -4,14 +4,16 @@ pub(crate) mod test_fixtures {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use ironclaw_auth::AuthProductError;
-    use ironclaw_auth::AuthResolved;
+    use ironclaw_auth::{
+        AuthProductError, AuthProviderId, AuthResolved, CredentialAccountOwnerScope,
+    };
     use ironclaw_host_api::{AgentId, TenantId, UserId};
     use ironclaw_product_adapters::{
         ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
         ProjectionSubscriptionRequest,
     };
     use ironclaw_secrets::FilesystemSecretStore;
+    use ironclaw_turns::IdempotencyKey;
     use secrecy::SecretString;
 
     use super::super::*;
@@ -37,6 +39,15 @@ pub(crate) mod test_fixtures {
             event: AuthResolved,
         ) -> Result<(), AuthProductError> {
             self.events.lock().expect("lock").push(event); // safety: test-only fixture
+            Ok(())
+        }
+
+        async fn dispatch_provider_connection(
+            &self,
+            _delivery_key: IdempotencyKey,
+            _owner: CredentialAccountOwnerScope,
+            _provider: AuthProviderId,
+        ) -> Result<(), AuthProductError> {
             Ok(())
         }
     }

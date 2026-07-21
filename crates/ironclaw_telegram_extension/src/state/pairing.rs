@@ -1,10 +1,11 @@
 use chrono::Utc;
-use ironclaw_auth::AuthFlowId;
 use ironclaw_filesystem::{
     CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FilesystemError, cas_update,
 };
 use ironclaw_host_api::UserId;
 use ironclaw_product_adapters::AdapterInstallationId;
+use ironclaw_turns::IdempotencyKey;
+use uuid::Uuid;
 
 use super::FilesystemTelegramHostState;
 use super::records::{
@@ -19,10 +20,13 @@ impl FilesystemTelegramHostState {
         installation_id: &AdapterInstallationId,
         user_id: &UserId,
         chat_id: i64,
-    ) -> Result<AuthFlowId, TelegramPairingError> {
+    ) -> Result<IdempotencyKey, TelegramPairingError> {
         let path = pairing_completion_path(installation_id, user_id).map_err(map_fs_pairing)?;
         let installation_id = installation_id.clone();
         let user_id = user_id.clone();
+        let candidate_resolution_key =
+            IdempotencyKey::new(format!("telegram-pairing-{}", Uuid::new_v4()))
+                .map_err(|reason| TelegramPairingError::StoreUnavailable { reason })?;
         cas_update(
             self.filesystem.as_ref(),
             &self.scope,
@@ -30,7 +34,8 @@ impl FilesystemTelegramHostState {
             decode_pairing_completion,
             encode_pairing_completion,
             move |current: Option<StoredPairingCompletion>| {
-                let resolution_flow_id = current
+                let candidate_resolution_key = candidate_resolution_key.clone();
+                let resolution_key = current
                     .as_ref()
                     .filter(|completion| {
                         !completion.completed
@@ -38,16 +43,16 @@ impl FilesystemTelegramHostState {
                             && completion.user_id == user_id
                             && completion.chat_id == chat_id
                     })
-                    .and_then(|completion| completion.resolution_flow_id)
-                    .unwrap_or_default();
+                    .and_then(|completion| completion.resolution_key.clone())
+                    .unwrap_or(candidate_resolution_key);
                 let completion = StoredPairingCompletion {
                     installation_id: installation_id.clone(),
                     user_id: user_id.clone(),
                     chat_id,
-                    resolution_flow_id: Some(resolution_flow_id),
+                    resolution_key: Some(resolution_key.clone()),
                     completed: false,
                 };
-                async move { Ok(CasApply::new(completion, resolution_flow_id)) }
+                async move { Ok(CasApply::new(completion, resolution_key)) }
             },
         )
         .await
@@ -58,7 +63,7 @@ impl FilesystemTelegramHostState {
         &self,
         installation_id: &AdapterInstallationId,
         user_id: &UserId,
-    ) -> Result<Option<(i64, AuthFlowId)>, TelegramPairingError> {
+    ) -> Result<Option<(i64, IdempotencyKey)>, TelegramPairingError> {
         let path = pairing_completion_path(installation_id, user_id).map_err(map_fs_pairing)?;
         let pending = self
             .read_record::<StoredPairingCompletion>(&path)
@@ -73,14 +78,14 @@ impl FilesystemTelegramHostState {
         let Some(record) = pending else {
             return Ok(None);
         };
-        let flow_id = match record.resolution_flow_id {
-            Some(flow_id) => flow_id,
+        let resolution_key = match record.resolution_key {
+            Some(resolution_key) => resolution_key,
             None => {
                 self.persist_pairing_completion(installation_id, user_id, record.chat_id)
                     .await?
             }
         };
-        Ok(Some((record.chat_id, flow_id)))
+        Ok(Some((record.chat_id, resolution_key)))
     }
 
     pub async fn finish_pairing_completion(
@@ -88,7 +93,7 @@ impl FilesystemTelegramHostState {
         installation_id: &AdapterInstallationId,
         user_id: &UserId,
         chat_id: i64,
-        resolution_flow_id: AuthFlowId,
+        resolution_key: IdempotencyKey,
     ) -> Result<(), TelegramPairingError> {
         let path = pairing_completion_path(installation_id, user_id).map_err(map_fs_pairing)?;
         let installation_id = installation_id.clone();
@@ -102,13 +107,14 @@ impl FilesystemTelegramHostState {
             move |current: Option<StoredPairingCompletion>| {
                 let installation_id = installation_id.clone();
                 let user_id = user_id.clone();
+                let resolution_key = resolution_key.clone();
                 async move {
                     let Some(mut completion) = current else {
                         let missing = StoredPairingCompletion {
                             installation_id,
                             user_id,
                             chat_id,
-                            resolution_flow_id: Some(resolution_flow_id),
+                            resolution_key: Some(resolution_key),
                             completed: true,
                         };
                         return Ok(CasApply::no_op(missing, ()));
@@ -116,7 +122,7 @@ impl FilesystemTelegramHostState {
                     if completion.installation_id != installation_id
                         || completion.user_id != user_id
                         || completion.chat_id != chat_id
-                        || completion.resolution_flow_id != Some(resolution_flow_id)
+                        || completion.resolution_key != Some(resolution_key)
                     {
                         return Err(TelegramPairingError::StoreUnavailable {
                             reason: "pairing completion identity changed concurrently".to_string(),
@@ -421,6 +427,27 @@ mod tests {
             expires_at: now + Duration::minutes(15),
             consumed_at: None,
         }
+    }
+
+    #[test]
+    fn legacy_pairing_completion_flow_id_decodes_as_the_stable_delivery_key() {
+        let legacy = serde_json::json!({
+            "installation_id": "tg-bot-1",
+            "user_id": "ben",
+            "chat_id": 42,
+            "resolution_flow_id": "22c4041b-4fd8-47a5-ab59-b6503ac9fe11",
+            "completed": false
+        });
+
+        let decoded = decode_pairing_completion(
+            &serde_json::to_vec(&legacy).expect("legacy completion bytes"),
+        )
+        .expect("legacy completion decodes");
+
+        assert_eq!(
+            decoded.resolution_key.as_ref().map(IdempotencyKey::as_str),
+            Some("22c4041b-4fd8-47a5-ab59-b6503ac9fe11")
+        );
     }
 
     #[tokio::test]

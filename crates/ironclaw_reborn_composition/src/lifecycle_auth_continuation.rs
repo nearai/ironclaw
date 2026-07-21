@@ -1,12 +1,16 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthContinuationRef, AuthFlowOutcome, AuthProductError, AuthResolved};
+use ironclaw_auth::{
+    AuthContinuationRef, AuthFlowOutcome, AuthProductError, AuthProviderId, AuthResolved,
+    CredentialAccountOwnerScope,
+};
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductSurfaceContext, LifecycleReadinessBlocker,
 };
+use ironclaw_turns::IdempotencyKey;
 
 use crate::RebornAuthResolutionDispatcher;
 
@@ -105,6 +109,17 @@ impl RebornAuthResolutionDispatcher for LifecycleAuthResolutionDispatcher {
             "OAuth lifecycle continuation did not produce an active extension"
         );
         Err(AuthProductError::BackendUnavailable)
+    }
+
+    async fn dispatch_provider_connection(
+        &self,
+        delivery_key: IdempotencyKey,
+        owner: CredentialAccountOwnerScope,
+        provider: AuthProviderId,
+    ) -> Result<(), AuthProductError> {
+        self.inner
+            .dispatch_provider_connection(delivery_key, owner, provider)
+            .await
     }
 }
 

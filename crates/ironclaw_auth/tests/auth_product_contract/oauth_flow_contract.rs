@@ -160,6 +160,49 @@ async fn legacy_auth_flow_wire_decodes_into_the_canonical_model_and_fails_closed
 }
 
 #[tokio::test]
+async fn legacy_failed_lifecycle_delivery_preserves_the_authorized_account() {
+    let services = InMemoryAuthProductServices::new();
+    let canonical = serde_json::to_value(oauth_flow(&services, scope("legacy-lifecycle")).await)
+        .expect("sample flow serializes");
+    let account_id = CredentialAccountId::new();
+    let mut legacy = canonical.as_object().expect("record object").clone();
+    legacy.remove("state");
+    legacy.remove("outcome");
+    legacy.remove("resolution_delivered_at");
+    legacy.insert("status".to_string(), serde_json::json!("failed"));
+    legacy.insert(
+        "error".to_string(),
+        serde_json::json!(AuthErrorCode::BackendUnavailable),
+    );
+    legacy.insert(
+        "credential_account_id".to_string(),
+        serde_json::json!(account_id),
+    );
+    legacy.insert(
+        "credential_secret_fingerprint".to_string(),
+        serde_json::json!("c".repeat(64)),
+    );
+    legacy.insert(
+        "continuation".to_string(),
+        serde_json::json!({
+            "type": "lifecycle_activation",
+            "package_ref": "slack"
+        }),
+    );
+
+    let migrated: ironclaw_auth::AuthFlowRecord =
+        serde_json::from_value(serde_json::Value::Object(legacy))
+            .expect("legacy committed lifecycle failure decodes");
+
+    assert_eq!(
+        migrated.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
+        "the provider authorization succeeded; only its old delivery protocol failed"
+    );
+    assert!(migrated.resolution_delivered_at.is_none());
+}
+
+#[tokio::test]
 async fn every_supported_legacy_lifecycle_shape_maps_to_one_canonical_state() {
     let services = InMemoryAuthProductServices::new();
     let canonical = serde_json::to_value(oauth_flow(&services, scope("legacy-matrix")).await)

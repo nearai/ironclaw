@@ -1002,7 +1002,7 @@ fn oauth_callback_response(headers: &HeaderMap, response: RebornOAuthCallbackRes
     }
     Json(json!({
         "flow_id": response.flow_id,
-        "status": OAuthFlowWireStatus::from(response.status),
+        "status": response.status,
         "credential_account_id": response.credential_account_id,
         "continuation": response.continuation,
     }))
@@ -1060,11 +1060,11 @@ fn oauth_callback_signal_script(payload: &serde_json::Value) -> String {
 
 fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Response {
     let (title, message) = match response.status {
-        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. }) => (
+        AuthFlowStatus::Completed => (
             "Authorization complete",
             "Authorization complete. You can close this window.",
         ),
-        AuthFlowState::Resolved(_) => (
+        AuthFlowStatus::Failed | AuthFlowStatus::Canceled | AuthFlowStatus::Expired => (
             "Authorization failed",
             "Authorization failed. No permissions were selected, or authorization was denied. Please retry authorization and select the requested permissions.",
         ),
@@ -1077,7 +1077,7 @@ fn oauth_callback_completion_html(response: &RebornOAuthCallbackResponse) -> Res
     let script = oauth_callback_signal_script(&json!({
         "type": OAUTH_CALLBACK_SIGNAL_MESSAGE_TYPE,
         "flowId": response.flow_id,
-        "status": OAuthFlowWireStatus::from(response.status),
+        "status": response.status,
         "continuation": response.continuation,
     }));
     let html = format!(
@@ -1119,7 +1119,7 @@ fn oauth_callback_failure_html(
     let script = oauth_callback_signal_script(&json!({
         "type": OAUTH_CALLBACK_SIGNAL_MESSAGE_TYPE,
         "flowId": flow_id,
-        "status": OAuthFlowWireStatus::Failed,
+        "status": AuthFlowStatus::Failed,
         "errorCode": error.code,
     }));
     let html = format!(
@@ -1600,7 +1600,7 @@ mod tests {
 
         assert_eq!(
             observed.status,
-            OAuthFlowWireStatus::Expired,
+            AuthFlowStatus::Expired,
             "a non-terminal flow past its deadline must poll as expired, not open"
         );
         assert_eq!(

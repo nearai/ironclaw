@@ -163,15 +163,17 @@ pub struct AuthCredentialAccountChoiceView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthInteractionStatus {
-    Open,
-    Processing,
+    Pending,
+    AwaitingUser,
+    CallbackReceived,
+    Completing,
 }
 
 impl AuthInteractionStatus {
     fn from_flow_state(state: AuthFlowState) -> Option<Self> {
         match state {
-            AuthFlowState::Open => Some(Self::Open),
-            AuthFlowState::Processing => Some(Self::Processing),
+            AuthFlowState::Open => Some(Self::AwaitingUser),
+            AuthFlowState::Processing => Some(Self::CallbackReceived),
             AuthFlowState::Resolved(_) => None,
         }
     }
@@ -398,6 +400,26 @@ mod tests {
         assert_eq!(
             interaction_scope.project_id.as_ref().map(ProjectId::as_str),
             Some("project:shared")
+        );
+    }
+
+    #[test]
+    fn auth_interaction_state_projection_preserves_the_existing_wire_statuses() {
+        assert_eq!(
+            serde_json::to_value(
+                AuthInteractionStatus::from_flow_state(AuthFlowState::Open)
+                    .expect("open interaction"),
+            )
+            .expect("serialize open status"),
+            serde_json::json!("awaiting_user"),
+        );
+        assert_eq!(
+            serde_json::to_value(
+                AuthInteractionStatus::from_flow_state(AuthFlowState::Processing)
+                    .expect("processing interaction"),
+            )
+            .expect("serialize processing status"),
+            serde_json::json!("callback_received"),
         );
     }
 }

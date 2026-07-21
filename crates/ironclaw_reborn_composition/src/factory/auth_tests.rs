@@ -644,10 +644,7 @@ async fn oauth_callback_with_stale_gate_is_an_idempotent_noop() {
         .await
         .expect("a stale exact gate has no remaining authority");
 
-    assert!(matches!(
-        response.status,
-        ironclaw_auth::AuthFlowState::Resolved(ironclaw_auth::AuthFlowOutcome::Authorized { .. })
-    ));
+    assert_eq!(response.status, ironclaw_auth::AuthFlowStatus::Completed);
 }
 
 #[tokio::test]

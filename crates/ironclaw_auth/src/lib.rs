@@ -45,12 +45,12 @@ pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
     AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOutcome,
-    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowState, AuthResolved,
-    CredentialAccountUpdateBinding, CredentialSelectionInput, ManualTokenCompletionInput,
-    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    ProviderCallbackOutcome, TurnGateAuthFlowQuery, credential_status_for_completed_flow,
-    flow_matches_durable_owner, flow_matches_turn_gate_query, flow_shares_setup_owner_root,
-    is_setup_class_continuation,
+    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowState, AuthFlowStatus,
+    AuthResolved, CredentialAccountUpdateBinding, CredentialSelectionInput,
+    ManualTokenCompletionInput, NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
+    OAuthCallbackInput, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
+    credential_status_for_completed_flow, flow_matches_durable_owner, flow_matches_turn_gate_query,
+    flow_shares_setup_owner_root, is_setup_class_continuation,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,

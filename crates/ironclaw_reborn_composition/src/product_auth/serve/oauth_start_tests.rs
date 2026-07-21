@@ -198,6 +198,7 @@ mod tests {
             .await
             .expect("response body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        assert_eq!(json["status"], "awaiting_user");
         let flow_id = AuthFlowId::from_uuid(
             Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
         );
