@@ -7,4 +7,5 @@
 //! composition's own route builders need stay here.
 
 pub(crate) mod facade;
+mod product_capability;
 pub(crate) mod route_mounts;

@@ -23,6 +23,7 @@ use ironclaw_product_workflow::{
 use ironclaw_triggers::TriggerRepository;
 
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::webui::product_capability::RuntimeProductCapabilityInvoker;
 use crate::{
     RebornAutomationProductFacade, RebornBuildError, RebornProductAuthServices, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticStatus, RebornRuntime,
@@ -235,9 +236,10 @@ pub(crate) fn build_webui_services_with_channel_connection(
         outbound_delivery_target_providers.push(provider);
     }
 
-    let mut api = ProductRebornServices::new(
+    let mut api = ProductRebornServices::new_with_product_capability_invoker(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
+        RuntimeProductCapabilityInvoker::from_services(services),
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());

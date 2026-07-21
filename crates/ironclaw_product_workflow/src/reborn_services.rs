@@ -2749,9 +2749,46 @@ pub trait InboundAttachmentReader: Send + Sync {
     ) -> Result<Vec<u8>, RebornServicesError>;
 }
 
+/// Product-side command membrane for the generic [`RebornServicesApi::invoke`]
+/// conduit.
+///
+/// The concrete host-runtime adapter lives in composition: this crate owns the
+/// product contract but must not depend on `ironclaw_host_runtime`. The facade
+/// is generic over this boundary so the production capability hot path does
+/// not add another `Arc<dyn ...>` seam solely for test substitution.
+#[async_trait]
+pub trait ProductCapabilityInvoker: Send + Sync {
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError>;
+}
+
+/// Fail-closed default for compositions that have not attached the product
+/// capability membrane.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnavailableProductCapabilityInvoker;
+
+#[async_trait]
+impl ProductCapabilityInvoker for UnavailableProductCapabilityInvoker {
+    async fn invoke(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _capability: CapabilityId,
+        _input: serde_json::Value,
+        _activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
-pub struct RebornServices {
+pub struct RebornServices<I = UnavailableProductCapabilityInvoker> {
+    product_capability_invoker: I,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
@@ -2782,12 +2819,30 @@ pub struct RebornServices {
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
-impl RebornServices {
+impl RebornServices<UnavailableProductCapabilityInvoker> {
     pub fn new(
         thread_service: Arc<dyn SessionThreadService>,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
+        Self::new_with_product_capability_invoker(
+            thread_service,
+            turn_coordinator,
+            UnavailableProductCapabilityInvoker,
+        )
+    }
+}
+
+impl<I> RebornServices<I>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+{
+    pub fn new_with_product_capability_invoker(
+        thread_service: Arc<dyn SessionThreadService>,
+        turn_coordinator: Arc<dyn TurnCoordinator>,
+        product_capability_invoker: I,
+    ) -> Self {
         Self {
+            product_capability_invoker,
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
@@ -3180,7 +3235,22 @@ fn last_admin_error() -> RebornServicesError {
 }
 
 #[async_trait]
-impl RebornServicesApi for RebornServices {
+impl<I> RebornServicesApi for RebornServices<I>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+{
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        self.product_capability_invoker
+            .invoke(caller, capability, input, activity_id)
+            .await
+    }
+
     async fn list_admin_users(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -5217,7 +5287,10 @@ impl RebornServicesApi for RebornServices {
     }
 }
 
-impl RebornServices {
+impl<I> RebornServices<I>
+where
+    I: ProductCapabilityInvoker,
+{
     async fn list_visible_threads_for_scope(
         &self,
         scope: ThreadScope,
@@ -5838,7 +5911,10 @@ struct ResolvedThreadAccess {
 //                == Some(fire.creator_user_id) [post-#4754: new first-fire bindings
 //                   persist creator; legacy (pre-#4754) bindings remain owner-None
 //                   and will not match — accepted breakage; recreate trigger to fix].
-impl RebornServices {
+impl<I> RebornServices<I>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+{
     /// Shared authorization check for automation-trigger threads.
     ///
     /// Checks whether `scope.thread_id` belongs to one of the authenticated

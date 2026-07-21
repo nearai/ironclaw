@@ -1,7 +1,7 @@
 //! Descriptor-backed caller and operator log projections.
 
 use super::{
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    ProductCapabilityInvoker, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
     RebornOperatorCommandPlaneResponse, RebornOperatorLogsQuery, RebornOperatorSurfaceStatus,
     RebornServices, RebornServicesError, RebornViewDescriptor, WebUiAuthenticatedCaller,
     WebUiInboundValidationCode, WebUiInboundValidationError, bounded_log_query,
@@ -18,7 +18,10 @@ pub const OPERATOR_LOGS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     paginated: true,
 };
 
-impl RebornServices {
+impl<I> RebornServices<I>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+{
     pub(super) async fn build_logs_view(
         &self,
         caller: WebUiAuthenticatedCaller,

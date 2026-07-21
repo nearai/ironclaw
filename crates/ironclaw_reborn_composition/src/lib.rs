@@ -433,6 +433,7 @@ pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
 /// two tenants sharing one underlying [`RootFilesystem`] cannot collide
 /// on identically-shaped paths.
 const PER_USER_ALIASES: &[&str] = &[
+    "/product-results",
     "/processes",
     "/secrets",
     "/authorization",
