@@ -30,6 +30,11 @@ import {
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+const OAUTH_STATUS_ERROR_KEYS = Object.freeze({
+  failed: "extensions.oauthFailed",
+  canceled: "extensions.oauthCanceled",
+  expired: "extensions.oauthExpired",
+});
 
 // OAuth callback constants, HTTPS-auth-URL/popup helpers, and completion
 // parsing/matching are the shared product-auth OAuth event contract — see
@@ -543,14 +548,10 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
             const status = result?.status;
             if (status === "completed") {
               complete();
-            } else if (["failed", "canceled", "expired"].includes(status)) {
-              setAuthError(
-                status === "expired"
-                  ? t("extensions.oauthExpired")
-                  : status === "canceled"
-                    ? t("extensions.oauthCanceled")
-                    : t("extensions.oauthFailed"),
-              );
+            } else {
+              const errorKey = OAUTH_STATUS_ERROR_KEYS[status];
+              if (typeof errorKey !== "string") return;
+              setAuthError(t(errorKey));
               stopWatcher();
               refreshSetupState();
             }
