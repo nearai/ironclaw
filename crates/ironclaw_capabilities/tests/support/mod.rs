@@ -525,7 +525,7 @@ visibility = "host_internal"
 input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "echo.other"
 description = "A second echo capability, distinct from echo.say"
 effects = ["dispatch_capability"]

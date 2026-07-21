@@ -331,7 +331,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | `agents.defaults.contextInjection: "never"` | ✅ | ❌ | Disable workspace bootstrap injection per-agent |
 | `agents.defaults.experimental.localModelLean` | ✅ | ❌ | Drop heavyweight default tools for weaker local models |
 | `agents.files.get/set` workspace tools | ✅ | 🚧 | First-party scoped read/write/list/glob/grep/apply_patch capabilities exist through Reborn HostRuntime; OpenClaw-compatible `agents.files.*` aliases and realpath-via-fd hardening still pending |
-| Trajectory export | ✅ | ❌ | Default-on local trajectory capture; `/export-trajectory` bundles with redacted transcripts/events/artifacts |
+| Trajectory export | ✅ | 🚧 | WebChat v2 can download a caller-owned, deterministically redacted `ironclaw.run_artifact.v1` bundle for one exact run, including replay metadata and bounded scoped logs; default-on local capture and full event/artifact parity remain follow-up |
 | Block-level streaming | ✅ | ❌ | |
 | Tool-level streaming | ✅ | ❌ | |
 | Z.AI tool_stream | ✅ | ❌ | Real-time tool call streaming |
@@ -866,7 +866,7 @@ CLAUDE.md for the full mapping + gap catalog.
 - ❌ Codex native app-server runtime + Computer Use
 - ❌ Talk Mode / realtime voice (browser + backend)
 - ❌ OpenTelemetry diagnostics + Prometheus exporter
-- ❌ Active Memory + Skill Workshop + Trajectory export
+- ❌ Active Memory + Skill Workshop; 🚧 Trajectory export (caller-owned, redacted single-run export; full parity remains pending)
 - ❌ Outbound proxy routing + `proxy validate`
 - ❌ `migrate` (Claude/Hermes import)
 

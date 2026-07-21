@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderName, Method, Request, StatusCode, header};
+use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InstallationState, InvocationId, ProjectId, RuntimeKind,
@@ -27,9 +28,9 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    FsMount, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
-    LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry, ProjectFsEntryKind,
-    ProjectFsFile, ProjectFsStat, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    FsMount, LifecyclePackageRef, LOGS_VIEW, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_LOGS_VIEW, ProjectFsEntry, ProjectFsEntryKind,
+    ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
     RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
@@ -53,21 +54,23 @@ use ironclaw_product_workflow::{
     RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
     RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
     RebornRemoveMemberRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
+    RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
+    RunArtifactLogs, RunArtifactRedaction, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
-    EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus,
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    TurnRunId, TurnStatus,
 };
 use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
@@ -248,6 +251,7 @@ struct StubServices {
     global_auto_approve_calls: Mutex<usize>,
     stall_global_auto_approve: Mutex<bool>,
     next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
+    view_queries: Mutex<Vec<RebornViewQuery>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -605,6 +609,103 @@ impl RebornServicesApi for StubServices {
             summary_artifacts: Vec::new(),
             next_cursor: None,
         })
+    }
+
+    async fn query(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        self.view_queries.lock().expect("lock").push(query.clone());
+        match query.view_id.as_str() {
+            id if id == RUN_ARTIFACT_VIEW.id => {
+                let request: RebornRunArtifactRequest =
+                    serde_json::from_value(query.params).expect("artifact params");
+                let run_id = TurnRunId::parse(&request.run_id).expect("test run id");
+                let artifact = RebornRunArtifact {
+                    schema: RUN_ARTIFACT_SCHEMA.to_string(),
+                    generated_at: Utc::now(),
+                    thread_id: request.thread_id,
+                    run: RebornGetRunStateResponse {
+                        turn_id: "turn-artifact".to_string(),
+                        run_id,
+                        status: TurnStatus::Completed,
+                        event_cursor: EventCursor(1),
+                        accepted_message_ref: AcceptedMessageRef::new("msg:artifact")
+                            .expect("message ref"),
+                        resolved_run_profile_id: "default".to_string(),
+                        resolved_run_profile_version: 1,
+                        received_at: Utc::now(),
+                        checkpoint_id: None,
+                        gate_ref: None,
+                        failure: None,
+                        usage: None,
+                        cost: None,
+                    },
+                    messages: Vec::new(),
+                    logs: RunArtifactLogs {
+                        source: "test".to_string(),
+                        available: true,
+                        complete: false,
+                        truncated: false,
+                        unavailable_reason: None,
+                        entries: Vec::new(),
+                    },
+                    redaction: RunArtifactRedaction {
+                        pipeline: "deterministic-trace-redactor-v1".to_string(),
+                        applied: false,
+                    },
+                };
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(artifact).expect("artifact payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == LOGS_VIEW.id => {
+                let mut request: RebornLogQueryRequest =
+                    serde_json::from_value(query.params).expect("logs params");
+                request.cursor = query.cursor.or(request.cursor);
+                if request.tail && request.follow {
+                    return Err(RebornServicesError {
+                        code: RebornServicesErrorCode::InvalidRequest,
+                        kind: RebornServicesErrorKind::Validation,
+                        status_code: 400,
+                        retryable: false,
+                        field: Some("follow".to_string()),
+                        validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                    });
+                }
+                self.query_logs_calls.lock().expect("lock").push(request);
+                let response = RebornLogQueryResponse {
+                    source: "test".to_string(),
+                    entries: Vec::new(),
+                    next_cursor: None,
+                    tail_supported: true,
+                    follow_supported: true,
+                };
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(response).expect("logs payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_LOGS_VIEW.id => {
+                let mut request: RebornOperatorLogsQuery =
+                    serde_json::from_value(query.params).expect("operator logs params");
+                request.cursor = query.cursor.or(request.cursor);
+                self.query_operator_logs_calls
+                    .lock()
+                    .expect("lock")
+                    .push(request);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(operator_command_response(
+                        RebornOperatorArea::Logs,
+                    ))
+                    .expect("operator logs payload"),
+                    next_cursor: None,
+                })
+            }
+            _ => Err(rejecting_reborn_services_error()),
+        }
     }
 
     async fn list_fs_mounts(
@@ -1153,44 +1254,6 @@ impl RebornServicesApi for StubServices {
         Ok(operator_config_diagnostic_command_plane_response(
             RebornOperatorArea::Status,
         ))
-    }
-
-    async fn query_logs(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        if request.tail && request.follow {
-            return Err(RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
-                status_code: 400,
-                retryable: false,
-                field: Some("follow".to_string()),
-                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
-            });
-        }
-
-        self.query_logs_calls.lock().expect("lock").push(request);
-        Ok(RebornLogQueryResponse {
-            source: "test".to_string(),
-            entries: Vec::new(),
-            next_cursor: None,
-            tail_supported: true,
-            follow_supported: true,
-        })
-    }
-
-    async fn query_operator_logs(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        query: RebornOperatorLogsQuery,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        self.query_operator_logs_calls
-            .lock()
-            .expect("lock")
-            .push(query);
-        Ok(operator_command_response(RebornOperatorArea::Logs))
     }
 
     async fn run_operator_service_lifecycle(
@@ -1841,6 +1904,40 @@ async fn get_timeline_threads_path_into_request() {
     let calls = services.get_timeline_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].thread_id, "thread-x");
+}
+
+#[tokio::test]
+async fn get_run_artifact_threads_path_and_run_path_into_request() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+    let run_id = "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18";
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/webchat/v2/threads/thread-x/runs/{run_id}/artifact"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: Value = serde_json::from_slice(&body).expect("artifact json");
+    assert_eq!(payload["schema"], RUN_ARTIFACT_SCHEMA);
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, RUN_ARTIFACT_VIEW.id);
+    let request: RebornRunArtifactRequest =
+        serde_json::from_value(queries[0].params.clone()).expect("artifact params");
+    assert_eq!(request.thread_id, "thread-x");
+    assert_eq!(request.run_id, run_id);
 }
 
 // The attachment-bytes route carries three path segments and returns raw

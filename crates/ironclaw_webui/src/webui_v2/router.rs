@@ -22,6 +22,7 @@ use crate::webui_v2::descriptors::{
     WEBUI_V2_PATTERN_COMPLETE_NEARAI_WALLET_LOGIN, WEBUI_V2_PATTERN_CREATE_THREAD,
     WEBUI_V2_PATTERN_DELETE_LLM_PROVIDER, WEBUI_V2_PATTERN_DELETE_THREAD,
     WEBUI_V2_PATTERN_GET_ATTACHMENT, WEBUI_V2_PATTERN_GET_LLM_CONFIG, WEBUI_V2_PATTERN_GET_SESSION,
+    WEBUI_V2_PATTERN_GET_RUN_ARTIFACT,
     WEBUI_V2_PATTERN_GET_TIMELINE, WEBUI_V2_PATTERN_IMPORT_EXTENSION,
     WEBUI_V2_PATTERN_INSTALL_EXTENSION, WEBUI_V2_PATTERN_INSTALL_SKILL,
     WEBUI_V2_PATTERN_LIST_AUTOMATIONS, WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY,
@@ -189,6 +190,10 @@ pub fn webui_v2_router_with_options(state: WebUiV2State, options: WebUiV2RouteOp
         .route(WEBUI_V2_PATTERN_GET_SESSION, get(handlers::get_session))
         .route(WEBUI_V2_PATTERN_SEND_MESSAGE, post(handlers::send_message))
         .route(WEBUI_V2_PATTERN_GET_TIMELINE, get(handlers::get_timeline))
+        .route(
+            WEBUI_V2_PATTERN_GET_RUN_ARTIFACT,
+            get(handlers::get_run_artifact),
+        )
         .route(WEBUI_V2_PATTERN_LOGS, get(handlers::query_logs))
         .route(
             WEBUI_V2_PATTERN_LIST_PROJECT_FILES,
