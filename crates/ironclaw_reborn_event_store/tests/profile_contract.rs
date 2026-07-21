@@ -6,20 +6,18 @@ use secrecy::SecretString;
 
 const POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV: &str =
     "IRONCLAW_FILESYSTEM_POSTGRES_MIGRATION_CONNECT_MAX_WAIT_SECS";
-static POSTGRES_MIGRATION_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct ShortMigrationConnectWait {
-    _lock: tokio::sync::MutexGuard<'static, ()>,
+    _lock: std::sync::MutexGuard<'static, ()>,
     previous: Option<std::ffi::OsString>,
 }
 
 impl ShortMigrationConnectWait {
-    async fn install() -> Self {
-        let lock = POSTGRES_MIGRATION_ENV_LOCK.lock().await;
+    fn install() -> Self {
+        let lock = ironclaw_common::env_helpers::lock_env();
         let previous = std::env::var_os(POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV);
-        // SAFETY: the two tests that exercise a failed migration connection
-        // serialize access through POSTGRES_MIGRATION_ENV_LOCK. No other test
-        // in this integration-test process reads this variable.
+        // SAFETY: env-mutating tests serialize through the canonical
+        // workspace lock for the lifetime of this guard.
         unsafe { std::env::set_var(POSTGRES_MIGRATION_CONNECT_MAX_WAIT_ENV, "1") };
         Self {
             _lock: lock,
@@ -164,8 +162,9 @@ async fn production_postgres_rejects_remote_sslmode_disable_before_connecting() 
     assert!(!displayed.contains("postgres://"));
 }
 #[tokio::test]
+#[allow(clippy::await_holding_lock, reason = "serializes process env mutation")]
 async fn production_postgres_event_store_honors_explicit_remote_cleartext_opt_in() {
-    let _short_wait = ShortMigrationConnectWait::install().await;
+    let _short_wait = ShortMigrationConnectWait::install();
     let result = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {
@@ -194,8 +193,9 @@ async fn production_postgres_event_store_honors_explicit_remote_cleartext_opt_in
     assert!(!displayed.contains("postgres://"));
 }
 #[tokio::test]
+#[allow(clippy::await_holding_lock, reason = "serializes process env mutation")]
 async fn postgres_connection_failure_does_not_fall_back_or_leak_secret_config() {
-    let _short_wait = ShortMigrationConnectWait::install().await;
+    let _short_wait = ShortMigrationConnectWait::install();
     let result = build_reborn_event_stores(
         RebornProfile::Production,
         RebornEventStoreConfig::Postgres {

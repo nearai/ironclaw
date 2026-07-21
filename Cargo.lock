@@ -4273,6 +4273,7 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "hex",
+ "ironclaw_common",
  "ironclaw_events",
  "ironclaw_filesystem",
  "ironclaw_host_api",
