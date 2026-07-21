@@ -79,5 +79,10 @@
         "output_tokens": 73
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.extension_activate"
+    ]
+  }
 }

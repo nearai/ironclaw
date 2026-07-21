@@ -99,5 +99,10 @@
         "output_tokens": 166
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "google-drive.list_files"
+    ]
+  }
 }

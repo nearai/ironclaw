@@ -698,7 +698,7 @@
       },
       "response": {
         "type": "text",
-        "content": "Here's your direct message digest, Canary User. I've listed each person you have a DM with and the most recent message:\n\n---\n\n**DM Digest — Canary User's Slack DMs**\n\n| Person | Most recent message |\n|---|---|\n| **Ron Di Sandro** | You: *\"Hey IronClawm — detailed strategy question grounded in the live Reborn QA 5D strategy doc...\"* (QA nonce strategy questions) |\n| **Matias** | You: *\"Canary User joined Slack — take a second to say hello.\"* (join message, no replies) |\n| **Ironclaw QA** | Ironclaw QA: *\"Hi there! How can I help you today?\"* |\n| **IronClaw Reborn** (SLACK_ID_REDACTED) | You: *\"live pr5362 slack test\"* |\n| **Canary Other** | Canary Other: *\"ENTITYMSG_1784643032040 please sync with @Canary User\"* |\n| **IronClaw Reborn** (SLACK_ID_REDACTED) | You: *\"Hey @IronClaw Reborn, this is a test mention. Marker: MENTION_1783959667139\"* |\n| **Ashton** | Ashton: *\"📋 Ironclaw Open Issues — 100 total...\"* (issue stats summary) |\n| **Canary User** (self-DM) | You: *\"LASTSENT_1784642942705\"* |\n| **Slack** (USLACK) | Slack: *(empty message — system notification)* |\n| **sergey.astretsov** | You: *\"Canary User joined Slack — take a second to say hello.\"* (join message, no replies) |\n| **reborn-local-henry** | *(no messages yet)* |\n| **Canary Canary** | You: *\"Canary User has joined Slack – take a second to say hello.\"* (join message, no replies) |\n| **Emil Bogomolov** | You: *\"Canary User joined Slack — take a second to say hello.\"* (join message, no replies) |\n| **Henry Park** | You: *\"Canary User joined Slack — take a second to say hello.\"* (join message, no replies) |\n| **Lemon** | You: *\"Canary User joined Slack — take a second to say hello.\"* (join message, no replies) |\n| **IronClaw Reborn** (SLACK_ID_REDACTED) | *(no messages yet)* |\n| **Google Drive** | *(no messages yet)* |\n| **Artem Sirobaba** | You: *\"Canary User joined Slack — take a second to say hello.\"* (join message, no replies) |\n| **Josh Ford** | You: *\"Canary User joined Slack — take a second to say hello.\"* (join message, no replies) |\n| **Customer Support** | You: *\"Canary User accepted your invitation to join Slack — take a second to say hello.\"* (join message, no replies) |\n| **ChatGPT** (bot) | *(no messages yet)* |\n| **Slackbot** | *(Slackbot DM not found/accessible)* |\n\n---\n\nREBORN_QA_9C_DIGEST_1784642929134",
+        "content": "DM digest generated from live QA. Participant names and message excerpts were removed during fixture sanitization.\n\nREBORN_QA_9C_DIGEST_REDACTED",
         "input_tokens": 34875,
         "output_tokens": 713
       }
@@ -925,10 +925,15 @@
       },
       "response": {
         "type": "text",
-        "content": "Here's your DM digest, Canary User (the messages from *you* are your own outgoing messages):\n\n---\n\n## Your Direct Message Digest\n\n| Person | Last Message |\n|---|---|\n| **Ron Di Sandro** | You sent a detailed strategy question about live Google Docs grounding with a QA nonce protocol. |\n| **Matias** | You sent a welcome message after joining Slack (\"take a second to say hello\"). |\n| **sergey.astretsov** | You sent a welcome message after joining Slack. |\n| **IronClaw Reborn** (SLACK_ID_REDACTED) | You sent a test mention with marker MENTION_1783959667139. |\n| **Ironclaw QA** | They replied: \"Hi there! How can I help you today?\" |\n| **Canary Canary** | You sent a welcome message after joining Slack. |\n| **Emil Bogomolov** | You sent a welcome message after joining Slack. |\n| **Henry Park** | You sent a welcome message after joining Slack. |\n| **IronClaw Reborn** (SLACK_ID_REDACTED) | You said \"live pr5362 slack test\". |\n| **Lemon** | You sent a welcome message after joining Slack. |\n| **Google Drive** | *(no message history)* |\n| **Canary Other** | They sent: \"ENTITYMSG_1784643032040 please sync with @Canary User\" |\n| **Artem Sirobaba** | You sent a welcome message after joining Slack. |\n| **Ashton** | They posted a clipboard summary of Ironclaw Open Issues (100 total). |\n| **Canary User** (yourself) | You sent a Hacker News link about a macOS journaling app. |\n| **Josh Ford** | You sent a welcome message after joining Slack. |\n| **Customer Support** | You sent a welcome acceptance message. |\n| **Slack** | *(empty message — likely a system notification)* |\n| **Slackbot** | *(channel not found)* |\n| **ChatGPT** | *(no messages)* |\n| **reborn-local-henry** | *(no messages)* |\n\n---\n\n**REBORN_QA_9C_DIGEST_1784643080134**",
+        "content": "DM digest generated from live QA. Participant names and message excerpts were removed during fixture sanitization.\n\nREBORN_QA_9C_DIGEST_REDACTED",
         "input_tokens": 25826,
         "output_tokens": 480
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.get_user_info"
+    ]
+  }
 }

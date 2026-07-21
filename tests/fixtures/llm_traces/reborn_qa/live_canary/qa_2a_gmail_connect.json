@@ -99,5 +99,10 @@
         "output_tokens": 127
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "gmail.list_messages"
+    ]
+  }
 }

@@ -59,5 +59,10 @@
         "output_tokens": 58
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.search_messages"
+    ]
+  }
 }

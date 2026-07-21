@@ -915,6 +915,7 @@ jobs:
             shard_name: QA 10
             cases: qa_10a_slack_self_attribution,qa_10b_slack_ooo_status,qa_10c_slack_thread_replies,qa_10d_slack_channel_membership,qa_10e_slack_error_honesty,qa_10f_slack_mention_encoding,qa_10g_slack_last_message_sent,qa_10g_slack_last_message_sent_global,qa_10h_slack_email_hallucination_guard,qa_10i_slack_raw_entity_hygiene
     env:
+      STRICT_ARTIFACT_SCRUB: "true"
       REBORN_WEBUI_V2_GOOGLE_CASES: >-
         qa_2a_gmail_connect,qa_2b_calendar_connect,qa_2c_drive_connect,qa_2d_calendar_prep_live_chat,qa_2e_calendar_prep_email_routine,qa_2f_calendar_prep_email_delivery,
         qa_4a_gmail_connect,qa_4e_github_release_email_delivery,
@@ -1215,7 +1216,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: live-canary-reborn-webui-v2-live-qa-${{ matrix.shard_id }}
-          path: artifacts/live-canary/
+          path: |
+            artifacts/live-canary/
+            !artifacts/live-canary/**/llm-traces/**
           if-no-files-found: ignore
           retention-days: 14
 

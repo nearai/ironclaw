@@ -89,5 +89,10 @@
         "output_tokens": 803
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.get_thread_replies"
+    ]
+  }
 }

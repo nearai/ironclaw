@@ -139,7 +139,7 @@
             "id": "call_637ae3be89154accbce79374",
             "name": "google-sheets__get_spreadsheet",
             "arguments": {
-              "spreadsheet_id": "1oB8Ykc9AnrxEL_f6YOdo5JiiRh_e8RE1-ci5deC3dP8"
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED"
             }
           }
         ],
@@ -180,7 +180,7 @@
             "name": "google-sheets__read_values",
             "arguments": {
               "range": "Sheet1!A1:Z10",
-              "spreadsheet_id": "1oB8Ykc9AnrxEL_f6YOdo5JiiRh_e8RE1-ci5deC3dP8"
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED"
             }
           },
           {
@@ -229,7 +229,7 @@
             "name": "builtin__trigger_create",
             "arguments": {
               "name": "Check inbox for near.ai emails -> ABC sheet",
-              "prompt": "Every 30 minutes, check the Gmail inbox for unread emails from @near.ai addresses. For each new message not already recorded in the Google Sheet \"ABC\" (spreadsheet ID: 1oB8Ykc9AnrxEL_f6YOdo5JiiRh_e8RE1-ci5deC3dP8, sheet: Sheet1), append a row with columns: Date/Time, From, Subject, Message ID. Use the sheet's header row (Date/Time, From, Subject, Message ID) to determine existing entries — skip any message whose Message ID is already in column D. Append new rows to the first empty row after existing data.",
+              "prompt": "Every 30 minutes, check the Gmail inbox for unread emails from @near.ai addresses. For each new message not already recorded in the Google Sheet \"ABC\" (spreadsheet ID: GOOGLE_RESOURCE_ID_REDACTED, sheet: Sheet1), append a row with columns: Date/Time, From, Subject, Message ID. Use the sheet's header row (Date/Time, From, Subject, Message ID) to determine existing entries — skip any message whose Message ID is already in column D. Append new rows to the first empty row after existing data.",
               "schedule": {
                 "expression": "*/30 * * * *",
                 "kind": "cron",
@@ -254,5 +254,10 @@
         "output_tokens": 183
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.trigger_create"
+    ]
+  }
 }

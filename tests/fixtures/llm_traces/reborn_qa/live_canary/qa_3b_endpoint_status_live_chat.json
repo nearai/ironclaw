@@ -41,5 +41,10 @@
         "output_tokens": 149
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.http"
+    ]
+  }
 }

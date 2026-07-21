@@ -40,7 +40,7 @@
             "name": "google-sheets__rename_sheet",
             "arguments": {
               "sheet_id": 1561201913,
-              "spreadsheet_id": "1OUlooEPJ3JS8blIG1-jsiiIG9R0N_1Hdq2fA9D6Ai9k",
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED",
               "title": "Bugs"
             }
           }
@@ -62,7 +62,7 @@
             "name": "google-sheets__write_values",
             "arguments": {
               "range": "Bugs!A1:E1",
-              "spreadsheet_id": "1OUlooEPJ3JS8blIG1-jsiiIG9R0N_1Hdq2fA9D6Ai9k",
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED",
               "value_input_option": "USER_ENTERED",
               "values": [
                 [
@@ -87,7 +87,7 @@
       },
       "response": {
         "type": "text",
-        "content": "Done. Here's the summary:\n\n**Google Sheet** created: **REBORN_QA_7E_BUG_TRACKER_SHEET_1784642821163**\n\n- Sheet tab renamed to **Bugs**\n- Header row written: Summary, Reporter, Slack Timestamp, Status, QA Marker\n- No bug data rows — just the header\n\n**Spreadsheet URL:** https://docs.google.com/spreadsheets/d/1OUlooEPJ3JS8blIG1-jsiiIG9R0N_1Hdq2fA9D6Ai9k/edit\n\nMarker: **REBORN_QA_7E_BUG_TRACKER_SHEET_1784642821163**",
+        "content": "Done. Here's the summary:\n\n**Google Sheet** created: **REBORN_QA_7E_BUG_TRACKER_SHEET_1784642821163**\n\n- Sheet tab renamed to **Bugs**\n- Header row written: Summary, Reporter, Slack Timestamp, Status, QA Marker\n- No bug data rows — just the header\n\n**Spreadsheet URL:** https://docs.google.com/spreadsheets/d/GOOGLE_RESOURCE_ID_REDACTED/edit\n\nMarker: **REBORN_QA_7E_BUG_TRACKER_SHEET_1784642821163**",
         "input_tokens": 16795,
         "output_tokens": 150
       }
@@ -104,7 +104,7 @@
             "id": "call_44b7e8a25ca54957af8c8722",
             "name": "google-sheets__get_spreadsheet",
             "arguments": {
-              "spreadsheet_id": "1OUlooEPJ3JS8blIG1-jsiiIG9R0N_1Hdq2fA9D6Ai9k"
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED"
             }
           }
         ],
@@ -125,7 +125,7 @@
             "name": "google-sheets__read_values",
             "arguments": {
               "range": "Bugs!A1:E1",
-              "spreadsheet_id": "1OUlooEPJ3JS8blIG1-jsiiIG9R0N_1Hdq2fA9D6Ai9k"
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED"
             }
           }
         ],
@@ -146,7 +146,7 @@
             "name": "google-sheets__append_values",
             "arguments": {
               "range": "Bugs!A:E",
-              "spreadsheet_id": "1OUlooEPJ3JS8blIG1-jsiiIG9R0N_1Hdq2fA9D6Ai9k",
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED",
               "value_input_option": "USER_ENTERED",
               "values": [
                 [
@@ -164,5 +164,10 @@
         "output_tokens": 216
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "google-sheets.append_values"
+    ]
+  }
 }

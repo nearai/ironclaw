@@ -90,7 +90,7 @@
             "name": "google-sheets__append_values",
             "arguments": {
               "range": "Sheet1!A1",
-              "spreadsheet_id": "1vfXC7j2ieVBsGxlV4MqXW0TF4dsfsEmn59GXk3p3a9M",
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED",
               "value_input_option": "USER_ENTERED",
               "values": [
                 [
@@ -113,10 +113,15 @@
       },
       "response": {
         "type": "text",
-        "content": "**QA Case 6E complete.** Here's what happened:\n\n1. **Gmail inspection** — Retrieved the most recent inbox message, which is a previous QA delivery confirmation (QA 2F calendar-prep), sent to `EMAIL_REDACTED` on 2026-07-21 with subject *\"Reborn QA 2F meeting prep 1784638286195\"*.\n\n2. **Google Sheet created** — `REBORN_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263` was created at:\n   [https://docs.google.com/spreadsheets/d/1vfXC7j2ieVBsGxlV4MqXW0TF4dsfsEmn59GXk3p3a9M/edit](https://docs.google.com/spreadsheets/d/1vfXC7j2ieVBsGxlV4MqXW0TF4dsfsEmn59GXk3p3a9M/edit)\n\n3. **Row appended** — One row written with:\n   - **Source**: `Gmail`\n   - **Summary**: `QA 2F calendar-prep delivery confirmation (REBORN_QA_2F_CALENDAR_PREP_EMAIL_DELIVERED_1784638286195)`\n   - **QA Marker**: `REBORN_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263`\n\n**QA Marker:** `REBORN_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263` — confirmed present in the Sheet.",
+        "content": "**QA Case 6E complete.** Here's what happened:\n\n1. **Gmail inspection** — Retrieved the most recent inbox message, which is a previous QA delivery confirmation (QA 2F calendar-prep), sent to `EMAIL_REDACTED` on 2026-07-21 with subject *\"Reborn QA 2F meeting prep 1784638286195\"*.\n\n2. **Google Sheet created** — `REBORN_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263` was created at:\n   [https://docs.google.com/spreadsheets/d/GOOGLE_RESOURCE_ID_REDACTED/edit](https://docs.google.com/spreadsheets/d/GOOGLE_RESOURCE_ID_REDACTED/edit)\n\n3. **Row appended** — One row written with:\n   - **Source**: `Gmail`\n   - **Summary**: `QA 2F calendar-prep delivery confirmation (REBORN_QA_2F_CALENDAR_PREP_EMAIL_DELIVERED_1784638286195)`\n   - **QA Marker**: `REBORN_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263`\n\n**QA Marker:** `REBORN_QA_6E_GMAIL_TO_SHEET_DELIVERY_1784642819263` — confirmed present in the Sheet.",
         "input_tokens": 19389,
         "output_tokens": 353
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "google-sheets.append_values"
+    ]
+  }
 }

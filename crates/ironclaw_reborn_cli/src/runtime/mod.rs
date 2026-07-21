@@ -1922,6 +1922,45 @@ mod tests {
     }
 
     #[test]
+    fn serve_runtime_input_attaches_trace_recorder_from_environment() {
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _api_key = EnvGuard::set("NEARAI_API_KEY", "test-api-key");
+        let _record_trace = EnvGuard::set("IRONCLAW_RECORD_TRACE", "1");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[llm.default]
+provider_id = "nearai"
+model = "deepseek-ai/DeepSeek-V4-Flash"
+api_key_env = "NEARAI_API_KEY"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Serve).expect("runtime input");
+        let resolved = runtime_input.llm.expect("resolved LLM");
+
+        assert!(
+            resolved.has_provider_factory(),
+            "serve must attach the recording decorator at the caller seam"
+        );
+    }
+
+    #[test]
     fn runner_env_cap_blank_value_is_fatal() {
         // Strict-presence semantics apply to cap vars, not just worker_count:
         // a set-but-blank slot must be rejected rather than silently ignored.

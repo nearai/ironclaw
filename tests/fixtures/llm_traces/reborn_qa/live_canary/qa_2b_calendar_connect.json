@@ -97,5 +97,10 @@
         "output_tokens": 133
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "google-calendar.list_calendars"
+    ]
+  }
 }

@@ -65,5 +65,10 @@
         "output_tokens": 165
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "gmail.send_message"
+    ]
+  }
 }

@@ -76,5 +76,10 @@
         "output_tokens": 79
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.memory_search"
+    ]
+  }
 }

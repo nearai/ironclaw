@@ -651,5 +651,10 @@
         "output_tokens": 400
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "github.list_releases"
+    ]
+  }
 }

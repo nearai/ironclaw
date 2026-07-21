@@ -285,5 +285,10 @@
         "output_tokens": 164
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.trigger_create"
+    ]
+  }
 }

@@ -7567,6 +7567,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             case=[],
         )
         selected_cases = run_live_qa._selected_case_names(args)
+        fixture_manifest_path = (
+            Path(__file__).resolve().parents[2]
+            / "tests/fixtures/llm_traces/reborn_qa/live_canary/case-manifest.json"
+        )
+        fixture_manifest = json.loads(
+            fixture_manifest_path.read_text(encoding="utf-8")
+        )
+        self.assertEqual(fixture_manifest["selected_cases"], selected_cases)
         workflow_path = (
             Path(__file__).resolve().parents[2] / ".github/workflows/live-canary.yml"
         )
@@ -7665,6 +7673,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             match.group("body"),
         )
         self.assertIn('SKIP_BUILD: "1"', match.group("body"))
+        self.assertIn(
+            'STRICT_ARTIFACT_SCRUB: "true"',
+            match.group("body"),
+            "live QA traces must be scrubbed fail-closed before artifact upload",
+        )
+        self.assertIn(
+            "!artifacts/live-canary/**/llm-traces/**",
+            match.group("body"),
+            "raw live-account traces must never enter the uploaded artifact",
+        )
         self.assertIn("REBORN_WEBUI_V2_LIVE_QA_BUILD_SOURCE", match.group("body"))
         self.assertIn("Cache Playwright browsers", match.group("body"))
         self.assertIn("cache: pip", match.group("body"))

@@ -40,5 +40,10 @@
         "output_tokens": 53
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.list_conversations"
+    ]
+  }
 }

@@ -40,5 +40,10 @@
         "output_tokens": 41
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.get_conversation_history"
+    ]
+  }
 }

@@ -57,5 +57,10 @@
         "output_tokens": 79
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.get_user_info"
+    ]
+  }
 }

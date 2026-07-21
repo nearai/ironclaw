@@ -241,6 +241,11 @@ impl ResolvedRebornLlm {
         &self.model
     }
 
+    /// Whether a caller-installed provider decorator will run at cold boot.
+    pub fn has_provider_factory(&self) -> bool {
+        self.provider_factory.is_some()
+    }
+
     /// Base URL of the backend `serve` actually boots with, when the
     /// backend has one. See [`ironclaw_llm::LlmConfig::active_base_url`].
     pub fn base_url(&self) -> Option<String> {
@@ -295,14 +300,9 @@ impl ResolvedRebornLlm {
     /// untouched, so production `serve`/`run` are unaffected unless the operator
     /// opts in.
     pub fn with_env_trace_recording(self) -> Self {
-        // Read through the runtime env overlay (real process env first, then the
-        // test overlay) so this gate is production-correct on `serve`/`run` —
-        // where `IRONCLAW_RECORD_TRACE` is a real process env var — and drivable
-        // under this crate's `#![forbid(unsafe_code)]` (no `set_var`) via
-        // `RuntimeEnvGuard`. `env_or_override` already treats empty as unset.
-        let enabled = ironclaw_common::env_helpers::env_or_override("IRONCLAW_RECORD_TRACE")
-            .is_some_and(|value| !value.is_empty());
-        if !enabled {
+        // Keep the enabling semantics with the recorder rather than duplicating
+        // its environment parsing at the composition seam.
+        if !ironclaw_llm::RecordingLlm::env_recording_enabled() {
             return self;
         }
         // `RecordingLlm::from_env` re-reads `IRONCLAW_RECORD_TRACE` /

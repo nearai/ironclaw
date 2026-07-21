@@ -134,7 +134,7 @@
             "id": "call_4f3bee378d97441d88c2ef14",
             "name": "google-sheets__get_spreadsheet",
             "arguments": {
-              "spreadsheet_id": "1oB8Ykc9AnrxEL_f6YOdo5JiiRh_e8RE1-ci5deC3dP8"
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED"
             }
           }
         ],
@@ -155,7 +155,7 @@
             "name": "google-sheets__read_values",
             "arguments": {
               "range": "Sheet1!A1:D",
-              "spreadsheet_id": "1oB8Ykc9AnrxEL_f6YOdo5JiiRh_e8RE1-ci5deC3dP8"
+              "spreadsheet_id": "GOOGLE_RESOURCE_ID_REDACTED"
             }
           }
         ],
@@ -170,10 +170,16 @@
       },
       "response": {
         "type": "text",
-        "content": "The email from `near.ai` is already in the ABC sheet. Let me also mark it as read since we've processed it.\n\nThe ABC spreadsheet already contains the email from `EMAIL_REDACTED` — it was added previously. Here's what's in it:\n\n**ABC Sheet** (`Sheet1`):\n\n| Date/Time | From | Subject | Message ID |\n|---|---|---|---|\n| 2026-06-29 23:06:23 +0300 | Canary Canary <EMAIL_REDACTED> | Next Meeting Reminder | CAM1ghpG+... |\n\n**Summary of what happened:**\n- I checked recent emails from `*.near.ai` senders — found **1 email** (from Canary Canary, subject \"Next Meeting Reminder\" about recurring Friday 5PM CET meetings).\n- I located the **ABC** spreadsheet (there are 7 copies; used the most recently created one: `1oB8Ykc9AnrxEL_f6YOdo5JiiRh_e8RE1-ci5deC3dP8`).\n- That email was **already recorded** in the sheet (from a prior run), so no new rows were needed.\n\n**Result:** 0 new rows added (already up to date). The single `near.ai` email is present in the sheet.",
+        "content": "The email from `near.ai` is already in the ABC sheet. Let me also mark it as read since we've processed it.\n\nThe ABC spreadsheet already contains the email from `EMAIL_REDACTED` — it was added previously. Here's what's in it:\n\n**ABC Sheet** (`Sheet1`):\n\n| Date/Time | From | Subject | Message ID |\n|---|---|---|---|\n| 2026-06-29 23:06:23 +0300 | Canary Canary <EMAIL_REDACTED> | Next Meeting Reminder | CAM1ghpG+... |\n\n**Summary of what happened:**\n- I checked recent emails from `*.near.ai` senders — found **1 email** (from Canary Canary, subject \"Next Meeting Reminder\" about recurring Friday 5PM CET meetings).\n- I located the **ABC** spreadsheet (there are 7 copies; used the most recently created one: `GOOGLE_RESOURCE_ID_REDACTED`).\n- That email was **already recorded** in the sheet (from a prior run), so no new rows were needed.\n\n**Result:** 0 new rows added (already up to date). The single `near.ai` email is present in the sheet.",
         "input_tokens": 28012,
         "output_tokens": 290
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "gmail.get_message",
+      "google-sheets.read_values"
+    ]
+  }
 }

@@ -12,6 +12,10 @@ The catalog contains 47 live-QA cases:
   `qa_7a_slack_product_channel_connect`, `qa_8a_slack_connect`, and
   `qa_9a_slack_connect`.
 
+`case-manifest.json` is the promoted inventory from that run. The Rust
+contract derives model/no-model coverage from it, while each trace declares
+its required tools in `expects.tools_used`; there is no second Rust case table.
+
 The committed traces retain user prompts, model responses, tool names and
 arguments, and final assistant text. Recorded tool-result payloads are removed
 because the serve runtime did not capture the corresponding capability HTTP
@@ -19,6 +23,8 @@ exchanges, so these are model/tool-choice contracts rather than full runtime
 replay fixtures. Removing the payloads also prevents live provider content from
 entering the repository. Remaining emails, local paths, names, and Slack entity
 identifiers are normalized before the repository fixture scrub check runs.
+Raw per-run traces remain available only inside the live-QA runner and are
+explicitly excluded from public Actions artifact uploads.
 
 The source run had 44 successful cases. The three QA-9 cases still emitted
 complete diagnostic model traces but failed their live outcome probes:

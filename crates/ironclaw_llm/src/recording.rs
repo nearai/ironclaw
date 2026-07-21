@@ -1,3 +1,4 @@
+// arch-exempt: large_file, recorder format, provider decorator, and focused contract tests remain co-located pending provider adapter decomposition, plan #6175
 //! Live trace recording mode.
 //!
 //! Wraps any [`LlmProvider`] and captures every LLM interaction into
@@ -23,8 +24,8 @@ use tokio::sync::Mutex;
 
 use crate::error::LlmError;
 use crate::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ChatMessage, CompletionRequest, CompletionResponse, CompletionStreamSink, LlmProvider,
+    ModelMetadata, Role, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 // ── Trace format types ─────────────────────────────────────────────
@@ -846,6 +847,7 @@ pub struct RecordingLlm {
     model_name: String,
     memory_snapshot: Mutex<Vec<MemorySnapshotEntry>>,
     http_interceptor: Arc<RecordingHttpInterceptor>,
+    flush_lock: Mutex<()>,
 }
 
 impl RecordingLlm {
@@ -859,32 +861,31 @@ impl RecordingLlm {
             model_name,
             memory_snapshot: Mutex::new(Vec::new()),
             http_interceptor: Arc::new(RecordingHttpInterceptor::new()),
+            flush_lock: Mutex::new(()),
         }
+    }
+
+    /// Whether trace recording is enabled by the shared runtime environment.
+    pub fn env_recording_enabled() -> bool {
+        ironclaw_common::env_helpers::env_or_override("IRONCLAW_RECORD_TRACE").is_some()
     }
 
     /// Create from environment variables if recording is enabled.
     ///
     /// - `IRONCLAW_RECORD_TRACE` — any non-empty value enables recording
     /// - `IRONCLAW_TRACE_OUTPUT` — file path (default: `./trace_{timestamp}.json`)
-    /// - `IRONCLAW_TRACE_MODEL_NAME` — model_name field (default: `recorded-{inner.model_name()}`)
+    /// - `IRONCLAW_TRACE_MODEL_NAME` — model name (default: `recorded-{inner.model_name()}`)
     pub fn from_env(inner: Arc<dyn LlmProvider>) -> Option<Arc<Self>> {
-        let enabled = std::env::var("IRONCLAW_RECORD_TRACE")
-            .ok()
-            .filter(|v| !v.is_empty());
-        enabled?;
+        Self::env_recording_enabled().then_some(())?;
 
-        let output_path = std::env::var("IRONCLAW_TRACE_OUTPUT")
-            .ok()
-            .filter(|v| !v.is_empty())
+        let output_path = ironclaw_common::env_helpers::env_or_override("IRONCLAW_TRACE_OUTPUT")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
                 let ts = chrono::Local::now().format("%Y%m%dT%H%M%S");
                 PathBuf::from(format!("trace_{ts}.json"))
             });
 
-        let model_name = std::env::var("IRONCLAW_TRACE_MODEL_NAME")
-            .ok()
-            .filter(|v| !v.is_empty())
+        let model_name = ironclaw_common::env_helpers::env_or_override("IRONCLAW_TRACE_MODEL_NAME")
             .unwrap_or_else(|| format!("recorded-{}", inner.model_name()));
 
         tracing::info!(
@@ -925,15 +926,20 @@ impl RecordingLlm {
 
     /// Flush accumulated steps, memory snapshot, and HTTP exchanges to the output file.
     pub async fn flush(&self) -> Result<(), std::io::Error> {
-        let steps = self.steps.lock().await;
-        let memory_snapshot = self.memory_snapshot.lock().await;
+        // Serialize publications so an older snapshot can never overwrite a
+        // newer one. Clone recorder state under its narrow locks, then release
+        // those locks before JSON serialization and filesystem I/O so model
+        // completions can continue recording while a checkpoint is written.
+        let _flush_guard = self.flush_lock.lock().await;
+        let steps = self.steps.lock().await.clone();
+        let memory_snapshot = self.memory_snapshot.lock().await.clone();
         let http_exchanges = self.http_interceptor.take_exchanges().await;
 
         let trace = TraceFile {
             model_name: self.model_name.clone(),
-            memory_snapshot: memory_snapshot.clone(),
+            memory_snapshot,
             http_exchanges,
-            steps: steps.clone(),
+            steps,
         };
         let json = serde_json::to_string_pretty(&trace).map_err(std::io::Error::other)?;
         tokio::fs::write(&self.output_path, json).await?;
@@ -943,8 +949,8 @@ impl RecordingLlm {
         // in CLAUDE.md). Explicit end-of-session `flush()` callers are equally
         // fine at debug level.
         tracing::debug!(
-            steps = steps.len(),
-            memory_docs = memory_snapshot.len(),
+            steps = trace.steps.len(),
+            memory_docs = trace.memory_snapshot.len(),
             path = %self.output_path.display(),
             "Flushed LLM trace recording"
         );
@@ -1045,6 +1051,69 @@ impl RecordingLlm {
 
         (hint, tool_results)
     }
+
+    async fn record_completion_response(
+        &self,
+        hint: Option<RequestHint>,
+        tool_results: Vec<ExpectedToolResult>,
+        response: &CompletionResponse,
+    ) {
+        self.steps.lock().await.push(TraceStep {
+            request_hint: hint,
+            response: TraceResponse::Text {
+                content: response.content.clone(),
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+            },
+            expected_tool_results: tool_results,
+        });
+        self.flush_after_step().await;
+    }
+
+    async fn record_tool_completion_response(
+        &self,
+        hint: Option<RequestHint>,
+        tool_results: Vec<ExpectedToolResult>,
+        prior_tool_lookup: &HashMap<String, HashMap<String, String>>,
+        response: &ToolCompletionResponse,
+    ) {
+        let step = if response.tool_calls.is_empty() {
+            TraceStep {
+                request_hint: hint,
+                response: TraceResponse::Text {
+                    content: response.content.clone().unwrap_or_default(),
+                    input_tokens: response.input_tokens,
+                    output_tokens: response.output_tokens,
+                },
+                expected_tool_results: tool_results,
+            }
+        } else {
+            TraceStep {
+                request_hint: hint,
+                response: TraceResponse::ToolCalls {
+                    tool_calls: response
+                        .tool_calls
+                        .iter()
+                        .map(|tc| {
+                            let mut args = tc.arguments.clone();
+                            parameterize_value(&mut args, prior_tool_lookup);
+                            TraceToolCall {
+                                id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                arguments: args,
+                            }
+                        })
+                        .collect(),
+                    input_tokens: response.input_tokens,
+                    output_tokens: response.output_tokens,
+                },
+                expected_tool_results: tool_results,
+            }
+        };
+
+        self.steps.lock().await.push(step);
+        self.flush_after_step().await;
+    }
 }
 
 #[async_trait]
@@ -1068,18 +1137,21 @@ impl LlmProvider for RecordingLlm {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let (hint, tool_results) = self.capture_new_messages(&request.messages).await;
         let response = self.inner.complete(request).await?;
+        self.record_completion_response(hint, tool_results, &response)
+            .await;
 
-        self.steps.lock().await.push(TraceStep {
-            request_hint: hint,
-            response: TraceResponse::Text {
-                content: response.content.clone(),
-                input_tokens: response.input_tokens,
-                output_tokens: response.output_tokens,
-            },
-            expected_tool_results: tool_results,
-        });
-        self.flush_after_step().await;
+        Ok(response)
+    }
 
+    async fn complete_streaming(
+        &self,
+        request: CompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let (hint, tool_results) = self.capture_new_messages(&request.messages).await;
+        let response = self.inner.complete_streaming(request, sink).await?;
+        self.record_completion_response(hint, tool_results, &response)
+            .await;
         Ok(response)
     }
 
@@ -1097,43 +1169,24 @@ impl LlmProvider for RecordingLlm {
         // don't bake the recording-time values into the fixture.
         let prior_tool_lookup = build_prior_tool_lookup(&request.messages);
         let response = self.inner.complete_with_tools(request).await?;
+        self.record_tool_completion_response(hint, tool_results, &prior_tool_lookup, &response)
+            .await;
+        Ok(response)
+    }
 
-        let step = if response.tool_calls.is_empty() {
-            TraceStep {
-                request_hint: hint,
-                response: TraceResponse::Text {
-                    content: response.content.clone().unwrap_or_default(),
-                    input_tokens: response.input_tokens,
-                    output_tokens: response.output_tokens,
-                },
-                expected_tool_results: tool_results,
-            }
-        } else {
-            TraceStep {
-                request_hint: hint,
-                response: TraceResponse::ToolCalls {
-                    tool_calls: response
-                        .tool_calls
-                        .iter()
-                        .map(|tc| {
-                            let mut args = tc.arguments.clone();
-                            parameterize_value(&mut args, &prior_tool_lookup);
-                            TraceToolCall {
-                                id: tc.id.clone(),
-                                name: tc.name.clone(),
-                                arguments: args,
-                            }
-                        })
-                        .collect(),
-                    input_tokens: response.input_tokens,
-                    output_tokens: response.output_tokens,
-                },
-                expected_tool_results: tool_results,
-            }
-        };
-
-        self.steps.lock().await.push(step);
-        self.flush_after_step().await;
+    async fn complete_with_tools_streaming(
+        &self,
+        request: ToolCompletionRequest,
+        sink: Arc<dyn CompletionStreamSink>,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        let (hint, tool_results) = self.capture_new_messages(&request.messages).await;
+        let prior_tool_lookup = build_prior_tool_lookup(&request.messages);
+        let response = self
+            .inner
+            .complete_with_tools_streaming(request, sink)
+            .await?;
+        self.record_tool_completion_response(hint, tool_results, &prior_tool_lookup, &response)
+            .await;
         Ok(response)
     }
 
@@ -1174,6 +1227,89 @@ mod tests {
             dir.path().join("test_recording.json"),
             "test-recording".to_string(),
         )
+    }
+
+    #[derive(Default)]
+    struct RecordingStreamSink {
+        deltas: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl CompletionStreamSink for RecordingStreamSink {
+        async fn text_delta(&self, delta: String) {
+            self.deltas.lock().await.push(delta);
+        }
+    }
+
+    struct StreamingStub;
+
+    #[async_trait]
+    impl LlmProvider for StreamingStub {
+        fn model_name(&self) -> &str {
+            "streaming-stub"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "streaming-stub".to_string(),
+                reason: "non-streaming path must not be used".to_string(),
+            })
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: CompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<CompletionResponse, LlmError> {
+            sink.text_delta("streamed ".to_string()).await;
+            sink.text_delta("answer".to_string()).await;
+            Ok(CompletionResponse {
+                content: "streamed answer".to_string(),
+                input_tokens: 3,
+                output_tokens: 2,
+                finish_reason: crate::provider::FinishReason::Stop,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "streaming-stub".to_string(),
+                reason: "non-streaming tool path must not be used".to_string(),
+            })
+        }
+
+        async fn complete_with_tools_streaming(
+            &self,
+            _request: ToolCompletionRequest,
+            sink: Arc<dyn CompletionStreamSink>,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            sink.text_delta("tool ".to_string()).await;
+            sink.text_delta("answer".to_string()).await;
+            Ok(ToolCompletionResponse {
+                content: Some("tool answer".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 4,
+                output_tokens: 2,
+                finish_reason: crate::provider::FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            })
+        }
     }
 
     #[tokio::test]
@@ -1251,6 +1387,111 @@ mod tests {
             !trace.steps.is_empty(),
             "the completed model call must be persisted as a trace step"
         );
+    }
+
+    #[tokio::test]
+    async fn complete_succeeds_when_incremental_flush_fails() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let stub = Arc::new(StubLlm::new("recorded answer"));
+        let recorder = RecordingLlm::new(
+            stub,
+            dir.path().to_path_buf(),
+            "unwritable-output-test".to_string(),
+        );
+
+        let response = recorder
+            .complete(CompletionRequest::new(vec![ChatMessage::user("question")]))
+            .await
+            .expect("trace I/O failure must not fail the model completion");
+
+        assert_eq!(response.content, "recorded answer");
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_flushes_incrementally_without_explicit_flush() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("incremental_tool_trace.json");
+        let stub = Arc::new(StubLlm::new("tool-aware answer"));
+        let recorder = RecordingLlm::new(stub, path.clone(), "tool-test".to_string());
+
+        recorder
+            .complete_with_tools(ToolCompletionRequest::new(
+                vec![ChatMessage::user("use a tool")],
+                vec![],
+            ))
+            .await
+            .expect("stubbed tool completion succeeds");
+
+        let trace: TraceFile = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("tool trace is flushed incrementally"),
+        )
+        .expect("tool trace parses");
+        assert!(matches!(
+            &trace.steps.last().expect("recorded response").response,
+            TraceResponse::Text { content, .. } if content == "tool-aware answer"
+        ));
+    }
+
+    #[tokio::test]
+    async fn complete_streaming_forwards_deltas_and_flushes_final_response() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("streaming_trace.json");
+        let recorder = RecordingLlm::new(
+            Arc::new(StreamingStub),
+            path.clone(),
+            "streaming-test".to_string(),
+        );
+        let sink = Arc::new(RecordingStreamSink::default());
+
+        let response = recorder
+            .complete_streaming(
+                CompletionRequest::new(vec![ChatMessage::user("question")]),
+                sink.clone(),
+            )
+            .await
+            .expect("streaming completion succeeds");
+
+        assert_eq!(response.content, "streamed answer");
+        assert_eq!(sink.deltas.lock().await.as_slice(), ["streamed ", "answer"]);
+        let trace: TraceFile = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("streaming trace is flushed"),
+        )
+        .expect("streaming trace parses");
+        assert!(matches!(
+            &trace.steps.last().expect("recorded response").response,
+            TraceResponse::Text { content, .. } if content == "streamed answer"
+        ));
+    }
+
+    #[tokio::test]
+    async fn complete_with_tools_streaming_forwards_deltas_and_flushes_final_response() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("tool_streaming_trace.json");
+        let recorder = RecordingLlm::new(
+            Arc::new(StreamingStub),
+            path.clone(),
+            "tool-streaming-test".to_string(),
+        );
+        let sink = Arc::new(RecordingStreamSink::default());
+
+        let response = recorder
+            .complete_with_tools_streaming(
+                ToolCompletionRequest::new(vec![ChatMessage::user("use a tool")], vec![]),
+                sink.clone(),
+            )
+            .await
+            .expect("tool streaming completion succeeds");
+
+        assert_eq!(response.content.as_deref(), Some("tool answer"));
+        assert_eq!(sink.deltas.lock().await.as_slice(), ["tool ", "answer"]);
+        let trace: TraceFile = serde_json::from_str(
+            &std::fs::read_to_string(path).expect("tool streaming trace is flushed"),
+        )
+        .expect("tool streaming trace parses");
+        assert!(matches!(
+            &trace.steps.last().expect("recorded response").response,
+            TraceResponse::Text { content, .. } if content == "tool answer"
+        ));
     }
 
     #[tokio::test]

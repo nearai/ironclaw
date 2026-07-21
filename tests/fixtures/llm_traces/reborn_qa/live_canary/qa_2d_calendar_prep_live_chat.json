@@ -81,7 +81,7 @@
             "id": "call_8db2ef082b5b419ebb8907e1",
             "name": "google-drive__download_file",
             "arguments": {
-              "file_id": "1LuIADzUFa3SMYOS1D3VA1pIFWEO0KK8pVYAZCGECet0"
+              "file_id": "GOOGLE_RESOURCE_ID_REDACTED"
             }
           },
           {
@@ -105,10 +105,17 @@
       },
       "response": {
         "type": "text",
-        "content": "Here's what I found for your next meeting:\n\n## 📄 Google Doc: **Acme Corp - Meeting Prep Notes**\n\nI found a document titled **\"Acme Corp - Meeting Prep Notes\"** in your Google Drive — this is likely the prep doc for your upcoming meeting. Unfortunately, the document content appears to be empty (no body text was returned). You may want to check the doc directly:\n\n[Acme Corp - Meeting Prep Notes](https://docs.google.com/document/d/1LuIADzUFa3SMYOS1D3VA1pIFWEO0KK8pVYAZCGECet0/edit?usp=drivesdk)\n\n## 📰 Latest News on Acme Corp (Acme United Corporation)\n\nHere are the most recent headlines:\n\n1. **Acme United to Release Q2 2026 Financial Results on July 23, 2026** — Just two days from now! Q2 results drop July 23 at 6:30 AM ET, with a conference call at noon ET. ([MarketScreener](https://www.marketscreener.com/news/acme-united-to-release-second-quarter-2026-financial-results-on-july-23-2026-ce7f5ed2db80f227))\n\n2. **Acme United Gets New $65 Million Syndicated Loan Facility** — Recent financing news for the company.\n\n3. **Acme United Board Approves Cash Dividend** — Payable on July 23, 2026. ([StockTitan](https://www.stocktitan.net/news/ACU/acme-united-to-release-second-quarter-2026-financial-results-on-july-3c24rlfd7ot8.html))\n\n4. **Acme United Q1 2026 Results** — Net sales of **$52.3M**, up **14% YoY** from $46.0M. Strong growth driven by recent acquisitions. ([Acme United IR](https://acmeunited.gcs-web.com/news-releases/news-release-details/acme-united-reports-first-quarter-2026-financial-results))\n\n**Key takeaway for your meeting:** Acme United is releasing Q2 earnings **this Thursday July 23** — it would be timely to ask about their Q2 performance and the $65M new loan facility during your meeting.",
+        "content": "Here's what I found for your next meeting:\n\n## 📄 Google Doc: **Acme Corp - Meeting Prep Notes**\n\nI found a document titled **\"Acme Corp - Meeting Prep Notes\"** in your Google Drive — this is likely the prep doc for your upcoming meeting. Unfortunately, the document content appears to be empty (no body text was returned). You may want to check the doc directly:\n\n[Acme Corp - Meeting Prep Notes](https://docs.google.com/document/d/GOOGLE_RESOURCE_ID_REDACTED/edit?usp=drivesdk)\n\n## 📰 Latest News on Acme Corp (Acme United Corporation)\n\nHere are the most recent headlines:\n\n1. **Acme United to Release Q2 2026 Financial Results on July 23, 2026** — Just two days from now! Q2 results drop July 23 at 6:30 AM ET, with a conference call at noon ET. ([MarketScreener](https://www.marketscreener.com/news/acme-united-to-release-second-quarter-2026-financial-results-on-july-23-2026-ce7f5ed2db80f227))\n\n2. **Acme United Gets New $65 Million Syndicated Loan Facility** — Recent financing news for the company.\n\n3. **Acme United Board Approves Cash Dividend** — Payable on July 23, 2026. ([StockTitan](https://www.stocktitan.net/news/ACU/acme-united-to-release-second-quarter-2026-financial-results-on-july-3c24rlfd7ot8.html))\n\n4. **Acme United Q1 2026 Results** — Net sales of **$52.3M**, up **14% YoY** from $46.0M. Strong growth driven by recent acquisitions. ([Acme United IR](https://acmeunited.gcs-web.com/news-releases/news-release-details/acme-united-reports-first-quarter-2026-financial-results))\n\n**Key takeaway for your meeting:** Acme United is releasing Q2 earnings **this Thursday July 23** — it would be timely to ask about their Q2 performance and the $65M new loan facility during your meeting.",
         "input_tokens": 37165,
         "output_tokens": 489
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "google-calendar.list_events",
+      "google-drive.download_file",
+      "web-access.search"
+    ]
+  }
 }

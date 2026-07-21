@@ -97,5 +97,10 @@
         "output_tokens": 84
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "github.get_authenticated_user"
+    ]
+  }
 }

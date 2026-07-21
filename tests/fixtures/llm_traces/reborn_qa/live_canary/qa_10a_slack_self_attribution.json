@@ -45,5 +45,11 @@
         "output_tokens": 536
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.get_conversation_history",
+      "slack.whoami"
+    ]
+  }
 }

@@ -97,10 +97,15 @@
       },
       "response": {
         "type": "text",
-        "content": "Google Sheets is connected! Here's a summary of what happened:\n\n1. **Installed** the Google Sheets extension\n2. **Activated** it — no additional auth was required (tools became available immediately)\n3. **Verified** by creating a test spreadsheet → ✅ created successfully\n\n**Test spreadsheet created:** [Test - IronClaw Connection](https://docs.google.com/spreadsheets/d/1AydYi1SRYniBMpshTHmpDPdaaVVQijTvlq7mMy6Qar4/edit)\n\nAll Google Sheets capabilities are ready to use:\n- Create, read, write, append, and clear spreadsheet data\n- Add, rename, and delete sheet tabs\n- Format cells (colors, bold, alignment, etc.)\n- Batch read from multiple ranges",
+        "content": "Google Sheets is connected! Here's a summary of what happened:\n\n1. **Installed** the Google Sheets extension\n2. **Activated** it — no additional auth was required (tools became available immediately)\n3. **Verified** by creating a test spreadsheet → ✅ created successfully\n\n**Test spreadsheet created:** [Test - IronClaw Connection](https://docs.google.com/spreadsheets/d/GOOGLE_RESOURCE_ID_REDACTED/edit)\n\nAll Google Sheets capabilities are ready to use:\n- Create, read, write, append, and clear spreadsheet data\n- Add, rename, and delete sheet tabs\n- Format cells (colors, bold, alignment, etc.)\n- Batch read from multiple ranges",
         "input_tokens": 17645,
         "output_tokens": 164
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "google-sheets.create_spreadsheet"
+    ]
+  }
 }

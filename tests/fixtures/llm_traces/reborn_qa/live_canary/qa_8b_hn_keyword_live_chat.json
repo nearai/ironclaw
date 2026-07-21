@@ -80,5 +80,10 @@
         "output_tokens": 434
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "nearai.web_search"
+    ]
+  }
 }

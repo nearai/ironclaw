@@ -133,5 +133,10 @@
         "output_tokens": 248
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "google-docs.read_content"
+    ]
+  }
 }

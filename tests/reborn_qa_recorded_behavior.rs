@@ -166,237 +166,19 @@ const SLACK_ENTITY_HYGIENE_FIXTURE: &str = "slack_entity_hygiene";
 const SLACK_SELF_ATTRIBUTION_FIXTURE: &str = "slack_self_attribution";
 const SLACK_OOO_STATUS_FIXTURE: &str = "slack_ooo_status";
 const SLACK_THREAD_REPLIES_FIXTURE: &str = "slack_thread_replies";
-
-struct LiveCanaryContract {
-    case: &'static str,
-    required_tools: &'static [&'static str],
-    expects_final_text: bool,
+#[derive(serde::Deserialize)]
+struct LiveCanaryManifest {
+    selected_cases: Vec<String>,
+    no_model_cases: Vec<String>,
 }
 
-const LIVE_CANARY_CONTRACTS: &[LiveCanaryContract] = &[
-    LiveCanaryContract {
-        case: "qa_2a_gmail_connect",
-        required_tools: &["gmail.list_messages"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_2b_calendar_connect",
-        required_tools: &["google-calendar.list_calendars"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_2c_drive_connect",
-        required_tools: &["google-drive.list_files"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_2d_calendar_prep_live_chat",
-        required_tools: &[
-            "google-calendar.list_events",
-            "google-drive.download_file",
-            "web-access.search",
-        ],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_2e_calendar_prep_email_routine",
-        required_tools: &["builtin.trigger_create"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_2f_calendar_prep_email_delivery",
-        required_tools: &["gmail.send_message"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_3b_endpoint_status_live_chat",
-        required_tools: &["builtin.http"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_3c_endpoint_status_slack_routine",
-        required_tools: &["builtin.trigger_create"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_3d_endpoint_status_slack_delivery",
-        required_tools: &["builtin.http"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_4a_gmail_connect",
-        required_tools: &["builtin.extension_activate"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_4b_github_connect",
-        required_tools: &["github.get_authenticated_user"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_4c_github_release_live_chat",
-        required_tools: &["github.list_releases"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_4d_github_release_slack_routine",
-        required_tools: &["builtin.trigger_create"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_4e_github_release_email_delivery",
-        required_tools: &["gmail.send_message"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_5b_drive_connect",
-        required_tools: &["google-drive.list_files"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_5c_strategy_doc_knowledge_base",
-        required_tools: &["google-docs.read_content"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_5d_slack_strategy_doc_answer",
-        required_tools: &["google-docs.read_content"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_6a_gmail_connect",
-        required_tools: &["builtin.extension_activate"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_6b_sheets_connect",
-        required_tools: &["google-sheets.create_spreadsheet"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_6c_gmail_to_sheet_live_chat",
-        required_tools: &["gmail.get_message", "google-sheets.read_values"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_6d_gmail_to_sheet_routine",
-        required_tools: &["builtin.trigger_create"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_6e_gmail_to_sheet_delivery",
-        required_tools: &["google-sheets.append_values"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_7b_sheets_connect",
-        required_tools: &["builtin.extension_activate"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_7c_slack_bug_logger_routine",
-        required_tools: &["builtin.trigger_create"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_7d_slack_bug_message_trigger",
-        required_tools: &["builtin.memory_search"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_7e_slack_bug_sheet_delivery",
-        required_tools: &["google-sheets.append_values"],
-        expects_final_text: false,
-    },
-    LiveCanaryContract {
-        case: "qa_8b_hn_keyword_live_chat",
-        required_tools: &["nearai.web_search"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_8c_hn_keyword_slack_routine",
-        required_tools: &["builtin.trigger_create"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_8d_hn_keyword_slack_delivery",
-        required_tools: &["builtin.http"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_9b_routine_dm_delivery_exactly_once",
-        required_tools: &["builtin.trigger_create"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_9c_slack_digest_names_not_ids",
-        required_tools: &["slack.get_user_info"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_9d_routine_per_trigger_delivery_target",
-        required_tools: &["builtin.trigger_create"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_10a_slack_self_attribution",
-        required_tools: &["slack.get_conversation_history", "slack.whoami"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_10b_slack_ooo_status",
-        required_tools: &["slack.get_user_info"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_10c_slack_thread_replies",
-        required_tools: &["slack.get_thread_replies"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_10d_slack_channel_membership",
-        required_tools: &["slack.list_conversations"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_10e_slack_error_honesty",
-        required_tools: &["slack.get_conversation_history"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_10f_slack_mention_encoding",
-        required_tools: &["slack.send_message"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_10g_slack_last_message_sent",
-        required_tools: &["slack.get_conversation_history"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_10g_slack_last_message_sent_global",
-        required_tools: &["slack.search_messages"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_10h_slack_email_hallucination_guard",
-        required_tools: &["slack.get_user_info"],
-        expects_final_text: true,
-    },
-    LiveCanaryContract {
-        case: "qa_10i_slack_raw_entity_hygiene",
-        required_tools: &["slack.get_conversation_history"],
-        expects_final_text: true,
-    },
-];
-
-const LIVE_CANARY_NO_MODEL_CASES: &[&str] = &[
-    "qa_3a_slack_connect",
-    "qa_5a_slack_connect",
-    "qa_7a_slack_product_channel_connect",
-    "qa_8a_slack_connect",
-    "qa_9a_slack_connect",
-];
+fn load_live_canary_manifest() -> LiveCanaryManifest {
+    let path = qa_fixture_path("live_canary/case-manifest");
+    let contents = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("read live-canary manifest {}: {error}", path.display()));
+    serde_json::from_str(&contents)
+        .unwrap_or_else(|error| panic!("parse live-canary manifest {}: {error}", path.display()))
+}
 
 // --- Tier 1: recorders (live API, manual) ----------------------------------
 
@@ -899,43 +681,76 @@ async fn contract_slack_thread_replies_expands_the_recent_thread() {
 
 #[test]
 fn contract_live_canary_harvested_traces_cover_every_model_case() {
+    let manifest = load_live_canary_manifest();
+    let selected = manifest
+        .selected_cases
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        LIVE_CANARY_CONTRACTS.len() + LIVE_CANARY_NO_MODEL_CASES.len(),
-        47,
-        "live-QA case inventory changed; harvest and classify the new cases"
+        selected.len(),
+        manifest.selected_cases.len(),
+        "live-canary manifest must not contain duplicate cases"
+    );
+    let no_model = manifest
+        .no_model_cases
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        no_model.is_subset(&selected),
+        "every no-model case must belong to the selected live-QA inventory"
     );
 
-    for contract in LIVE_CANARY_CONTRACTS {
-        let fixture = format!("live_canary/{}", contract.case);
-        let trace = load_qa_trace(&fixture);
+    let fixture_dir = qa_fixture_path("live_canary/case-manifest")
+        .parent()
+        .expect("live-canary fixture directory")
+        .to_path_buf();
+    let actual_model_cases = std::fs::read_dir(&fixture_dir)
+        .expect("read live-canary fixture directory")
+        .map(|entry| entry.expect("read live-canary fixture entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|path| {
+            let case = path.file_stem()?.to_str()?.to_string();
+            (case != "case-manifest").then_some(case)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_model_cases = selected
+        .difference(&no_model)
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_model_cases, expected_model_cases,
+        "fixture files must exactly match manifest cases that reached the model"
+    );
+
+    for case in expected_model_cases {
+        let trace = load_qa_trace(&format!("live_canary/{case}"));
         assert!(
             matches!(
                 trace.steps.first().map(|step| &step.response),
                 Some(TraceResponse::UserInput { .. })
             ),
-            "{} should begin with the harvested user input",
-            contract.case
+            "{case} should begin with the harvested user input"
+        );
+        assert!(
+            !trace.expects.tools_used.is_empty(),
+            "{case} must declare its required tool contract in the fixture"
         );
 
         let calls = recorded_tool_calls(&trace);
-        for required_tool in contract.required_tools {
+        for required_tool in &trace.expects.tools_used {
             assert!(
                 calls.iter().any(|(name, _)| name == required_tool),
-                "{} should call {required_tool}; recorded calls: {calls:#?}",
-                contract.case
-            );
-        }
-
-        if contract.expects_final_text {
-            assert!(
-                final_text_reply(&trace).is_some(),
-                "{} should end with a harvested assistant reply",
-                contract.case
+                "{case} should call {required_tool}; recorded calls: {calls:#?}"
             );
         }
     }
 
-    for case in LIVE_CANARY_NO_MODEL_CASES {
+    for case in no_model {
         assert!(
             !qa_fixture_path(&format!("live_canary/{case}")).exists(),
             "{case} is a preflight/connect probe and should not invent a model trace"

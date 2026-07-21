@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -66,8 +67,44 @@ class ScrubArtifactsTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertTrue(trace.exists())
-            self.assertIn("Bearer <REDACTED>", trace.read_text(encoding="utf-8"))
+            scrubbed = json.loads(trace.read_text(encoding="utf-8"))
+            self.assertEqual(
+                scrubbed["steps"][0]["response"]["content"],
+                "Bearer <REDACTED>",
+            )
             self.assertIn("Strict scrub redacted diagnostic artifacts", result.stdout)
+
+    def test_strict_scrub_matches_relative_llm_trace_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            trace = root / "llm-traces" / "case_a.json"
+            trace.parent.mkdir()
+            trace.write_text(
+                '{"steps":[{"response":{"content":"Bearer relative-secret"}}]}\n',
+                encoding="utf-8",
+            )
+            runner_temp = root / "runner-temp"
+            runner_temp.mkdir()
+            env = os.environ.copy()
+            env["STRICT_ARTIFACT_SCRUB"] = "true"
+            env["RUNNER_TEMP"] = str(runner_temp)
+
+            result = subprocess.run(
+                [str(SCRIPT), "llm-traces"],
+                cwd=root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            scrubbed = json.loads(trace.read_text(encoding="utf-8"))
+            self.assertEqual(
+                scrubbed["steps"][0]["response"]["content"],
+                "Bearer <REDACTED>",
+            )
 
     def test_strict_scrub_fails_if_redacted_artifact_still_matches_secret_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -60,5 +60,10 @@
         "output_tokens": 127
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.send_message"
+    ]
+  }
 }

@@ -127,5 +127,10 @@
         "output_tokens": 296
       }
     }
-  ]
+  ],
+  "expects": {
+    "tools_used": [
+      "builtin.http"
+    ]
+  }
 }
