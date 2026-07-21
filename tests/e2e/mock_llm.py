@@ -121,7 +121,7 @@ def _new_llm_trace_state() -> dict:
         "source": None,
         "responses": [],
         "next_response": 0,
-        "user_input": None,
+        "expected_user_inputs": {},
         "error": None,
     }
 
@@ -144,11 +144,25 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
         raise ValueError("trace must start with a user_input response")
 
     responses = []
+    expected_user_inputs = {0: first_response["content"]}
+    pending_user_input = False
     for index, step in enumerate(steps[1:], start=1):
         if not isinstance(step, dict) or not isinstance(step.get("response"), dict):
             raise ValueError(f"trace.steps[{index}].response must be an object")
         response = step["response"]
         response_type = response.get("type")
+        if response_type == "user_input":
+            if not isinstance(response.get("content"), str):
+                raise ValueError(
+                    f"trace.steps[{index}] user_input content must be a string"
+                )
+            if pending_user_input:
+                raise ValueError(
+                    f"trace.steps[{index}] has consecutive user_input responses"
+                )
+            expected_user_inputs[len(responses)] = response["content"]
+            pending_user_input = True
+            continue
         if response_type == "text":
             if not isinstance(response.get("content"), str):
                 raise ValueError(f"trace.steps[{index}] text content must be a string")
@@ -172,14 +186,17 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
                 f"trace.steps[{index}] has unsupported response type {response_type!r}"
             )
         responses.append(response)
+        pending_user_input = False
 
     if not responses:
         raise ValueError("trace must contain at least one model response")
+    if pending_user_input:
+        raise ValueError("trace must not end with a user_input response")
     return {
         "source": source,
         "responses": responses,
         "next_response": 0,
-        "user_input": first_response["content"],
+        "expected_user_inputs": expected_user_inputs,
         "error": None,
     }
 
@@ -200,12 +217,13 @@ def _next_llm_trace_response(
         )
         raise web.HTTPConflict(text=state["error"])
 
-    if next_index == 0:
-        expected_input = state["user_input"]
+    expected_input = state["expected_user_inputs"].get(next_index)
+    if expected_input is not None:
         actual_input = _last_user_content(messages)
         if expected_input not in actual_input:
             state["error"] = (
-                "recorded LLM trace user input does not match the conversation"
+                "recorded LLM trace user input does not match the conversation "
+                f"before response {next_index}"
             )
             raise web.HTTPConflict(text=state["error"])
 

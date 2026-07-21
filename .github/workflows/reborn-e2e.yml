@@ -191,6 +191,14 @@ jobs:
       - name: Run Reborn WebUI v2 smoke
         run: pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
 
+      - name: Replay harvested QA traces with Emulate
+        run: >-
+          pytest
+          tests/e2e/scenarios/test_reborn_qa_trace_catalog.py
+          tests/e2e/scenarios/test_reborn_qa_trace_emulate_replay.py
+          -v
+          --timeout=120
+
       - name: Run Reborn Responses API E2E
         run: |
           mapfile -t responses_tests < <(

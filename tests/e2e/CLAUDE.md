@@ -173,12 +173,16 @@ create/read/list/files/review/comment/merge, branch/ref creation, Git
 blob/tree/commit read/write, fork create/list, and empty Actions route readback.
 
 Direct provider-contract tests prove the Emulate fixture layer itself. Full-path
-recorded-trace tests load harvested `LlmTrace` JSON through
-`mock_llm.py`'s `/__mock/llm_trace` endpoint, then execute the recorded tool
-decision through standalone `ironclaw serve`. See
-`test_reborn_qa_trace_emulate_replay.py`: it replays the provider-facing suffix
-of `qa_2c_drive_connect`, routes Google HTTP through `emulate_google_server`,
-and asserts Emulate-seeded Drive data rather than the model's final prose.
+recorded-trace tests load harvested `LlmTrace` JSON through `mock_llm.py`'s
+`/__mock/llm_trace` endpoint. `test_reborn_qa_trace_catalog.py` replays every
+model response from every case in the live-canary manifest and probes each
+supported provider operation against Emulate. Its closed-set assertions require
+new fixtures and provider operations to be classified instead of silently
+losing coverage. `test_reborn_qa_trace_emulate_replay.py` additionally proves
+the whole runtime seam for `qa_2c_drive_connect`: it executes the recorded Drive
+decision through standalone `ironclaw serve`, routes Google HTTP through
+`emulate_google_server`, and asserts Emulate-seeded Drive data rather than the
+model's final prose.
 Debug builds honor `IRONCLAW_TEST_HTTP_REWRITE_MAP` only after the original
 destination has passed the normal network policy and DNS checks; release builds
 do not compile this local rewrite seam.
@@ -192,10 +196,12 @@ use when the behavior being protected is extension install/auth, model-to-tool
 routing, tool execution, and provider mutation together.
 
 Google Docs, Sheets, and Slides are first-party extension assets, but Emulate
-0.7.0 does not provide those APIs directly; do not claim those are covered
-unless a separate fixture exercises the actual document API behavior. The manual
-QA rows that mention Google Docs, Google Sheets, Telegram, Twitter/X, or HN/web
-search are therefore partial unless paired with a separate fake/provider fixture.
+0.7.0 does not provide those APIs directly; Slack `search.messages` is also not
+implemented. The trace catalog still replays model decisions containing those
+operations and keeps the unsupported set explicit, but do not claim their
+provider behavior is covered unless a separate fixture exercises the actual API.
+Manual QA rows that mention Telegram, Twitter/X, or HN/web search are likewise
+model-replay-only unless paired with a separate fake/provider fixture.
 GitHub `/contents` file create/update/delete and workflow dispatch also remain
 outside direct Emulate 0.7.0 coverage: the emulator exposes Git data APIs but no
 `/contents` routes, and it exposes Actions routes but does not let fixture seeds
