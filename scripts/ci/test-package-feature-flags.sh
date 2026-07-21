@@ -38,6 +38,6 @@ assert_flags ironclaw_channel_delivery ""
 assert_flags ironclaw_telegram_extension ""
 
 # Guard the case-arm structure itself with one long-standing recipe.
-assert_flags ironclaw_reborn_composition "--features test-support,libsql"
+assert_flags ironclaw_reborn_composition "--features test-support"
 
 echo "PASS package-feature-flags recipes"

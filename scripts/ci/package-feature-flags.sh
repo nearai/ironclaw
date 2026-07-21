@@ -47,7 +47,7 @@ case "${package}" in
     printf '%s\n' "--features test-support"
     ;;
   ironclaw_reborn_composition)
-    printf '%s\n' "--features test-support,libsql"
+    printf '%s\n' "--features test-support"
     ;;
   ironclaw_runner)
     printf '%s\n' "--features libsql-restart-tests"
@@ -57,10 +57,9 @@ case "${package}" in
   ironclaw_hooks)
     # The durable libSQL/Postgres backends + parity matrix folded into this
     # crate are exercised by the dedicated hooks-parity job in
-    # platform-and-compat.yml (postgres,libsql,integration,test-support).
+    # platform-and-compat.yml (integration,test-support).
     # Keep this reborn-closure job light — the framework's own unit tests only —
-    # so it does not pull the heavy libSQL/Postgres driver deps that the default
-    # fallback would otherwise add now that the crate declares a `libsql` feature.
+    # so it does not pull more integration-tier work into the crate bucket.
     printf '%s\n' "--features test-support"
     ;;
   ironclaw_webui)
@@ -69,9 +68,8 @@ case "${package}" in
   ironclaw_host_runtime)
     # Integration tests (tests/) link the lib as a normal dependency, so
     # cfg(test) is false there; the deterministic test-mode behavior they assert
-    # is gated behind `feature = "test-support"`. libsql exercises the embedded
-    # DB paths without a Postgres server (which the crate-tests job has none of).
-    printf '%s\n' "--features test-support,libsql"
+    # is gated behind `feature = "test-support"`.
+    printf '%s\n' "--features test-support"
     ;;
   ironclaw_reborn_openai_compat)
     ;;
