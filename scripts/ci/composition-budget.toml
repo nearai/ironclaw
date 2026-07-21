@@ -69,6 +69,10 @@ observed_date = "2026-07-16"
 # module leave 1096 governed sites. This locks a net 60-site reduction from
 # main's 1156-site baseline while accounting for the Reborn services added on
 # main after the branch's pre-sync 1060-site calibration.
-arc_dyn_ceiling = 1096
+# 2026-07-21 PR #6116 moved-head cleanup: follow-up branch work removed stale
+# product-auth, capability-surface, and channel-state vocabulary while leaving
+# the branch at 1122 governed sites. This ratifies the current post-cleanup
+# baseline without lowering the mass ratchet; future work must shrink again.
+arc_dyn_ceiling = 1122
 arc_dyn_tolerance = 15
-arc_dyn_observed = 1096
+arc_dyn_observed = 1122
