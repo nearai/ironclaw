@@ -101,6 +101,51 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         assert_eq!(descriptor.default_permission, expected_permission);
     }
 
+    // §5.2.1 / S5 (behavior-neutral ratchet): every builtin descriptor declares
+    // a well-formed origin_gate_matrix (invariant 1's derived-descriptor half for
+    // the builtin package, plus the §11.7 per-descriptor self-consistency check).
+    // `loop_run` is Ungated iff the id is in the reviewed
+    // `UNGATED_LOOP_RUN_CAPABILITIES` allowlist and GatedUnlessGranted otherwise
+    // (today's effect gate). `Product`/`Automation` are deny-by-default
+    // (Forbidden). `ConsentSufficient` is Product-only and must never appear on
+    // the loop_run/automation columns.
+    for descriptor in &package.capabilities {
+        let matrix = descriptor
+            .origin_gate_matrix
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", descriptor.id));
+        assert_ne!(
+            matrix.loop_run,
+            OriginGatePolicy::ConsentSufficient,
+            "{}: ConsentSufficient is Product-only; not valid on loop_run",
+            descriptor.id
+        );
+        assert_ne!(
+            matrix.automation,
+            OriginGatePolicy::ConsentSufficient,
+            "{}: ConsentSufficient is Product-only; not valid on automation",
+            descriptor.id
+        );
+        let expected_loop_run = if UNGATED_LOOP_RUN_CAPABILITIES.contains(&descriptor.id.as_str()) {
+            OriginGatePolicy::Ungated
+        } else {
+            OriginGatePolicy::GatedUnlessGranted
+        };
+        assert_eq!(matrix.loop_run, expected_loop_run, "{}", descriptor.id);
+        assert_eq!(
+            matrix.product,
+            OriginGatePolicy::Forbidden,
+            "{}",
+            descriptor.id
+        );
+        assert_eq!(
+            matrix.automation,
+            OriginGatePolicy::Forbidden,
+            "{}",
+            descriptor.id
+        );
+    }
+
     for descriptor in package
         .capabilities
         .iter()

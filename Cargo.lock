@@ -3361,7 +3361,9 @@ dependencies = [
 name = "ironclaw_architecture"
 version = "0.1.0"
 dependencies = [
+ "ironclaw_host_api",
  "serde_json",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
