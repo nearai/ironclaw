@@ -845,6 +845,13 @@ impl RebornBinaryE2EHarness {
                 Arc::clone(&await_edge_store)
                     as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
                 thread_scope.clone(),
+            )
+            // Production wires the checkpoint-state store into the evidence
+            // port (`ironclaw_runner::runtime`); without it the applier fails
+            // failure-evidence closed and every graceful `LoopExit::Failed`
+            // collapses to `driver_protocol_violation` in this harness.
+            .with_checkpoint_state_store(
+                checkpoint_state_store.clone() as Arc<dyn ironclaw_turns::CheckpointStateStore>
             ),
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
             accept_harness_blocked_evidence,

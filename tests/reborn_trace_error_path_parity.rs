@@ -17,7 +17,9 @@ use parity_qa_support::{
 };
 
 /// Exercises read_file with a missing `path` parameter, proving malformed real
-/// built-in tool input is persisted as a terminal Reborn run failure.
+/// built-in tool input surfaces as a model-visible tool error (the loop
+/// continues and re-prompts) rather than a run-terminal fault; the run's
+/// eventual failure is only this one-step script running out of replay steps.
 #[tokio::test]
 async fn reborn_trace_error_path_parity() {
     let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
@@ -48,15 +50,26 @@ async fn reborn_trace_error_path_parity() {
         .await
         .expect("failed run");
     let failure = state.failure.expect("failure category");
-    assert_eq!(failure.category(), "driver_protocol_violation");
-    // The durable failure record must name WHICH loop-exit protocol rule was
-    // broken (loop-failure matrix §5a.6): the driver's Failed exit could not be
-    // evidence-verified, and that specific violation kind survives on the
-    // sanitized failure detail instead of collapsing into the bare category.
-    assert_eq!(
-        failure.detail(),
-        Some("loop exit violation: unverified_failure_evidence"),
-        "the specific loop-exit violation kind must survive on the durable failure detail"
+    // Contract update (#6284 item 1 + harness fix): malformed tool input is a
+    // model-visible tool error, not a run-terminal fault — the loop feeds the
+    // invalid-input observation back and calls the model again. That second
+    // call exhausts this one-step script, so the run's terminal failure is the
+    // replay gateway's unavailability, with the exhaustion diagnostic on the
+    // durable detail. (The previous `driver_protocol_violation` pin was an
+    // artifact of the harness not wiring the checkpoint-state store into the
+    // evidence port, which condemned every graceful `Failed` exit; the
+    // violation-detail contract of matrix §5a.6 is pinned at crate tier in
+    // `ironclaw_turns` loop_exit tests.)
+    assert_eq!(failure.category(), "model_unavailable");
+    let detail = failure.detail().expect("script-exhaustion detail");
+    assert!(
+        detail.contains("trace replay has no matching step"),
+        "terminal failure must carry the replay-exhaustion diagnostic, got: {detail}"
+    );
+    assert!(
+        detail.contains("ToolResult"),
+        "the request that exhausted the script must include the model-visible \
+         tool-error result from the malformed call, got: {detail}"
     );
 
     let invocations = harness.capability_invocations();
