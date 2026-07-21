@@ -3596,12 +3596,8 @@ impl StreamingRecordingLlmProvider {
 
     fn fail_after_deltas(streaming_deltas: Vec<String>) -> Self {
         Self {
-            model_name: "streaming-recording-model".to_string(),
-            complete_requests: Mutex::new(Vec::new()),
-            streaming_requests: Mutex::new(Vec::new()),
-            streaming_deltas,
-            response_content: String::new(),
             fail_after_streaming: true,
+            ..Self::new(streaming_deltas, "")
         }
     }
 }
