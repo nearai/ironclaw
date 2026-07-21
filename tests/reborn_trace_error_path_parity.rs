@@ -87,8 +87,8 @@ async fn reborn_trace_error_path_parity() {
 
 /// Exercises the model replay guard for scripted calls whose capability was not
 /// advertised by the active surface. The harness exposes only write_file, then
-/// the trace asks for read_file, so `provider_tool_calls_response` must fail
-/// before any provider tool call is registered or invoked.
+/// the trace asks for read_file, so `provider_tool_calls_response` must reject
+/// the model output before registration and retry with corrective context.
 #[tokio::test]
 async fn reborn_trace_unadvertised_capability_is_rejected() {
     let read_file = CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id");
@@ -133,7 +133,16 @@ async fn reborn_trace_unadvertised_capability_is_rejected() {
         "unadvertised capability should fail before invocation"
     );
     assert_eq!(harness.remaining_model_responses(), 0);
-    assert_eq!(harness.model_requests().len(), 2);
+    let requests = harness.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].messages.iter().any(|message| {
+            message.role == HostManagedModelMessageRole::System
+                && message.content.contains("structurally invalid")
+                && message.content.contains("available tool")
+        }),
+        "the recovery turn must receive the invalid-output repair instruction"
+    );
     assert!(
         !harness.milestones().iter().any(|milestone| matches!(
             milestone.kind,
