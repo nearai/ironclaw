@@ -163,6 +163,9 @@ const SLACK_CHANNEL_MEMBERSHIP_FIXTURE: &str = "slack_channel_membership";
 const SLACK_RECENT_MESSAGE_FIXTURE: &str = "slack_recent_message";
 const SLACK_MENTION_ENCODING_FIXTURE: &str = "slack_mention_encoding";
 const SLACK_ENTITY_HYGIENE_FIXTURE: &str = "slack_entity_hygiene";
+const SLACK_SELF_ATTRIBUTION_FIXTURE: &str = "slack_self_attribution";
+const SLACK_OOO_STATUS_FIXTURE: &str = "slack_ooo_status";
+const SLACK_THREAD_REPLIES_FIXTURE: &str = "slack_thread_replies";
 
 // --- Tier 1: recorders (live API, manual) ----------------------------------
 
@@ -573,6 +576,94 @@ async fn contract_slack_entity_hygiene_humanizes_the_chained_user_id() {
         !reply.contains("D0CANARY"),
         "entity-hygiene reply leaked the synthetic raw conversation id: {reply:?}"
     );
+}
+
+#[tokio::test]
+async fn contract_slack_self_attribution_filters_other_senders() {
+    let trace = load_qa_trace(SLACK_SELF_ATTRIBUTION_FIXTURE);
+    assert_tool_sequence(&trace, &["slack.get_conversation_history", "slack.whoami"]);
+    assert_tool_call_groups(
+        &trace,
+        &[["slack.get_conversation_history", "slack.whoami"].as_slice()],
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_conversation_history",
+        "channel",
+        "D0CANARY",
+    );
+
+    let reply = final_text_reply(&trace).expect("self-attribution fixture should end in text");
+    assert!(
+        reply.contains("SELFMSG_A_1784640084808") && reply.contains("SELFMSG_B_1784640084808"),
+        "self-attribution reply should include both current-user markers; reply: {reply:?}"
+    );
+    assert!(
+        !reply.contains("OTHERMSG_C_1784640084808") && !reply.contains("OTHERMSG_D_1784640084808"),
+        "self-attribution reply should exclude other-sender markers; reply: {reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn contract_slack_ooo_status_reads_the_connected_user() {
+    let trace = load_qa_trace(SLACK_OOO_STATUS_FIXTURE);
+    assert_tool_sequence(&trace, &["slack.whoami", "slack.get_user_info"]);
+    assert_tool_call_groups(
+        &trace,
+        &[&["slack.whoami"][..], &["slack.get_user_info"][..]],
+    );
+    assert_tool_argument_string_field_eq(&trace, "slack.get_user_info", "user_id", "U0CANARY");
+
+    let reply = final_text_reply(&trace).expect("OOO-status fixture should end in text");
+    assert!(
+        reply.contains("OOO-CANARY-FIXTURE back July 20"),
+        "OOO-status reply should preserve the exact synthetic status text; reply: {reply:?}"
+    );
+}
+
+#[tokio::test]
+async fn contract_slack_thread_replies_expands_the_recent_thread() {
+    let trace = load_qa_trace(SLACK_THREAD_REPLIES_FIXTURE);
+    assert_tool_sequence(
+        &trace,
+        &[
+            "slack.get_conversation_history",
+            "builtin.time",
+            "slack.get_thread_replies",
+        ],
+    );
+    assert_tool_call_groups(
+        &trace,
+        &[
+            &["slack.get_conversation_history"][..],
+            &["builtin.time"][..],
+            &["slack.get_thread_replies"][..],
+        ],
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_conversation_history",
+        "channel",
+        "D0CANARY",
+    );
+    assert_tool_argument_string_field_eq(
+        &trace,
+        "slack.get_thread_replies",
+        "thread_ts",
+        "1700000000.000000",
+    );
+
+    let reply = final_text_reply(&trace).expect("thread-replies fixture should end in text");
+    for marker in [
+        "REPLY_ONE_1784640131932",
+        "REPLY_TWO_1784640131932",
+        "REPLY_THREE_1784640131932",
+    ] {
+        assert!(
+            reply.contains(marker),
+            "thread-replies reply should include {marker}; reply: {reply:?}"
+        );
+    }
 }
 
 // --- Tier 3: runtime replay (hermetic) ---------------------------------------
