@@ -106,7 +106,7 @@ use super::*;
 use crate::setup::{TelegramInstallationSetupUpdate, TelegramSetupService};
 use crate::state::FilesystemTelegramHostState;
 use crate::telegram_actor_identity::telegram_user_identity_provider_user_id;
-use crate::test_support::{RecordingBotApi, fault_injected_telegram_state, telegram_state};
+use crate::test_support::{RecordingBotApi, read_barrier_telegram_state, telegram_state};
 
 #[derive(Debug, Default)]
 struct RecordingDispatcher {
@@ -440,7 +440,7 @@ async fn same_user_re_pair_is_idempotent() {
 /// single-consumer and happens before any identity/target side effect.
 #[tokio::test]
 async fn concurrent_consume_of_one_code_binds_exactly_one_winner() {
-    let (state, filesystem) = fault_injected_telegram_state();
+    let (state, filesystem) = read_barrier_telegram_state();
     let fixture = fixture_with_state(true, state, Arc::new(RecordingDispatcher::default())).await;
     let ben = user("ben");
     let issue = fixture.service.issue_or_rotate(&ben).await.expect("issue");

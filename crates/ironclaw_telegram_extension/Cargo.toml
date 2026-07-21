@@ -50,6 +50,7 @@ uuid = { version = "1", features = ["v4"] }
 http-body-util = "0.1"
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }  # FaultInjecting decorator: test store fault paths through the real store
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }

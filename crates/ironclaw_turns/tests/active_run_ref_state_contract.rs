@@ -1,57 +1,14 @@
+use std::sync::Arc;
+
 use chrono::{TimeZone, Utc};
+use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_turns::test_support::scoped_turns_filesystem;
 use ironclaw_turns::{
-    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, IdempotencyKey, InMemoryRunProfileResolver,
-    ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef, TurnActiveRunRefState, TurnActor,
-    TurnError, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+    AcceptedMessageRef, AllowAllTurnAdmissionPolicy, FilesystemTurnStateRowStore, IdempotencyKey,
+    InMemoryRunProfileResolver, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
+    TurnActiveRunRefState, TurnActor, TurnError, TurnRunId, TurnScope, TurnStateStore, TurnStatus,
 };
-
-struct FailingTurnStateStore;
-
-#[async_trait::async_trait]
-impl TurnStateStore for FailingTurnStateStore {
-    async fn submit_turn(
-        &self,
-        _request: ironclaw_turns::SubmitTurnRequest,
-        _admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
-        _run_profile_resolver: &dyn ironclaw_turns::RunProfileResolver,
-    ) -> Result<ironclaw_turns::SubmitTurnResponse, TurnError> {
-        unreachable!("active_run_ref_state only calls get_run_state")
-    }
-
-    async fn resume_turn(
-        &self,
-        _request: ironclaw_turns::ResumeTurnRequest,
-    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
-        unreachable!("active_run_ref_state only calls get_run_state")
-    }
-
-    async fn retry_turn(
-        &self,
-        request: ironclaw_turns::RetryTurnRequest,
-    ) -> Result<ironclaw_turns::RetryTurnResponse, TurnError> {
-        // WS-3 implements this.
-        Err(TurnError::RunNotRetryable {
-            run_id: request.run_id,
-        })
-    }
-
-    async fn request_cancel(
-        &self,
-        _request: ironclaw_turns::CancelRunRequest,
-    ) -> Result<ironclaw_turns::CancelRunResponse, TurnError> {
-        unreachable!("active_run_ref_state only calls get_run_state")
-    }
-
-    async fn get_run_state(
-        &self,
-        _request: ironclaw_turns::GetRunStateRequest,
-    ) -> Result<ironclaw_turns::TurnRunState, TurnError> {
-        Err(TurnError::Unavailable {
-            reason: "backend unavailable".to_string(),
-        })
-    }
-}
 
 fn turn_scope(thread: &str) -> TurnScope {
     TurnScope::new(
@@ -156,8 +113,19 @@ async fn active_run_ref_state_treats_missing_lookup_as_missing() {
 
 #[tokio::test]
 async fn active_run_ref_state_propagates_non_scope_not_found_errors() {
+    // The real row store over a `FaultInjecting` backend armed to fail its first
+    // durable read: `get_run_state` now runs the store's genuine
+    // `load_snapshot_from_rows` and its `FilesystemError::Backend -> TurnError`
+    // mapping (`fs_error` -> `TurnError::Unavailable`), which the former
+    // whole-trait `FailingTurnStateStore` fake short-circuited. A non-scope
+    // (not `ScopeNotFound`) error must propagate through `active_run_ref_state`.
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::ReadFile).backend("injected turn-state read failure"),
+    ));
+    let store = FilesystemTurnStateRowStore::new(scoped_turns_filesystem(backend));
+
     let result = ironclaw_turns::active_run_ref_state(
-        &FailingTurnStateStore,
+        &store,
         turn_scope("active-run-ref-error"),
         Some(TurnRunId::new()),
     )

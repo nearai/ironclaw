@@ -3,13 +3,7 @@ mod support;
 
 use support::host_runtime_harness::*;
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_approvals::LeaseApproval;
@@ -30,11 +24,11 @@ use ironclaw_events::{
     InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_filesystem::DiskFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::RootFilesystem;
+use ironclaw_filesystem::{DiskFilesystem, FilesystemOperation};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
@@ -5740,7 +5734,7 @@ async fn process_obligation_lifecycle_surfaces_resource_cleanup_errors_after_ter
 async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_complete_fails() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
-    let result_store = Arc::new(FailingProcessResultStore::default());
+    let (result_store, result_backend) = result_store_failing_writes();
     let fixture = spawn_obligation_fixture_with_result_store(
         reservation_id,
         secret_handle.clone(),
@@ -5750,7 +5744,7 @@ async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_complete
     .await;
 
     let process = fixture.spawn().await;
-    wait_for_result_store_attempt(&result_store, "complete").await;
+    wait_for_result_store_write(&result_backend).await;
     wait_for_no_reserved_processes(&fixture.governor).await;
 
     let record = fixture
@@ -5773,7 +5767,7 @@ async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_complete
 async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_fail_fails() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
-    let result_store = Arc::new(FailingProcessResultStore::default());
+    let (result_store, result_backend) = result_store_failing_writes();
     let fixture = spawn_obligation_fixture_with_result_store(
         reservation_id,
         secret_handle.clone(),
@@ -5783,7 +5777,7 @@ async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_fail_fai
     .await;
 
     let process = fixture.spawn().await;
-    wait_for_result_store_attempt(&result_store, "fail").await;
+    wait_for_result_store_write(&result_backend).await;
     wait_for_no_reserved_processes(&fixture.governor).await;
 
     let record = fixture
@@ -5806,7 +5800,7 @@ async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_fail_fai
 async fn spawned_obligation_lifecycle_reconciles_when_store_complete_fails_after_result_write() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
-    let inner_process_store = Arc::new(FailingTerminalProcessStore::fail_complete());
+    let (inner_process_store, process_backend) = terminal_failing_process_store();
     let fixture = spawn_obligation_fixture_with_process_store_and_result_store(
         reservation_id,
         secret_handle.clone(),
@@ -5817,7 +5811,7 @@ async fn spawned_obligation_lifecycle_reconciles_when_store_complete_fails_after
     .await;
 
     let process = fixture.spawn().await;
-    wait_for_process_store_attempt(&inner_process_store, "complete").await;
+    wait_for_terminal_transition_write(&process_backend).await;
     wait_for_no_reserved_processes(&fixture.governor).await;
 
     let record = fixture
@@ -5840,7 +5834,7 @@ async fn spawned_obligation_lifecycle_reconciles_when_store_complete_fails_after
 async fn spawned_obligation_lifecycle_releases_when_store_fail_fails_after_result_write() {
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
-    let inner_process_store = Arc::new(FailingTerminalProcessStore::fail_fail());
+    let (inner_process_store, process_backend) = terminal_failing_process_store();
     let fixture = spawn_obligation_fixture_with_process_store_and_result_store(
         reservation_id,
         secret_handle.clone(),
@@ -5851,7 +5845,7 @@ async fn spawned_obligation_lifecycle_releases_when_store_fail_fails_after_resul
     .await;
 
     let process = fixture.spawn().await;
-    wait_for_process_store_attempt(&inner_process_store, "fail").await;
+    wait_for_terminal_transition_write(&process_backend).await;
     wait_for_no_reserved_processes(&fixture.governor).await;
 
     let record = fixture
@@ -6473,8 +6467,10 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
     let capability_leases = Arc::new(in_memory_backed_capability_lease_store());
     let script_runtime = Arc::new(RecordingScriptExecutor::default());
-    // Counts metadata() probes so we can prove the obligation backstop ran on resume.
-    let metadata_calls = Arc::new(AtomicUsize::new(0));
+    // Real secret store over a fault backend that fails every read; the backend
+    // records each `metadata()` -> `get` (ReadFile) probe so we can prove the
+    // obligation backstop re-probed the store on resume.
+    let (secret_store, secret_backend) = secret_store_failing_reads();
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_WITH_CREDENTIAL_MANIFEST)),
         Arc::new(DiskFilesystem::new()),
@@ -6493,12 +6489,10 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_capability_leases(Arc::clone(&capability_leases))
-    // Wire the erroring, call-counting store — the pre-flight must skip on Err (not
-    // return AuthRequired), and the dispatch-time obligation backstop must fail closed
+    // Wire the erroring store — the pre-flight must skip on Err (not return
+    // AuthRequired), and the dispatch-time obligation backstop must fail closed
     // when it re-probes the same erroring store on resume.
-    .with_secret_store(Arc::new(CountingErrorSecretStore {
-        metadata_calls: Arc::clone(&metadata_calls),
-    }))
+    .with_secret_store(secret_store)
     .with_script_runtime(Arc::clone(&script_runtime));
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_without_grants();
@@ -6545,9 +6539,11 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
         "script executor must not be reached when blocked at approval gate"
     );
 
-    // Reset the metadata probe counter: any probe observed from here on can only
-    // come from the resume path's obligation handler (resume does not run pre-flight).
-    metadata_calls.store(0, Ordering::SeqCst);
+    // Snapshot the read-probe count: any probe observed from here on can only
+    // come from the resume path's obligation handler (resume does not run
+    // pre-flight). The backend counter is monotonic, so we compare against this
+    // baseline rather than resetting it.
+    let read_probes_before_resume = secret_backend.count(FilesystemOperation::ReadFile);
 
     // Step 2: approve WITH the required secret handle granted, so dispatch
     // authorization PASSES and the resumed call reaches the dispatch-time credential
@@ -6600,9 +6596,9 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
     // and never probe the store — so this distinguishes the two even though both map to
     // `RuntimeFailureKind::Authorization`.
     assert!(
-        metadata_calls.load(Ordering::SeqCst) >= 1,
+        secret_backend.count(FilesystemOperation::ReadFile) > read_probes_before_resume,
         "resume must reach the dispatch-time obligation backstop and re-probe the store; \
-         a zero metadata count means authorization was denied before the backstop ran"
+         an unchanged read count means authorization was denied before the backstop ran"
     );
 
     // The backstop re-probes the required secret via `metadata()`. Against the erroring

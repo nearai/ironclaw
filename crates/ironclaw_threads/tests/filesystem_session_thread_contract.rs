@@ -12,15 +12,15 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, FileStat,
-    FilesystemError, FilesystemOperation, Filter, InMemoryBackend, Page, RecordVersion,
+    BackendCapabilities, CasExpectation, DirEntry, DiskFilesystem, Entry, Fault, FaultInjecting,
+    FileStat, FilesystemError, FilesystemOperation, Filter, InMemoryBackend, Page, RecordVersion,
     RootFilesystem, ScopedFilesystem, SeqNo, StorageTxn, TxnCapability, VersionedEntry,
 };
 use ironclaw_host_api::{
@@ -1055,7 +1055,7 @@ async fn filesystem_redacts_append_only_finalized_assistant_message() {
 
 #[tokio::test]
 async fn filesystem_lookup_index_write_failure_does_not_fail_message_contract() {
-    let backend = Arc::new(LookupIndexWriteFailureBackend::new());
+    let backend = Arc::new(lookup_index_write_failure_backend());
     let scoped = scoped_threads_fs_at(backend, "tenant-lookup-index-failure", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
     let scope = scope("lookup-index-failure");
@@ -1105,7 +1105,7 @@ async fn filesystem_lookup_index_write_failure_does_not_fail_message_contract() 
 
 #[tokio::test]
 async fn filesystem_lookup_index_read_failure_falls_back_to_transcript_scan() {
-    let backend = Arc::new(LookupIndexReadFailureBackend::new());
+    let backend = Arc::new(lookup_index_read_failure_backend());
     let scoped = scoped_threads_fs_at(backend, "tenant-lookup-index-read-failure", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
     let scope = scope("lookup-index-read-failure");
@@ -2270,7 +2270,7 @@ async fn filesystem_list_threads_does_not_treat_partial_source_cache_as_complete
 async fn filesystem_list_threads_retries_bootstrap_after_source_read_error() {
     use ironclaw_threads::ListThreadsForScopeRequest;
 
-    let backend = Arc::new(FailOnceThreadRecordReadBackend::new("legacy-flaky-read"));
+    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
     let scoped = scoped_threads_fs_at(
         Arc::clone(&backend),
         "tenant-index-bootstrap-retry",
@@ -2299,7 +2299,16 @@ async fn filesystem_list_threads_retries_bootstrap_after_source_read_error() {
         )
         .await
         .expect("test setup removes one derived index row");
-    backend.fail_next_thread_record_read();
+    // Arm the fault mid-test through the shared `Arc`: `.nth(1)` counts only
+    // matching reads that occur AFTER `add_fault`, so the first `thread.json`
+    // read for `legacy-flaky-read` during the following list fails exactly
+    // once — the same one-shot semantics the old `fail_next_read` flag had.
+    backend.add_fault(
+        Fault::on(FilesystemOperation::ReadFile)
+            .path("/threads/legacy-flaky-read/thread.json")
+            .nth(1)
+            .backend("thread record reads disabled once by contract test"),
+    );
     service.clear_thread_index_cache_for_scope(&scope);
 
     let first = service
@@ -3128,33 +3137,41 @@ where
     Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
-struct LookupIndexWriteFailureBackend {
-    inner: InMemoryBackend,
+/// Real thread store backend that fails every write to a message lookup-index
+/// row (`/indexes/assistant-runs/…`, `/indexes/tool-results/…`) so the store
+/// runs its genuine "lookup-index backfill is best-effort, fall back to a
+/// transcript scan" path. Folds the former hand-rolled
+/// `LookupIndexWriteFailureBackend` onto `FaultInjecting` — two path-scoped
+/// `WriteFile` faults, one per lookup-index family.
+fn lookup_index_write_failure_backend() -> FaultInjecting<InMemoryBackend> {
+    FaultInjecting::new(InMemoryBackend::new())
+        .with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("/indexes/assistant-runs/")
+                .backend("lookup index writes disabled by contract test"),
+        )
+        .with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("/indexes/tool-results/")
+                .backend("lookup index writes disabled by contract test"),
+        )
 }
 
-impl LookupIndexWriteFailureBackend {
-    fn new() -> Self {
-        Self {
-            inner: InMemoryBackend::new(),
-        }
-    }
-
-    fn is_lookup_index_path(path: &VirtualPath) -> bool {
-        path.as_str().contains("/indexes/assistant-runs/")
-            || path.as_str().contains("/indexes/tool-results/")
-    }
-}
-
-struct LookupIndexReadFailureBackend {
-    inner: InMemoryBackend,
-}
-
-impl LookupIndexReadFailureBackend {
-    fn new() -> Self {
-        Self {
-            inner: InMemoryBackend::new(),
-        }
-    }
+/// As [`lookup_index_write_failure_backend`], but fails every lookup-index
+/// *read* so the store must fall back to a transcript scan. Folds the former
+/// hand-rolled `LookupIndexReadFailureBackend`.
+fn lookup_index_read_failure_backend() -> FaultInjecting<InMemoryBackend> {
+    FaultInjecting::new(InMemoryBackend::new())
+        .with_fault(
+            Fault::on(FilesystemOperation::ReadFile)
+                .path("/indexes/assistant-runs/")
+                .backend("lookup index reads disabled by contract test"),
+        )
+        .with_fault(
+            Fault::on(FilesystemOperation::ReadFile)
+                .path("/indexes/tool-results/")
+                .backend("lookup index reads disabled by contract test"),
+        )
 }
 
 struct QueryCountingBackend {
@@ -3178,31 +3195,6 @@ impl QueryCountingBackend {
 
     fn get_count(&self) -> usize {
         self.get_count.load(Ordering::SeqCst)
-    }
-}
-
-struct FailOnceThreadRecordReadBackend {
-    inner: InMemoryBackend,
-    thread_id: String,
-    fail_next_read: AtomicBool,
-}
-
-impl FailOnceThreadRecordReadBackend {
-    fn new(thread_id: &str) -> Self {
-        Self {
-            inner: InMemoryBackend::new(),
-            thread_id: thread_id.to_string(),
-            fail_next_read: AtomicBool::new(false),
-        }
-    }
-
-    fn fail_next_thread_record_read(&self) {
-        self.fail_next_read.store(true, Ordering::SeqCst);
-    }
-
-    fn is_target_thread_record_path(&self, path: &VirtualPath) -> bool {
-        path.as_str()
-            .contains(&format!("/threads/{}/thread.json", self.thread_id))
     }
 }
 
@@ -3308,102 +3300,6 @@ impl TransactionalRaceTxn {
 }
 
 #[async_trait]
-impl RootFilesystem for LookupIndexWriteFailureBackend {
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        if Self::is_lookup_index_path(path) {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::WriteFile,
-                reason: "lookup index writes disabled by contract test".to_string(),
-            });
-        }
-        self.inner.put(path, entry, cas).await
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn query(
-        &self,
-        path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-}
-
-#[async_trait]
-impl RootFilesystem for LookupIndexReadFailureBackend {
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        self.inner.put(path, entry, cas).await
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        if LookupIndexWriteFailureBackend::is_lookup_index_path(path) {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::ReadFile,
-                reason: "lookup index reads disabled by contract test".to_string(),
-            });
-        }
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn query(
-        &self,
-        path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-}
-
-#[async_trait]
 impl RootFilesystem for QueryCountingBackend {
     fn capabilities(&self) -> BackendCapabilities {
         self.inner.capabilities()
@@ -3451,56 +3347,6 @@ impl RootFilesystem for QueryCountingBackend {
 
     async fn reserve_sequence(&self, path: &VirtualPath) -> Result<SeqNo, FilesystemError> {
         self.inner.reserve_sequence(path).await
-    }
-}
-
-#[async_trait]
-impl RootFilesystem for FailOnceThreadRecordReadBackend {
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        self.inner.put(path, entry, cas).await
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        if self.is_target_thread_record_path(path)
-            && self.fail_next_read.swap(false, Ordering::SeqCst)
-        {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::ReadFile,
-                reason: "thread record reads disabled once by contract test".to_string(),
-            });
-        }
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn query(
-        &self,
-        path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
     }
 }
 
@@ -4078,79 +3924,25 @@ async fn filesystem_summary_spanning_interior_draft_is_not_applied() {
     assert_eq!(context.messages[1].content, "third");
 }
 
-// Backend that fails only the summary-artifact write, so all prior reads in
-// `create_summary_artifact` succeed and only the final CAS `put` errors —
-// the shape `persist_summary` (ironclaw_loop_host::compaction_task) hits
-// in production (#5838).
-struct SummaryWriteFailureBackend {
-    inner: InMemoryBackend,
-}
-
-impl SummaryWriteFailureBackend {
-    fn new() -> Self {
-        Self {
-            inner: InMemoryBackend::new(),
-        }
-    }
-
-    fn is_summary_path(path: &VirtualPath) -> bool {
-        path.as_str().contains("/summaries/")
-    }
-}
-
-#[async_trait]
-impl RootFilesystem for SummaryWriteFailureBackend {
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        if Self::is_summary_path(path) {
-            return Err(FilesystemError::Backend {
-                path: path.clone(),
-                operation: FilesystemOperation::WriteFile,
-                reason: "synthetic summary artifact write failure (contract test)".to_string(),
-            });
-        }
-        self.inner.put(path, entry, cas).await
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn query(
-        &self,
-        path: &VirtualPath,
-        filter: &Filter,
-        page: Page,
-    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
-        self.inner.query(path, filter, page).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
+// Real thread store backend that fails only the summary-artifact write, so all
+// prior reads in `create_summary_artifact` succeed and only the final CAS `put`
+// errors — the shape `persist_summary` (ironclaw_loop_host::compaction_task)
+// hits in production (#5838). Folds the former hand-rolled
+// `SummaryWriteFailureBackend` onto `FaultInjecting`: an always-firing
+// path-scoped `WriteFile` fault on `/summaries/`.
+fn summary_write_failure_backend() -> FaultInjecting<InMemoryBackend> {
+    FaultInjecting::new(InMemoryBackend::new()).with_fault(
+        Fault::on(FilesystemOperation::WriteFile)
+            .path("/summaries/")
+            .backend("synthetic summary artifact write failure (contract test)"),
+    )
 }
 
 #[tokio::test]
 async fn create_summary_artifact_surfaces_backend_error_on_storage_write_failure() {
     // Regression for #5838: the backend cause must survive to the caller
     // instead of being collapsed away before it reaches `persist_summary`.
-    let backend = Arc::new(SummaryWriteFailureBackend::new());
+    let backend = Arc::new(summary_write_failure_backend());
     let scoped = scoped_threads_fs_at(backend, "tenant-summary-write-fail", "alice");
     let service = FilesystemSessionThreadService::new(scoped);
     let scope = scope("fs-summary-write-fail");
