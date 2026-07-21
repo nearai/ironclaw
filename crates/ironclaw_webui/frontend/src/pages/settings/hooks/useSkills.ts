@@ -47,8 +47,17 @@ export function useSkills() {
 
   const learnedAutoActivateMutation = useMutation({
     mutationFn: (enabled) => setAutoActivateLearnedRequest(enabled),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["skills"] });
+    onSuccess: (_response, enabled) => {
+      queryClient.setQueryData(["skills"], (current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          auto_activate_learned: enabled,
+        };
+      });
+      // Keep the active view on the mutation-confirmed value while marking the
+      // cached list stale for the next normal refresh.
+      queryClient.invalidateQueries({ queryKey: ["skills"], refetchType: "none" });
     },
   });
 

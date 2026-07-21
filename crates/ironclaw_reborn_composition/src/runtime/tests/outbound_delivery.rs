@@ -19,7 +19,9 @@ use ironclaw_turns::{
 
 use crate::RebornCompositionProfile;
 use crate::input::RebornBuildInput;
-use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+use crate::outbound::outbound_preferences::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+};
 use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
@@ -35,16 +37,25 @@ struct OutboundDeliveryTriggerGateway {
 
 #[derive(Clone)]
 struct StaticOutboundDeliveryTargetProvider {
-    entry: OutboundDeliveryTargetEntry,
+    summary: RebornOutboundDeliveryTargetSummary,
+    capabilities: RebornOutboundDeliveryTargetCapabilities,
+    reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
 #[async_trait]
 impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        _caller: &WebUiAuthenticatedCaller,
+        caller: &WebUiAuthenticatedCaller,
     ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        Ok(vec![self.entry.clone()])
+        // Fixture available to whichever caller asks: claim the querying caller
+        // as owner so it survives the registry's caller-scoping filter.
+        Ok(vec![OutboundDeliveryTargetEntry {
+            summary: self.summary.clone(),
+            capabilities: self.capabilities.clone(),
+            reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            owner: OutboundDeliveryTargetOwner::for_caller(caller),
+        }])
     }
 }
 
@@ -202,22 +213,20 @@ async fn local_dev_runtime_selects_outbound_delivery_target_before_trigger_creat
     let registered = runtime.register_outbound_delivery_target_provider(
         "slack:test",
         Arc::new(StaticOutboundDeliveryTargetProvider {
-            entry: OutboundDeliveryTargetEntry {
-                summary: RebornOutboundDeliveryTargetSummary::new(
-                    slack_target_id,
-                    "slack",
-                    "Slack DM",
-                    Some("Personal Slack direct message".to_string()),
-                )
-                .expect("target summary"),
-                capabilities: RebornOutboundDeliveryTargetCapabilities {
-                    final_replies: true,
-                    gate_prompts: false,
-                    auth_prompts: false,
-                },
-                reply_target_binding_ref: ReplyTargetBindingRef::new("reply:test:slack-dm")
-                    .expect("reply target"),
+            summary: RebornOutboundDeliveryTargetSummary::new(
+                slack_target_id,
+                "slack",
+                "Slack DM",
+                Some("Personal Slack direct message".to_string()),
+            )
+            .expect("target summary"),
+            capabilities: RebornOutboundDeliveryTargetCapabilities {
+                final_replies: true,
+                gate_prompts: false,
+                auth_prompts: false,
             },
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply:test:slack-dm")
+                .expect("reply target"),
         }),
     );
     assert_eq!(

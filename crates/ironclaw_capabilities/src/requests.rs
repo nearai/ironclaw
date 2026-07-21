@@ -2,7 +2,6 @@ use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatchResult, CapabilityId, ExecutionContext, ResourceEstimate,
 };
 use ironclaw_processes::ProcessRecord;
-use ironclaw_trust::TrustDecision;
 use serde_json::Value;
 
 pub struct CapabilityInvocationRequest {
@@ -10,7 +9,6 @@ pub struct CapabilityInvocationRequest {
     pub capability_id: CapabilityId,
     pub estimate: ResourceEstimate,
     pub input: Value,
-    pub trust_decision: TrustDecision,
 }
 
 /// Caller-facing approved capability resume request.
@@ -21,7 +19,6 @@ pub struct CapabilityResumeRequest {
     pub capability_id: CapabilityId,
     pub estimate: ResourceEstimate,
     pub input: Value,
-    pub trust_decision: TrustDecision,
 }
 
 /// Caller-facing auth-resume capability request.
@@ -37,7 +34,6 @@ pub struct CapabilityAuthResumeRequest {
     pub capability_id: CapabilityId,
     pub estimate: ResourceEstimate,
     pub input: Value,
-    pub trust_decision: TrustDecision,
     pub approval_request_id: Option<ApprovalRequestId>,
 }
 
@@ -48,7 +44,6 @@ pub struct CapabilitySpawnRequest {
     pub capability_id: CapabilityId,
     pub estimate: ResourceEstimate,
     pub input: Value,
-    pub trust_decision: TrustDecision,
 }
 
 /// Caller-facing capability invocation result.

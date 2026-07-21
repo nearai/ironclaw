@@ -867,26 +867,8 @@ fn reborn_turns_public_surface_keeps_runner_api_explicit() {
 }
 
 #[test]
-fn reborn_runner_llm_wiring_stays_out_of_root_src() {
+fn reborn_runner_llm_wiring_is_isolated() {
     let root = workspace_root();
-    let root_lib =
-        std::fs::read_to_string(root.join("src/lib.rs")).expect("root src/lib.rs must be readable");
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_support;"),
-        "retired Reborn loop-support wiring must not return to root src/lib.rs"
-    );
-    assert!(
-        !root.join("src/reborn_loop_support.rs").exists(),
-        "retired Reborn loop-support wiring must not return under root src/"
-    );
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_host;"),
-        "Reborn loop-host wiring must live under crates/ironclaw_loop_host, not root src/lib.rs"
-    );
-    assert!(
-        !root.join("src/reborn_loop_host.rs").exists(),
-        "Reborn loop-host wiring must not live under root src/"
-    );
 
     let reborn_gateway = root.join("crates/ironclaw_runner/src/model_gateway.rs");
     assert!(
@@ -902,9 +884,10 @@ fn reborn_runner_llm_wiring_stays_out_of_root_src() {
     );
 
     // Reborn crates may reuse the extracted LLM crate, but never on its default
-    // terms: `ironclaw_llm`'s defaults drag in the root app's postgres/libsql/tui
-    // feature set, which would couple the Reborn stack back to the v1 monolith.
-    // `default-features = false` on every edge is the durable invariant.
+    // terms: `ironclaw_llm`'s defaults pull in extra provider/backend features
+    // (e.g. `bedrock`) Reborn doesn't need. `default-features = false` on every
+    // edge is the durable invariant, keeping the Reborn stack's dependency
+    // footprint minimal and explicit.
     for manifest_path in [
         "crates/ironclaw_runner/Cargo.toml",
         "crates/ironclaw_reborn_composition/Cargo.toml",
@@ -937,7 +920,9 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_safety/src/provider_validation.rs",
         // Host loop/run/thread protocol structs that preserve exact model
         // provider names for tool-result roundtrips and historical replay.
-        "crates/ironclaw_turns/src/run_profile/host.rs",
+        // The provider-tool-call DTOs live in the `capability` submodule after
+        // the `host.rs` -> `host/` decomposition.
+        "crates/ironclaw_turns/src/run_profile/host/capability.rs",
         "crates/ironclaw_threads/src/tool_result_reference.rs",
         // Loop support owns capability-id <-> provider-name surface snapshots,
         // synthetic provider tools, provider-call registration, and replay refs.
@@ -2844,12 +2829,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
             // The v1→Reborn migration tool is an intentional one-way bridge:
-            // it reads through the root `ironclaw_legacy` crate and writes through the
-            // Reborn state substrate + composition's `migration-support` seam.
-            // That bridge must stay a *state* converter — it must not grow
-            // direct deps on the serving/runtime/engine layers (gateway, engine,
-            // runtime lanes, dispatcher, webui) or it would quietly become a
-            // second live entry point into Reborn.
+            // it reads through its own frozen v1 read path
+            // (`crates/ironclaw_reborn_migration/src/legacy_snapshot/`, ported
+            // off the live `ironclaw_legacy` crate so it survives Tier B) and
+            // writes through the Reborn state substrate + composition's
+            // `migration-support` seam. That bridge must stay a *state*
+            // converter — it must not grow direct deps on the serving/
+            // runtime/engine layers (gateway, engine, runtime lanes,
+            // dispatcher, webui) or it would quietly become a second live
+            // entry point into Reborn.
             crate_name: "ironclaw_reborn_migration",
             forbidden: vec![
                 "ironclaw_dispatcher",
@@ -3765,7 +3753,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemTurnStateStore
+                // ironclaw_filesystem is permitted: FilesystemTurnStateRowStore
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -4063,13 +4051,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W3.6",
         reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_reborn_migration",
-        dependency_name: "ironclaw_legacy",
-        introduced: "2026-07-09",
-        removes_in: "Tier B",
-        reason: "the migration app intentionally reads v1 state until the legacy root is retired",
     },
 ];
 

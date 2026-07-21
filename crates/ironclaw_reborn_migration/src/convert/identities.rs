@@ -14,6 +14,7 @@ use ironclaw_reborn_identity::{
 };
 
 use crate::error::MigrationError;
+use crate::legacy_snapshot::UserIdentityRecord;
 use crate::options::MigrationOptions;
 use crate::report::{Domain, LossReason, MigrationReport};
 use crate::source::V1Source;
@@ -89,7 +90,7 @@ async fn migrate_user_identities(
 
 fn build_oauth_identity(
     tgt: &RebornTarget,
-    rec: &ironclaw::db::UserIdentityRecord,
+    rec: &UserIdentityRecord,
     report: &mut MigrationReport,
 ) -> Option<ResolveExternalIdentity> {
     let source_id = format!("identity:{}:{}", rec.provider, rec.provider_user_id);

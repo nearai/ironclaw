@@ -18,7 +18,7 @@ use ironclaw_host_runtime::TenantSandboxProcessPort;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
-use ironclaw_turns::{InMemoryTurnStateStoreLimits, TurnRunWakeNotifier};
+use ironclaw_turns::{TurnRunWakeNotifier, TurnStateStoreLimits};
 use secrecy::SecretString;
 
 #[cfg(feature = "postgres")]
@@ -236,7 +236,7 @@ pub struct RebornBuildInput {
         Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
-    pub(crate) turn_state_store_limits: InMemoryTurnStateStoreLimits,
+    pub(crate) turn_state_store_limits: TurnStateStoreLimits,
 }
 
 #[derive(Clone, Debug)]
@@ -454,31 +454,6 @@ impl RebornBuildInput {
                 secret_master_key,
                 process_local_resource_governor_singleton,
             },
-        ))
-    }
-
-    /// Open the hosted-single-tenant trigger access store from this build
-    /// input's already-resolved PostgreSQL storage.
-    #[cfg(feature = "postgres")]
-    pub async fn open_hosted_single_tenant_trigger_access_store(
-        &self,
-    ) -> Result<Arc<dyn crate::LocalTriggerAccessStore>, crate::RebornLocalTriggerAccessStoreError>
-    {
-        let RebornStorageInput::HostedSingleTenantPostgres { pool, .. } = &self.storage else {
-            return Err(crate::RebornLocalTriggerAccessStoreError::Backend(
-                "hosted-single-tenant trigger access requires PostgreSQL-backed runtime storage"
-                    .to_string(),
-            ));
-        };
-        let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
-            pool.clone(),
-        ));
-        filesystem.run_migrations().await.map_err(|error| {
-            crate::RebornLocalTriggerAccessStoreError::Backend(error.to_string())
-        })?;
-        let scoped = crate::wrap_scoped(filesystem);
-        Ok(Arc::new(
-            crate::RebornFilesystemLocalTriggerAccessStore::new(scoped),
         ))
     }
 
@@ -836,10 +811,7 @@ impl RebornBuildInput {
     /// Called by `build_reborn_runtime` after mapping from `TurnRunnerSettings` so the
     /// factory can apply them when constructing the store. Callers should use
     /// `RebornRuntimeInput::with_runner_settings` rather than calling this directly.
-    pub(crate) fn with_turn_state_store_limits(
-        mut self,
-        limits: InMemoryTurnStateStoreLimits,
-    ) -> Self {
+    pub(crate) fn with_turn_state_store_limits(mut self, limits: TurnStateStoreLimits) -> Self {
         self.turn_state_store_limits = limits;
         self
     }
@@ -903,7 +875,7 @@ impl RebornBuildInput {
             slack_host_beta_enabled: false,
             slack_personal_oauth_redirect_uri_configured: false,
             nearai_mcp_bootstrap_config: None,
-            turn_state_store_limits: InMemoryTurnStateStoreLimits::default(),
+            turn_state_store_limits: TurnStateStoreLimits::default(),
         }
     }
 }

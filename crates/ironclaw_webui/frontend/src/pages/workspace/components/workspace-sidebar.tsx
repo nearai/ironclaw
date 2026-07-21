@@ -24,6 +24,7 @@ export function WorkspaceSidebar({
           value={filter}
           onInput={(event) => onFilterChange(event.currentTarget.value)}
           placeholder={t("workspace.filterPlaceholder")}
+          aria-label={t("workspace.filterPlaceholder")}
           className="h-9 w-full rounded-md border border-white/10 bg-iron-950/80 px-3 text-sm text-white outline-none placeholder:text-iron-400 focus:border-signal/45"
         />
       </div>

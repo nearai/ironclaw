@@ -23,13 +23,13 @@
 
 use std::collections::HashMap;
 
-use ironclaw::agent::routine::{Routine, RoutineAction, Trigger};
 use ironclaw_host_api::ProjectId;
 use ironclaw_triggers::{TriggerRecord, TriggerSchedule, TriggerSourceKind, TriggerState};
 use uuid::Uuid;
 
 use crate::convert::threads::{ImportMessage, ImportRole, ThreadImport, write_thread};
 use crate::error::MigrationError;
+use crate::legacy_snapshot::{Routine, RoutineAction, Trigger};
 use crate::options::MigrationOptions;
 use crate::report::{Domain, LossReason, MigrationReport};
 use crate::source::V1Source;

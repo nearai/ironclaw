@@ -3,7 +3,7 @@ name = "ironclaw"
 version = "1.0.0-rc.1"
 edition = "2024"
 rust-version.workspace = true
-description = "Standalone IronClaw Reborn binary"
+description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -16,7 +16,7 @@ layer = "app"
 [package.metadata.dist]
 dist = true
 display-name = "ironclaw"
-features = ["libsql", "postgres", "inmemory-turn-state"]
+features = ["libsql", "postgres"]
 
 [package.metadata.wix]
 upgrade-guid = "650712A0-A6B4-4584-829A-03A90CE3D7D9"
@@ -36,15 +36,6 @@ postgres = [
 # Enable embedded libSQL storage composition for volume-backed hosted previews.
 libsql = [
     "ironclaw_reborn_composition/libsql",
-]
-# Coordinate turn state in a single in-process `InMemoryTurnStateStore` authority
-# instead of the per-user `state.json` filesystem CAS store (the runtime-wedge
-# fix). Forwards to `ironclaw_reborn_composition/inmemory-turn-state`; see that
-# crate's feature doc for the durability trade-off (in-flight turns are volatile
-# across a hard crash, gate-blocked turns are persisted off the hot path and a
-# graceful shutdown flushes the full snapshot).
-inmemory-turn-state = [
-    "ironclaw_reborn_composition/inmemory-turn-state",
 ]
 [dependencies]
 anyhow = "1"

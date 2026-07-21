@@ -445,12 +445,6 @@ impl SlackHostBetaMounts {
     ) {
         if let Some(service) = &self.setup_service {
             slot.fill(Arc::clone(service));
-            slot.fill_gate_lifecycle(
-                crate::slack::slack_personal_oauth::SlackPersonalOAuthGateLifecycle::new(
-                    Arc::clone(&self.personal_connection_scope_resolver),
-                    Arc::clone(&self.user_binding_lifecycle_store),
-                ),
-            );
         }
     }
 }
@@ -4457,19 +4451,6 @@ mod tests {
     async fn bind_slack_oauth_user(mounts: &SlackHostBetaMounts) {
         let config = mounts.personal_oauth_binding_config();
         let epoch = SlackConnectionEpoch::new(ironclaw_auth::AuthFlowId::new());
-        config
-            .lifecycle_store
-            .begin_connection(
-                &crate::slack::slack_personal_binding::SlackConnectionOwner::new(
-                    TenantId::new(TENANT).expect("tenant"),
-                    UserId::new(USER).expect("user"),
-                    AdapterInstallationId::new(INSTALLATION).expect("installation"),
-                ),
-                epoch,
-                chrono::Utc::now() + chrono::Duration::minutes(5),
-            )
-            .await
-            .expect("Slack OAuth lifecycle begins");
         config
             .binding_service
             .bind_personal_user_for_epoch(

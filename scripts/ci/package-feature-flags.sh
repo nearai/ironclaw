@@ -50,7 +50,7 @@ case "${package}" in
     printf '%s\n' "--features test-support,libsql"
     ;;
   ironclaw_runner)
-    printf '%s\n' "--features libsql-secrets,libsql-restart-tests,webui-user-store"
+    printf '%s\n' "--features libsql-restart-tests"
     ;;
   ironclaw_reborn_event_store)
     ;;

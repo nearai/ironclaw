@@ -37,24 +37,38 @@ export function useAdminUsers() {
     errorCode === "forbidden" ||
     errorCode === "participant_denied";
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
+  const invalidateUsers = () =>
+    queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
+  const invalidateUser = (userId) => {
+    const invalidations = [invalidateUsers()];
+    if (userId) {
+      invalidations.push(
+        queryClient.invalidateQueries({
+          queryKey: ["admin", "user", userId],
+          exact: true,
+          refetchType: "active",
+        }),
+      );
+    }
+    return Promise.all(invalidations);
+  };
 
-  const createMut = useMutation({ mutationFn: createAdminUser, onSuccess: invalidate });
+  const createMut = useMutation({ mutationFn: createAdminUser, onSuccess: invalidateUsers });
   const updateMut = useMutation({
     mutationFn: ({ id, payload }) => updateAdminUser(id, payload),
-    onSuccess: invalidate,
+    onSuccess: (_user, { id }) => invalidateUser(id),
   });
   const deleteMut = useMutation({
     mutationFn: (id) => deleteAdminUser(id),
-    onSuccess: invalidate,
+    onSuccess: invalidateUsers,
   });
   const suspendMut = useMutation({
     mutationFn: (id) => suspendAdminUser(id),
-    onSuccess: invalidate,
+    onSuccess: (_user, id) => invalidateUser(id),
   });
   const activateMut = useMutation({
     mutationFn: (id) => activateAdminUser(id),
-    onSuccess: invalidate,
+    onSuccess: (_user, id) => invalidateUser(id),
   });
 
   return {

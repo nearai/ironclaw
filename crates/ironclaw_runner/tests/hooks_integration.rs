@@ -89,9 +89,10 @@ use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     SessionThreadService, ThreadScope,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CheckpointStateStore, EventCursor,
-    GetRunStateRequest, InMemoryRunProfileResolver, InMemoryTurnStateStore, LoopResultRef,
+    FilesystemTurnStateRowStore, GetRunStateRequest, InMemoryRunProfileResolver, LoopResultRef,
     PutCheckpointStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
     RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
@@ -111,7 +112,7 @@ use ironclaw_turns::{
 // ─── Static turn state store ──────────────────────────────────────────────
 //
 // The factory's cancellation handle builder looks up the run by id from
-// the supplied `TurnStateStore`. `InMemoryTurnStateStore::default()` is
+// the supplied `TurnStateStore`. `in_memory_turn_state_store()` is
 // empty, so we wrap the claimed state directly. This mirrors the
 // `StaticTurnStateStore` pattern used by `tests/loop_driver_host.rs`.
 
@@ -1027,7 +1028,7 @@ use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_che
 struct Fixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
-    loop_checkpoint_store: Arc<InMemoryTurnStateStore>,
+    loop_checkpoint_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     gateway: Arc<UnusedGateway>,
     thread_scope: ThreadScope,
@@ -1041,7 +1042,7 @@ impl Fixture {
     async fn new() -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let checkpoint_state_store = in_memory_checkpoint_state_store();
-        let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
+        let loop_checkpoint_store = Arc::new(in_memory_turn_state_store());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let gateway = Arc::new(UnusedGateway);
 

@@ -99,7 +99,7 @@ pull-request workflows.
 
 The cargo-dist release and manual preflight both build the `ironclaw` package
 and binary with the explicit release feature contract
-`libsql,postgres,inmemory-turn-state`. In the manual preflight, each matrix
+`libsql,postgres`. In the manual preflight, each matrix
 entry performs a final `cargo build --locked --profile dist` link and executes
 that exact native binary with `--version`, `--help`, and
 `profile list --json`. Its musl entries also use `readelf` to reject a program

@@ -75,7 +75,12 @@ function componentProps(node, component) {
   return props;
 }
 
-function renderToolsModule({ tools = [], translations = {}, toolError = null } = {}) {
+function renderToolsModule({
+  tools = [],
+  translations = {},
+  toolError = null,
+  pendingPermissions = {},
+} = {}) {
   const saved = [];
   const translate = (key, params = {}) => {
     let value = translations[key] || key;
@@ -98,6 +103,7 @@ function renderToolsModule({ tools = [], translations = {}, toolError = null } =
       query: { isLoading: false, error: null },
       setPermission: () => {},
       savedTools: {},
+      pendingPermissions,
       error: toolError,
     }),
   };
@@ -182,6 +188,50 @@ test("Tool permission select follows global unless a per-tool override exists", 
   });
   const overrideSelect = findComponentNode(overrideTool, "SelectMenu");
   assert.equal(componentProps(overrideSelect, "SelectMenu").value, "ask_each_time");
+});
+
+test("Tool permission select retains a pending selection while saving", () => {
+  const { exports } = renderToolsModule();
+  const rendered = exports.ToolRow({
+    tool: {
+      name: "builtin.echo",
+      description: "Echo",
+      state: "ask_each_time",
+      default_state: "ask_each_time",
+      effective_source: "override",
+      locked: false,
+    },
+    pendingPermission: "disabled",
+    onPermissionChange: () => {},
+    isSaved: false,
+  });
+
+  const select = findComponentNode(rendered, "SelectMenu");
+  assert.equal(componentProps(select, "SelectMenu").value, "disabled");
+});
+
+test("ToolsTab wires pending permissions to the matching tool row", () => {
+  const tool = {
+    name: "builtin.echo",
+    description: "Echo",
+    state: "ask_each_time",
+    default_state: "ask_each_time",
+    effective_source: "override",
+    locked: false,
+  };
+  const { exports } = renderToolsModule({
+    tools: [tool],
+    pendingPermissions: {
+      "builtin.echo": { requestId: 7, state: "disabled" },
+    },
+  });
+
+  const rendered = exports.ToolsTab({});
+  const row = findComponentNode(rendered, exports.ToolRow);
+  assert.ok(row, "expected ToolsTab to render the tool row");
+  const props = componentProps(row, exports.ToolRow);
+  assert.equal(props.tool, tool);
+  assert.equal(props.pendingPermission, "disabled");
 });
 
 test("Tool rows localize built-in descriptions by capability id", () => {
