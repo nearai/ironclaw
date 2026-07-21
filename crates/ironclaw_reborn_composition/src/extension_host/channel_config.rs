@@ -19,10 +19,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_extensions::ExtensionInstallationStore;
-use ironclaw_host_api::{ExtensionId, RecipeSecretField, ResourceScope};
+use ironclaw_extensions::{ExtensionInstallationStore, ExtensionManifestRecord};
+use ironclaw_host_api::{ExtensionId, RecipeSecretField, ResourceScope, SecretHandle};
 use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
 use ironclaw_secrets::{SecretMaterial, SecretStore};
+
+use crate::extension_host::admin_configuration::ComposedAdminConfigurationService;
 
 /// Presence-only projection of one `[channel.config]` field (§6.4 config
 /// completeness input). Secret fields never carry their stored value.
@@ -68,6 +70,13 @@ pub(crate) struct ChannelConfigService {
     /// through the egress credential fallback with no bridging.
     secret_scope: ResourceScope,
     reactivation: Arc<dyn ChannelConfigReactivation>,
+    admin_configuration: Option<AdminConfigurationConsumer>,
+}
+
+#[derive(Clone)]
+struct AdminConfigurationConsumer {
+    service: Arc<ComposedAdminConfigurationService>,
+    scope: ResourceScope,
 }
 
 impl ChannelConfigService {
@@ -82,7 +91,30 @@ impl ChannelConfigService {
             secrets,
             secret_scope,
             reactivation,
+            admin_configuration: None,
         }
+    }
+
+    pub(crate) fn with_admin_configuration(
+        mut self,
+        service: Arc<ComposedAdminConfigurationService>,
+        scope: ResourceScope,
+    ) -> Self {
+        self.admin_configuration = Some(AdminConfigurationConsumer { service, scope });
+        self
+    }
+
+    async fn manifest(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<ExtensionManifestRecord, ChannelConfigError> {
+        self.installation_store
+            .get_manifest(extension_id)
+            .await
+            .map_err(storage_error)?
+            .ok_or_else(|| ChannelConfigError::NotInstalled {
+                extension_id: extension_id.as_str().to_string(),
+            })
     }
 
     /// The installed manifest's `[channel.config]` field descriptors; empty
@@ -91,14 +123,7 @@ impl ChannelConfigService {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Vec<RecipeSecretField>, ChannelConfigError> {
-        let record = self
-            .installation_store
-            .get_manifest(extension_id)
-            .await
-            .map_err(storage_error)?
-            .ok_or_else(|| ChannelConfigError::NotInstalled {
-                extension_id: extension_id.as_str().to_string(),
-            })?;
+        let record = self.manifest(extension_id).await?;
         Ok(record
             .resolved()
             .channel
@@ -203,8 +228,31 @@ impl ChannelConfigService {
     /// port resolves `verification.secret_handle` through this.
     pub(crate) async fn secret_material(
         &self,
-        handle: &ironclaw_host_api::SecretHandle,
+        extension_id: &ExtensionId,
+        handle: &SecretHandle,
     ) -> Result<Option<SecretMaterial>, ChannelConfigError> {
+        if let Some(admin) = &self.admin_configuration {
+            let manifest = self.manifest(extension_id).await?;
+            if let Some(descriptor) =
+                manifest
+                    .resolved()
+                    .admin_configuration
+                    .iter()
+                    .find(|descriptor| {
+                        descriptor
+                            .fields
+                            .iter()
+                            .any(|field| field.secret && field.handle == *handle)
+                    })
+                && let Some(material) = admin
+                    .service
+                    .secret_material(&admin.scope, &descriptor.group_id, handle)
+                    .await
+                    .map_err(admin_configuration_error)?
+            {
+                return Ok(Some(material));
+            }
+        }
         let lease = match self.secrets.lease_once(&self.secret_scope, handle).await {
             Ok(lease) => lease,
             Err(error) if error.is_unknown_secret() => return Ok(None),
@@ -226,6 +274,29 @@ impl ChannelConfigService {
         extension_id: &ExtensionId,
         handle: &str,
     ) -> Result<Option<String>, ChannelConfigError> {
+        if let Some(admin) = &self.admin_configuration {
+            let manifest = self.manifest(extension_id).await?;
+            let handle = SecretHandle::new(handle).map_err(storage_error)?;
+            if let Some(descriptor) =
+                manifest
+                    .resolved()
+                    .admin_configuration
+                    .iter()
+                    .find(|descriptor| {
+                        descriptor
+                            .fields
+                            .iter()
+                            .any(|field| !field.secret && field.handle == handle)
+                    })
+                && let Some(value) = admin
+                    .service
+                    .non_secret_value(&admin.scope, &descriptor.group_id, &handle)
+                    .await
+                    .map_err(admin_configuration_error)?
+            {
+                return Ok(Some(value));
+            }
+        }
         let values = self
             .installation_store
             .channel_config(extension_id)
@@ -237,13 +308,11 @@ impl ChannelConfigService {
             .map(|(_, value)| value))
     }
 
-    /// Resolve one auth-recipe client-credential handle from the operator's
-    /// saved channel configuration: when an installed manifest declares the
-    /// handle as a `[channel.config]` field, a secret field resolves through
-    /// the scoped secret store and a non-secret field through the durable
-    /// installation config. `None` when no installed manifest declares the
-    /// handle or no value was saved yet. Per-request read: a configure save
-    /// takes effect on the next OAuth start with no rewiring.
+    /// Resolve one auth-recipe client-credential handle from manifest-declared
+    /// administrator configuration, including extensions with no channel
+    /// surface. The retired channel-config store remains a compatibility
+    /// fallback for older manifests. Per-request resolution means an operator
+    /// save takes effect on the next OAuth start without rewiring.
     pub(crate) async fn credential_handle_value(
         &self,
         handle: &str,
@@ -253,6 +322,44 @@ impl ChannelConfigService {
             .list_manifests()
             .await
             .map_err(storage_error)?;
+        let typed_handle = SecretHandle::new(handle).map_err(storage_error)?;
+        if let Some(admin) = &self.admin_configuration {
+            for record in &manifests {
+                let Some((descriptor, field)) = record
+                    .resolved()
+                    .admin_configuration
+                    .iter()
+                    .find_map(|descriptor| {
+                        descriptor
+                            .fields
+                            .iter()
+                            .find(|field| field.handle == typed_handle)
+                            .map(|field| (descriptor, field))
+                    })
+                else {
+                    continue;
+                };
+                if field.secret {
+                    let material = admin
+                        .service
+                        .secret_material(&admin.scope, &descriptor.group_id, &typed_handle)
+                        .await
+                        .map_err(admin_configuration_error)?;
+                    if let Some(material) = material {
+                        return Ok(Some(secrecy::SecretString::from(
+                            secrecy::ExposeSecret::expose_secret(&material).to_string(),
+                        )));
+                    }
+                } else if let Some(value) = admin
+                    .service
+                    .non_secret_value(&admin.scope, &descriptor.group_id, &typed_handle)
+                    .await
+                    .map_err(admin_configuration_error)?
+                {
+                    return Ok(Some(secrecy::SecretString::from(value)));
+                }
+            }
+        }
         for record in manifests {
             let Some(channel) = record.resolved().channel.as_ref() else {
                 continue;
@@ -266,7 +373,8 @@ impl ChannelConfigService {
                 continue;
             };
             if field.secret {
-                let material = self.secret_material(&field.handle).await?;
+                let extension_id = record.resolved().id.clone();
+                let material = self.secret_material(&extension_id, &field.handle).await?;
                 return Ok(material.map(|material| {
                     secrecy::SecretString::from(
                         secrecy::ExposeSecret::expose_secret(&material).to_string(),
@@ -274,17 +382,61 @@ impl ChannelConfigService {
                 }));
             }
             let extension_id = record.resolved().id.clone();
-            let values = self
-                .installation_store
-                .channel_config(&extension_id)
+            return self
+                .non_secret_value(&extension_id, handle)
                 .await
-                .map_err(storage_error)?;
-            return Ok(values
-                .into_iter()
-                .find(|(stored, _)| stored == handle)
-                .map(|(_, value)| secrecy::SecretString::from(value)));
+                .map(|value| value.map(secrecy::SecretString::from));
         }
         Ok(None)
+    }
+
+    /// Resolve the non-secret configuration passed to `ChannelAdapter::activate`.
+    /// Manifest-declared tenant admin values take precedence over the retired
+    /// per-installation configure surface while preserving it as a compatibility
+    /// fallback for manifests that do not declare administrator configuration.
+    pub(crate) async fn effective_non_secret_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ChannelConfigError> {
+        let manifest = self.manifest(extension_id).await?;
+        let mut effective = self
+            .installation_store
+            .channel_config(extension_id)
+            .await
+            .map_err(storage_error)?;
+        let Some(admin) = &self.admin_configuration else {
+            return Ok(effective);
+        };
+        let Some(channel) = manifest.resolved().channel.as_ref() else {
+            return Ok(effective);
+        };
+        for descriptor in &manifest.resolved().admin_configuration {
+            for field in descriptor.fields.iter().filter(|field| {
+                !field.secret
+                    && channel
+                        .config
+                        .fields
+                        .iter()
+                        .any(|channel_field| channel_field.handle == field.handle)
+            }) {
+                let Some(value) = admin
+                    .service
+                    .non_secret_value(&admin.scope, &descriptor.group_id, &field.handle)
+                    .await
+                    .map_err(admin_configuration_error)?
+                else {
+                    continue;
+                };
+                match effective
+                    .iter_mut()
+                    .find(|(handle, _)| handle == field.handle.as_str())
+                {
+                    Some(existing) => existing.1 = value,
+                    None => effective.push((field.handle.as_str().to_string(), value)),
+                }
+            }
+        }
+        Ok(effective)
     }
 
     /// Per-field presence for the extension's `[channel.config]` fields
@@ -294,7 +446,13 @@ impl ChannelConfigService {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Vec<ChannelConfigFieldStatus>, ChannelConfigError> {
-        let descriptors = self.descriptors(extension_id).await?;
+        let manifest = self.manifest(extension_id).await?;
+        let descriptors = manifest
+            .resolved()
+            .channel
+            .as_ref()
+            .map(|channel| channel.config.fields.clone())
+            .unwrap_or_default();
         if descriptors.is_empty() {
             return Ok(Vec::new());
         }
@@ -305,7 +463,31 @@ impl ChannelConfigService {
             .map_err(storage_error)?;
         let mut statuses = Vec::with_capacity(descriptors.len());
         for field in descriptors {
-            let provided = if field.secret {
+            let admin_provided = if let Some(admin) = &self.admin_configuration
+                && let Some(descriptor) =
+                    manifest
+                        .resolved()
+                        .admin_configuration
+                        .iter()
+                        .find(|descriptor| {
+                            descriptor
+                                .fields
+                                .iter()
+                                .any(|admin_field| admin_field.handle == field.handle)
+                        }) {
+                admin
+                    .service
+                    .get(&admin.scope, &descriptor.group_id)
+                    .await
+                    .map_err(admin_configuration_error)?
+                    .fields
+                    .into_iter()
+                    .find(|admin_field| admin_field.handle == field.handle)
+                    .is_some_and(|admin_field| admin_field.provided)
+            } else {
+                false
+            };
+            let legacy_provided = if field.secret {
                 self.secrets
                     .metadata(&self.secret_scope, &field.handle)
                     .await
@@ -320,7 +502,7 @@ impl ChannelConfigService {
                 handle: field.handle.as_str().to_string(),
                 label: field.label,
                 secret: field.secret,
-                provided,
+                provided: admin_provided || legacy_provided,
             });
         }
         Ok(statuses)
@@ -330,6 +512,15 @@ impl ChannelConfigService {
 fn storage_error(error: impl std::fmt::Display) -> ChannelConfigError {
     ChannelConfigError::Storage {
         reason: error.to_string(),
+    }
+}
+
+fn admin_configuration_error(
+    error: ironclaw_extension_host::AdminConfigurationServiceError,
+) -> ChannelConfigError {
+    tracing::warn!(error = %error, "admin configuration consumer resolution failed");
+    ChannelConfigError::Storage {
+        reason: "administrator configuration is unavailable".to_string(),
     }
 }
 
@@ -429,11 +620,16 @@ fn map_channel_config_error(error: ChannelConfigError) -> RebornServicesError {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use ironclaw_extension_host::{
+        AdminConfigurationIdempotencyKey, AdminConfigurationService,
+        AdminConfigurationSubmittedValue, FilesystemAdminConfigurationStore,
+    };
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
         ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
         ManifestSource,
     };
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{InvocationId, SecretHandle, UserId};
     use ironclaw_secrets::FilesystemSecretStore;
 
@@ -510,6 +706,9 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
 "#;
+
+    const NON_CHANNEL_ADMIN_FIXTURE_MANIFEST: &str =
+        include_str!("../../../ironclaw_first_party_extensions/assets/gmail/manifest.toml");
 
     struct RecordingReactivation {
         calls: AtomicUsize,
@@ -620,6 +819,72 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             scope,
             reactivation,
             extension_id: ExtensionId::new("acmechat").expect("extension id"),
+        }
+    }
+
+    #[tokio::test]
+    async fn non_channel_auth_credentials_resolve_from_manifest_admin_configuration() {
+        let installation_store = installed_store(NON_CHANNEL_ADMIN_FIXTURE_MANIFEST, "gmail").await;
+        let manifest = installation_store
+            .get_manifest(&ExtensionId::new("gmail").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(manifest.resolved().channel.is_none());
+        assert!(!manifest.resolved().admin_configuration.is_empty());
+
+        let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+        let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+        let admin = Arc::new(
+            AdminConfigurationService::new(
+                FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                    filesystem,
+                    crate::invocation_mount_view,
+                ))),
+                Arc::clone(&secrets),
+                manifest.resolved().admin_configuration.clone(),
+            )
+            .unwrap(),
+        );
+        let scope = test_scope();
+        let group = manifest.resolved().admin_configuration[0].group_id.clone();
+        admin
+            .replace(
+                &scope,
+                &group,
+                &AdminConfigurationIdempotencyKey::new("gmail-admin-save").unwrap(),
+                0,
+                vec![
+                    AdminConfigurationSubmittedValue {
+                        handle: SecretHandle::new("google_oauth_client_id").unwrap(),
+                        value: SecretMaterial::from("client-id".to_string()),
+                    },
+                    AdminConfigurationSubmittedValue {
+                        handle: SecretHandle::new("google_oauth_client_secret").unwrap(),
+                        value: SecretMaterial::from("client-secret".to_string()),
+                    },
+                ],
+            )
+            .await
+            .unwrap();
+        let service = ChannelConfigService::new(
+            Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStore>,
+            Arc::clone(&secrets),
+            scope.clone(),
+            Arc::new(RecordingReactivation::new()),
+        )
+        .with_admin_configuration(admin, scope);
+
+        for (handle, expected) in [
+            ("google_oauth_client_id", "client-id"),
+            ("google_oauth_client_secret", "client-secret"),
+        ] {
+            let value = service
+                .credential_handle_value(handle)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(secrecy::ExposeSecret::expose_secret(&value), expected);
         }
     }
 

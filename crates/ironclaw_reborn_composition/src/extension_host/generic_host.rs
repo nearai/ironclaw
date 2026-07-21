@@ -64,6 +64,8 @@ pub(crate) struct GenericExtensionHostParams {
     pub(crate) native_factories: Vec<Arc<dyn NativeExtensionFactory>>,
     pub(crate) channel_adapters: Vec<(String, Arc<dyn ChannelAdapter>)>,
     pub(crate) installation_store: Arc<dyn ExtensionInstallationStore>,
+    pub(crate) channel_config:
+        Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
     pub(crate) governor: Arc<dyn ResourceGovernor>,
     pub(crate) reserved_capability_ids: BTreeSet<CapabilityId>,
     pub(crate) reserved_ingress_routes: BTreeSet<String>,
@@ -82,6 +84,7 @@ pub(crate) async fn build_generic_extension_host(
         native_factories,
         channel_adapters,
         installation_store,
+        channel_config,
         governor,
         reserved_capability_ids,
         reserved_ingress_routes,
@@ -151,12 +154,22 @@ pub(crate) async fn build_generic_extension_host(
         // Durable per-installation `[channel.config]` values ride into the
         // host's working record so `ChannelAdapter::activate` revalidates
         // them on boot exactly as it did on the configure-time cycle.
-        let config = installation_store
-            .channel_config(&extension_id)
-            .await
-            .map_err(|error| crate::RebornBuildError::InvalidConfig {
-                reason: format!("extension channel config could not be loaded: {error}"),
-            })?;
+        let config = match &channel_config {
+            Some(channel_config) => channel_config
+                .effective_non_secret_config(&extension_id)
+                .await
+                .map_err(|error| crate::RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "effective extension configuration could not be loaded: {error}"
+                    ),
+                })?,
+            None => installation_store
+                .channel_config(&extension_id)
+                .await
+                .map_err(|error| crate::RebornBuildError::InvalidConfig {
+                    reason: format!("extension channel config could not be loaded: {error}"),
+                })?,
+        };
         let record = InstallationRecord {
             extension_id: extension_id.as_str().to_string(),
             installation_id: installation.installation_id().as_str().to_string(),
@@ -607,6 +620,7 @@ input_schema_ref = "schemas/echo.input.json"
             native_factories: vec![Arc::new(FixtureNativeFactory)],
             channel_adapters: Vec::new(),
             installation_store: Arc::clone(&store) as Arc<dyn ExtensionInstallationStore>,
+            channel_config: None,
             governor: Arc::new(InMemoryResourceGovernor::new()),
             reserved_capability_ids: BTreeSet::new(),
             reserved_ingress_routes: BTreeSet::new(),

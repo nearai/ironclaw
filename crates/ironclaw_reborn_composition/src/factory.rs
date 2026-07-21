@@ -14,6 +14,10 @@ use crate::extension_host::lifecycle::{
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
 use crate::extension_host::{
     admin_configuration::ComposedAdminConfigurationService,
+    admin_configuration_capability::{
+        extend_builtin_first_party_package as extend_builtin_admin_configuration_package,
+        insert_handler as insert_admin_configuration_handler,
+    },
     available_extensions::{AdminConfigurationCatalogUse, AvailableExtensionCatalog},
     extension_installation_store::FilesystemExtensionInstallationStore,
     extension_lifecycle::{
@@ -2157,8 +2161,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             channel_egress_scope.clone(),
             Arc::clone(&extension_management)
                 as Arc<dyn crate::extension_host::channel_config::ChannelConfigReactivation>,
+        )
+        .with_admin_configuration(
+            Arc::clone(&admin_configuration),
+            channel_egress_scope.clone(),
         ),
     );
+    extension_management.attach_channel_config(&channel_config_service);
     channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
     // The generic channel-identity and DM-target stores (extension-runtime
     // §5.4–§5.5): the fold below seeds them from retired lane state, and the
@@ -2180,8 +2189,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     );
     if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
         local_runtime.extension_management = Some(Arc::clone(&extension_management));
-        local_runtime.channel_config = Some(channel_config_service);
-        local_runtime.admin_configuration = Some(admin_configuration);
+        local_runtime.channel_config = Some(Arc::clone(&channel_config_service));
+        local_runtime.admin_configuration = Some(Arc::clone(&admin_configuration));
         local_runtime.admin_configuration_uses = Arc::new(admin_configuration_uses);
         local_runtime.channel_identity_store = Some(channel_identity_store);
         local_runtime.channel_dm_target_store = Some(channel_dm_target_store);
@@ -2238,6 +2247,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("local-dev extension lifecycle handlers are invalid: {error}"),
     })?;
+    insert_admin_configuration_handler(
+        &mut first_party_registry,
+        admin_configuration,
+        channel_egress_scope.user_id.clone(),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("admin configuration handler is invalid: {error}"),
+    })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     // Generic extension host (extension-runtime P2): loaders over the fully
@@ -2255,10 +2272,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             .map(|descriptor| descriptor.id.clone())
             .collect();
         let channel_egress_credentials = Arc::new(
-            crate::extension_host::channel_egress::SecretStoreChannelEgressCredentials::new(
-                Arc::clone(&secret_store),
-                channel_egress_scope.clone(),
-            ),
+            crate::extension_host::channel_egress::ChannelConfigEgressCredentials::new(Arc::clone(
+                &channel_config_service,
+            )),
         );
         #[cfg(feature = "test-support")]
         let channel_egress_credentials = Arc::new(
@@ -2301,6 +2317,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     .ok_or_else(|| RebornBuildError::InvalidConfig {
                         reason: "generic extension host requires extension management".to_string(),
                     })?,
+                channel_config: store_graph.local_runtime.channel_config.clone(),
                 governor: Arc::clone(&store_graph.resource_governor)
                     as Arc<dyn ironclaw_resources::ResourceGovernor>,
                 reserved_capability_ids,
@@ -4284,6 +4301,11 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
     let package = extend_builtin_first_party_package(package).map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: format!("local-dev extension lifecycle package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_admin_configuration_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev administrator configuration package is invalid: {error}"),
         }
     })?;
     registry

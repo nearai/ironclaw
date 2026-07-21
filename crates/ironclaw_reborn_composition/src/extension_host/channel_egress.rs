@@ -20,7 +20,9 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     HostRuntimeCredentialMaterial, HostRuntimeHttpEgressPort, HostRuntimeHttpEgressRequest,
 };
-use ironclaw_secrets::{SecretMaterial, SecretStore};
+use ironclaw_secrets::SecretMaterial;
+#[cfg(test)]
+use ironclaw_secrets::SecretStore;
 
 /// Fixed capability id channel vendor calls are attributed to in egress
 /// events/audit (mirrors the retiring per-vendor egress capability ids).
@@ -50,11 +52,13 @@ pub(crate) enum ChannelEgressCredentialError {
 }
 
 /// Generic credentials port over the scoped secret store.
+#[cfg(test)]
 pub(crate) struct SecretStoreChannelEgressCredentials {
     store: Arc<dyn SecretStore>,
     scope_template: ResourceScope,
 }
 
+#[cfg(test)]
 impl SecretStoreChannelEgressCredentials {
     pub(crate) fn new(store: Arc<dyn SecretStore>, scope_template: ResourceScope) -> Self {
         Self {
@@ -65,6 +69,7 @@ impl SecretStoreChannelEgressCredentials {
 }
 
 #[async_trait]
+#[cfg(test)]
 impl ChannelEgressCredentialsPort for SecretStoreChannelEgressCredentials {
     async fn channel_secret(
         &self,
@@ -80,6 +85,40 @@ impl ChannelEgressCredentialsPort for SecretStoreChannelEgressCredentials {
             Ok(material) => Ok(Some(material)),
             Err(_) => Err(ChannelEgressCredentialError::Unavailable),
         }
+    }
+}
+
+/// Production credential bridge over the same effective configuration
+/// resolver used by setup, OAuth, activation, pairing, and ingress.
+pub(crate) struct ChannelConfigEgressCredentials {
+    channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+}
+
+impl ChannelConfigEgressCredentials {
+    pub(crate) fn new(
+        channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+    ) -> Self {
+        Self { channel_config }
+    }
+}
+
+#[async_trait]
+impl ChannelEgressCredentialsPort for ChannelConfigEgressCredentials {
+    async fn channel_secret(
+        &self,
+        extension_id: &str,
+        _installation_id: &str,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMaterial>, ChannelEgressCredentialError> {
+        let extension_id = ExtensionId::new(extension_id)
+            .map_err(|_| ChannelEgressCredentialError::Unavailable)?;
+        self.channel_config
+            .secret_material(&extension_id, handle)
+            .await
+            .map_err(|error| {
+                tracing::warn!(error = %error, "effective channel egress credential unavailable");
+                ChannelEgressCredentialError::Unavailable
+            })
     }
 }
 

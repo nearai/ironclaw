@@ -1,5 +1,8 @@
 // arch-exempt: large_file, shared extension removal convergence and compatibility tests, plan #6329
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Weak},
+};
 
 use async_trait::async_trait;
 use ironclaw_auth::{
@@ -124,6 +127,11 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     // the dispatch chain resolves extensions from the host's active snapshot;
     // unattached compositions (focused tests) keep registry-only dispatch.
     generic_host: std::sync::OnceLock<Arc<ironclaw_extension_host::ExtensionHost>>,
+    /// Late-bound weak reference to the effective channel-configuration
+    /// resolver. Weak ownership avoids the cycle created by that resolver's
+    /// reactivation port pointing back to this lifecycle facade.
+    channel_config:
+        std::sync::OnceLock<Weak<crate::extension_host::channel_config::ChannelConfigService>>,
     // Late-attached with `generic_host` (both need the fully wired host
     // runtime): stages hosted-MCP discovery authority — the connection
     // credential and the server network policy — under the discovery scope.
@@ -335,6 +343,7 @@ impl RebornLocalExtensionManagementPort {
             operation_lock: Arc::new(Mutex::new(())),
             credential_cleanup,
             generic_host: std::sync::OnceLock::new(),
+            channel_config: std::sync::OnceLock::new(),
             discovery_runtime_ports: std::sync::OnceLock::new(),
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
             tenant_operator_user_id,
@@ -402,6 +411,13 @@ impl RebornLocalExtensionManagementPort {
         let _ = self.generic_host.set(host);
     }
 
+    pub(crate) fn attach_channel_config(
+        &self,
+        channel_config: &Arc<crate::extension_host::channel_config::ChannelConfigService>,
+    ) {
+        let _ = self.channel_config.set(Arc::downgrade(channel_config));
+    }
+
     /// The attached generic host, when this facade has one — the snapshot
     /// authority the channel host assembly reconciles against.
     pub(crate) fn generic_host(&self) -> Option<Arc<ironclaw_extension_host::ExtensionHost>> {
@@ -438,11 +454,17 @@ impl RebornLocalExtensionManagementPort {
         );
         // Durable per-installation `[channel.config]` values ride the
         // published record so `ChannelAdapter::activate` sees them.
-        let config = self
-            .installation_store
-            .channel_config(extension_id)
-            .await
-            .map_err(map_extension_installation_error)?;
+        let config = match self.channel_config.get().and_then(Weak::upgrade) {
+            Some(channel_config) => channel_config
+                .effective_non_secret_config(extension_id)
+                .await
+                .map_err(map_channel_config_error)?,
+            None => self
+                .installation_store
+                .channel_config(extension_id)
+                .await
+                .map_err(map_extension_installation_error)?,
+        };
         let record = ironclaw_extension_host::InstallationRecord {
             extension_id: extension_id.as_str().to_string(),
             installation_id: installation_id.as_str().to_string(),
@@ -517,11 +539,17 @@ impl RebornLocalExtensionManagementPort {
         };
         let effective =
             crate::extension_host::generic_host::effective_resolved_for_package(&base, package);
-        let config = self
-            .installation_store
-            .channel_config(&package.id)
-            .await
-            .map_err(map_extension_installation_error)?;
+        let config = match self.channel_config.get().and_then(Weak::upgrade) {
+            Some(channel_config) => channel_config
+                .effective_non_secret_config(&package.id)
+                .await
+                .map_err(map_channel_config_error)?,
+            None => self
+                .installation_store
+                .channel_config(&package.id)
+                .await
+                .map_err(map_extension_installation_error)?,
+        };
         host.install(ironclaw_extension_host::InstallationRecord {
             extension_id: package.id.as_str().to_string(),
             installation_id: format!("{}-test-install", package.id.as_str()),
@@ -2824,6 +2852,15 @@ fn hosted_mcp_discovery_network_policy(
 fn generic_host_error(error: ironclaw_extension_host::LifecycleError) -> ProductWorkflowError {
     ProductWorkflowError::InvalidBindingRequest {
         reason: format!("generic extension host rejected the activation: {error}"),
+    }
+}
+
+fn map_channel_config_error(
+    error: crate::extension_host::channel_config::ChannelConfigError,
+) -> ProductWorkflowError {
+    tracing::warn!(error = %error, "effective extension configuration resolution failed");
+    ProductWorkflowError::Transient {
+        reason: "effective extension configuration is unavailable".to_string(),
     }
 }
 

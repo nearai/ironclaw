@@ -595,6 +595,8 @@ impl GenericChannelHostAssembly {
 
         let secrets = Arc::new(ChannelConfigIngressSecrets {
             channel_config: Arc::clone(&self.deps.channel_config),
+            extension_id: ExtensionId::new(&active.extension_id)
+                .map_err(|error| format!("invalid extension id: {error}"))?,
             handle: secret_handle.clone(),
             installation_id: active.installation_id.clone(),
         });
@@ -963,6 +965,7 @@ impl ProductActorUserResolver for OperatorActorUserResolver {
 /// router rejects 401.
 struct ChannelConfigIngressSecrets {
     channel_config: Arc<ChannelConfigService>,
+    extension_id: ExtensionId,
     handle: SecretHandle,
     installation_id: String,
 }
@@ -977,7 +980,7 @@ impl IngressSecretsPort for ChannelConfigIngressSecrets {
     ) -> Result<Vec<VerificationCandidate>, IngressPortError> {
         let material = self
             .channel_config
-            .secret_material(&self.handle)
+            .secret_material(&self.extension_id, &self.handle)
             .await
             .map_err(|error| IngressPortError {
                 reason: format!("channel verification secret unavailable: {error}"),
