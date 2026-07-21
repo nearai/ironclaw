@@ -64,7 +64,7 @@ urlencoding = "2"
 # to mark it `optional = true` broke `cargo test` because the
 # `cfg(test)` gate activated the `use uuid::Uuid;` import without
 # pulling in the optional crate.
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["macros"] }

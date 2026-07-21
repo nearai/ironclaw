@@ -27,48 +27,51 @@ use axum::response::{IntoResponse, Response};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    CodexLoginStart, FsMount, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
-    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_LOGS_VIEW,
-    ProductOutboundEnvelope, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
-    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
-    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
-    RebornCancelRunResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse,
-    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornViewQuery, SetActiveLlmRequest, SettingsToolPermissionState, UpsertLlmProviderRequest,
-    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW, CodexLoginStart, FsMount,
+    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_LOGS_VIEW, ProductOutboundEnvelope,
+    ProductWorkflowError, ProjectFsFile, ProjectionCursor, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
+    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
+    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+    RebornAttachmentRequest, RebornAutomationMutationResponse, RebornCancelRunResponse,
+    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
+    RebornFsStatResponse, RebornGetProjectRequest, RebornListAutomationsResponse,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
+    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewQuery, SetActiveLlmRequest, SettingsToolPermissionState,
+    UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::{SecretHandle, UserId};
+use ironclaw_host_api::{
+    ActivityId, Blocked, CapabilityId, FailureKind, Resolution, SecretHandle, UserId,
+};
+use uuid::Uuid;
 
 use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
@@ -83,6 +86,7 @@ const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
 const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
+const ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
@@ -1714,6 +1718,285 @@ fn require_operator_webui_config(
         validation_code: None,
     }
     .into())
+}
+
+#[derive(Deserialize)]
+pub struct ExtensionAdminConfigurationPath {
+    pub group_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ExtensionAdminConfigurationValue {
+    pub handle: String,
+    pub value: String,
+}
+
+#[derive(Deserialize)]
+pub struct ReplaceExtensionAdminConfigurationBody {
+    pub values: Vec<ExtensionAdminConfigurationValue>,
+    pub expected_revision: u64,
+    pub idempotency_key: String,
+}
+
+#[derive(Serialize)]
+struct ReplaceExtensionAdminConfigurationInput {
+    group_id: String,
+    values: Vec<ExtensionAdminConfigurationValue>,
+    expected_revision: u64,
+}
+
+/// `GET /api/webchat/v2/operator/extension-configuration`
+pub async fn list_extension_admin_configuration(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let payload = query_extension_admin_configuration(&state, caller).await?;
+    Ok(Json(payload))
+}
+
+/// `PUT /api/webchat/v2/operator/extension-configuration/{group_id}`
+///
+/// This ingress adapter carries only the manifest group designator and values
+/// through the generic product capability conduit. The client retry key is
+/// consumed here into a scoped [`ActivityId`]; it never enters capability
+/// input as authority.
+pub async fn replace_extension_admin_configuration(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Path(path): Path<ExtensionAdminConfigurationPath>,
+    Json(body): Json<ReplaceExtensionAdminConfigurationBody>,
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let activity_id =
+        admin_configuration_activity_id(&caller, &path.group_id, &body.idempotency_key)?;
+    let expected_revision = body.expected_revision;
+    let input = serde_json::to_value(ReplaceExtensionAdminConfigurationInput {
+        group_id: path.group_id.clone(),
+        values: body.values,
+        expected_revision,
+    })
+    .map_err(RebornServicesError::internal_from)?;
+    let capability = CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)
+        .map_err(RebornServicesError::internal_from)?;
+    let resolution = state
+        .services()
+        .invoke(caller.clone(), capability, input, activity_id)
+        .await?;
+
+    match resolution {
+        Resolution::Done(outcome) => {
+            let payload = query_extension_admin_configuration(&state, caller).await?;
+            let group = select_extension_admin_configuration_group(&payload, &path.group_id)?;
+            if outcome.verdict.is_success() {
+                return Ok(Json(group));
+            }
+
+            // The generic runtime failure taxonomy deliberately has no HTTP
+            // conflict variant. The authoritative query is the typed CAS
+            // witness: a failed replacement whose active revision moved past
+            // the submitted revision is a 409, without parsing prose.
+            let current_revision = group
+                .get("revision")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    RebornServicesError::internal_from(
+                        "admin configuration view omitted a numeric revision",
+                    )
+                })?;
+            if current_revision != expected_revision {
+                return Err(admin_configuration_conflict().into());
+            }
+            Err(admin_configuration_done_failure(outcome.verdict.error_kind()).into())
+        }
+        Resolution::Denied(_) => Err(RebornServicesError {
+            code: RebornServicesErrorCode::Forbidden,
+            kind: RebornServicesErrorKind::ParticipantDenied,
+            status_code: 403,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        }
+        .into()),
+        Resolution::Blocked(blocked) => Err(admin_configuration_blocked(blocked).into()),
+        Resolution::Suspended(_) => Err(admin_configuration_unavailable(true).into()),
+    }
+}
+
+async fn query_extension_admin_configuration(
+    state: &WebUiV2State,
+    caller: WebUiAuthenticatedCaller,
+) -> Result<serde_json::Value, RebornServicesError> {
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: ADMIN_CONFIGURATION_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    if !page
+        .payload
+        .get("groups")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        return Err(RebornServicesError::internal_from(
+            "admin configuration view returned an invalid list payload",
+        ));
+    }
+    Ok(page.payload)
+}
+
+fn select_extension_admin_configuration_group(
+    payload: &serde_json::Value,
+    group_id: &str,
+) -> Result<serde_json::Value, RebornServicesError> {
+    payload
+        .get("groups")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|groups| {
+            groups.iter().find(|group| {
+                group.get("group_id").and_then(serde_json::Value::as_str) == Some(group_id)
+            })
+        })
+        .cloned()
+        .ok_or_else(RebornServicesError::not_found)
+}
+
+fn admin_configuration_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    group_id: &str,
+    idempotency_key: &str,
+) -> Result<ActivityId, RebornServicesError> {
+    let validation_code = if idempotency_key.is_empty() {
+        Some(WebUiInboundValidationCode::Blank)
+    } else if idempotency_key.len() > ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES {
+        Some(WebUiInboundValidationCode::TooLong)
+    } else if idempotency_key.trim() != idempotency_key {
+        Some(WebUiInboundValidationCode::InvalidId)
+    } else if idempotency_key.chars().any(char::is_control) {
+        Some(WebUiInboundValidationCode::InvalidControlCharacter)
+    } else {
+        None
+    };
+    if let Some(validation_code) = validation_code {
+        return Err(RebornServicesError {
+            code: RebornServicesErrorCode::InvalidRequest,
+            kind: RebornServicesErrorKind::Validation,
+            status_code: 400,
+            retryable: false,
+            field: Some("idempotency_key".to_string()),
+            validation_code: Some(validation_code),
+        });
+    }
+
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-extension-admin-configuration",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        group_id,
+        idempotency_key,
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
+}
+
+fn admin_configuration_conflict() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind: RebornServicesErrorKind::Conflict,
+        status_code: 409,
+        retryable: false,
+        field: Some("expected_revision".to_string()),
+        validation_code: None,
+    }
+}
+
+fn admin_configuration_unavailable(retryable: bool) -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> RebornServicesError {
+    match error_kind {
+        Some(FailureKind::InvalidInput) => RebornServicesError {
+            code: RebornServicesErrorCode::InvalidRequest,
+            kind: RebornServicesErrorKind::Validation,
+            status_code: 400,
+            retryable: false,
+            field: None,
+            validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+        },
+        Some(
+            FailureKind::Backend
+            | FailureKind::Network
+            | FailureKind::Resource
+            | FailureKind::Transient
+            | FailureKind::Unavailable,
+        ) => admin_configuration_unavailable(true),
+        Some(
+            FailureKind::Authorization | FailureKind::PolicyDenied | FailureKind::GateDeclined,
+        ) => RebornServicesError {
+            code: RebornServicesErrorCode::Forbidden,
+            kind: RebornServicesErrorKind::ParticipantDenied,
+            status_code: 403,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        },
+        Some(
+            FailureKind::Cancelled
+            | FailureKind::Dispatcher
+            | FailureKind::InvalidOutput
+            | FailureKind::MissingRuntime
+            | FailureKind::OperationFailed
+            | FailureKind::OutputTooLarge
+            | FailureKind::Process
+            | FailureKind::Internal
+            | FailureKind::Permanent
+            | FailureKind::Unknown(_),
+        )
+        | None => RebornServicesError::internal(),
+    }
+}
+
+fn admin_configuration_blocked(blocked: Blocked) -> RebornServicesError {
+    let kind = match blocked {
+        Blocked::Approval(_) => RebornServicesErrorKind::BlockedApproval,
+        Blocked::Auth(_) => RebornServicesErrorKind::BlockedAuthentication,
+        Blocked::Resource(_) => RebornServicesErrorKind::BlockedResource,
+    };
+    RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind,
+        status_code: 409,
+        retryable: true,
+        field: None,
+        validation_code: None,
+    }
 }
 
 /// `GET /api/webchat/v2/operator/setup`
