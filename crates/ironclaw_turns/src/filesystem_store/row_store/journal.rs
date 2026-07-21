@@ -714,9 +714,14 @@ mod tests {
         .await
         .expect("write newer row");
 
-        delete_row(&filesystem, RowCollection::Turns, "row", SeqNo::from_backend(1))
-            .await
-            .expect("skip older tombstone");
+        delete_row(
+            &filesystem,
+            RowCollection::Turns,
+            "row",
+            SeqNo::from_backend(1),
+        )
+        .await
+        .expect("skip older tombstone");
 
         assert_eq!(
             read_test_row(&filesystem, "row").await,
@@ -725,9 +730,14 @@ mod tests {
             })
         );
 
-        delete_row(&filesystem, RowCollection::Turns, "row", SeqNo::from_backend(3))
-            .await
-            .expect("write newer tombstone");
+        delete_row(
+            &filesystem,
+            RowCollection::Turns,
+            "row",
+            SeqNo::from_backend(3),
+        )
+        .await
+        .expect("write newer tombstone");
         assert_eq!(read_test_row(&filesystem, "row").await, None);
     }
 }

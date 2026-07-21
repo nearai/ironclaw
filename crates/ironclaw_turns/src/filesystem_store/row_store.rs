@@ -36,8 +36,8 @@ mod journal;
 mod traits;
 
 use delta::{
-    RowSnapshotState, RowStoreMeta, SnapshotDelta, active_lock_record_key,
-    event_record_key, keyed_records, preserve_loop_checkpoints, row_store_durable_delta,
+    RowSnapshotState, RowStoreMeta, SnapshotDelta, active_lock_record_key, event_record_key,
+    keyed_records, preserve_loop_checkpoints, row_store_durable_delta,
     row_store_hot_cache_snapshot, snapshot_delta,
 };
 use io::{
@@ -680,8 +680,7 @@ where
             return Ok(current);
         }
 
-        let delta = snapshot_delta(&TurnPersistenceSnapshot::default(), &legacy)
-            ?;
+        let delta = snapshot_delta(&TurnPersistenceSnapshot::default(), &legacy)?;
         if delta.is_empty() {
             return Ok(current);
         }
@@ -696,12 +695,8 @@ where
             idempotency_records = legacy.idempotency_records.len(),
             "migrating legacy turn-state blob into row store"
         );
-        let ack = self
-            .enqueue_delta(delta)
-            ?;
-        self.await_delta_ack(ack)
-            .await
-            ?;
+        let ack = self.enqueue_delta(delta)?;
+        self.await_delta_ack(ack).await?;
         materialize_delta_log(self.filesystem.as_ref(), &self.materialize_gate, None).await?;
         let migrated = self.read_materialized_row_snapshot().await?;
         tracing::debug!(
@@ -892,8 +887,7 @@ where
                 })
                 .await?,
             &event_record_key,
-        )
-        ?;
+        )?;
         let retention_floor = self.read_meta().await?.event_retention_floor;
         let mut events = events.into_values().collect::<Vec<_>>();
         events.sort_by_key(|event| event.cursor);
@@ -1200,9 +1194,7 @@ where
                 // journal channel past the cap while the flusher is stalled.
                 // A degraded reservation → clear the hot cache (next read
                 // reloads from durable) and fail fast.
-                if !delta_critical
-                    && let Err(error) = self.reserve_write_behind_slot().await
-                {
+                if !delta_critical && let Err(error) = self.reserve_write_behind_slot().await {
                     *guard = None;
                     return Err(error);
                 }
@@ -1217,10 +1209,7 @@ where
                 let ack = self
                     .track_write_behind_ack_if_async(delta_critical, ack)
                     .await;
-                return Ok(RowApplyOutcome::Pending(PendingRowCommit {
-                    value,
-                    ack,
-                }));
+                return Ok(RowApplyOutcome::Pending(PendingRowCommit { value, ack }));
             }
         };
 
@@ -1366,10 +1355,7 @@ where
                         }
                         state.store = store;
                     }
-                    return Ok(PendingRowCommit {
-                        value,
-                        ack: None,
-                    });
+                    return Ok(PendingRowCommit { value, ack: None });
                 }
                 if let Some(state) = guard.as_mut() {
                     if let Err(error) = state.apply_delta(delta, reservation_seq) {
@@ -1391,9 +1377,7 @@ where
                 }
                 // Bound the pending window BEFORE enqueue (#6263 Step 3): see the
                 // twin reservation in the whole-snapshot apply path above.
-                if !delta_critical
-                    && let Err(error) = self.reserve_write_behind_slot().await
-                {
+                if !delta_critical && let Err(error) = self.reserve_write_behind_slot().await {
                     *guard = None;
                     return Err(error);
                 }
@@ -1407,10 +1391,7 @@ where
                 let ack = self
                     .track_write_behind_ack_if_async(delta_critical, ack)
                     .await;
-                return Ok(PendingRowCommit {
-                    value,
-                    ack,
-                });
+                return Ok(PendingRowCommit { value, ack });
             }
         };
 

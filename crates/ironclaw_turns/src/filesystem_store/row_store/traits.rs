@@ -22,10 +22,9 @@ use crate::{
 use super::{
     FilesystemTurnStateRowStore, PendingRowCommit, RunStateTransitionTarget,
     delta::{
-        SnapshotDelta, blocked_run_targeted_delta, claimed_run_targeted_delta,
-        full_snapshot_delta, retry_turn_full_delta, row_store_durable_delta,
-        run_state_targeted_delta, run_state_with_idempotency_targeted_delta,
-        submit_turn_targeted_delta,
+        SnapshotDelta, blocked_run_targeted_delta, claimed_run_targeted_delta, full_snapshot_delta,
+        retry_turn_full_delta, row_store_durable_delta, run_state_targeted_delta,
+        run_state_with_idempotency_targeted_delta, submit_turn_targeted_delta,
     },
     turn_state_write_span,
 };
@@ -469,14 +468,11 @@ where
                 // concurrent checkpoints can't grow the journal channel past the
                 // cap while a flush is in flight — the same reserve→enqueue→track
                 // flow every other async commit uses.
-                if !checkpoint_critical
-                    && let Err(error) = self.reserve_write_behind_slot().await
-                {
+                if !checkpoint_critical && let Err(error) = self.reserve_write_behind_slot().await {
                     *guard = None;
                     return Err(error);
                 }
-                let ack = self
-                    .enqueue_delta(row_store_durable_delta(delta.clone()))?;
+                let ack = self.enqueue_delta(row_store_durable_delta(delta.clone()))?;
                 if let Some(state) = guard.as_mut()
                     && let Err(error) = state.apply_delta(delta, state.journal_seq)
                 {
@@ -497,10 +493,7 @@ where
                 (record, ack)
             };
             self.commit_pending(
-                PendingRowCommit {
-                    value: record,
-                    ack,
-                },
+                PendingRowCommit { value: record, ack },
                 "timed out waiting for loop checkpoint row-store append",
             )
             .await

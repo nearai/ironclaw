@@ -10,10 +10,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_turns::test_support::in_memory_turns_filesystem;
 use ironclaw_turns::{
-    CheckpointSchemaId, FilesystemTurnStateRowStore,
-    GetLoopCheckpointRequest, LoopCheckpointStateRef, LoopCheckpointStore,
-    PutLoopCheckpointRequest, RunProfileVersion, TurnId, TurnRunId, TurnScope,
-    run_profile::LoopCheckpointKind,
+    CheckpointSchemaId, FilesystemTurnStateRowStore, GetLoopCheckpointRequest,
+    LoopCheckpointStateRef, LoopCheckpointStore, PutLoopCheckpointRequest, RunProfileVersion,
+    TurnId, TurnRunId, TurnScope, run_profile::LoopCheckpointKind,
 };
 
 fn test_scope(thread: &str) -> TurnScope {
