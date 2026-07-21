@@ -1,9 +1,71 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use ironclaw_approvals::*;
 use ironclaw_authorization::*;
 use ironclaw_events::{AuditSink, EventError, InMemoryAuditSink};
+use ironclaw_filesystem::{
+    Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, ScopedFilesystem,
+};
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
+
+/// The production `FilesystemApprovalRequestStore` over a [`FaultInjecting`]
+/// backend armed to fail the approval-status write. On the `/approvals` mount,
+/// `save_pending` is the 1st `WriteFile` and `approve` is the 2nd, so failing the
+/// 2nd lets the pending record persist and then faults the status transition.
+/// Replaces the former whole-trait `FailingApproveApprovalStore` fake: the real
+/// store now runs its genuine CAS read-modify-write and
+/// `FilesystemError -> RunStateError::Filesystem` mapping under the injected
+/// backend fault, so the test exercises the production store path instead of a
+/// hand-rolled stand-in that reimplemented the trait.
+fn approval_store_failing_status_write()
+-> FilesystemApprovalRequestStore<FaultInjecting<InMemoryBackend>> {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("approvals")
+                .nth(2)
+                .backend("injected approval write failure"),
+        ),
+    );
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/approvals").unwrap(),
+        VirtualPath::new("/engine/approvals").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    FilesystemApprovalRequestStore::new(Arc::new(ScopedFilesystem::with_fixed_view(
+        backend, mounts,
+    )))
+}
+
+/// The production `FilesystemCapabilityLeaseStore` over a [`FaultInjecting`]
+/// backend armed to fail every write on the `/authorization` mount, so
+/// `issue(...)` fails at its first backend write. Replaces the former
+/// whole-trait `FailingIssueLeaseStore` fake: the real store now runs its
+/// genuine lease serialization and `FilesystemError -> CapabilityLeaseError`
+/// mapping (`Backend -> Persistence`) under the injected fault, proving the
+/// mapping the fake short-circuited.
+fn lease_store_failing_issue_write()
+-> FilesystemCapabilityLeaseStore<FaultInjecting<InMemoryBackend>> {
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("authorization")
+                .backend("injected lease write failure"),
+        ),
+    );
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/authorization").unwrap(),
+        VirtualPath::new("/engine/authorization").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    FilesystemCapabilityLeaseStore::new(Arc::new(ScopedFilesystem::with_fixed_view(
+        backend, mounts,
+    )))
+}
 
 #[tokio::test]
 async fn approving_pending_dispatch_request_issues_scoped_capability_lease() {
@@ -146,7 +208,7 @@ async fn approving_pending_request_marks_request_approved_even_when_lease_issue_
     // the system can surface the error to the caller and re-attempt
     // lease issuance later.
     let approvals = ironclaw_run_state::in_memory_backed_approval_request_store();
-    let leases = FailingIssueLeaseStore;
+    let leases = lease_store_failing_issue_write();
     let resolver = ApprovalResolver::new(&approvals, &leases);
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -201,13 +263,13 @@ async fn approving_pending_request_issues_no_lease_when_approval_update_fails() 
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
     let request_id = approval.id;
-    let approvals = FailingApproveApprovalStore {
-        record: ApprovalRecord {
-            scope: scope.clone(),
-            request: approval,
-            status: ApprovalStatus::Pending,
-        },
-    };
+    let approvals = approval_store_failing_status_write();
+    // 1st `/approvals` write persists the pending record; the armed fault fires
+    // on the 2nd write (the `approve` status transition below).
+    approvals
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
     let leases = in_memory_backed_capability_lease_store();
     let resolver = ApprovalResolver::new(&approvals, &leases);
 
@@ -231,8 +293,22 @@ async fn approving_pending_request_issues_no_lease_when_approval_update_fails() 
         .await
         .unwrap_err();
 
+    // The real store mapped the injected `FilesystemError::Backend` through its
+    // CAS write path to `RunStateError::Filesystem` (which the old whole-trait
+    // fake short-circuited), surfaced as `ApprovalResolutionError::RunState`.
     assert!(matches!(err, ApprovalResolutionError::RunState(_)));
     assert_eq!(leases.leases_for_scope(&scope).await, Vec::new());
+    // The faulted status write left the record `Pending` — the real store's CAS
+    // behavior the old whole-trait fake could not prove.
+    assert_eq!(
+        approvals
+            .get(&scope, request_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ApprovalStatus::Pending
+    );
 }
 
 #[tokio::test]
@@ -753,62 +829,6 @@ impl AuditSink for FailingAuditSink {
     }
 }
 
-struct FailingApproveApprovalStore {
-    record: ApprovalRecord,
-}
-
-#[async_trait]
-impl ApprovalRequestStore for FailingApproveApprovalStore {
-    async fn save_pending(
-        &self,
-        _scope: ResourceScope,
-        _request: ApprovalRequest,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        Ok(self.record.clone())
-    }
-
-    async fn get(
-        &self,
-        scope: &ResourceScope,
-        request_id: ApprovalRequestId,
-    ) -> Result<Option<ApprovalRecord>, RunStateError> {
-        if self.record.scope == *scope && self.record.request.id == request_id {
-            Ok(Some(self.record.clone()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn approve(
-        &self,
-        _scope: &ResourceScope,
-        _request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        Err(RunStateError::Filesystem(
-            "injected approval write failure".to_string(),
-        ))
-    }
-
-    async fn deny(
-        &self,
-        _scope: &ResourceScope,
-        _request_id: ApprovalRequestId,
-    ) -> Result<ApprovalRecord, RunStateError> {
-        Ok(self.record.clone())
-    }
-
-    async fn records_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<ApprovalRecord>, RunStateError> {
-        if same_tenant_user_for_test(&self.record.scope, scope) {
-            Ok(vec![self.record.clone()])
-        } else {
-            Ok(Vec::new())
-        }
-    }
-}
-
 struct AlreadyResolvedOnApproveStore {
     record: ApprovalRecord,
     resolved_status: ApprovalStatus,
@@ -867,78 +887,6 @@ impl ApprovalRequestStore for AlreadyResolvedOnApproveStore {
         } else {
             Ok(Vec::new())
         }
-    }
-}
-
-struct FailingIssueLeaseStore;
-
-#[async_trait]
-impl CapabilityLeaseStore for FailingIssueLeaseStore {
-    async fn issue(
-        &self,
-        _lease: CapabilityLease,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        Err(CapabilityLeaseError::Persistence {
-            reason: "injected lease write failure".to_string(),
-        })
-    }
-
-    async fn revoke(
-        &self,
-        _scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        Err(CapabilityLeaseError::UnknownLease { lease_id })
-    }
-
-    async fn get(
-        &self,
-        _scope: &ResourceScope,
-        _lease_id: CapabilityGrantId,
-    ) -> Option<CapabilityLease> {
-        None
-    }
-
-    async fn claim(
-        &self,
-        _scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-        _invocation_fingerprint: &InvocationFingerprint,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        Err(CapabilityLeaseError::UnknownLease { lease_id })
-    }
-
-    async fn consume(
-        &self,
-        _scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        Err(CapabilityLeaseError::UnknownLease { lease_id })
-    }
-
-    async fn begin_dispatch_claimed(
-        &self,
-        _scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-        _invocation_fingerprint: &InvocationFingerprint,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        Err(CapabilityLeaseError::UnknownLease { lease_id })
-    }
-
-    async fn abort_dispatch_claimed(
-        &self,
-        _scope: &ResourceScope,
-        lease_id: CapabilityGrantId,
-    ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        Err(CapabilityLeaseError::UnknownLease { lease_id })
-    }
-
-    async fn leases_for_scope(&self, _scope: &ResourceScope) -> Vec<CapabilityLease> {
-        Vec::new()
-    }
-
-    async fn active_leases_for_context(&self, _context: &ExecutionContext) -> Vec<CapabilityLease> {
-        Vec::new()
     }
 }
 
