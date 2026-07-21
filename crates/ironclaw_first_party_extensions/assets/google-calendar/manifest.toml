@@ -147,6 +147,7 @@ default_permission = "allow"
 visibility = "model"
 runtime_credentials = [
   { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/gmail.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/gmail.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
+  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/gmail.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/gmail.readonly"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]
 input_schema_ref = "schemas/google-calendar/daily_brief.input.v1.json"
 output_schema_ref = "schemas/google-calendar/daily_brief.output.v1.json"

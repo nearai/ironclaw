@@ -363,6 +363,22 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                     .iter()
                     .map(|scope| (*scope).to_string())
                     .collect::<Vec<_>>();
+                let mut runtime_credentials = vec![(
+                    spec.credential_handle.to_string(),
+                    ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
+                    required_scopes.clone(),
+                    required_scopes.clone(),
+                    spec.credential_host_pattern.to_string(),
+                )];
+                if capability.id == "google-calendar.daily_brief" {
+                    runtime_credentials.push((
+                        "gmail_account".to_string(),
+                        ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
+                        required_scopes.clone(),
+                        required_scopes.clone(),
+                        "gmail.googleapis.com".to_string(),
+                    ));
+                }
                 (
                     capability.id.to_string(),
                     capability.effects.to_vec(),
@@ -379,13 +395,7 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                         "prompts/{}/{}.md",
                         spec.schema_prefix, capability.short_name
                     )),
-                    vec![(
-                        spec.credential_handle.to_string(),
-                        ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
-                        required_scopes.clone(),
-                        required_scopes,
-                        spec.credential_host_pattern.to_string(),
-                    )],
+                    runtime_credentials,
                 )
             })
             .collect::<Vec<_>>();

@@ -247,6 +247,7 @@ pub struct ReadExcerptResult {
     pub truncated_after: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outline: Vec<DocumentOutlineItem>,
+    pub outline_truncated: bool,
 }
 
 /// Compact heading outline entry.

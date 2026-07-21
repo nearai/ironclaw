@@ -183,9 +183,11 @@
     "partialFailure": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["scope", "status", "reason", "source"],
+      "required": ["status", "reason", "source"],
+      "anyOf": [{ "required": ["scope"] }, { "required": ["messageId"] }],
       "properties": {
         "scope": { "type": "string" },
+        "messageId": { "type": "string" },
         "status": { "type": "integer", "minimum": 100, "maximum": 599 },
         "reason": { "type": ["string", "null"] },
         "source": { "enum": ["calendar", "gmail"] }

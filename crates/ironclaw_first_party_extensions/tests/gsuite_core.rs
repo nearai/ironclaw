@@ -309,6 +309,48 @@ async fn calendar_daily_brief_combines_agenda_and_gmail_attention() {
 }
 
 #[tokio::test]
+async fn calendar_daily_brief_gmail_failures_match_the_output_schema() {
+    let scope = scope();
+    let auth = auth_with_google_account(
+        &scope,
+        vec![
+            provider_scope(GOOGLE_CALENDAR_READONLY_SCOPE),
+            provider_scope(GOOGLE_GMAIL_READONLY_SCOPE),
+        ],
+    )
+    .await;
+    let egress = Arc::new(RecordingEgress::with_responses(vec![
+        RecordingEgress::json(json!({"items": []})),
+        RecordingEgress::json(json!({
+            "messages": [{"id": "msg-1", "threadId": "thread-1"}]
+        })),
+        RecordingEgress::json_status(503, json!({"error": {"status": "UNAVAILABLE"}})),
+    ]));
+
+    let output = dispatch_ok(
+        auth,
+        scope,
+        CALENDAR_DAILY_BRIEF_CAPABILITY_ID,
+        json!({"email_max_results": 1}),
+        egress,
+    )
+    .await;
+    let body = &output["body"];
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "../assets/google-calendar/schemas/google-calendar/daily_brief.output.v1.json"
+    ))
+    .unwrap();
+    let validator = jsonschema::validator_for(&schema).expect("daily brief schema compiles");
+
+    assert!(
+        validator.is_valid(body),
+        "daily brief output must accept Gmail per-message failures: {body}"
+    );
+    assert_eq!(body["partialFailures"][0]["source"], "gmail");
+    assert_eq!(body["partialFailures"][0]["messageId"], "msg-1");
+}
+
+#[tokio::test]
 async fn gmail_message_summaries_borrows_one_credential_for_parallel_metadata_requests() {
     let scope = scope();
     let auth =

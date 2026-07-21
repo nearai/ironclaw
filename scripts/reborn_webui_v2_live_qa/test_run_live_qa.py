@@ -7655,6 +7655,14 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("(authorized trigger)", workflow)
+        self.assertEqual(
+            workflow.count(
+                "inputs.cases || vars.REBORN_WEBUI_V2_LIVE_QA_CASES || 'all', "
+                "'benchmark_google_'"
+            ),
+            2,
+            "benchmark comparison and upload must use the shard case fallback",
+        )
         self.assertIn("- prepare-reborn-webui-v2-live-qa", match.group("body"))
         self.assertIn(
             "- preflight-reborn-webui-v2-google-oauth",

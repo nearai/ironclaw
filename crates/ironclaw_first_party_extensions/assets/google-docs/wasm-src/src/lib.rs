@@ -98,6 +98,7 @@ fn execute_inner(params: &str, context: Option<&str>) -> Result<String, String> 
     let action: GoogleDocsAction =
         serde_json::from_value(params).map_err(|e| format!("Invalid parameters: {}", e))?;
 
+    #[cfg(not(test))]
     crate::near::agent::host::log(
         crate::near::agent::host::LogLevel::Debug,
         &format!("Executing Google Docs action: {action_name}"),
@@ -298,6 +299,43 @@ mod tests {
         );
 
         assert_eq!(result, Err("invalid_parameters".to_string()));
+    }
+
+    #[test]
+    fn read_excerpt_dispatches_through_invocation_context_with_defaults() {
+        api::stub_api_response(Ok(serde_json::json!({
+            "documentId": "doc/1",
+            "title": "Status",
+            "body": {
+                "content": [{
+                    "paragraph": {
+                        "paragraphStyle": {"namedStyleType": "HEADING_1"},
+                        "elements": [{"textRun": {"content": "Summary\n"}}]
+                    }
+                }]
+            }
+        })
+        .to_string()));
+
+        let output = execute_inner(
+            r#"{"document_id":"doc/1"}"#,
+            Some(r#"{"capability_id":"google-docs.read_excerpt"}"#),
+        )
+        .expect("read_excerpt should dispatch through the tool entrypoint");
+
+        let output: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(output["document_id"], "doc/1");
+        assert_eq!(output["excerpt"], "Summary\n");
+        assert_eq!(output["outline"][0]["title"], "Summary");
+        assert_eq!(output["outline_truncated"], false);
+        assert_eq!(
+            api::take_test_api_calls(),
+            vec![api::TestApiCall {
+                method: "GET".to_string(),
+                url: "https://docs.googleapis.com/v1/documents/doc%2F1".to_string(),
+                body: None,
+            }]
+        );
     }
 }
 

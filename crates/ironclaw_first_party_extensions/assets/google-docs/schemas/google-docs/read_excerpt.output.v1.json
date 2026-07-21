@@ -12,7 +12,8 @@
     "end_char",
     "total_chars",
     "truncated_before",
-    "truncated_after"
+    "truncated_after",
+    "outline_truncated"
   ],
   "properties": {
     "document_id": { "type": "string", "minLength": 1 },
@@ -23,6 +24,7 @@
     "total_chars": { "type": "integer", "minimum": 0 },
     "truncated_before": { "type": "boolean" },
     "truncated_after": { "type": "boolean" },
+    "outline_truncated": { "type": "boolean" },
     "outline": {
       "type": "array",
       "items": {

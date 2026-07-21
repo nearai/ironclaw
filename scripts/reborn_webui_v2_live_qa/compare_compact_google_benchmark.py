@@ -14,10 +14,8 @@ PROVIDER_MARKER = "qa-context-compact-"
 
 def _arm_for_path(path: Path) -> str | None:
     text = str(path)
-    for arm in ARMS:
-        if f"{PROVIDER_MARKER}{arm}" in text:
-            return arm
-    return None
+    matches = [arm for arm in ARMS if f"{PROVIDER_MARKER}{arm}" in text]
+    return matches[0] if len(matches) == 1 else None
 
 
 def load_results(artifacts_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
