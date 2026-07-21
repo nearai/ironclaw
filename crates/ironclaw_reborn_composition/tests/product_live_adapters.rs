@@ -47,7 +47,7 @@ use ironclaw_runner::{
             store::FilesystemAwaitEdgeStore,
         },
         flavors::StaticSubagentDefinitionResolver,
-        goal_store::FilesystemSubagentGoalStore,
+        goal_store::{FilesystemSubagentGoalStore, in_memory_backed_subagent_goal_store},
     },
 };
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
@@ -68,17 +68,7 @@ use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_che
 use ironclaw_turns::test_support::in_memory_turn_state_store;
 
 fn in_memory_subagent_goal_store() -> Arc<FilesystemSubagentGoalStore<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").unwrap(),
-        VirtualPath::new("/turns").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    let fs = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::new(InMemoryBackend::new()),
-        mounts,
-    ));
-    Arc::new(FilesystemSubagentGoalStore::new(fs))
+    Arc::new(in_memory_backed_subagent_goal_store())
 }
 
 async fn write_capability_result_for_test(

@@ -244,14 +244,14 @@ fn map_goal_error(
     ironclaw_turns::run_profile::AgentLoopHostError::new(kind, error.to_string())
 }
 
-#[cfg(test)]
-pub(crate) fn in_memory_backed_subagent_goal_store()
+#[cfg(any(test, feature = "test-support"))]
+pub fn in_memory_backed_subagent_goal_store()
 -> FilesystemSubagentGoalStore<ironclaw_filesystem::InMemoryBackend> {
     FilesystemSubagentGoalStore::new(scoped_goal_filesystem())
 }
 
-#[cfg(test)]
-fn scoped_goal_filesystem() -> Arc<ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn scoped_goal_filesystem() -> Arc<ScopedFilesystem<ironclaw_filesystem::InMemoryBackend>> {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 

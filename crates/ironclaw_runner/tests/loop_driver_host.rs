@@ -88,7 +88,7 @@ use ironclaw_runner::subagent::{
         store::FilesystemAwaitEdgeStore,
     },
     flavors::StaticSubagentDefinitionResolver,
-    goal_store::FilesystemSubagentGoalStore,
+    goal_store::{FilesystemSubagentGoalStore, in_memory_backed_subagent_goal_store},
 };
 use ironclaw_runner::text_loop_driver::TextOnlyModelReplyDriver;
 use ironclaw_runner::turn_run_executor::RebornTurnRunExecutor;
@@ -215,17 +215,7 @@ fn build_test_await_edge_trio(
 }
 
 fn in_memory_subagent_goal_store() -> Arc<FilesystemSubagentGoalStore<InMemoryBackend>> {
-    let mounts = MountView::new(vec![MountGrant::new(
-        MountAlias::new("/turns").unwrap(),
-        VirtualPath::new("/turns").unwrap(),
-        MountPermissions::read_write_list_delete(),
-    )])
-    .unwrap();
-    let fs = Arc::new(ScopedFilesystem::with_fixed_view(
-        Arc::new(InMemoryBackend::new()),
-        mounts,
-    ));
-    Arc::new(FilesystemSubagentGoalStore::new(fs))
+    Arc::new(in_memory_backed_subagent_goal_store())
 }
 
 /// Build a fresh, never-written-to in-memory await-edge store for call sites

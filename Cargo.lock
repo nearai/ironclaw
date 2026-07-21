@@ -4556,6 +4556,7 @@ dependencies = [
  "ironclaw_reborn_event_store",
  "ironclaw_resources",
  "ironclaw_run_state",
+ "ironclaw_runner",
  "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_skills",

@@ -159,7 +159,7 @@ ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0", fe
 ironclaw_secrets = { path = "crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
-ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0" }
+ironclaw_runner = { path = "crates/ironclaw_runner", version = "0.1.0", features = ["test-support"] }
 # `ironclaw_webui` + `ironclaw_reborn_identity` sit on the int-tier coverage
 # lane (identity_resolution_smoke / webui_v2_router_smoke); they compile into
 # every int-tier build, behaviorally inert for suites that never call them.

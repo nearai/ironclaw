@@ -23,6 +23,7 @@ layer = "app"
 test-support = [
     "ironclaw_channel_delivery/test-support",
     "ironclaw_host_runtime/test-support",
+    "ironclaw_runner/test-support",
 ]
 # Expose the narrow `extension_installation_store_for_migration` accessor for
 # the v1→Reborn migration tool (`ironclaw_reborn_migration`). Mirrors the
