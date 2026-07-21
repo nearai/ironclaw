@@ -22,17 +22,10 @@ use super::types::{
 };
 use super::types::{Routine, RoutineAction};
 
-#[cfg(feature = "libsql")]
-fn is_missing_libsql_table_error(message: &str) -> bool {
-    message.to_ascii_lowercase().contains("no such table")
-}
-
 #[cfg(feature = "postgres")]
-fn is_missing_postgres_table_error(error: &tokio_postgres::Error) -> bool {
-    error
-        .as_db_error()
-        .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::UNDEFINED_TABLE)
-}
+use crate::source::is_missing_postgres_table_error;
+#[cfg(feature = "libsql")]
+use crate::source::is_missing_table_error;
 
 /// Explicit column list for the `routines` table — libSQL positional reads
 /// match this order 1:1; Postgres reads `SELECT *` by name, so this is
@@ -416,7 +409,7 @@ async fn libsql_identities_for_user(
         .await
     {
         Ok(rows) => rows,
-        Err(e) if is_missing_libsql_table_error(&e.to_string()) => return Ok(Vec::new()),
+        Err(e) if is_missing_table_error(&e.to_string()) => return Ok(Vec::new()),
         Err(e) => return Err(LegacyError::Query(e.to_string())),
     };
 

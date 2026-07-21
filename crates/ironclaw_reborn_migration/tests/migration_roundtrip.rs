@@ -1182,7 +1182,10 @@ async fn migration_reads_older_optional_tables_without_wit_version() {
     drop(conn);
     drop(db);
 
-    let report = run_migration(options(path, dst, true))
+    // Run a real (non-dry) migration so the write path is genuinely exercised:
+    // a dry run only counts in memory and would not prove the older schema lets
+    // real writes through.
+    let report = run_migration(options(path, dst.clone(), false))
         .await
         .expect("older wasm schema should not block migration");
 
@@ -1190,6 +1193,20 @@ async fn migration_reads_older_optional_tables_without_wit_version() {
     assert_eq!(
         report.stats.extensions, 1,
         "installed tools must still migrate when the optional capabilities table is absent"
+    );
+
+    // Assert the migrated content is actually persisted on disk (the point of
+    // dropping dry-run): the memory document and the extension installation
+    // record must be readable back through a fresh connection.
+    assert!(
+        reborn_entry_count_by_path_and_content(&dst, "%old-wasm.md", "%old schema still migrates%")
+            .await
+            >= 1,
+        "the migrated memory document must be persisted on disk, not just counted"
+    );
+    assert!(
+        reborn_entry_count(&dst, "%/system/extensions/.installations/state.json").await >= 1,
+        "the installed tool must be persisted as an extension installation on disk"
     );
 }
 

@@ -12,8 +12,13 @@ use crate::error::MigrationError;
 use crate::legacy_snapshot::{self, LegacyDb, LegacyHandles};
 use crate::options::SourceDb;
 
+/// True when a PostgreSQL error is the "table/relation does not exist" class,
+/// the one case the read paths tolerate as "nothing here" (see
+/// [`is_missing_table_error`] for the string-based libSQL counterpart). Shared
+/// across every read site in the crate (source discovery, the frozen legacy
+/// queries, the wasm stores, and the identity converter).
 #[cfg(feature = "postgres")]
-fn is_missing_postgres_table_error(error: &tokio_postgres::Error) -> bool {
+pub(crate) fn is_missing_postgres_table_error(error: &tokio_postgres::Error) -> bool {
     error
         .as_db_error()
         .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::UNDEFINED_TABLE)

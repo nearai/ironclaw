@@ -15,18 +15,10 @@ pub(crate) enum WasmStorageError {
     Database(String),
 }
 
-fn is_missing_table_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("no such table")
-        || (lower.contains("relation") && lower.contains("does not exist"))
-}
-
 #[cfg(feature = "postgres")]
-fn is_missing_postgres_table_error(error: &tokio_postgres::Error) -> bool {
-    error
-        .as_db_error()
-        .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::UNDEFINED_TABLE)
-}
+use crate::source::is_missing_postgres_table_error;
+#[cfg(feature = "libsql")]
+use crate::source::is_missing_table_error;
 
 /// Frozen mirror of `ironclaw::tools::wasm::ToolStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

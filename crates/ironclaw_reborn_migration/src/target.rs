@@ -226,6 +226,15 @@ fn build_memory_backend(
 ) -> Result<Arc<dyn MemoryBackend>, MigrationError> {
     let repository = Arc::new(FilesystemMemoryDocumentRepository::new(filesystem));
     let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repository.clone()));
+    // Intentionally empty, and load-bearing: the migration must be able to
+    // import legacy content into paths that are normally prompt-protected (e.g.
+    // BOOTSTRAP.md). Because `MemoryBackendWriteOptions` leaves
+    // `prompt_safety_already_enforced: false`, the backend consults this
+    // registry on every write and is fail-closed by default; an empty registry
+    // is what makes it match nothing, so no legacy write is blocked. This
+    // bypass is deliberately scoped to this ephemeral, one-shot migration-only
+    // backend — do NOT "fix" it by populating protected paths here, or you will
+    // silently reintroduce write failures for protected legacy documents.
     let empty_protected_paths = PromptProtectedPathRegistry::new(
         PromptSafetyPolicyVersion::new("migration-empty-prompt-protected-paths:v1")
             .map_err(|error| MigrationError::OpenTarget(error.to_string()))?,

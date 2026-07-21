@@ -20,13 +20,6 @@ use crate::report::{Domain, LossReason, MigrationReport};
 use crate::source::V1Source;
 use crate::target::RebornTarget;
 
-#[cfg(feature = "postgres")]
-fn is_missing_postgres_table_error(error: &tokio_postgres::Error) -> bool {
-    error
-        .as_db_error()
-        .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::UNDEFINED_TABLE)
-}
-
 pub(crate) async fn run(
     src: &V1Source,
     tgt: &mut RebornTarget,
@@ -240,7 +233,7 @@ async fn read_channel_identities(
         let client = pool.get().await.map_err(|e| read_err(&e))?;
         let rows = match client.query(sql, &[]).await {
             Ok(rows) => rows,
-            Err(e) if is_missing_postgres_table_error(&e) => return Ok(Vec::new()),
+            Err(e) if crate::source::is_missing_postgres_table_error(&e) => return Ok(Vec::new()),
             Err(e) => return Err(read_err(&e)),
         };
         let mut out = Vec::new();
