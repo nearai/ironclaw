@@ -19,8 +19,8 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::ScopedPath;
 use ironclaw_product_workflow::{
-    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
-    ProjectFsStat,
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsStat,
+    WorkspaceFile,
 };
 use ironclaw_threads::ThreadScope;
 
@@ -120,7 +120,7 @@ impl<F: RootFilesystem> ProjectFilesystemReader for ProjectScopedFilesystemReade
         &self,
         thread_scope: &ThreadScope,
         path: &str,
-    ) -> Result<ProjectFsFile, ProjectFsError> {
+    ) -> Result<WorkspaceFile, ProjectFsError> {
         let scope = thread_scope.to_resource_scope();
         let file = self.confine(path)?;
         let stat = self
@@ -149,9 +149,8 @@ impl<F: RootFilesystem> ProjectFilesystemReader for ProjectScopedFilesystemReade
         let path_str = file.as_str().to_string();
         let filename = file_name_of(&path_str);
         let mime_type = mime_for_path(&path_str);
-        Ok(ProjectFsFile {
-            size_bytes: bytes.len() as u64,
-            path: path_str,
+        Ok(WorkspaceFile {
+            path: file,
             filename,
             mime_type,
             bytes,

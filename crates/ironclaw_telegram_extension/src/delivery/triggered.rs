@@ -137,8 +137,7 @@ impl DynamicTelegramTriggeredRunDeliveryHook {
             route_store,
             self.revision_parts.config().agent_id.clone(),
         )
-        .with_outbound_target_provider(Arc::clone(&self.outbound_target_provider))
-        .with_project_filesystem_reader(self.revision_parts.project_filesystem_reader());
+        .with_outbound_target_provider(Arc::clone(&self.outbound_target_provider));
         Ok(Arc::new(driver))
     }
 }

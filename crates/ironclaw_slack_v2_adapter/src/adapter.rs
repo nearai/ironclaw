@@ -6,9 +6,9 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
     DeliveryStatus, EgressCredentialHandle, EgressRequest, OutboundDeliverySink,
     ParsedProductInbound, ProductAdapter, ProductAdapterCapabilities, ProductAdapterError,
-    ProductAdapterId, ProductCapabilityFlag, ProductOutboundAttachment, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductOutboundTarget, ProductRenderOutcome, ProductSurfaceKind,
-    ProtocolAuthEvidence, ProtocolHttpEgress,
+    ProductAdapterId, ProductCapabilityFlag, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductRenderOutcome, ProductSurfaceKind, ProtocolAuthEvidence,
+    ProtocolHttpEgress, WorkspaceFile,
 };
 use ironclaw_turns::TurnRunId;
 
@@ -151,7 +151,7 @@ impl ProductAdapter for SlackV2Adapter {
     async fn render_outbound_with_attachments(
         &self,
         envelope: ProductOutboundEnvelope,
-        attachments: Vec<ProductOutboundAttachment>,
+        attachments: Vec<WorkspaceFile>,
         egress: &dyn ProtocolHttpEgress,
         delivery_sink: &dyn OutboundDeliverySink,
     ) -> Result<ProductRenderOutcome, ProductAdapterError> {
@@ -390,6 +390,7 @@ fn map_render_error(err: SlackRenderError) -> ProductAdapterError {
 mod tests {
     use super::*;
     use chrono::Utc;
+    use ironclaw_host_api::ScopedPath;
     use ironclaw_product_adapters::auth::mark_request_signature_verified;
     use ironclaw_product_adapters::{
         DeliveryStatus, EgressResponse, ExternalConversationRef, FakeOutboundDeliverySink,
@@ -477,20 +478,18 @@ mod tests {
         );
         let sink = FakeOutboundDeliverySink::new();
         let attachments = vec![
-            ProductOutboundAttachment::new(
-                "/workspace/report.pdf",
-                "report.pdf",
-                "application/pdf",
-                b"pdf bytes".to_vec(),
-            )
-            .expect("attachment"),
-            ProductOutboundAttachment::new(
-                "/workspace/chart.csv",
-                "chart.csv",
-                "text/csv",
-                b"csv bytes".to_vec(),
-            )
-            .expect("attachment"),
+            WorkspaceFile {
+                path: ScopedPath::new("/workspace/report.pdf").expect("attachment path"),
+                filename: Some("report.pdf".into()),
+                mime_type: "application/pdf".into(),
+                bytes: b"pdf bytes".to_vec(),
+            },
+            WorkspaceFile {
+                path: ScopedPath::new("/workspace/chart.csv").expect("attachment path"),
+                filename: Some("chart.csv".into()),
+                mime_type: "text/csv".into(),
+                bytes: b"csv bytes".to_vec(),
+            },
         ];
 
         adapter
@@ -569,14 +568,11 @@ mod tests {
         let sink = FakeOutboundDeliverySink::new();
         let attachments = ["one.pdf", "two.pdf"]
             .into_iter()
-            .map(|filename| {
-                ProductOutboundAttachment::new(
-                    format!("/workspace/{filename}"),
-                    filename,
-                    "application/pdf",
-                    b"pdf bytes".to_vec(),
-                )
-                .expect("attachment")
+            .map(|filename| WorkspaceFile {
+                path: ScopedPath::new(format!("/workspace/{filename}")).expect("attachment path"),
+                filename: Some(filename.to_string()),
+                mime_type: "application/pdf".into(),
+                bytes: b"pdf bytes".to_vec(),
             })
             .collect();
 

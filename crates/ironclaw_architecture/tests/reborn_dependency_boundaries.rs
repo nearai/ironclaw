@@ -4538,3 +4538,25 @@ fn collect_forbidden_uses_detects_violation() {
         violations
     );
 }
+
+#[test]
+fn attachment_delivery_uses_the_canonical_workspace_file_contract() {
+    let root = workspace_root();
+    let product_adapter =
+        std::fs::read_to_string(root.join("crates/ironclaw_product_adapters/src/adapter.rs"))
+            .expect("read product adapter contract");
+    assert!(
+        !product_adapter.contains("pub struct ProductOutboundAttachment"),
+        "ProductOutboundAttachment mirrors the canonical workspace file carrier"
+    );
+
+    for file in ["observer.rs", "triggered.rs"] {
+        let source =
+            std::fs::read_to_string(root.join("crates/ironclaw_channel_delivery/src").join(file))
+                .expect("read channel delivery source");
+        assert!(
+            !source.contains("with_project_filesystem_reader"),
+            "channel delivery must receive ProjectFilesystemReader through FinalReplyDeliveryServices ({file})"
+        );
+    }
+}

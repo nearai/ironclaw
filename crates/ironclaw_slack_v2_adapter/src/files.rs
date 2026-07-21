@@ -2,8 +2,7 @@
 
 use ironclaw_product_adapters::{
     DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath,
-    EgressRequest, ProductAdapterError, ProductOutboundAttachment, ProtocolHttpEgress,
-    RedactedString,
+    EgressRequest, ProductAdapterError, ProtocolHttpEgress, RedactedString, WorkspaceFile,
 };
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -15,13 +14,16 @@ pub(crate) async fn upload_workspace_files(
     egress: &dyn ProtocolHttpEgress,
     credential_handle: EgressCredentialHandle,
     target: &SlackReplyTarget,
-    attachments: &[ProductOutboundAttachment],
+    attachments: &[WorkspaceFile],
 ) -> Result<(), ProductAdapterError> {
     let mut completed_files = Vec::with_capacity(attachments.len());
     for attachment in attachments {
         let body = url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("filename", attachment.filename())
-            .append_pair("length", &attachment.bytes().len().to_string())
+            .append_pair(
+                "filename",
+                attachment.filename.as_deref().unwrap_or("attachment"),
+            )
+            .append_pair("length", &attachment.bytes.len().to_string())
             .finish()
             .into_bytes();
         let response = egress
@@ -50,7 +52,7 @@ pub(crate) async fn upload_workspace_files(
                 &host,
                 "POST",
                 path,
-                Some(("application/octet-stream", attachment.bytes().to_vec())),
+                Some(("application/octet-stream", attachment.bytes.clone())),
                 None,
                 Some(64 * 1024),
             )?)
@@ -63,7 +65,10 @@ pub(crate) async fn upload_workspace_files(
         }
         completed_files.push(CompletedFile {
             id: file_id,
-            title: attachment.filename().to_string(),
+            title: attachment
+                .filename
+                .clone()
+                .unwrap_or_else(|| "attachment".to_string()),
         });
     }
     if completed_files.is_empty() {

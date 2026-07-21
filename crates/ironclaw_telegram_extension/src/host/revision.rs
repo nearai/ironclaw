@@ -100,10 +100,6 @@ impl TelegramRevisionWorkflowParts {
         Arc::clone(&self.delivery_services.delivered_gate_routes)
     }
 
-    pub(crate) fn project_filesystem_reader(&self) -> Arc<dyn ProjectFilesystemReader> {
-        Arc::clone(&self.project_filesystem_reader)
-    }
-
     pub(crate) fn adapter_for_setup(
         &self,
         setup: &TelegramInstallationSetup,
@@ -131,6 +127,7 @@ impl TelegramRevisionWorkflowParts {
             adapter,
             egress: Arc::clone(&self.egress),
             delivery_sink: Arc::new(NoopTelegramDeliverySink),
+            project_filesystem_reader: Arc::clone(&self.project_filesystem_reader),
             auth_challenges: self.delivery_services.auth_challenges.clone(),
             auth_flow_canceller: self.delivery_services.auth_flow_canceller.clone(),
             approval_requests: Some(Arc::clone(&self.delivery_services.approval_requests)),
@@ -188,13 +185,10 @@ impl TelegramRevisionWorkflowBuilder for TelegramRevisionWorkflowParts {
         let adapter = self
             .adapter_for_setup(setup, installation_id)
             .map_err(revision_workflow_build_error)?;
-        let observer = Arc::new(
-            FinalReplyDeliveryObserver::with_settings(
-                self.final_reply_delivery_services(Arc::new(binding), adapter),
-                FinalReplyDeliverySettings::default(),
-            )
-            .with_project_filesystem_reader(Arc::clone(&self.project_filesystem_reader)),
-        );
+        let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+            self.final_reply_delivery_services(Arc::new(binding), adapter),
+            FinalReplyDeliverySettings::default(),
+        ));
 
         Ok(TelegramRevisionWorkflow {
             workflow,

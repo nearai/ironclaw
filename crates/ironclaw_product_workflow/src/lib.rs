@@ -236,7 +236,7 @@ pub use reborn_services::{
     StaticOperatorStatusService, TriggerRunThreadScope, UnsupportedAutomationProductFacade,
     UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
     UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
-    UpsertLlmProviderRequest, normalize_operator_log_context_value,
+    UpsertLlmProviderRequest, WorkspaceFile, normalize_operator_log_context_value,
 };
 
 pub use webui_inbound::{

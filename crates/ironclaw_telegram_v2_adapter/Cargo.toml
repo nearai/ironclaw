@@ -28,6 +28,7 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 # `test-support` exposes `FakeProtocolHttpEgress` / `FakeOutboundDeliverySink`
 # used by the `adapter::tests` mod. `host-auth-mint` exposes
 # `mark_shared_secret_header_verified` used by `payload::tests` to mint

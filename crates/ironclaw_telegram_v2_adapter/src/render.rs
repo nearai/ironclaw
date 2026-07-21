@@ -8,7 +8,7 @@
 use ironclaw_product_adapters::{
     AuthPromptView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod,
     EgressPath, EgressRequest, ExternalConversationRef, FinalReplyView, GatePromptView,
-    ProductOutboundAttachment, ProductOutboundTarget, ProgressKind, ProgressUpdateView,
+    ProductOutboundTarget, ProgressKind, ProgressUpdateView, WorkspaceFile,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 use thiserror::Error;
@@ -26,10 +26,10 @@ pub enum TelegramRenderError {
 /// Render one workspace file as a Telegram `sendDocument` multipart request.
 pub fn render_document(
     reply: &TelegramReplyTarget,
-    attachment: &ProductOutboundAttachment,
+    attachment: &WorkspaceFile,
     credential_handle: EgressCredentialHandle,
 ) -> Result<EgressRequest, TelegramRenderError> {
-    let boundary = multipart_boundary(attachment.bytes())?;
+    let boundary = multipart_boundary(&attachment.bytes)?;
     let mut body = Vec::new();
     push_text_part(&mut body, &boundary, "chat_id", &reply.chat_id.to_string());
     if let Some(topic_id) = reply.topic_id {
@@ -49,15 +49,19 @@ pub fn render_document(
         );
     }
     body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    let filename = attachment.filename().replace('"', "_");
+    let filename = attachment
+        .filename
+        .as_deref()
+        .unwrap_or("attachment")
+        .replace('"', "_");
     body.extend_from_slice(
         format!(
             "Content-Disposition: form-data; name=\"document\"; filename=\"{filename}\"\r\nContent-Type: {}\r\n\r\n",
-            attachment.mime_type()
+            attachment.mime_type
         )
         .as_bytes(),
     );
-    body.extend_from_slice(attachment.bytes());
+    body.extend_from_slice(&attachment.bytes);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
 
     let host = DeclaredEgressHost::new(TELEGRAM_API_HOST).map_err(|error| {

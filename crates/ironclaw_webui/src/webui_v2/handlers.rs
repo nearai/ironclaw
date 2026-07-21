@@ -487,7 +487,7 @@ fn project_fs_download_response(file: ProjectFsFile) -> Result<Response, WebUiV2
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, file.mime_type)
-        .header(header::CONTENT_LENGTH, file.size_bytes)
+        .header(header::CONTENT_LENGTH, file.size_bytes())
         .header(
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{filename}\""),

@@ -18,7 +18,7 @@ mod projection;
 pub mod redaction;
 mod workflow;
 
-pub use adapter::{ProductAdapter, ProductAdapterHealth, ProductOutboundAttachment};
+pub use adapter::{ProductAdapter, ProductAdapterHealth};
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, ProtocolAuthFailure, VerifiedAuthClaim};
 #[cfg(feature = "host-auth-mint")]
 pub use auth::{
@@ -55,6 +55,7 @@ pub use inbound::{
     parse_product_slash_command,
 };
 pub use interaction_commands::{parse_interaction_resolution_text, strip_wrapping_inline_code};
+pub use ironclaw_attachments::WorkspaceFile;
 pub use outbound::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptChallengeKind,

@@ -762,6 +762,7 @@ fn build_triggered_run_delivery_hook_from_parts(
         adapter,
         egress,
         delivery_sink,
+        project_filesystem_reader: Arc::clone(&parts.project_filesystem_reader),
         auth_challenges: parts.auth_challenge_provider.clone(),
         auth_flow_canceller: parts.auth_flow_canceller.clone(),
         approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
@@ -808,8 +809,7 @@ fn build_triggered_run_delivery_hook_from_parts(
         route_store,
         config.agent_id.clone(),
     )
-    .with_outbound_target_provider(outbound_target_provider)
-    .with_project_filesystem_reader(Arc::clone(&parts.project_filesystem_reader));
+    .with_outbound_target_provider(outbound_target_provider);
     Ok(Arc::new(driver))
 }
 
@@ -1219,28 +1219,26 @@ fn build_slack_installation_record_with_resolvers(
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
         Arc::clone(&parts.local_runtime.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
-    let observer = Arc::new(
-        FinalReplyDeliveryObserver::with_settings(
-            FinalReplyDeliveryServices {
-                channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
-                binding_service: Arc::new(binding),
-                thread_service: Arc::clone(&parts.thread_service),
-                turn_coordinator: Arc::clone(&parts.turn_coordinator),
-                outbound_store,
-                route_store,
-                communication_preferences: preferences,
-                adapter,
-                egress,
-                delivery_sink,
-                auth_challenges: parts.auth_challenge_provider.clone(),
-                auth_flow_canceller: parts.auth_flow_canceller.clone(),
-                approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
-                    as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
-            },
-            FinalReplyDeliverySettings::default(),
-        )
-        .with_project_filesystem_reader(Arc::clone(&parts.project_filesystem_reader)),
-    );
+    let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
+        FinalReplyDeliveryServices {
+            channel_protocol: Arc::new(crate::slack::slack_delivery::SlackDeliveryProtocol),
+            binding_service: Arc::new(binding),
+            thread_service: Arc::clone(&parts.thread_service),
+            turn_coordinator: Arc::clone(&parts.turn_coordinator),
+            outbound_store,
+            route_store,
+            communication_preferences: preferences,
+            adapter,
+            egress,
+            delivery_sink,
+            project_filesystem_reader: Arc::clone(&parts.project_filesystem_reader),
+            auth_challenges: parts.auth_challenge_provider.clone(),
+            auth_flow_canceller: parts.auth_flow_canceller.clone(),
+            approval_requests: Some(Arc::clone(&parts.local_runtime.approval_requests)
+                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
+        },
+        FinalReplyDeliverySettings::default(),
+    ));
 
     Ok(SlackInstallationRecord::new(
         config.tenant_id,

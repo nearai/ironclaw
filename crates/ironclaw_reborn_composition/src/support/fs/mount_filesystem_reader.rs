@@ -166,7 +166,6 @@ impl<F: RootFilesystem> FilesystemBrowseReader for MountScopedFilesystemReader<F
         let mime_type = mime_for_path(&scoped_str);
         let filename = file_name_of(&scoped_str);
         Ok(ProjectFsFile {
-            size_bytes: bytes.len() as u64,
             path: Self::relativize(alias, &scoped_str),
             filename,
             mime_type,

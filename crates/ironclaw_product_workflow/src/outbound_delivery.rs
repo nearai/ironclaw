@@ -1,6 +1,7 @@
 //! Product outbound orchestration after outbound policy approval.
 
 use async_trait::async_trait;
+use ironclaw_attachments::WorkspaceFile;
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
     OutboundDeliveryDecision, OutboundDeliveryStatus, OutboundError, OutboundPolicyService,
@@ -9,9 +10,8 @@ use ironclaw_outbound::{
 };
 use ironclaw_product_adapters::{
     ExternalActorRef, ExternalConversationRef, OutboundDeliverySink, ProductAdapter,
-    ProductAdapterError, ProductOutboundAttachment, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductOutboundTarget, ProductRenderOutcome, ProjectionCursor,
-    ProtocolHttpEgress,
+    ProductAdapterError, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductRenderOutcome, ProjectionCursor, ProtocolHttpEgress,
 };
 use thiserror::Error;
 use tracing::debug;
@@ -139,7 +139,7 @@ pub async fn prepare_and_render_product_outbound_with_attachments(
     communication_preferences: &dyn CommunicationPreferenceRepository,
     target_resolver: &dyn ProductOutboundTargetResolver,
     request: ProductOutboundDeliveryRequest<'_>,
-    attachments: Vec<ProductOutboundAttachment>,
+    attachments: Vec<WorkspaceFile>,
 ) -> Result<ProductOutboundDeliveryOutcome, ProductOutboundDeliveryError> {
     let delivery_kind = OutboundPushKind::from(request.delivery.resolution_request.delivery_kind());
     let payload_kind = outbound_push_kind_for_payload(&request.payload);

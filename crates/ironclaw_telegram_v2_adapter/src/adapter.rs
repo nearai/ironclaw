@@ -6,9 +6,9 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
     DeliveryStatus, EgressCredentialHandle, OutboundDeliverySink, ParsedProductInbound,
     ProductAdapter, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterId,
-    ProductCapabilityFlag, ProductOutboundAttachment, ProductOutboundEnvelope,
-    ProductOutboundPayload, ProductRenderOutcome, ProductSurfaceKind, ProtocolAuthEvidence,
-    ProtocolHttpEgress, ProtocolHttpEgressError,
+    ProductCapabilityFlag, ProductOutboundEnvelope, ProductOutboundPayload, ProductRenderOutcome,
+    ProductSurfaceKind, ProtocolAuthEvidence, ProtocolHttpEgress, ProtocolHttpEgressError,
+    WorkspaceFile,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 
@@ -164,7 +164,7 @@ impl ProductAdapter for TelegramV2Adapter {
     async fn render_outbound_with_attachments(
         &self,
         envelope: ProductOutboundEnvelope,
-        attachments: Vec<ProductOutboundAttachment>,
+        attachments: Vec<WorkspaceFile>,
         egress: &dyn ProtocolHttpEgress,
         delivery_sink: &dyn OutboundDeliverySink,
     ) -> Result<ProductRenderOutcome, ProductAdapterError> {
@@ -642,6 +642,7 @@ fn map_egress_error(err: ProtocolHttpEgressError) -> ProductAdapterError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_host_api::ScopedPath;
     use ironclaw_product_adapters::FakeProtocolHttpEgress;
 
     fn config(progress: bool) -> TelegramV2AdapterConfig {
@@ -812,13 +813,12 @@ mod tests {
             adapter.adapter_id().clone(),
             adapter.installation_id().clone(),
         );
-        let attachment = ProductOutboundAttachment::new(
-            "/workspace/report.pdf",
-            "report.pdf",
-            "application/pdf",
-            b"pdf bytes".to_vec(),
-        )
-        .expect("attachment");
+        let attachment = WorkspaceFile {
+            path: ScopedPath::new("/workspace/report.pdf").expect("attachment path"),
+            filename: Some("report.pdf".into()),
+            mime_type: "application/pdf".into(),
+            bytes: b"pdf bytes".to_vec(),
+        };
 
         adapter
             .render_outbound_with_attachments(envelope, vec![attachment], &egress, &sink)

@@ -13,8 +13,8 @@ use ironclaw_product_adapters::{
     ProductInboundPayload, ProductOutboundPayload, ProductRejectionKind,
 };
 use ironclaw_product_workflow::{
-    ConversationBindingService, ProductOutboundDeliveryRequest, ProjectFilesystemReader,
-    ResolveBindingRequest, ResolvedBinding, approval_prompt_context_view, enrich_auth_prompt_view,
+    ConversationBindingService, ProductOutboundDeliveryRequest, ResolveBindingRequest,
+    ResolvedBinding, approval_prompt_context_view, enrich_auth_prompt_view,
     prepare_and_render_product_outbound_with_attachments,
 };
 use ironclaw_threads::{FinalizedAssistantMessageByRunRequest, SessionThreadService, ThreadScope};
@@ -59,8 +59,6 @@ pub struct FinalReplyDeliveryObserver {
     /// posted N times. The original loop detects the unblock and posts the next gate
     /// exactly once, so resolution-ack loops are always redundant duplicates.
     pub(crate) active_delivery_run_ids: Mutex<HashSet<TurnRunId>>,
-    // arch-exempt: optional_arc, reduced test observers omit workspace reads while production channel wiring supplies them and referenced files fail closed without them, plan #6159
-    project_filesystem: Option<Arc<dyn ProjectFilesystemReader>>,
 }
 
 /// RAII guard that removes a `run_id` from `active_delivery_run_ids` on drop.
@@ -101,19 +99,7 @@ impl FinalReplyDeliveryObserver {
             delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
             hint_seen: Mutex::new((VecDeque::new(), HashSet::new())),
             active_delivery_run_ids: Mutex::new(HashSet::new()),
-            project_filesystem: None,
         }
-    }
-
-    /// Wire scoped workspace reads for native delivery of assistant-mentioned
-    /// files. Paths are still recognized and bounded by the shared channel
-    /// delivery layer.
-    pub fn with_project_filesystem_reader(
-        mut self,
-        reader: Arc<dyn ProjectFilesystemReader>,
-    ) -> Self {
-        self.project_filesystem = Some(reader);
-        self
     }
 
     pub(crate) async fn deliver_final_reply(
@@ -525,7 +511,7 @@ impl FinalReplyDeliveryObserver {
         let attachments = resolve_workspace_attachments(
             &payload,
             thread_scope,
-            self.project_filesystem.as_deref(),
+            self.services.project_filesystem_reader.as_ref(),
         )
         .await?;
         let _outcome = prepare_and_render_product_outbound_with_attachments(

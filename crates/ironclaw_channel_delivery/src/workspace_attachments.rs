@@ -1,17 +1,17 @@
 //! Shared resolution of assistant-mentioned workspace files for native channels.
 
-use ironclaw_attachments::{DEFAULT_ATTACHMENT_BUDGETS, extract_workspace_attachment_paths};
-use ironclaw_product_adapters::{
-    ProductAdapterError, ProductOutboundAttachment, ProductOutboundPayload, RedactedString,
+use ironclaw_attachments::{
+    DEFAULT_ATTACHMENT_BUDGETS, WorkspaceFile, extract_workspace_attachment_paths,
 };
+use ironclaw_product_adapters::{ProductAdapterError, ProductOutboundPayload, RedactedString};
 use ironclaw_product_workflow::ProjectFilesystemReader;
 use ironclaw_threads::ThreadScope;
 
 pub(crate) async fn resolve_workspace_attachments(
     payload: &ProductOutboundPayload,
     thread_scope: &ThreadScope,
-    reader: Option<&dyn ProjectFilesystemReader>,
-) -> Result<Vec<ProductOutboundAttachment>, ProductAdapterError> {
+    reader: &dyn ProjectFilesystemReader,
+) -> Result<Vec<WorkspaceFile>, ProductAdapterError> {
     let ProductOutboundPayload::FinalReply(view) = payload else {
         return Ok(Vec::new());
     };
@@ -24,7 +24,6 @@ pub(crate) async fn resolve_workspace_attachments(
             "assistant reply references too many workspace files",
         ));
     }
-    let reader = reader.ok_or_else(|| permanent("workspace attachment reader is unavailable"))?;
     let mut attachments = Vec::with_capacity(paths.len());
     let mut total_bytes = 0usize;
     for path in paths {
@@ -50,16 +49,7 @@ pub(crate) async fn resolve_workspace_attachments(
                 "assistant workspace files exceed the channel batch limit",
             ));
         }
-        let filename = file
-            .filename
-            .or_else(|| path.rsplit('/').next().map(ToOwned::to_owned))
-            .ok_or_else(|| permanent("assistant workspace file has no filename"))?;
-        attachments.push(ProductOutboundAttachment::new(
-            path,
-            filename,
-            file.mime_type,
-            file.bytes,
-        )?);
+        attachments.push(file);
     }
     Ok(attachments)
 }
@@ -76,7 +66,7 @@ mod tests {
     use chrono::Utc;
     use ironclaw_host_api::{AgentId, TenantId, UserId};
     use ironclaw_product_adapters::FinalReplyView;
-    use ironclaw_product_workflow::{ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat};
+    use ironclaw_product_workflow::{ProjectFsEntry, ProjectFsError, ProjectFsStat};
     use ironclaw_turns::TurnRunId;
 
     use super::*;
@@ -99,12 +89,11 @@ mod tests {
             &self,
             _thread_scope: &ThreadScope,
             path: &str,
-        ) -> Result<ProjectFsFile, ProjectFsError> {
-            Ok(ProjectFsFile {
-                path: path.to_string(),
+        ) -> Result<WorkspaceFile, ProjectFsError> {
+            Ok(WorkspaceFile {
+                path: ironclaw_host_api::ScopedPath::new(path).expect("valid test path"),
                 filename: Some("report.pdf".into()),
                 mime_type: "application/pdf".into(),
-                size_bytes: self.bytes.len() as u64,
                 bytes: self.bytes.clone(),
             })
         }
@@ -144,31 +133,15 @@ mod tests {
         let attachments = resolve_workspace_attachments(
             &final_reply("Done: [report](/workspace/report.pdf)"),
             &thread_scope(),
-            Some(&reader),
+            &reader,
         )
         .await
         .expect("workspace file resolves");
 
         assert_eq!(attachments.len(), 1);
-        assert_eq!(attachments[0].workspace_path(), "/workspace/report.pdf");
-        assert_eq!(attachments[0].filename(), "report.pdf");
-        assert_eq!(attachments[0].bytes(), b"pdf");
-    }
-
-    #[tokio::test]
-    async fn referenced_file_without_reader_fails_closed() {
-        let result = resolve_workspace_attachments(
-            &final_reply("/workspace/report.pdf"),
-            &thread_scope(),
-            None,
-        )
-        .await;
-        let error = match result {
-            Ok(_) => panic!("must not silently drop referenced file"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(error, ProductAdapterError::Internal { .. }));
+        assert_eq!(attachments[0].path.as_str(), "/workspace/report.pdf");
+        assert_eq!(attachments[0].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(attachments[0].bytes, b"pdf");
     }
 
     #[tokio::test]
@@ -180,7 +153,7 @@ mod tests {
         let result = resolve_workspace_attachments(
             &final_reply(&text),
             &thread_scope(),
-            Some(&FileReader { bytes: vec![] }),
+            &FileReader { bytes: vec![] },
         )
         .await;
 
@@ -192,9 +165,9 @@ mod tests {
         let equal = resolve_workspace_attachments(
             &final_reply("/workspace/equal.bin"),
             &thread_scope(),
-            Some(&FileReader {
+            &FileReader {
                 bytes: vec![0; DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes],
-            }),
+            },
         )
         .await;
         assert!(equal.is_ok());
@@ -202,9 +175,9 @@ mod tests {
         let over = resolve_workspace_attachments(
             &final_reply("/workspace/over.bin"),
             &thread_scope(),
-            Some(&FileReader {
+            &FileReader {
                 bytes: vec![0; DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes + 1],
-            }),
+            },
         )
         .await;
         assert!(matches!(over, Err(ProductAdapterError::Internal { .. })));
@@ -218,7 +191,7 @@ mod tests {
         let equal = resolve_workspace_attachments(
             &final_reply("/workspace/one.bin /workspace/two.bin"),
             &thread_scope(),
-            Some(&reader),
+            &reader,
         )
         .await;
         assert!(equal.is_ok());
@@ -226,7 +199,7 @@ mod tests {
         let over = resolve_workspace_attachments(
             &final_reply("/workspace/one.bin /workspace/two.bin /workspace/three.bin"),
             &thread_scope(),
-            Some(&reader),
+            &reader,
         )
         .await;
         assert!(matches!(over, Err(ProductAdapterError::Internal { .. })));

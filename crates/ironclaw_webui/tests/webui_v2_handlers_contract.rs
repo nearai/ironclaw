@@ -680,7 +680,6 @@ impl RebornServicesApi for StubServices {
             path: request.path,
             filename: Some("today.md".to_string()),
             mime_type: "text/markdown".to_string(),
-            size_bytes: 7,
             bytes: b"# notes".to_vec(),
         })
     }
