@@ -25,5 +25,5 @@ if [ "${IRONCLAW_STRICT_DELTA_LINT:-0}" = "1" ]; then
     "$SCRIPT_DIR/delta_lint.sh" "$1"
 elif [ "${IRONCLAW_STRICT_LINT:-0}" = "1" ]; then
     echo "==> clippy (strict: all warnings, all targets)"
-    cargo clippy --locked --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 fi

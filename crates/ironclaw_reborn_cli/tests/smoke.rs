@@ -189,6 +189,11 @@ fn cargo_command_features(text: &str) -> Vec<String> {
         if let Some(value) = word.strip_prefix("--features=") {
             features.extend(split_cargo_feature_value(value).map(str::to_owned));
         }
+        if let Some(value) = word.strip_prefix("-F")
+            && !value.is_empty()
+        {
+            features.extend(split_cargo_feature_value(value).map(str::to_owned));
+        }
         index += 1;
     }
     features
@@ -243,7 +248,7 @@ fn package_metadata_dist_features(manifest: &str) -> Vec<String> {
 
     let mut features = Vec::new();
     let mut token = String::new();
-    let mut in_string = false;
+    let mut quote = None;
     let mut escaped = false;
     for ch in array.chars() {
         if escaped {
@@ -251,19 +256,60 @@ fn package_metadata_dist_features(manifest: &str) -> Vec<String> {
             escaped = false;
             continue;
         }
-        match (in_string, ch) {
-            (true, '\\') => escaped = true,
-            (true, '"') => {
+        match (quote, ch) {
+            (Some('"'), '\\') => escaped = true,
+            (Some(active), _) if ch == active => {
                 features.push(std::mem::take(&mut token));
-                in_string = false;
+                quote = None;
             }
-            (false, '"') => in_string = true,
-            (true, _) => token.push(ch),
-            (false, _) => {}
+            (None, '"' | '\'') => quote = Some(ch),
+            (Some(_), _) => token.push(ch),
+            (None, _) => {}
         }
     }
 
     features
+}
+
+#[test]
+fn cargo_feature_parser_detects_removed_backend_spellings() {
+    for input in [
+        "cargo build --features libsql",
+        "cargo build --features=postgres",
+        "cargo build --features 'libsql,other'",
+        "cargo build -F postgres",
+        "cargo build -Flibsql",
+        "cargo build -Fpostgres,other",
+    ] {
+        let features = cargo_command_features(input);
+        assert!(
+            features
+                .iter()
+                .any(|feature| feature == "libsql" || feature == "postgres"),
+            "expected removed backend feature in parsed features={features:?} for {input}"
+        );
+    }
+}
+
+#[test]
+fn dist_feature_parser_detects_basic_and_literal_strings() {
+    let manifest = r#"
+[package]
+name = "ironclaw"
+
+[package.metadata.dist]
+dist = true
+features = [
+    "libsql",
+    'postgres',
+]
+
+[package.metadata.wix]
+"#;
+    assert_eq!(
+        package_metadata_dist_features(manifest),
+        vec!["libsql".to_string(), "postgres".to_string()]
+    );
 }
 
 #[test]
