@@ -8262,9 +8262,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("if ! (", prepare_body)
         self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
         self.assertIn(
-            "libsql",
+            '"${TARGET_REF}" \\\n                ""',
             prepare_body,
         )
+        self.assertIn("--argjson features '[]'", prepare_body)
         self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", prepare_body)
         self.assertIn(
             "ironclaw-reborn.tar.gz ironclaw ironclaw-reborn",
@@ -8282,10 +8283,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "github.event.pull_request.head.sha",
             reborn_e2e,
         )
-        self.assertIn(
-            '["libsql"]',
-            reborn_e2e,
-        )
+        self.assertIn("--argjson features '[]'", reborn_e2e)
         self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", reborn_e2e)
         self.assertIn(
             "ironclaw-reborn.tar.gz\" ironclaw ironclaw-reborn",
