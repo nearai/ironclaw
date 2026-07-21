@@ -1020,6 +1020,80 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     runtime.shutdown().await.expect("runtime shuts down");
 }
 
+/// Deployment configuration is discovered from the manifest catalog, not from
+/// per-user installation state. An operator must therefore see first-party
+/// channel configuration on a fresh runtime before any user installs either
+/// extension, and secret fields must remain value-free in the response.
+#[tokio::test]
+async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_redacted() {
+    let root = tempdir().expect("runtime storage tempdir");
+    let tenant_id = TenantId::new("webui-admin-config-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-admin-config-agent").expect("agent id");
+    let user_id = UserId::new("webui-admin-config-operator").expect("user id");
+    let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-admin-config-source".to_string(),
+                reply_target_binding_id: "webui-admin-config-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id,
+        user_id,
+        Some(agent_id),
+        None,
+    );
+    let operator_router = webui_v2_router(WebUiV2State::new(
+        Arc::clone(&webui.api),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller.with_operator_webui_config(true)))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }));
+
+    let (status, body) = get_json(
+        operator_router,
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator response: {body}");
+    let groups = body["groups"].as_array().expect("configuration groups");
+    for group_id in ["extension.slack", "extension.telegram"] {
+        assert!(
+            groups.iter().any(|group| group["group_id"] == group_id),
+            "manifest-declared group {group_id} must be listed before installation: {body}"
+        );
+    }
+    for secret_field in groups
+        .iter()
+        .flat_map(|group| group["fields"].as_array().into_iter().flatten())
+        .filter(|field| field["secret"] == true)
+    {
+        assert!(
+            secret_field.get("value").is_none_or(Value::is_null),
+            "secret fields must never expose a value: {secret_field}"
+        );
+    }
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+}
+
 async fn post_raw(router: Router, path: &str, body: Vec<u8>) -> (StatusCode, Value) {
     let response = router
         .oneshot(
