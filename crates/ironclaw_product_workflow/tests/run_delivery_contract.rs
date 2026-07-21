@@ -27,10 +27,10 @@ use ironclaw_product_adapters::{
     TrustedInboundContext, UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product_workflow::{
-    BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelDeliveryResolver,
-    DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy, PreferenceTargetCodec,
-    ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
+    ChannelDeliveryResolver, DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy,
+    PreferenceTargetCodec, ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
 use ironclaw_threads::{
     AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
@@ -431,7 +431,11 @@ fn fallback_scope() -> TurnScope {
     )
 }
 
-fn envelope(payload: ProductInboundPayload, event_id: &str) -> ProductInboundEnvelope {
+fn envelope_for_conversation(
+    payload: ProductInboundPayload,
+    event_id: &str,
+    conversation_id: &str,
+) -> ProductInboundEnvelope {
     let adapter_id = ProductAdapterId::new("acme_v1").expect("adapter");
     let installation_id = AdapterInstallationId::new("install_alpha").expect("installation");
     let evidence = ProtocolAuthEvidence::test_verified(
@@ -450,11 +454,16 @@ fn envelope(payload: ProductInboundPayload, event_id: &str) -> ProductInboundEnv
     let parsed = ParsedProductInbound::new(
         ExternalEventId::new(event_id).expect("event"),
         ExternalActorRef::new("acme_user", "U-1", None::<String>).expect("actor"),
-        ExternalConversationRef::new(Some("space-1"), "conv-1", None, None).expect("conversation"),
+        ExternalConversationRef::new(Some("space-1"), conversation_id, None, None)
+            .expect("conversation"),
         payload,
     )
     .expect("parsed");
     ProductInboundEnvelope::from_trusted_parse(context, parsed).expect("envelope")
+}
+
+fn envelope(payload: ProductInboundPayload, event_id: &str) -> ProductInboundEnvelope {
+    envelope_for_conversation(payload, event_id, "conv-1")
 }
 
 fn user_message_envelope(trigger: ProductTriggerReason, event_id: &str) -> ProductInboundEnvelope {
@@ -463,6 +472,20 @@ fn user_message_envelope(trigger: ProductTriggerReason, event_id: &str) -> Produ
             UserMessagePayload::new("hello", Vec::new(), trigger).expect("payload"),
         ),
         event_id,
+    )
+}
+
+fn user_message_envelope_for_conversation(
+    trigger: ProductTriggerReason,
+    event_id: &str,
+    conversation_id: &str,
+) -> ProductInboundEnvelope {
+    envelope_for_conversation(
+        ProductInboundPayload::UserMessage(
+            UserMessagePayload::new("hello", Vec::new(), trigger).expect("payload"),
+        ),
+        event_id,
+        conversation_id,
     )
 }
 
@@ -475,6 +498,7 @@ fn accepted_ack(run_id: TurnRunId) -> ProductInboundAck {
 
 struct Harness {
     observer: RunDeliveryObserver,
+    connection_notices: ChannelConnectionNoticePolicy,
     adapter: Arc<RecordingChannelAdapter>,
     store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     route_store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
@@ -527,17 +551,21 @@ fn build_harness(
         }),
         auth_flow_cancel: None,
     };
-    let observer = RunDeliveryObserver::with_settings(
+    let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
+    let observer = RunDeliveryObserver::with_settings_and_connection_notices(
         services,
         RunDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait,
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            connect_notice_throttle_window: Duration::from_secs(30),
         },
+        connection_notices.clone(),
     );
     Harness {
         observer,
+        connection_notices,
         adapter,
         store,
         route_store,
@@ -810,22 +838,109 @@ async fn observer_connect_nudge_posts_only_for_direct_chat_binding_required() {
         .observer
         .observe_ack(
             user_message_envelope(ProductTriggerReason::DirectChat, "evt-dm"),
+            rejected.clone(),
+        )
+        .await;
+    // A distinct transport event in the same conversation stays throttled.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-dm-2"),
+            rejected.clone(),
+        )
+        .await;
+    // A distinct direct conversation owns an independent reservation.
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope_for_conversation(
+                ProductTriggerReason::DirectChat,
+                "evt-dm-other",
+                "conv-2",
+            ),
             rejected,
         )
         .await;
     let texts = harness.adapter.texts();
-    assert_eq!(texts.len(), 1);
-    assert!(texts[0].contains("connect your account"), "{}", texts[0]);
+    assert_eq!(
+        texts,
+        vec![
+            harness.connection_notices.connect_required.clone(),
+            harness.connection_notices.connect_required.clone(),
+        ]
+    );
     let attempts = harness
         .store
         .list_delivery_attempts(fallback_scope())
         .await
         .expect("attempts");
-    assert_eq!(attempts.len(), 1, "nudge attempt audited");
+    assert_eq!(attempts.len(), 2, "one nudge attempt per conversation");
     assert_eq!(
         attempts[0].candidate.kind,
         ironclaw_outbound::OutboundPushKind::DeliveryStatus
     );
+}
+
+#[tokio::test]
+async fn observer_connect_nudge_releases_failed_delivery_reservation_for_retry() {
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    harness
+        .adapter
+        .reports
+        .lock()
+        .expect("reports lock")
+        .push_back(DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Permanent {
+                reason: "scripted failure".to_string(),
+            }],
+        });
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-failed"),
+            rejected.clone(),
+        )
+        .await;
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-retry"),
+            rejected,
+        )
+        .await;
+
+    let envelopes = harness.adapter.envelopes();
+    assert_eq!(
+        envelopes.len(),
+        2,
+        "failed evidence must release reservation"
+    );
+    assert!(envelopes.iter().all(|envelope| {
+        matches!(
+            envelope.parts.as_slice(),
+            [OutboundPart::Text(text)] if text == &harness.connection_notices.connect_required
+        )
+    }));
+    let attempts = harness
+        .store
+        .list_delivery_attempts(fallback_scope())
+        .await
+        .expect("attempts");
+    assert_eq!(attempts.len(), 2);
+    assert!(matches!(
+        attempts.last().map(|attempt| attempt.status),
+        Some(ironclaw_outbound::OutboundDeliveryStatus::Delivered)
+    ));
 }
 
 #[tokio::test]
@@ -1011,6 +1126,7 @@ fn build_triggered_harness(
             max_wait: Duration::from_millis(60),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+            connect_notice_throttle_window: Duration::from_secs(30),
         },
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         Arc::new(StaticCodec {

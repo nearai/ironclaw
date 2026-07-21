@@ -87,6 +87,9 @@ pub struct RunDeliverySettings {
     /// are recorded as `Skipped` rather than spawning an unbounded waiting
     /// task.
     pub max_pending_deliveries: NonZeroUsize,
+    /// Minimum time between connect-required notices for one observer's
+    /// source conversation.
+    pub connect_notice_throttle_window: Duration,
 }
 
 impl Default for RunDeliverySettings {
@@ -96,6 +99,7 @@ impl Default for RunDeliverySettings {
             max_wait: Duration::from_secs(120),
             max_concurrent_deliveries: NonZeroUsize::new(64).expect("non-zero literal"), // safety: static default literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(256).expect("non-zero literal"), // safety: static default literal is non-zero.
+            connect_notice_throttle_window: Duration::from_secs(30),
         }
     }
 }

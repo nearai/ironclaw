@@ -23,11 +23,14 @@ use ironclaw_extension_host::ingress::{
 };
 use ironclaw_host_api::SecretHandle;
 use ironclaw_product_adapters::{
-    AdapterInstallationId, NormalizedInboundMessage, ParsedProductInbound, ProductAdapterId,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductWorkflow,
-    ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    AdapterInstallationId, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
+    ParsedProductInbound, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
+    ProductInboundPayload, ProductWorkflow, ProtocolAuthEvidence, TrustedInboundContext,
+    UserMessagePayload,
 };
 use tokio::task::JoinSet;
+
+use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 
 /// Fixed host route paths inside the extension ingress namespace
 /// (`/webhooks/extensions/…`). An extension whose canonical route collides
@@ -51,6 +54,14 @@ pub(crate) fn reserved_fixed_ingress_routes() -> BTreeSet<String> {
 #[async_trait]
 pub trait PostAdmissionObserver: Send + Sync {
     async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck);
+
+    async fn observe_pairing_outcome(
+        &self,
+        _conversation: ExternalConversationRef,
+        _event_id: ExternalEventId,
+        _outcome: ChannelPairingConsumeOutcome,
+    ) {
+    }
 
     async fn observe_error(
         &self,
@@ -295,17 +306,20 @@ impl InboundSink for ExtensionIngressRegistry {
 /// direct message from an actor with no identity binding is offered to the
 /// pairing seam BEFORE workflow admission, so a pairing code is consumed
 /// instead of becoming (or failing as) a turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelPairingInterception {
+    NotHandled,
+    Consumed(ChannelPairingConsumeOutcome),
+    Failed,
+}
+
 #[async_trait]
 pub trait ChannelPairingInterceptor: Send + Sync {
-    /// Returns `true` when the message was serviced as a pairing
-    /// interaction and must not reach the workflow. The implementation owns
-    /// unbound-actor detection and code-shape parsing; a `false` lets the
-    /// message flow to normal admission.
     async fn intercept(
         &self,
         installation_id: &AdapterInstallationId,
         message: &NormalizedInboundMessage,
-    ) -> bool;
+    ) -> ChannelPairingInterception;
 }
 
 /// Configuration for [`GenericChannelInboundSink`].
@@ -398,13 +412,29 @@ impl InboundSink for GenericChannelInboundSink {
         // Pairing pre-admission gate: a serviced pairing interaction is
         // durably reflected in the pairing/identity stores, not the turn
         // ledger — the vendor still gets its 2xx.
-        if let Some(pairing) = &self.config.pairing
+        if let Some(pairing) = &self.config.pairing {
             // Boxed: the consume path (CAS claim → identity bind → completion
             // fan-out) is a deep async subtree nested inside the admission
             // future; boxing keeps instrumented builds off the stack limit.
-            && Box::pin(pairing.intercept(&installation, &message)).await
-        {
-            return Ok(InboundAdmissionAck::Accepted);
+            match Box::pin(pairing.intercept(&installation, &message)).await {
+                ChannelPairingInterception::NotHandled => {}
+                ChannelPairingInterception::Consumed(outcome) => {
+                    if let Some(observer) = self.config.observer.clone() {
+                        let conversation = message.conversation.clone();
+                        let event_id = message.event_id.clone();
+                        self.spawn_observer(async move {
+                            observer
+                                .observe_pairing_outcome(conversation, event_id, outcome)
+                                .await;
+                        })
+                        .await;
+                    }
+                    return Ok(InboundAdmissionAck::Accepted);
+                }
+                ChannelPairingInterception::Failed => {
+                    return Ok(InboundAdmissionAck::Accepted);
+                }
+            }
         }
         let evidence = self.config.evidence.mint(&installation_id);
         let context = TrustedInboundContext::from_verified_evidence(
@@ -747,7 +777,127 @@ mod serve_mount {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use ironclaw_host_api::UserId;
+    use ironclaw_product_adapters::{
+        ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAdapterError,
+        ProductTriggerReason,
+    };
+    use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
+
     use super::*;
+    use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
+
+    struct CountingWorkflow {
+        submissions: AtomicUsize,
+    }
+
+    impl CountingWorkflow {
+        fn new() -> Self {
+            Self {
+                submissions: AtomicUsize::new(0),
+            }
+        }
+
+        fn submit_count(&self) -> usize {
+            self.submissions.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ProductWorkflow for CountingWorkflow {
+        async fn submit_inbound(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            self.submissions.fetch_add(1, Ordering::SeqCst);
+            Ok(ProductInboundAck::Accepted {
+                accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
+                    .expect("accepted message ref"),
+                submitted_run_id: TurnRunId::new(),
+            })
+        }
+    }
+
+    struct ScriptedPairingInterceptor {
+        interception: ChannelPairingInterception,
+    }
+
+    #[async_trait]
+    impl ChannelPairingInterceptor for ScriptedPairingInterceptor {
+        async fn intercept(
+            &self,
+            _installation_id: &AdapterInstallationId,
+            _message: &NormalizedInboundMessage,
+        ) -> ChannelPairingInterception {
+            self.interception.clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingPairingObserver {
+        outcomes: std::sync::Mutex<Vec<ChannelPairingConsumeOutcome>>,
+    }
+
+    impl RecordingPairingObserver {
+        fn take_pairing_outcome(&self) -> Option<ChannelPairingConsumeOutcome> {
+            self.outcomes.lock().expect("outcomes lock").pop()
+        }
+    }
+
+    #[async_trait]
+    impl PostAdmissionObserver for RecordingPairingObserver {
+        async fn observe_ack(&self, _envelope: ProductInboundEnvelope, _ack: ProductInboundAck) {}
+
+        async fn observe_pairing_outcome(
+            &self,
+            _conversation: ExternalConversationRef,
+            _event_id: ExternalEventId,
+            outcome: ChannelPairingConsumeOutcome,
+        ) {
+            self.outcomes.lock().expect("outcomes lock").push(outcome);
+        }
+    }
+
+    fn admission_for(text: &str) -> InboundAdmission {
+        InboundAdmission {
+            extension_id: "vendorx".to_string(),
+            installation_id: "install".to_string(),
+            message: NormalizedInboundMessage {
+                actor: ExternalActorRef::new("vendor_user", "user-1", None::<&str>).expect("actor"),
+                conversation: ExternalConversationRef::new(None, "chat-1", None, None)
+                    .expect("conversation"),
+                event_id: ExternalEventId::new("evt-1").expect("event"),
+                text: text.to_string(),
+                trigger: ProductTriggerReason::DirectChat,
+                attachments: Vec::new(),
+                reply_context: None,
+            },
+        }
+    }
+
+    fn pairing_sink(
+        interception: ChannelPairingInterception,
+    ) -> (
+        GenericChannelInboundSink,
+        Arc<CountingWorkflow>,
+        Arc<RecordingPairingObserver>,
+    ) {
+        let workflow = Arc::new(CountingWorkflow::new());
+        let observer = Arc::new(RecordingPairingObserver::default());
+        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+            adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
+            evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                header: "X-Vendor-Secret".to_string(),
+            },
+            classifier: None,
+            workflow: Arc::clone(&workflow) as Arc<dyn ProductWorkflow>,
+            observer: Some(Arc::clone(&observer) as Arc<dyn PostAdmissionObserver>),
+            pairing: Some(Arc::new(ScriptedPairingInterceptor { interception })),
+        });
+        (sink, workflow, observer)
+    }
 
     struct FailingSink;
 
@@ -846,5 +996,43 @@ mod tests {
             registry.register_managed("vendorx", registration(b"managed-again")),
             ManagedRegistrationOutcome::SkippedUnmanaged
         ));
+    }
+
+    #[tokio::test]
+    async fn pairing_interception_preserves_every_typed_consume_outcome_for_the_observer() {
+        let user_id = UserId::new("paired-user").expect("user id");
+        for outcome in [
+            ChannelPairingConsumeOutcome::Paired {
+                user_id: user_id.clone(),
+            },
+            ChannelPairingConsumeOutcome::AlreadyPairedSameUser {
+                user_id: user_id.clone(),
+            },
+            ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser,
+            ChannelPairingConsumeOutcome::ExpiredOrUnknown,
+        ] {
+            let (sink, workflow, observer) =
+                pairing_sink(ChannelPairingInterception::Consumed(outcome.clone()));
+
+            let ack = sink
+                .admit(admission_for("ABCDEFGH"))
+                .await
+                .expect("admitted");
+            assert_eq!(ack, InboundAdmissionAck::Accepted);
+            sink.drain().await;
+            assert_eq!(workflow.submit_count(), 0);
+            assert_eq!(observer.take_pairing_outcome(), Some(outcome));
+        }
+    }
+
+    #[tokio::test]
+    async fn pairing_not_handled_continues_to_the_product_workflow() {
+        let (sink, workflow, observer) = pairing_sink(ChannelPairingInterception::NotHandled);
+
+        let ack = sink.admit(admission_for("hello")).await.expect("admitted");
+        assert_eq!(ack, InboundAdmissionAck::Accepted);
+        sink.drain().await;
+        assert_eq!(workflow.submit_count(), 1);
+        assert_eq!(observer.take_pairing_outcome(), None);
     }
 }

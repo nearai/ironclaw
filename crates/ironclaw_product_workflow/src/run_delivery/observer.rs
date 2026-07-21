@@ -2,8 +2,9 @@
 //! channel message submitted and deliver its outputs back to the
 //! originating conversation, entirely through the [`DeliveryCoordinator`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -15,7 +16,7 @@ use ironclaw_outbound::{
     ThreadProjectionAccessClaim, ThreadProjectionAccessPolicy, ThreadProjectionAccessRequest,
 };
 use ironclaw_product_adapters::{
-    ExternalActorRef, ExternalConversationRef, OutboundPart, ProductAdapterError,
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, OutboundPart, ProductAdapterError,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
     ProductRejectionKind, ProductTriggerReason, ProductWorkflowRejectionKind,
 };
@@ -37,7 +38,9 @@ use super::{
 use crate::delivery_coordinator::{
     CoordinatedDeliveryOutcome, CoordinatedDeliveryRequest, DeliveryIntent,
 };
-use crate::{ProductWorkflowError, ResolveBindingRequest, ResolvedBinding};
+use crate::{
+    ChannelConnectionNoticePolicy, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
+};
 
 /// One actionable run state reduced to a semantic notification: the intent,
 /// its channel-neutral text, and the routing bookkeeping it needs.
@@ -56,6 +59,7 @@ struct ActionableNotification {
 /// `DELIVERED_RUNS_CAP` deliveries ago — duplicate acks arrive within the
 /// same inbound exchange, not that far apart.
 const DELIVERED_RUNS_CAP: usize = 1024;
+const CONNECT_NUDGE_RESERVATION_CAP: usize = 1024;
 
 /// Single-mutex ledger behind the per-run delivery dedup. `active` is the
 /// single-flight set (at most one live delivery loop per run); `delivered` is
@@ -132,7 +136,11 @@ impl Drop for RunDeliveryGuard<'_> {
 pub struct RunDeliveryObserver {
     services: RunDeliveryServices,
     settings: RunDeliverySettings,
+    connection_notices: ChannelConnectionNoticePolicy,
     delivery_permits: Arc<Semaphore>,
+    /// Per-observer, per-conversation connect-nudge reservations. Reserving
+    /// before delivery prevents concurrent unbound events from racing.
+    connect_nudge_reservations: Mutex<HashMap<String, Instant>>,
     /// Per-observer throttle: at most one busy-thread hint per
     /// (conversation fingerprint, external_event_id) pair.
     hint_seen: HintSeenSet,
@@ -147,17 +155,53 @@ pub struct RunDeliveryObserver {
 
 impl RunDeliveryObserver {
     pub fn new(services: RunDeliveryServices) -> Self {
-        Self::with_settings(services, RunDeliverySettings::default())
+        Self::with_settings_and_connection_notices(
+            services,
+            RunDeliverySettings::default(),
+            ChannelConnectionNoticePolicy::generic("this channel"),
+        )
     }
 
     pub fn with_settings(services: RunDeliveryServices, settings: RunDeliverySettings) -> Self {
+        Self::with_settings_and_connection_notices(
+            services,
+            settings,
+            ChannelConnectionNoticePolicy::generic("this channel"),
+        )
+    }
+
+    pub fn with_settings_and_connection_notices(
+        services: RunDeliveryServices,
+        settings: RunDeliverySettings,
+        connection_notices: ChannelConnectionNoticePolicy,
+    ) -> Self {
         Self {
             services,
             settings,
+            connection_notices,
             delivery_permits: Arc::new(Semaphore::new(settings.max_concurrent_deliveries.get())),
+            connect_nudge_reservations: Mutex::new(HashMap::new()),
             hint_seen: Mutex::new((std::collections::VecDeque::new(), HashSet::new())),
             delivery_runs: Mutex::new(DeliveryRunLedger::default()),
         }
+    }
+
+    pub async fn post_connection_status_notice(
+        &self,
+        conversation: &ExternalConversationRef,
+        event_id: &ExternalEventId,
+        text: &str,
+    ) {
+        self.services
+            .post_notice(
+                DeliveryIntent::ConnectionStatus,
+                self.services.fallback_notice_scope.clone(),
+                None,
+                conversation,
+                text,
+                format!("connection-status:{}", event_id.as_str()),
+            )
+            .await;
     }
 
     /// Observe one workflow ack for an inbound envelope. This is the
@@ -808,17 +852,61 @@ impl RunDeliveryObserver {
         if !envelope_is_direct_chat(envelope) {
             return false;
         }
-        self.services
+        let conversation_key = envelope
+            .external_conversation_ref()
+            .conversation_fingerprint();
+        let Some(reserved_at) = self.reserve_connect_nudge(conversation_key.clone()) else {
+            return true;
+        };
+        let delivered = self
+            .services
             .post_notice(
                 DeliveryIntent::ConnectRequired,
                 self.services.fallback_notice_scope.clone(),
                 None,
                 envelope.external_conversation_ref(),
-                prompts::CONNECT_NUDGE_MESSAGE,
+                &self.connection_notices.connect_required,
                 format!("connect-nudge:{}", envelope.external_event_id().as_str()),
             )
             .await;
+        if delivered.is_none() {
+            self.release_connect_nudge(&conversation_key, reserved_at);
+        }
         true
+    }
+
+    fn reserve_connect_nudge(&self, conversation_key: String) -> Option<Instant> {
+        let now = Instant::now();
+        let mut reservations = self
+            .connect_nudge_reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        reservations.retain(|_, reserved_at| {
+            now.duration_since(*reserved_at) < self.settings.connect_notice_throttle_window
+        });
+        if reservations.contains_key(&conversation_key) {
+            return None;
+        }
+        if reservations.len() >= CONNECT_NUDGE_RESERVATION_CAP
+            && let Some(oldest) = reservations
+                .iter()
+                .min_by_key(|(_, reserved_at)| **reserved_at)
+                .map(|(key, _)| key.clone())
+        {
+            reservations.remove(&oldest);
+        }
+        reservations.insert(conversation_key, now);
+        Some(now)
+    }
+
+    fn release_connect_nudge(&self, conversation_key: &str, reserved_at: Instant) {
+        let mut reservations = self
+            .connect_nudge_reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if reservations.get(conversation_key) == Some(&reserved_at) {
+            reservations.remove(conversation_key);
+        }
     }
 
     async fn post_busy_hint(&self, envelope: &ProductInboundEnvelope, active_run_id: TurnRunId) {

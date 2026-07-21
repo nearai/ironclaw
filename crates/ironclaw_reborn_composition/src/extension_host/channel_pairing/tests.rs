@@ -14,7 +14,9 @@ use ironclaw_product_adapters::{
 
 use super::*;
 use crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore;
-use crate::extension_host::extension_ingress::ChannelPairingInterceptor;
+use crate::extension_host::extension_ingress::{
+    ChannelPairingInterception, ChannelPairingInterceptor,
+};
 
 const EXT: &str = "vendorx";
 const INSTALL: &str = "install-1";
@@ -235,6 +237,7 @@ fn fixture_with(
         agent_id: ironclaw_host_api::AgentId::new("agent-a").expect("agent"),
         project_id: None,
         extension_id,
+        connection_notices: ChannelConnectionNoticePolicy::generic("Vendor X"),
         deep_link_template: deep_link_template.map(str::to_string),
         store,
         installation: Arc::new(StaticInstallation(
@@ -634,20 +637,29 @@ async fn interceptor_services_code_shaped_direct_messages_only() {
         .expect("mint");
 
     // Non-code text flows to admission.
-    assert!(
-        !fixture
+    assert_eq!(
+        fixture
             .service
             .intercept(&install(), &direct_message("hello there", "u-1"))
-            .await
+            .await,
+        ChannelPairingInterception::NotHandled
     );
     // Group-triggered code text flows to admission (pairing is DM-only).
     let mut group = direct_message(issue.code.as_str(), "u-1");
     group.trigger = ProductTriggerReason::BotMention;
-    assert!(!fixture.service.intercept(&install(), &group).await);
+    assert_eq!(
+        fixture.service.intercept(&install(), &group).await,
+        ChannelPairingInterception::NotHandled
+    );
 
     // The deep-link `/start CODE` shape is serviced and swallowed.
     let start = direct_message(&format!("/start {}", issue.code.as_str()), "u-1");
-    assert!(fixture.service.intercept(&install(), &start).await);
+    assert_eq!(
+        fixture.service.intercept(&install(), &start).await,
+        ChannelPairingInterception::Consumed(ChannelPairingConsumeOutcome::Paired {
+            user_id: user("alice"),
+        })
+    );
     assert_eq!(
         fixture
             .identity

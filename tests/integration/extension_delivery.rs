@@ -65,8 +65,8 @@ use ironclaw_product_adapters::{
     UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product_workflow::{
-    ConversationBindingService, ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices,
-    RunDeliverySettings,
+    ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
+    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
 };
 use ironclaw_reborn_composition::{
     ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
@@ -1147,7 +1147,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         TELEGRAM_INSTALLATION,
     );
 
-    let dm_body = |update_id: u64, text: &str| {
+    let dm_body = |update_id: u64, chat_id: u64, text: &str| {
         json!({
             "update_id": update_id,
             "message": {
@@ -1155,18 +1155,41 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
                 "date": 1710000000,
                 "text": text,
                 "from": {"id": 424242, "is_bot": false, "first_name": "Pat"},
-                "chat": {"id": 515151, "type": "private"}
+                "chat": {"id": chat_id, "type": "private"}
             }
         })
         .to_string()
     };
+    let telegram_notices = ChannelConnectionNoticePolicy::generic("Telegram");
 
     // 1. Unbound plain DM: fail-closed actor resolution — no turn, no
     //    reply; the generic driver greets the 1:1 with the connect nudge.
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
-            &dm_body(601, "hello, are you there?"),
+            &dm_body(601, 515151, "hello, are you there?"),
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "vendor still gets its 2xx");
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &dm_body(602, 515151, "still there?"),
+            vec![(
+                "X-Telegram-Bot-Api-Secret-Token",
+                TELEGRAM_WEBHOOK_SECRET.to_string(),
+            )],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "vendor still gets its 2xx");
+    let status = ingress
+        .post(
+            TELEGRAM_ROUTE,
+            &dm_body(603, 616161, "hello from another chat"),
             vec![(
                 "X-Telegram-Bot-Api-Secret-Token",
                 TELEGRAM_WEBHOOK_SECRET.to_string(),
@@ -1176,21 +1199,30 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     assert_eq!(status, StatusCode::OK, "vendor still gets its 2xx");
     ingress.drain().await;
     let requests = inbound.captured_network_requests_for_test();
-    let nudge = requests
+    let nudges: Vec<_> = requests
         .iter()
-        .find(|request| {
+        .filter(|request| {
             request.url.ends_with("/sendMessage")
-                && String::from_utf8_lossy(&request.body).contains("connect your account")
+                && String::from_utf8_lossy(&request.body)
+                    .contains(telegram_notices.connect_required.as_str())
         })
-        .unwrap_or_else(|| {
-            panic!(
-                "an unbound 1:1 DM must get the connect nudge; got {:?}",
-                requests.iter().map(|r| r.url.clone()).collect::<Vec<_>>()
-            )
-        });
+        .collect();
+    assert_eq!(
+        nudges.len(),
+        2,
+        "same-chat events share one 30-second nudge reservation while another chat gets its own"
+    );
     assert!(
-        String::from_utf8_lossy(&nudge.body).contains("515151"),
+        nudges
+            .iter()
+            .any(|request| String::from_utf8_lossy(&request.body).contains("515151")),
         "the nudge must land in the sender's own chat"
+    );
+    assert!(
+        nudges
+            .iter()
+            .any(|request| String::from_utf8_lossy(&request.body).contains("616161")),
+        "a distinct conversation must receive its own nudge"
     );
 
     // 2. Web-side mint for the paired user (the production pairing service —
@@ -1217,7 +1249,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
     let status = ingress
         .post(
             TELEGRAM_ROUTE,
-            &dm_body(602, &format!("/start {code}")),
+            &dm_body(604, 515151, &format!("/start {code}")),
             vec![(
                 "X-Telegram-Bot-Api-Secret-Token",
                 TELEGRAM_WEBHOOK_SECRET.to_string(),
@@ -1226,6 +1258,18 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         .await;
     assert_eq!(status, StatusCode::OK);
     ingress.drain().await;
+    let requests = inbound.captured_network_requests_for_test();
+    let paired_feedback = requests
+        .iter()
+        .find(|request| {
+            request.url.ends_with("/sendMessage")
+                && String::from_utf8_lossy(&request.body).contains(telegram_notices.paired.as_str())
+        })
+        .expect("successful pairing must post the descriptor's paired feedback");
+    assert!(
+        String::from_utf8_lossy(&paired_feedback.body).contains("515151"),
+        "paired feedback must land in the code sender's conversation"
+    );
     assert_eq!(
         services
             .pairing_connected_for_test("telegram", &paired_user)
@@ -1233,11 +1277,25 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
         Some(true),
         "consuming the minted code must durably connect the caller"
     );
+    for intercepted_text in [
+        "hello, are you there?",
+        "still there?",
+        "hello from another chat",
+        code.as_str(),
+    ] {
+        assert!(
+            inbound
+                .assert_model_request_contains(intercepted_text)
+                .await
+                .is_err(),
+            "unbound and pairing messages must not consume a scripted model reply: {intercepted_text}"
+        );
+    }
 
     // 4. The SAME actor's next plain DM now resolves through the pairing
     //    binding: a real turn admits under the paired user's scope and the
     //    reply coordinates back over sendMessage.
-    let chat_body = dm_body(603, "what can you do now that we're paired?");
+    let chat_body = dm_body(605, 515151, "what can you do now that we're paired?");
     let vendor_scope = preresolve_vendor_turn_scope(
         &telegram_binding_service,
         &ironclaw_telegram_extension::TelegramChannelAdapter::default(),

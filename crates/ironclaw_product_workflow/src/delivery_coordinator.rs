@@ -46,7 +46,7 @@ use crate::outbound_delivery::{
     ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata,
 };
 
-/// The eight semantic intents (§5.4). Emitters express *what* is being
+/// The nine semantic intents (§5.4). Emitters express *what* is being
 /// communicated; the coordinator decides targeting, persistence, and retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryIntent {
@@ -60,6 +60,8 @@ pub enum DeliveryIntent {
     FailureNotice,
     /// The user must connect an account before the channel works.
     ConnectRequired,
+    /// Pairing or account-connection status feedback.
+    ConnectionStatus,
     /// A transient "working on it" indicator.
     Working,
     /// Remove an earlier delivery (e.g. delete the working indicator).
@@ -93,6 +95,7 @@ impl DeliveryIntent {
             Self::AuthPrompt => "auth-prompt",
             Self::FailureNotice => "failure-notice",
             Self::ConnectRequired => "connect-required",
+            Self::ConnectionStatus => "connection-status",
             Self::Working => "working",
             Self::Cleanup => "cleanup",
             Self::TriggeredDelivery => "triggered-delivery",
@@ -159,10 +162,11 @@ pub struct CoordinatedDeliveryRequest<'a> {
 }
 
 /// One notice-class delivery request (§5.4: `Working`, `Cleanup`,
-/// `FailureNotice`, `ConnectRequired`): a source-routed system notice on the
-/// originating conversation. There is no policy resolution — the target IS
-/// the conversation the triggering inbound event arrived on — but the
-/// attempt is persisted and driven under the same sole-writer rules.
+/// `FailureNotice`, `ConnectRequired`, `ConnectionStatus`): a source-routed
+/// system notice on the originating conversation. There is no policy
+/// resolution — the target IS the conversation the triggering inbound event
+/// arrived on — but the attempt is persisted and driven under the same
+/// sole-writer rules.
 pub struct NoticeDeliveryRequest<'a> {
     pub intent: DeliveryIntent,
     pub scope: TurnScope,

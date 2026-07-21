@@ -445,6 +445,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                 max_wait: options.max_wait,
                 max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
                 max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+                connect_notice_throttle_window: Duration::from_secs(30),
             },
         }),
         channel_pairing: None,
@@ -1242,6 +1243,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            connect_notice_throttle_window: Duration::from_secs(30),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(SlackPreferenceTargetCodec),
@@ -1520,6 +1522,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            connect_notice_throttle_window: Duration::from_secs(30),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(SlackPreferenceTargetCodec),
@@ -1652,6 +1655,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
             max_wait: Duration::from_secs(2),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nonzero"), // safety: static test literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(16).expect("nonzero"), // safety: static test literal is non-zero.
+            connect_notice_throttle_window: Duration::from_secs(30),
         },
         Arc::new(in_memory_backed_outbound_state_store()),
         Arc::new(SlackPreferenceTargetCodec),

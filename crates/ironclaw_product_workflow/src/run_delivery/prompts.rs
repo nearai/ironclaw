@@ -17,9 +17,6 @@ pub(crate) const AUTH_CANCELED_MESSAGE: &str = "Authentication canceled.";
 /// challenge: entering a secret in chat is a security risk, so it must be
 /// done in the web app.
 pub(crate) const AUTH_UNAVAILABLE_MESSAGE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
-/// Greeting for a first-contact direct message from a user who has not yet
-/// connected their account. Fixed, host-authored text only — no agent runs.
-pub(crate) const CONNECT_NUDGE_MESSAGE: &str = "\u{1F44B} To use me, connect your account in the Ironclaw web app: install this channel's extension and finish the connect step, then message me here again.";
 pub(crate) const DELIVERY_TIMEOUT_MESSAGE: &str =
     "This is taking longer than expected — check the WebUI for the result.";
 pub(crate) const DELIVERY_ERROR_MESSAGE: &str =

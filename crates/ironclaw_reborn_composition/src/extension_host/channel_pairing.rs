@@ -37,6 +37,7 @@ use ironclaw_host_api::{
     MountView, ProjectId, ResourceScope, ScopedPath, TenantId, UserId, VirtualPath,
 };
 use ironclaw_product_adapters::AdapterInstallationId;
+use ironclaw_product_workflow::ChannelConnectionNoticePolicy;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -189,7 +190,7 @@ pub(crate) struct ChannelPairingStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ChannelPairingConsumeOutcome {
+pub enum ChannelPairingConsumeOutcome {
     Paired { user_id: UserId },
     AlreadyPairedSameUser { user_id: UserId },
     AlreadyBoundToOtherUser,
@@ -443,6 +444,7 @@ pub(crate) struct ChannelPairingService {
     agent_id: AgentId,
     project_id: Option<ProjectId>,
     extension_id: ExtensionId,
+    connection_notices: ChannelConnectionNoticePolicy,
     deep_link_template: Option<String>,
     store: Arc<FilesystemChannelPairingStore>,
     installation: Arc<dyn ChannelPairingInstallationSource>,
@@ -474,6 +476,7 @@ pub(crate) struct ChannelPairingServiceParts {
     pub(crate) agent_id: AgentId,
     pub(crate) project_id: Option<ProjectId>,
     pub(crate) extension_id: ExtensionId,
+    pub(crate) connection_notices: ChannelConnectionNoticePolicy,
     pub(crate) deep_link_template: Option<String>,
     pub(crate) store: Arc<FilesystemChannelPairingStore>,
     pub(crate) installation: Arc<dyn ChannelPairingInstallationSource>,
@@ -494,6 +497,7 @@ impl ChannelPairingService {
             agent_id: parts.agent_id,
             project_id: parts.project_id,
             extension_id: parts.extension_id,
+            connection_notices: parts.connection_notices,
             deep_link_template: parts.deep_link_template,
             store: parts.store,
             installation: parts.installation,
@@ -509,6 +513,10 @@ impl ChannelPairingService {
 
     pub(crate) fn extension_id(&self) -> &ExtensionId {
         &self.extension_id
+    }
+
+    pub(crate) fn connection_notices(&self) -> &ChannelConnectionNoticePolicy {
+        &self.connection_notices
     }
 
     async fn resolve_deep_link(
@@ -1005,12 +1013,14 @@ impl crate::extension_host::extension_ingress::ChannelPairingInterceptor for Cha
         &self,
         installation_id: &AdapterInstallationId,
         message: &ironclaw_product_adapters::NormalizedInboundMessage,
-    ) -> bool {
+    ) -> crate::extension_host::extension_ingress::ChannelPairingInterception {
+        use crate::extension_host::extension_ingress::ChannelPairingInterception;
+
         if message.trigger != ironclaw_product_adapters::ProductTriggerReason::DirectChat {
-            return false;
+            return ChannelPairingInterception::NotHandled;
         }
         let Some(code) = candidate_code(&message.text) else {
-            return false;
+            return ChannelPairingInterception::NotHandled;
         };
         let provider_user_id =
             installation_scoped_provider_user_id(installation_id, message.actor.id());
@@ -1026,7 +1036,7 @@ impl crate::extension_host::extension_ingress::ChannelPairingInterceptor for Cha
                     error = %error,
                     "pairing interceptor identity lookup failed; message flows to admission"
                 );
-                return false;
+                return ChannelPairingInterception::NotHandled;
             }
         }
         let outcome = Box::pin(self.consume(
@@ -1045,15 +1055,15 @@ impl crate::extension_host::extension_ingress::ChannelPairingInterceptor for Cha
                     outcome = ?outcome,
                     "pairing code consumed from channel inbound"
                 );
-                true
+                ChannelPairingInterception::Consumed(outcome)
             }
             Err(error) => {
                 tracing::warn!(
                     target: "ironclaw::reborn::channel_pairing",
                     error = %error,
-                    "pairing consume failed; code message swallowed for retry"
+                    "pairing consume failed; code message acknowledged without feedback"
                 );
-                true
+                ChannelPairingInterception::Failed
             }
         }
     }

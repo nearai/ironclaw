@@ -38,13 +38,15 @@ use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveredGateRouteStore, OutboundStateStore,
 };
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
+    AdapterInstallationId, ExternalConversationRef, ExternalEventId, ProductAdapterId,
+    ProductInboundAck, ProductInboundEnvelope,
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
-    BlockedAuthFlowCanceller, BlockedAuthPromptSource, ConversationBindingService,
-    DefaultInboundTurnService, DefaultProductWorkflow, DeliveryCoordinator, IdempotencyLedger,
-    PreferenceTargetCodec, ProductActorUserResolutionRequest, ProductActorUserResolver,
+    BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    DeliveryCoordinator, IdempotencyLedger, PreferenceTargetCodec,
+    ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
     ProductWorkflowError, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
     RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
@@ -54,6 +56,7 @@ use ironclaw_threads::SessionThreadService;
 use ironclaw_turns::{TurnCoordinator, TurnScope};
 
 use crate::extension_host::channel_config::ChannelConfigService;
+use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 use crate::extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
     ExtensionIngressRegistry, GenericChannelInboundSink, InboundPayloadClassifier,
@@ -828,11 +831,22 @@ impl GenericChannelHostAssembly {
             blocked_auth_prompts: delivery.blocked_auth_prompts.clone(),
             auth_flow_cancel: delivery.auth_flow_cancel.clone(),
         };
-        let observer = Arc::new(RunDeliveryObserver::with_settings(
+        let connection_notices = self
+            .deps
+            .channel_pairing
+            .as_ref()
+            .and_then(|registry| registry.get(&active.extension_id))
+            .map(|service| service.connection_notices().clone())
+            .unwrap_or_else(|| ChannelConnectionNoticePolicy::generic(&active.resolved.name));
+        let observer = Arc::new(RunDeliveryObserver::with_settings_and_connection_notices(
             services,
             delivery.settings,
+            connection_notices.clone(),
         ));
-        Ok(Arc::new(RunDeliveryPostAdmissionObserver(observer)))
+        Ok(Arc::new(RunDeliveryPostAdmissionObserver {
+            observer,
+            connection_notices,
+        }))
     }
 
     /// The live conversation-binding service the assembly registered for one
@@ -972,12 +986,38 @@ impl IngressSecretsPort for ChannelConfigIngressSecrets {
 
 /// Adapts the generic run-delivery observer onto the generic sink's
 /// post-admission observer seam.
-struct RunDeliveryPostAdmissionObserver(Arc<RunDeliveryObserver>);
+struct RunDeliveryPostAdmissionObserver {
+    observer: Arc<RunDeliveryObserver>,
+    connection_notices: ChannelConnectionNoticePolicy,
+}
 
 #[async_trait]
 impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
     async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
-        self.0.observe_ack(envelope, ack).await;
+        self.observer.observe_ack(envelope, ack).await;
+    }
+
+    async fn observe_pairing_outcome(
+        &self,
+        conversation: ExternalConversationRef,
+        event_id: ExternalEventId,
+        outcome: ChannelPairingConsumeOutcome,
+    ) {
+        let text = match outcome {
+            ChannelPairingConsumeOutcome::Paired { .. } => &self.connection_notices.paired,
+            ChannelPairingConsumeOutcome::AlreadyPairedSameUser { .. } => {
+                &self.connection_notices.already_paired_same_user
+            }
+            ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser => {
+                &self.connection_notices.already_bound_to_other_user
+            }
+            ChannelPairingConsumeOutcome::ExpiredOrUnknown => {
+                &self.connection_notices.expired_or_unknown
+            }
+        };
+        self.observer
+            .post_connection_status_notice(&conversation, &event_id, text)
+            .await;
     }
 
     async fn observe_error(
@@ -985,7 +1025,7 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
         envelope: ProductInboundEnvelope,
         error: ironclaw_product_adapters::ProductAdapterError,
     ) {
-        self.0.observe_error(envelope, error).await;
+        self.observer.observe_error(envelope, error).await;
     }
 }
 
