@@ -233,24 +233,35 @@ Uses the Responses API at `chatgpt.com/backend-api/codex/responses` with ChatGPT
 **Responses session planning:** The provider contains a bounded, in-memory
 request planner for a future retained-transport lane. IronClaw's complete
 normalized transcript remains authoritative; the planner stores only a
-provider response ID and structural SHA-256 item fingerprints. It may send
+provider response ID and structural SHA-256 item fingerprints
+(`ResponsesCursor` and `fingerprint_items` in
+`src/openai_responses_session.rs`). It may send
 `previous_response_id` plus an append-only suffix only when an explicit,
 UUID-valid `agent_loop_session_id` metadata discriminator selects the same
 parent-loop session and the new transcript structurally extends the acknowledged
-prefix. Generic `run_id` / `turn_id` metadata is deliberately insufficient
+prefix (`ResponsesSessionKey::from_metadata` and `ResponsesSessionState::plan`
+in `src/openai_responses_session.rs`). Generic `run_id` / `turn_id` metadata is
+deliberately insufficient
 because system-inference calls can share those IDs. Missing identity, missing
 cursor/output, desynchronization, unsupported response output, incomplete
 responses, failures, account changes, and a fully occupied session bound all
-fall back to full replay. The bounded registry never evicts an active session,
-so concurrent calls cannot split one identity across two cursor states.
+fall back to full replay (`ResponsesSessionState::commit` / `reset`,
+`ResponsesSessionRegistry::session_for_metadata`, and
+`OpenAiCodexProvider::send_completion_request`). The bounded registry never
+evicts an active session, so concurrent calls cannot split one identity across
+two cursor states (`ResponsesSessionRegistry::session_for_metadata`). Account
+changes are ordered with in-flight session requests and clear all cursor hints
+before new credentials become visible (`OpenAiCodexProvider::update_token`).
 
 The current production Codex HTTP constructor leaves this optimization disabled:
 it uses stateless HTTP with `store: false`, which does not establish the retention
-contract needed for reliable response-ID chaining. Do not enable it or change
-`store` as a shortcut. A future persistent Responses transport must explicitly
-enable the provider-private capability and the runner must supply the dedicated
-parent-loop session identity. This lane is same-run tool-loop state only and does
-not imply cross-turn continuity.
+contract needed for reliable response-ID chaining
+(`OpenAiCodexProvider::new` and `build_request_body_with_input`). Do not enable
+it or change `store` as a shortcut. A future persistent Responses transport must
+explicitly enable the provider-private capability; its runner integration must
+also add a dedicated parent-loop session-identity writer. No upstream writer is
+implemented by this provider-private slice. This lane is same-run tool-loop
+state only and does not imply cross-turn continuity.
 
 ## Provider Chain Construction
 
