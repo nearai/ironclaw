@@ -4,51 +4,47 @@ import { Meta } from "@storybook/addon-docs/blocks";
 
 # IronClaw Design System
 
-Radix-based, shadcn-patterned React components; the canonical `--v2-*`
-design tokens; and a restrained motion vocabulary. One import surface for
-every IronClaw UI: the WebUI v2 agent workspace consumes this package today,
-and any future repository (marketing, sub-UIs, third-party hosts) can import
-the same package for brand-consistent UI.
+React components built on Radix with shadcn-style patterns, the `--v2-*`
+design tokens, and a small motion vocabulary. The agent workspace consumes
+this package today; anything else we build (marketing, sub-UIs, other
+repos) can import the same package and look like IronClaw.
 
-**Why this exists** (per the product design review): a strong, agent-legible
-system means small UI changes can be delegated — to engineers *and* to
-agents — without a design review, because the decision space is already
-constrained. This Storybook is the living spec.
+The point of all this: when the design decisions are already made and
+enforced by tokens, small UI changes stop needing a design review. An
+engineer — or an agent — can ship them safely. This Storybook is the
+living spec.
 
-## Architecture
+## How it's put together
 
-- **Radix primitives** underneath every interactive component: Dialog,
-  Select, DropdownMenu, Tabs, Tooltip, Popover, Checkbox, Switch,
-  RadioGroup, Slider, Avatar, Separator, ScrollArea. Keyboard navigation,
-  focus management, and ARIA semantics come from the primitive, not from
-  bespoke code.
-- **shadcn patterns** for the styling layer: CVA variants, a `cn()`
-  merger (clsx + tailwind-merge), Tailwind classes bound to CSS custom
-  properties.
-- **Tokens, not values**: colors, radii, control heights, spacing, type
-  sizes, shadows, durations, and z-layers are all `--v2-*` custom
-  properties (see the Tokens section). Components never restate raw values.
+- **Radix underneath.** Dialog, Select, DropdownMenu, Tabs, Tooltip,
+  Popover, Checkbox, Switch, RadioGroup, Slider, Avatar, Separator,
+  ScrollArea. Keyboard navigation, focus management, and ARIA come from
+  the primitive, not from code we wrote.
+- **shadcn on top.** CVA variants, `cn()` (clsx + tailwind-merge), and
+  Tailwind classes bound to CSS custom properties.
+- **Tokens, not values.** Colors, radii, control heights, spacing, type
+  sizes, shadows, durations, z-layers — all `--v2-*` custom properties.
+  Components never restate a raw value.
 
-## Installation
+## Installing it
 
-Inside the ironclaw repo the frontend app already consumes the package via
-pnpm workspaces (`"@ironclaw/design-system": "workspace:*"`). From another
-repository, add it as a git dependency or link a local checkout:
+Inside the ironclaw repo the app already gets it through pnpm workspaces
+(`"@ironclaw/design-system": "workspace:*"`). From another repo, link a
+local checkout or add it as a file/git dependency:
 
 ```bash
-# link a local checkout for development (symlink)
+# link a local checkout while developing
 pnpm link /path/to/ironclaw/crates/ironclaw_webui/frontend/packages/design-system
 
-# or as a file dependency
+# or pin it as a file dependency
 # "@ironclaw/design-system": "file:../ironclaw/crates/ironclaw_webui/frontend/packages/design-system"
 ```
 
-The package is **source-first** — `exports` point at TypeScript source, so
-a bundler that compiles TSX from `node_modules` (Vite does out of the box)
-is expected. `pnpm build` also emits a compiled ESM bundle + declarations
-in `dist/` for hosts that cannot.
+The package ships TypeScript source (`exports` point at `.ts`), which any
+Vite-style bundler handles out of the box. If yours can't, `pnpm build`
+emits a compiled ESM bundle with declarations in `dist/`.
 
-## Setup
+## Wiring it up
 
 ```css
 /* your app.css — Tailwind v4 host */
@@ -57,12 +53,12 @@ in `dist/` for hosts that cannot.
 @source "../node_modules/@ironclaw/design-system/src";
 ```
 
-Set `data-theme="light" | "dark"` on `<html>` (or use the exported
-`useInterfaceTheme` hook). Localized hosts can bridge their translator
-through `DesignSystemI18nProvider`; without it, built-in strings fall back
-to English.
+Set `data-theme="light" | "dark"` on `<html>`, or use the exported
+`useInterfaceTheme` hook. If your app is localized, pass your translator
+through `DesignSystemI18nProvider` — otherwise the couple of built-in
+strings (modal close, confirm cancel) fall back to English.
 
-## Usage
+## Using it
 
 ```tsx
 import { Button, Card, Modal, SelectMenu, Tabs } from "@ironclaw/design-system";
@@ -70,7 +66,8 @@ import { COLOR_TOKENS, STATUS_CANON } from "@ironclaw/design-system/tokens";
 import { MOTION_DURATION } from "@ironclaw/design-system/motion";
 ```
 
-Every component page in this Storybook shows the variants, a props table,
-and the story source (the `Show code` toggle under each canvas) — use those
-as copy-paste starting points. The `/playground` route in the running WebUI
-renders the same components inside the real app shell.
+Every component page here shows the variants, a props table, and the
+story source (`Show code` under each canvas) — copy-paste from those. The
+`/playground` route in the running WebUI renders the same components
+inside the real app shell if you want to check something against actual
+chrome.

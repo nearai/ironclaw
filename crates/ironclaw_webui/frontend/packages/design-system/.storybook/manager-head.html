@@ -27,3 +27,26 @@
     color: #090909; /* --v2-ink */
   }
 </style>
+<script>
+  // Storybook's stock cog glyph (@storybook/icons CogIcon) draws its inner
+  // ring as an open arc — at 14px it reads as a broken stroke. Keep the
+  // stock icon but close the ring: swap only that inner path's geometry
+  // for a clean donut (outer r=3, inner r=2, same center).
+  (function () {
+    var FIXED_RING =
+      "M7 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6Zm0 1a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z";
+    function closeCogRing() {
+      document
+        .querySelectorAll('path[d^="M5.586 5.586"]')
+        .forEach(function (path) {
+          path.setAttribute("d", FIXED_RING);
+          path.setAttribute("fill-rule", "evenodd");
+        });
+    }
+    closeCogRing();
+    new MutationObserver(closeCogRing).observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
+  })();
+</script>
