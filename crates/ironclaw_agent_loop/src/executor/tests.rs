@@ -2089,9 +2089,10 @@ fn sanitize_result_ref_suffix_handles_empty_special_chars_and_truncation() {
 async fn exit_stage_no_progress_fails_when_nudge_disabled() {
     // Production default: the driver-specific nudge gate is off, so a no-progress
     // stop produces a typed `NoProgressDetected` failure with a Final checkpoint —
-    // NOT a canned "I stopped" reply finalized as a completed turn. No assistant
-    // reply is issued (no model call), and the failure carries the honest category
-    // the product layer renders deterministically.
+    // NOT a canned "I stopped" reply finalized as a completed turn. The failed
+    // branch attaches a best-effort failure explanation (§5a.2); with no model
+    // response available the explanation fails soft and the typed failure still
+    // carries the honest category the product layer renders deterministically.
     let host = MockHost::new(Vec::new());
     let family = crate::families::default();
     let ctx = StageContext {
@@ -2117,12 +2118,29 @@ async fn exit_stage_no_progress_fails_when_nudge_disabled() {
             // Final checkpoint is mandatory for the failed exit to validate
             // through `verify_failure_evidence` (parity with the Aborted arm).
             assert!(failed.checkpoint_id.is_some());
+            assert!(
+                failed.explanation_message_refs.is_empty(),
+                "a failed explanation model call must fail soft with no refs"
+            );
         }
         other => panic!("expected typed no-progress failure, got {other:?}"),
     }
+    // The single model call is the best-effort failure explanation (§5a.2),
+    // never the nudge: the nudge gate is off, so the nudge counter stays 0 —
+    // and no assistant reply was finalized.
+    assert_eq!(
+        host.model_requests().len(),
+        1,
+        "only the best-effort failure-explanation call may be issued"
+    );
+    assert_eq!(
+        final_staged_state(&host).final_answer_nudges_used,
+        0,
+        "nudge gate disabled must not attempt a nudge"
+    );
     assert!(
-        host.model_requests().is_empty(),
-        "nudge gate disabled must not issue a model call"
+        host.finalized_assistant_messages().is_empty(),
+        "no assistant reply is finalized when the explanation call fails"
     );
 }
 
@@ -2174,10 +2192,13 @@ async fn no_progress_nudge_synthesizes_reply_when_gate_enabled() {
 
 #[tokio::test]
 async fn no_progress_skips_nudge_when_gate_disabled() {
-    // Gate OFF: even with a model reply available, no tool-free nudge call is
-    // issued and the no-progress stop terminates as a typed failure (production
-    // default) — not a canned reply, not a completed turn.
-    let host = MockHost::new(vec![reply_response_with_text("unused")]);
+    // Gate OFF: no tool-free nudge call is issued and the no-progress stop
+    // terminates as a typed failure (production default) — not a canned reply,
+    // not a completed turn. The available model reply is consumed by the
+    // failure-explanation call (§5a.2) and referenced from the failed exit.
+    let host = MockHost::new(vec![reply_response_with_text(
+        "explanation after no progress",
+    )]);
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -2196,11 +2217,26 @@ async fn no_progress_skips_nudge_when_gate_disabled() {
         .await
         .expect("exit stage");
 
-    assert!(
-        host.model_requests().is_empty(),
-        "no nudge model call when gate disabled"
+    // Exactly one model call — the failure explanation, not a nudge (the nudge
+    // counter stays 0 and the run still FAILS; a successful nudge would have
+    // completed the run instead).
+    assert_eq!(host.model_requests().len(), 1);
+    assert_eq!(
+        final_staged_state(&host).final_answer_nudges_used,
+        0,
+        "no nudge attempt when the gate is disabled"
     );
-    assert!(matches!(exit, LoopExit::Failed(_)));
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert_eq!(
+                failed.explanation_message_refs.len(),
+                1,
+                "the failure explanation must be referenced from the failed exit"
+            );
+        }
+        other => panic!("expected typed no-progress failure, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -2247,8 +2283,13 @@ async fn budget_iteration_limit_nudges_to_completed_when_gate_enabled() {
 #[tokio::test]
 async fn nudge_respects_one_shot_cap() {
     // With the cap already spent, the no-progress exit must not issue another
-    // model call and terminates as a typed failure (no canned reply).
-    let host = MockHost::new(vec![reply_response_with_text("unused")]).with_driver_nudges_enabled();
+    // NUDGE model call and terminates as a typed failure (no canned reply).
+    // The failed branch still runs its failure-explanation call (§5a.2), which
+    // consumes the scripted reply as the explanation message.
+    let host = MockHost::new(vec![reply_response_with_text(
+        "explanation after capped nudge",
+    )])
+    .with_driver_nudges_enabled();
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -2268,11 +2309,22 @@ async fn nudge_respects_one_shot_cap() {
         .await
         .expect("exit stage");
 
-    assert!(
-        host.model_requests().is_empty(),
-        "capped nudge must not issue another model call"
+    // The nudge cap held: the counter did not advance, the run FAILED (a
+    // successful nudge would have completed it), and the single model call is
+    // the failure explanation.
+    assert_eq!(
+        final_staged_state(&host).final_answer_nudges_used,
+        1,
+        "capped nudge must not attempt another nudge"
     );
-    assert!(matches!(exit, LoopExit::Failed(_)));
+    assert_eq!(host.model_requests().len(), 1);
+    match exit {
+        LoopExit::Failed(failed) => {
+            assert_eq!(failed.reason_kind, LoopFailureKind::NoProgressDetected);
+            assert_eq!(failed.explanation_message_refs.len(), 1);
+        }
+        other => panic!("expected typed no-progress failure, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -2433,10 +2485,13 @@ async fn no_progress_nudge_model_failure_falls_back_to_failed_exit() {
         .await
         .expect("nudge model failure must not propagate out of the exit stage");
 
+    // Two model calls: the nudge attempt (scripted error) and the best-effort
+    // failure-explanation attempt (§5a.2, script exhausted → fails soft).
     assert_eq!(
         host.model_requests().len(),
-        1,
-        "nudge attempted exactly one model call before failing open"
+        2,
+        "nudge attempts one model call before failing open; the failed branch \
+         then attempts its best-effort failure explanation"
     );
     assert!(
         matches!(exit, LoopExit::Failed(_)),
@@ -6507,10 +6562,15 @@ async fn resume_with_still_missing_credentials_blocks_again_without_model_turn()
 #[tokio::test]
 async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
     // Bug scenario: auth record stored for capability A → resume re-dispatches A
-    // → re-dispatch returns ApprovalRequired → GateStage runs with kind Approval
-    // → planner returns SkipAndContinue. Without the fix, pending_auth_resume
-    // for A survives, and the next prompt iteration re-dispatches A again —
-    // potential infinite re-dispatch loop with no model turn.
+    // → re-dispatch blocks again → GateStage runs → planner returns
+    // SkipAndContinue. Without the fix, pending_auth_resume for A survives, and
+    // the next prompt iteration re-dispatches A again — potential infinite
+    // re-dispatch loop with no model turn.
+    //
+    // Driven through an Auth gate: SkipAndContinue is only a valid outcome for
+    // Auth/Resource gates now that GateStage enforces
+    // `GateOutcome::validate_for_gate_kind` (§5a.1) — an Approval-gate skip
+    // fails the run as DriverBug (covered by the executor failure matrix).
     //
     // This test exercises GateStage directly (not the full executor) so we can
     // seed pending_auth_resume before the gate runs, mirroring the existing
@@ -6544,7 +6604,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
         ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
     };
-    let gate_ref = LoopGateRef::new("gate:approval-skip").expect("valid");
+    let gate_ref = LoopGateRef::new("gate:auth-skip-stale").expect("valid");
 
     let step = GateStage
         .process(
@@ -6552,7 +6612,7 @@ async fn gate_stage_skip_and_continue_clears_stale_pending_auth_resume() {
             GateInput {
                 state,
                 call,
-                kind: GateKind::Approval,
+                kind: GateKind::Auth,
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
@@ -6645,6 +6705,8 @@ async fn gate_stage_abort_clears_stale_pending_auth_resume() {
 async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
     // The clear is capability-scoped: a SkipAndContinue for capability B must NOT
     // erase a pending_auth_resume record belonging to capability A.
+    // Driven through an Auth gate (a valid skip kind) since GateStage now
+    // enforces `GateOutcome::validate_for_gate_kind` (§5a.1).
     let family = family_with_gate_outcome(GateOutcome::SkipAndContinue {
         gate: empty_gate_state(),
     });
@@ -6675,7 +6737,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
         ParentLoopOutput::CapabilityCalls(mut calls) => calls.remove(0),
         ParentLoopOutput::AssistantReply(_) => panic!("expected provider call fixture"),
     };
-    let gate_ref = LoopGateRef::new("gate:approval-skip-other").expect("valid");
+    let gate_ref = LoopGateRef::new("gate:auth-skip-other").expect("valid");
 
     let step = GateStage
         .process(
@@ -6683,7 +6745,7 @@ async fn gate_stage_skip_does_not_clear_auth_resume_for_different_capability() {
             GateInput {
                 state,
                 call,
-                kind: GateKind::Approval,
+                kind: GateKind::Auth,
                 gate_ref,
                 credential_requirements: Vec::new(),
                 approval_resume: None,
