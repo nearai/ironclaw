@@ -135,6 +135,41 @@ impl HostManagedModelGateway for StaticReplyGateway {
     }
 }
 
+#[derive(Debug)]
+struct PausedReplyGateway {
+    reply: &'static str,
+    release: tokio::sync::Semaphore,
+}
+
+impl PausedReplyGateway {
+    fn new(reply: &'static str) -> Self {
+        Self {
+            reply,
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[async_trait::async_trait]
+impl HostManagedModelGateway for PausedReplyGateway {
+    async fn stream_model(
+        &self,
+        _request: HostManagedModelRequest,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        let permit = self
+            .release
+            .acquire()
+            .await
+            .expect("paused test gateway semaphore remains open");
+        permit.forget();
+        Ok(HostManagedModelResponse::assistant_reply(self.reply))
+    }
+}
+
 /// Post-admission observer that records every ack AND forwards to the REAL
 /// generic run-delivery observer — the exact composition `serve` wires
 /// (`RunDeliveryObserverAdapter`), plus recording so the tests can assert
@@ -326,7 +361,6 @@ impl VendorIngress {
             classifier: None,
             workflow: harness.product_workflow_for_test(),
             observer: Some(observer as Arc<dyn PostAdmissionObserver>),
-            pairing: None,
         }));
         parts.registry.register(
             extension_id,
@@ -937,10 +971,17 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
         &body,
     )
     .await;
+    let paused_gateway = Arc::new(PausedReplyGateway::new(TELEGRAM_REPLY));
     inbound.register_scope_gateway_for_test(
         vendor_scope.clone(),
-        Arc::new(StaticReplyGateway(TELEGRAM_REPLY)),
+        Arc::clone(&paused_gateway) as Arc<dyn HostManagedModelGateway>,
     );
+
+    let send_message_count_before_rejected_update = inbound
+        .captured_network_requests_for_test()
+        .iter()
+        .filter(|request| request.url.ends_with("/sendMessage"))
+        .count();
 
     // A wrong shared secret is rejected on the wire before any admission —
     // the production secrets port resolved the CONFIGURED webhook secret and
@@ -954,12 +995,14 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     ingress.drain().await;
-    assert!(
-        !inbound
+    assert_eq!(
+        inbound
             .captured_network_requests_for_test()
             .iter()
-            .any(|request| request.url.ends_with("/sendMessage")),
-        "a rejected update must not admit a turn or deliver a reply"
+            .filter(|request| request.url.ends_with("/sendMessage"))
+            .count(),
+        send_message_count_before_rejected_update,
+        "a rejected update must not add a turn delivery; earlier pairing feedback is preserved"
     );
 
     let status = ingress
@@ -973,6 +1016,34 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
         )
         .await;
     assert_eq!(status, StatusCode::OK, "the signed update must be accepted");
+
+    // The model is deliberately paused so the generic observer must surface
+    // a working indicator through the real Telegram adapter before the final
+    // reply exists.
+    for _ in 0..200 {
+        if inbound
+            .captured_network_requests_for_test()
+            .iter()
+            .any(|request| {
+                request.url.ends_with("/sendMessage")
+                    && String::from_utf8_lossy(&request.body).contains("Ironclaw is thinking...")
+            })
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let requests = inbound.captured_network_requests_for_test();
+    let working = requests
+        .iter()
+        .find(|request| {
+            request.url.ends_with("/sendMessage")
+                && String::from_utf8_lossy(&request.body).contains("Ironclaw is thinking...")
+        })
+        .expect("a running Telegram turn must post the generic working indicator");
+    assert!(String::from_utf8_lossy(&working.body).contains("8675309"));
+
+    paused_gateway.release();
     ingress.drain().await;
 
     // Wire seam: the coordinated reply reached sendMessage on the Bot API
@@ -997,6 +1068,17 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
     assert!(
         String::from_utf8_lossy(&send_message.body).contains("8675309"),
         "the reply must target the originating chat"
+    );
+    let delete_message = requests
+        .iter()
+        .find(|request| request.url.ends_with("/deleteMessage"))
+        .expect("the final reply must retract the Telegram working indicator");
+    let delete_body: serde_json::Value =
+        serde_json::from_slice(&delete_message.body).expect("deleteMessage body is JSON");
+    assert_eq!(delete_body["chat_id"], "8675309");
+    assert_eq!(
+        delete_body["message_id"], 4242,
+        "cleanup uses the authoritative message_id returned by sendMessage"
     );
 
     // Store seam: terminal Delivered attempt under the vendor scope.

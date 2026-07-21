@@ -247,8 +247,13 @@ async fn send_telegram_message(
         }
     };
     if parsed.ok {
+        let Some(message) = parsed.result else {
+            return PartDeliveryOutcome::Retryable {
+                reason: "sendMessage response omitted result.message_id evidence".to_string(),
+            };
+        };
         return PartDeliveryOutcome::Sent {
-            vendor_message_ref: parsed.result.map(|message| message.message_id.to_string()),
+            vendor_message_ref: Some(message.message_id.to_string()),
         };
     }
     let description = parsed
@@ -267,6 +272,7 @@ struct TelegramDeleteMessageResponse {
     ok: bool,
     error_code: Option<u16>,
     description: Option<String>,
+    result: Option<bool>,
 }
 
 /// Retract an earlier post (`deleteMessage`). The `vendor_message_ref` is
@@ -294,8 +300,16 @@ async fn delete_telegram_message(
         }
     };
     if parsed.ok {
-        return PartDeliveryOutcome::Sent {
-            vendor_message_ref: None,
+        return match parsed.result {
+            Some(true) => PartDeliveryOutcome::Sent {
+                vendor_message_ref: None,
+            },
+            Some(false) => PartDeliveryOutcome::Permanent {
+                reason: "deleteMessage response reported result:false".to_string(),
+            },
+            None => PartDeliveryOutcome::Retryable {
+                reason: "deleteMessage response omitted result evidence".to_string(),
+            },
         };
     }
     let description = parsed
@@ -696,6 +710,30 @@ mod deliver_tests {
     }
 
     #[tokio::test]
+    async fn deliver_retract_requires_true_result_evidence() {
+        for body in [r#"{"ok":true,"result":false}"#, r#"{"ok":true}"#] {
+            let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(body)]);
+            let report = TelegramChannelAdapter::default()
+                .deliver(
+                    envelope(
+                        vec![OutboundPart::Retract {
+                            vendor_message_ref: "42".to_string(),
+                        }],
+                        None,
+                    ),
+                    &egress,
+                )
+                .await
+                .expect("deliver drives");
+
+            assert!(
+                !matches!(&report.parts[0], PartDeliveryOutcome::Sent { .. }),
+                "deleteMessage must not report Sent without result:true: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn deliver_retract_with_non_numeric_ref_is_permanent_without_egress() {
         let egress = ScriptedEgress::new(Vec::new());
         let report = TelegramChannelAdapter::default()
@@ -752,6 +790,23 @@ mod deliver_tests {
         assert_eq!(body["chat_id"], "8675309");
         assert_eq!(body["text"], "hello");
         assert_eq!(body["message_thread_id"], 77, "numeric topic threads");
+    }
+
+    #[tokio::test]
+    async fn deliver_send_requires_message_id_evidence() {
+        let egress = ScriptedEgress::new(vec![ScriptedEgress::ok(r#"{"ok":true}"#)]);
+        let report = TelegramChannelAdapter::default()
+            .deliver(
+                envelope(vec![OutboundPart::Text("hello".to_string())], None),
+                &egress,
+            )
+            .await
+            .expect("deliver drives");
+
+        assert!(
+            !matches!(&report.parts[0], PartDeliveryOutcome::Sent { .. }),
+            "sendMessage must not report Sent without result.message_id"
+        );
     }
 
     #[tokio::test]

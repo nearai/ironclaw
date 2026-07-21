@@ -42,6 +42,8 @@ use crate::{
     ChannelConnectionNoticePolicy, ProductWorkflowError, ResolveBindingRequest, ResolvedBinding,
 };
 
+const CONNECT_NOTICE_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// One actionable run state reduced to a semantic notification: the intent,
 /// its channel-neutral text, and the routing bookkeeping it needs.
 struct ActionableNotification {
@@ -882,18 +884,17 @@ impl RunDeliveryObserver {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         reservations.retain(|_, reserved_at| {
-            now.duration_since(*reserved_at) < self.settings.connect_notice_throttle_window
+            now.duration_since(*reserved_at) < CONNECT_NOTICE_THROTTLE_WINDOW
         });
         if reservations.contains_key(&conversation_key) {
             return None;
         }
-        if reservations.len() >= CONNECT_NUDGE_RESERVATION_CAP
-            && let Some(oldest) = reservations
-                .iter()
-                .min_by_key(|(_, reserved_at)| **reserved_at)
-                .map(|(key, _)| key.clone())
-        {
-            reservations.remove(&oldest);
+        if reservations.len() >= CONNECT_NUDGE_RESERVATION_CAP {
+            // Fail closed at saturation. Entries can represent deliveries
+            // currently awaiting vendor evidence, so evicting an unexpired
+            // reservation would reopen that conversation to a concurrent
+            // duplicate nudge.
+            return None;
         }
         reservations.insert(conversation_key, now);
         Some(now)

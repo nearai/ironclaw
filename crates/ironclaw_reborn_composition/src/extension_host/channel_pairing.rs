@@ -190,7 +190,7 @@ pub(crate) struct ChannelPairingStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChannelPairingConsumeOutcome {
+pub(crate) enum ChannelPairingConsumeOutcome {
     Paired { user_id: UserId },
     AlreadyPairedSameUser { user_id: UserId },
     AlreadyBoundToOtherUser,

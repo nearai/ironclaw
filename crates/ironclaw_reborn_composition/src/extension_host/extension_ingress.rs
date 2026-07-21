@@ -55,14 +55,6 @@ pub(crate) fn reserved_fixed_ingress_routes() -> BTreeSet<String> {
 pub trait PostAdmissionObserver: Send + Sync {
     async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck);
 
-    async fn observe_pairing_outcome(
-        &self,
-        _conversation: ExternalConversationRef,
-        _event_id: ExternalEventId,
-        _outcome: ChannelPairingConsumeOutcome,
-    ) {
-    }
-
     async fn observe_error(
         &self,
         _envelope: ProductInboundEnvelope,
@@ -307,14 +299,14 @@ impl InboundSink for ExtensionIngressRegistry {
 /// pairing seam BEFORE workflow admission, so a pairing code is consumed
 /// instead of becoming (or failing as) a turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ChannelPairingInterception {
+pub(crate) enum ChannelPairingInterception {
     NotHandled,
     Consumed(ChannelPairingConsumeOutcome),
     Failed,
 }
 
 #[async_trait]
-pub trait ChannelPairingInterceptor: Send + Sync {
+pub(crate) trait ChannelPairingInterceptor: Send + Sync {
     async fn intercept(
         &self,
         installation_id: &AdapterInstallationId,
@@ -335,8 +327,34 @@ pub struct ChannelInboundSinkConfig {
     pub workflow: Arc<dyn ProductWorkflow>,
     /// Optional post-admission follow-up (e.g. final-reply delivery).
     pub observer: Option<Arc<dyn PostAdmissionObserver>>,
-    /// Optional pre-admission pairing gate (`WebGeneratedCode` channels).
-    pub pairing: Option<Arc<dyn ChannelPairingInterceptor>>,
+}
+
+#[derive(Clone)]
+pub(super) enum ChannelPairingOutcomeObserver {
+    RunDelivery(Arc<crate::extension_host::channel_host::RunDeliveryPostAdmissionObserver>),
+    #[cfg(test)]
+    Recording(Arc<std::sync::Mutex<Vec<ChannelPairingConsumeOutcome>>>),
+}
+
+impl ChannelPairingOutcomeObserver {
+    async fn observe(
+        &self,
+        conversation: ExternalConversationRef,
+        event_id: ExternalEventId,
+        outcome: ChannelPairingConsumeOutcome,
+    ) {
+        match self {
+            Self::RunDelivery(observer) => {
+                observer
+                    .observe_pairing_outcome(conversation, event_id, outcome)
+                    .await;
+            }
+            #[cfg(test)]
+            Self::Recording(outcomes) => {
+                outcomes.lock().expect("outcomes lock").push(outcome);
+            }
+        }
+    }
 }
 
 /// The generic [`InboundSink`]: builds the trusted inbound envelope from a
@@ -346,6 +364,8 @@ pub struct ChannelInboundSinkConfig {
 /// tasks drained at shutdown.
 pub struct GenericChannelInboundSink {
     config: ChannelInboundSinkConfig,
+    pairing: Option<Arc<dyn ChannelPairingInterceptor>>,
+    pairing_outcome_observer: Option<ChannelPairingOutcomeObserver>,
     observer_tasks: tokio::sync::Mutex<JoinSet<()>>,
 }
 
@@ -353,8 +373,20 @@ impl GenericChannelInboundSink {
     pub fn new(config: ChannelInboundSinkConfig) -> Self {
         Self {
             config,
+            pairing: None,
+            pairing_outcome_observer: None,
             observer_tasks: tokio::sync::Mutex::new(JoinSet::new()),
         }
+    }
+
+    pub(super) fn with_pairing(
+        mut self,
+        pairing: Arc<dyn ChannelPairingInterceptor>,
+        observer: Option<ChannelPairingOutcomeObserver>,
+    ) -> Self {
+        self.pairing = Some(pairing);
+        self.pairing_outcome_observer = observer;
+        self
     }
 
     fn permanent(reason: impl std::fmt::Display) -> InboundSinkError {
@@ -412,20 +444,18 @@ impl InboundSink for GenericChannelInboundSink {
         // Pairing pre-admission gate: a serviced pairing interaction is
         // durably reflected in the pairing/identity stores, not the turn
         // ledger — the vendor still gets its 2xx.
-        if let Some(pairing) = &self.config.pairing {
+        if let Some(pairing) = &self.pairing {
             // Boxed: the consume path (CAS claim → identity bind → completion
             // fan-out) is a deep async subtree nested inside the admission
             // future; boxing keeps instrumented builds off the stack limit.
             match Box::pin(pairing.intercept(&installation, &message)).await {
                 ChannelPairingInterception::NotHandled => {}
                 ChannelPairingInterception::Consumed(outcome) => {
-                    if let Some(observer) = self.config.observer.clone() {
+                    if let Some(observer) = self.pairing_outcome_observer.clone() {
                         let conversation = message.conversation.clone();
                         let event_id = message.event_id.clone();
                         self.spawn_observer(async move {
-                            observer
-                                .observe_pairing_outcome(conversation, event_id, outcome)
-                                .await;
+                            observer.observe(conversation, event_id, outcome).await;
                         })
                         .await;
                     }
@@ -835,31 +865,6 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct RecordingPairingObserver {
-        outcomes: std::sync::Mutex<Vec<ChannelPairingConsumeOutcome>>,
-    }
-
-    impl RecordingPairingObserver {
-        fn take_pairing_outcome(&self) -> Option<ChannelPairingConsumeOutcome> {
-            self.outcomes.lock().expect("outcomes lock").pop()
-        }
-    }
-
-    #[async_trait]
-    impl PostAdmissionObserver for RecordingPairingObserver {
-        async fn observe_ack(&self, _envelope: ProductInboundEnvelope, _ack: ProductInboundAck) {}
-
-        async fn observe_pairing_outcome(
-            &self,
-            _conversation: ExternalConversationRef,
-            _event_id: ExternalEventId,
-            outcome: ChannelPairingConsumeOutcome,
-        ) {
-            self.outcomes.lock().expect("outcomes lock").push(outcome);
-        }
-    }
-
     fn admission_for(text: &str) -> InboundAdmission {
         InboundAdmission {
             extension_id: "vendorx".to_string(),
@@ -882,10 +887,10 @@ mod tests {
     ) -> (
         GenericChannelInboundSink,
         Arc<CountingWorkflow>,
-        Arc<RecordingPairingObserver>,
+        Arc<std::sync::Mutex<Vec<ChannelPairingConsumeOutcome>>>,
     ) {
         let workflow = Arc::new(CountingWorkflow::new());
-        let observer = Arc::new(RecordingPairingObserver::default());
+        let outcomes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
@@ -893,10 +898,15 @@ mod tests {
             },
             classifier: None,
             workflow: Arc::clone(&workflow) as Arc<dyn ProductWorkflow>,
-            observer: Some(Arc::clone(&observer) as Arc<dyn PostAdmissionObserver>),
-            pairing: Some(Arc::new(ScriptedPairingInterceptor { interception })),
-        });
-        (sink, workflow, observer)
+            observer: None,
+        })
+        .with_pairing(
+            Arc::new(ScriptedPairingInterceptor { interception }),
+            Some(ChannelPairingOutcomeObserver::Recording(Arc::clone(
+                &outcomes,
+            ))),
+        );
+        (sink, workflow, outcomes)
     }
 
     struct FailingSink;
@@ -1021,7 +1031,7 @@ mod tests {
             assert_eq!(ack, InboundAdmissionAck::Accepted);
             sink.drain().await;
             assert_eq!(workflow.submit_count(), 0);
-            assert_eq!(observer.take_pairing_outcome(), Some(outcome));
+            assert_eq!(observer.lock().expect("outcomes lock").pop(), Some(outcome));
         }
     }
 
@@ -1033,6 +1043,6 @@ mod tests {
         assert_eq!(ack, InboundAdmissionAck::Accepted);
         sink.drain().await;
         assert_eq!(workflow.submit_count(), 1);
-        assert_eq!(observer.take_pairing_outcome(), None);
+        assert_eq!(observer.lock().expect("outcomes lock").pop(), None);
     }
 }

@@ -6,6 +6,7 @@
 
 use std::collections::VecDeque;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -168,6 +169,9 @@ struct RecordingChannelAdapter {
     envelopes: Mutex<Vec<OutboundEnvelope>>,
     reports: Mutex<VecDeque<DeliveryReport>>,
     counter: Mutex<u64>,
+    block_deliveries: AtomicBool,
+    started_deliveries: AtomicUsize,
+    delivery_release: tokio::sync::Semaphore,
 }
 
 impl RecordingChannelAdapter {
@@ -176,7 +180,24 @@ impl RecordingChannelAdapter {
             envelopes: Mutex::new(Vec::new()),
             reports: Mutex::new(VecDeque::new()),
             counter: Mutex::new(0),
+            block_deliveries: AtomicBool::new(false),
+            started_deliveries: AtomicUsize::new(0),
+            delivery_release: tokio::sync::Semaphore::new(0),
         }
+    }
+
+    fn block_deliveries(&self) {
+        self.block_deliveries.store(true, Ordering::SeqCst);
+    }
+
+    async fn wait_for_started_deliveries(&self, expected: usize) {
+        while self.started_deliveries.load(Ordering::SeqCst) < expected {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn release_deliveries(&self, count: usize) {
+        self.delivery_release.add_permits(count);
     }
 
     fn envelopes(&self) -> Vec<OutboundEnvelope> {
@@ -225,6 +246,15 @@ impl ChannelAdapter for RecordingChannelAdapter {
             .lock()
             .expect("envelopes")
             .push(envelope.clone());
+        if self.block_deliveries.load(Ordering::SeqCst) {
+            self.started_deliveries.fetch_add(1, Ordering::SeqCst);
+            let permit = self
+                .delivery_release
+                .acquire()
+                .await
+                .expect("test delivery semaphore remains open");
+            permit.forget();
+        }
         if let Some(report) = self.reports.lock().expect("reports").pop_front() {
             return Ok(report);
         }
@@ -497,7 +527,7 @@ fn accepted_ack(run_id: TurnRunId) -> ProductInboundAck {
 }
 
 struct Harness {
-    observer: RunDeliveryObserver,
+    observer: Arc<RunDeliveryObserver>,
     connection_notices: ChannelConnectionNoticePolicy,
     adapter: Arc<RecordingChannelAdapter>,
     store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
@@ -552,17 +582,16 @@ fn build_harness(
         auth_flow_cancel: None,
     };
     let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
-    let observer = RunDeliveryObserver::with_settings_and_connection_notices(
+    let observer = Arc::new(RunDeliveryObserver::with_settings_and_connection_notices(
         services,
         RunDeliverySettings {
             poll_interval: Duration::from_millis(1),
             max_wait,
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
-            connect_notice_throttle_window: Duration::from_secs(30),
         },
         connection_notices.clone(),
-    );
+    ));
     Harness {
         observer,
         connection_notices,
@@ -750,6 +779,55 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
         attempts
             .iter()
             .all(|a| a.status == ironclaw_outbound::OutboundDeliveryStatus::Delivered)
+    );
+}
+
+#[tokio::test]
+async fn observer_retracts_working_indicator_and_auth_prompt_after_auth_completion() {
+    let harness = build_harness(
+        vec![
+            // Existence guard, first blocked state, resumed running state,
+            // then the terminal state that owns cleanup.
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::BlockedAuth, Some("gate:auth-cleanup")),
+            scripted_state(TurnStatus::Running, None),
+            scripted_state(TurnStatus::Completed, None),
+        ],
+        false,
+        Some("https://provider.example/oauth"),
+        Duration::from_secs(5),
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "authenticated and finished").await;
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-auth-cleanup"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 3, "auth prompt + working + final reply");
+    assert!(texts[0].contains("Authentication required"));
+    assert_eq!(texts[1], "Ironclaw is thinking...");
+    assert_eq!(texts[2], "authenticated and finished");
+    assert_eq!(
+        harness.adapter.retracted_refs(),
+        vec!["ts-2".to_string(), "ts-1".to_string()],
+        "terminal delivery retracts the working indicator and then the stale auth prompt"
+    );
+    let attempts = harness
+        .store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("attempts");
+    assert_eq!(attempts.len(), 5, "three posts plus two cleanup calls");
+    assert!(
+        attempts
+            .iter()
+            .all(|attempt| attempt.status == ironclaw_outbound::OutboundDeliveryStatus::Delivered)
     );
 }
 
@@ -944,6 +1022,82 @@ async fn observer_connect_nudge_releases_failed_delivery_reservation_for_retry()
 }
 
 #[tokio::test]
+async fn observer_connect_nudge_saturation_does_not_evict_in_flight_reservations() {
+    const RESERVATION_CAP: usize = 1024;
+
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Running, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    harness.adapter.block_deliveries();
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+    let mut deliveries = Vec::with_capacity(RESERVATION_CAP);
+    for index in 0..RESERVATION_CAP {
+        let observer = Arc::clone(&harness.observer);
+        let rejected = rejected.clone();
+        deliveries.push(tokio::spawn(async move {
+            observer
+                .observe_ack(
+                    user_message_envelope_for_conversation(
+                        ProductTriggerReason::DirectChat,
+                        &format!("evt-cap-{index}"),
+                        &format!("conv-cap-{index}"),
+                    ),
+                    rejected,
+                )
+                .await;
+        }));
+    }
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        harness.adapter.wait_for_started_deliveries(RESERVATION_CAP),
+    )
+    .await
+    .expect("all capped reservations reach the blocked delivery seam");
+
+    let observer = Arc::clone(&harness.observer);
+    let mut overflow = tokio::spawn(async move {
+        observer
+            .observe_ack(
+                user_message_envelope_for_conversation(
+                    ProductTriggerReason::DirectChat,
+                    "evt-cap-overflow",
+                    "conv-cap-overflow",
+                ),
+                rejected,
+            )
+            .await;
+    });
+    let overflow_reached_delivery = tokio::select! {
+        result = &mut overflow => {
+            result.expect("overflow observer task completes");
+            false
+        }
+        () = harness.adapter.wait_for_started_deliveries(RESERVATION_CAP + 1) => true,
+    };
+
+    harness.adapter.release_deliveries(RESERVATION_CAP + 1);
+    for delivery in deliveries {
+        delivery.await.expect("capped observer task completes");
+    }
+    if overflow_reached_delivery {
+        overflow
+            .await
+            .expect("overflow observer task completes after release");
+    }
+
+    assert!(
+        !overflow_reached_delivery,
+        "a full reservation map must fail closed instead of evicting an in-flight nudge"
+    );
+}
+
+#[tokio::test]
 async fn observer_busy_hint_deduplicates_per_conversation_event_pair() {
     let harness = build_harness(
         vec![scripted_state(TurnStatus::Running, None)],
@@ -1126,7 +1280,6 @@ fn build_triggered_harness(
             max_wait: Duration::from_millis(60),
             max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
             max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
-            connect_notice_throttle_window: Duration::from_secs(30),
         },
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         Arc::new(StaticCodec {

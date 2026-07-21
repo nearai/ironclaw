@@ -59,8 +59,9 @@ use crate::extension_host::channel_config::ChannelConfigService;
 use crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 use crate::extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
-    ExtensionIngressRegistry, GenericChannelInboundSink, InboundPayloadClassifier,
-    ManagedRegistrationOutcome, PostAdmissionObserver, VerifiedEvidenceMint,
+    ChannelPairingOutcomeObserver, ExtensionIngressRegistry, GenericChannelInboundSink,
+    InboundPayloadClassifier, ManagedRegistrationOutcome, PostAdmissionObserver,
+    VerifiedEvidenceMint,
 };
 
 const CHANNEL_IDEMPOTENCY_LEDGER_SETTLED_LIMIT: usize = 10_000;
@@ -627,24 +628,33 @@ impl GenericChannelHostAssembly {
 
         let adapter_id = ProductAdapterId::new(&active.extension_id)
             .map_err(|error| format!("invalid adapter id: {error}"))?;
-        let sink = Arc::new(GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+        let pairing = self
+            .deps
+            .channel_pairing
+            .as_ref()
+            .and_then(|registry| registry.get(&active.extension_id))
+            .map(|service| {
+                service
+                    as Arc<dyn crate::extension_host::extension_ingress::ChannelPairingInterceptor>
+            });
+        let mut sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
             adapter_id,
             evidence,
             classifier: extras.classifier.clone(),
             workflow: Arc::new(workflow),
-            observer: observer.clone(),
-            pairing: self
-                .deps
-                .channel_pairing
-                .as_ref()
-                .and_then(|registry| registry.get(&active.extension_id))
-                .map(|service| {
-                    service
-                        as Arc<
-                            dyn crate::extension_host::extension_ingress::ChannelPairingInterceptor,
-                        >
-                }),
-        }));
+            observer: observer
+                .clone()
+                .map(|observer| observer as Arc<dyn PostAdmissionObserver>),
+        });
+        if let Some(pairing) = pairing {
+            sink = sink.with_pairing(
+                pairing,
+                observer
+                    .clone()
+                    .map(ChannelPairingOutcomeObserver::RunDelivery),
+            );
+        }
+        let sink = Arc::new(sink);
         let registration = ChannelIngressRegistration {
             secrets,
             sink: Arc::clone(&sink) as Arc<dyn ironclaw_extension_host::ingress::InboundSink>,
@@ -655,7 +665,7 @@ impl GenericChannelHostAssembly {
             #[cfg(feature = "test-support")]
             binding,
             #[cfg(feature = "test-support")]
-            observer,
+            observer: observer.map(|observer| observer as Arc<dyn PostAdmissionObserver>),
         }))
     }
 
@@ -803,7 +813,7 @@ impl GenericChannelHostAssembly {
         active: &ActiveExtension,
         delivery: &ChannelHostDeliveryDeps,
         binding: Arc<dyn ConversationBindingService>,
-    ) -> Result<Arc<dyn PostAdmissionObserver>, String> {
+    ) -> Result<Arc<RunDeliveryPostAdmissionObserver>, String> {
         let identity = &self.deps.identity;
         let notice_thread_id = ThreadId::new(format!(
             "{extension_id}-channel-notices",
@@ -986,7 +996,7 @@ impl IngressSecretsPort for ChannelConfigIngressSecrets {
 
 /// Adapts the generic run-delivery observer onto the generic sink's
 /// post-admission observer seam.
-struct RunDeliveryPostAdmissionObserver {
+pub(super) struct RunDeliveryPostAdmissionObserver {
     observer: Arc<RunDeliveryObserver>,
     connection_notices: ChannelConnectionNoticePolicy,
 }
@@ -997,7 +1007,17 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
         self.observer.observe_ack(envelope, ack).await;
     }
 
-    async fn observe_pairing_outcome(
+    async fn observe_error(
+        &self,
+        envelope: ProductInboundEnvelope,
+        error: ironclaw_product_adapters::ProductAdapterError,
+    ) {
+        self.observer.observe_error(envelope, error).await;
+    }
+}
+
+impl RunDeliveryPostAdmissionObserver {
+    pub(super) async fn observe_pairing_outcome(
         &self,
         conversation: ExternalConversationRef,
         event_id: ExternalEventId,
@@ -1018,14 +1038,6 @@ impl PostAdmissionObserver for RunDeliveryPostAdmissionObserver {
         self.observer
             .post_connection_status_notice(&conversation, &event_id, text)
             .await;
-    }
-
-    async fn observe_error(
-        &self,
-        envelope: ProductInboundEnvelope,
-        error: ironclaw_product_adapters::ProductAdapterError,
-    ) {
-        self.observer.observe_error(envelope, error).await;
     }
 }
 

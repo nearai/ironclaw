@@ -66,12 +66,10 @@ pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAs
 pub use extension_host::channel_identity::{
     ChannelIdentityBindingConfig, channel_identity_binding_hook_factory,
 };
-pub use extension_host::channel_pairing::ChannelPairingConsumeOutcome;
 pub use extension_host::extension_ingress::{
     ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
-    ChannelPairingInterception, ChannelPairingInterceptor, ExtensionIngressParts,
-    ExtensionIngressRegistry, GenericChannelInboundSink, InboundPayloadClassifier,
-    PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
+    ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
+    InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
 };
 pub use extension_host::extension_ingress::{
     EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount, forward_alias_request,
