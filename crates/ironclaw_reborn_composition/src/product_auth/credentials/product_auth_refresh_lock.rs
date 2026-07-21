@@ -126,12 +126,10 @@ impl CredentialRefreshLeaderLock {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
     {
-        {
-            if let Some(pool) = &self.pool {
-                return run_as_leader_postgres(pool, sweep).await;
-            }
+        if let Some(pool) = &self.pool {
+            return run_as_leader_postgres(pool, sweep).await;
         }
-        // No pool (libsql / local-dev / no-postgres): trivially the leader.
+        // No pool (libsql / local-dev): trivially the leader.
         LeaderOutcome::Ran(sweep().await)
     }
 }

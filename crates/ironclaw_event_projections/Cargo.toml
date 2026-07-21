@@ -19,7 +19,8 @@ thiserror = "2"
 
 [dev-dependencies]
 ironclaw_extensions = { path = "../ironclaw_extensions" }
-ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+# FaultInjecting decorator: test the projection source-error path through the real store
+ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 ironclaw_memory = { path = "../ironclaw_memory" }
 ironclaw_memory_native = { path = "../ironclaw_memory_native" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }

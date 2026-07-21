@@ -4,19 +4,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
-    InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    BackendCapabilities, CasExpectation, DirEntry, Entry, Fault, FaultInjecting, FileStat,
+    FilesystemError, FilesystemOperation, InMemoryBackend, RecordVersion, RootFilesystem,
+    ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
     ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
-    RuntimeCredentialAccountProviderId, SecretHandle, ThreadId, Timestamp, UserId, VirtualPath,
+    RuntimeCredentialAccountProviderId, SecretHandle, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::RuntimeCredentialAccountRequest;
 use ironclaw_host_runtime::RuntimeCredentialAccountResolver;
-use ironclaw_secrets::{
-    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
-    SecretStoreError,
-};
+use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
 use secrecy::SecretString;
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
@@ -333,94 +331,34 @@ fn paused_account_put_filesystem() -> (
     (filesystem, backend)
 }
 
-struct FailFirstDeleteSecretStore {
-    inner: FilesystemSecretStore<InMemoryBackend>,
-    fail_next_delete: AtomicBool,
+/// The real `FilesystemSecretStore` over a [`FaultInjecting`] backend, plus the
+/// fault handle. Replaces the former whole-trait `FailFirstDeleteSecretStore`
+/// fake: the injected backend delete fault flows through the store's real
+/// `delete` -> `FilesystemError::Backend -> SecretStoreError::StoreUnavailable`
+/// mapping instead of a hand-returned error. The returned backend is re-armable
+/// mid-test via [`arm_first_secret_delete_failure`] (the old fake's
+/// `set_delete_failure(true)`).
+fn faulting_secret_store() -> (
+    Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
+    Arc<FaultInjecting<InMemoryBackend>>,
+) {
+    let secret_backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+    let store = Arc::new(FilesystemSecretStore::ephemeral_over(
+        secret_backend.clone(),
+    ));
+    (store, secret_backend)
 }
 
-impl FailFirstDeleteSecretStore {
-    fn new() -> Self {
-        Self {
-            inner: FilesystemSecretStore::ephemeral(),
-            fail_next_delete: AtomicBool::new(true),
-        }
-    }
-
-    fn set_delete_failure(&self, fail: bool) {
-        self.fail_next_delete.store(fail, Ordering::SeqCst);
-    }
-}
-
-#[async_trait::async_trait]
-impl SecretStore for FailFirstDeleteSecretStore {
-    async fn put(
-        &self,
-        scope: ResourceScope,
-        handle: SecretHandle,
-        material: SecretMaterial,
-        expires_at: Option<Timestamp>,
-    ) -> Result<SecretMetadata, SecretStoreError> {
-        self.inner.put(scope, handle, material, expires_at).await
-    }
-
-    async fn metadata(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-        self.inner.metadata(scope, handle).await
-    }
-
-    async fn metadata_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-        self.inner.metadata_for_scope(scope).await
-    }
-
-    async fn delete(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<bool, SecretStoreError> {
-        if self.fail_next_delete.swap(false, Ordering::SeqCst) {
-            return Err(SecretStoreError::StoreUnavailable {
-                reason: "injected transient delete failure".to_string(),
-            });
-        }
-        self.inner.delete(scope, handle).await
-    }
-
-    async fn lease_once(
-        &self,
-        scope: &ResourceScope,
-        handle: &SecretHandle,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.lease_once(scope, handle).await
-    }
-
-    async fn consume(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretMaterial, SecretStoreError> {
-        self.inner.consume(scope, lease_id).await
-    }
-
-    async fn revoke(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<SecretLease, SecretStoreError> {
-        self.inner.revoke(scope, lease_id).await
-    }
-
-    async fn leases_for_scope(
-        &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<SecretLease>, SecretStoreError> {
-        self.inner.leases_for_scope(scope).await
-    }
+/// Arm the next secret `delete` to fail once (a fresh one-shot `nth(1)` rule).
+/// Used both at construction (matching the old fake's default armed state) and
+/// mid-test to re-arm a transient delete failure after the previous one fired.
+fn arm_first_secret_delete_failure(secret_backend: &FaultInjecting<InMemoryBackend>) {
+    secret_backend.add_fault(
+        Fault::on(FilesystemOperation::Delete)
+            .path("secrets")
+            .nth(1)
+            .backend("injected transient delete failure"),
+    );
 }
 
 fn google_provider() -> AuthProviderId {
@@ -2205,7 +2143,8 @@ async fn filesystem_oauth_callback_canceled_after_flow_read_cannot_leave_configu
     use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService as _};
 
     let (filesystem, backend) = paused_account_put_filesystem();
-    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
+    let (concrete_secret_store, secret_backend) = faulting_secret_store();
+    arm_first_secret_delete_failure(&secret_backend);
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let callback_service = Arc::new(FilesystemAuthProductServices::new(
@@ -2528,8 +2467,7 @@ async fn assert_stale_bound_callback_restores_newer_reconnect(failure: StaleBoun
     };
 
     let (filesystem, backend) = paused_account_put_filesystem();
-    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
-    concrete_secret_store.set_delete_failure(false);
+    let (concrete_secret_store, secret_backend) = faulting_secret_store();
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let stale_service = Arc::new(FilesystemAuthProductServices::new(
@@ -2727,7 +2665,7 @@ async fn assert_stale_bound_callback_restores_newer_reconnect(failure: StaleBoun
             backend.fail_account_put_for_after(account.id, 1);
         }
         StaleBoundRollbackFailure::SecretDelete => {
-            concrete_secret_store.set_delete_failure(true);
+            arm_first_secret_delete_failure(&secret_backend);
         }
     }
     backend.resume_account_get();
@@ -3347,7 +3285,8 @@ async fn filesystem_cleanup_retries_failed_secret_deletion_without_losing_handle
     use ironclaw_auth::{SecretCleanupAction, SecretCleanupRequest, SecretCleanupService};
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
+    let (concrete_secret_store, secret_backend) = faulting_secret_store();
+    arm_first_secret_delete_failure(&secret_backend);
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(filesystem, secret_store);
@@ -3730,7 +3669,8 @@ async fn filesystem_oauth_reauth_retains_failed_old_secret_deletion_for_lifecycl
     use ironclaw_secrets::SecretMaterial;
 
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
+    let (concrete_secret_store, secret_backend) = faulting_secret_store();
+    arm_first_secret_delete_failure(&secret_backend);
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
@@ -4724,7 +4664,8 @@ async fn filesystem_oauth_compensation_revokes_only_the_exact_account() {
 #[tokio::test]
 async fn filesystem_oauth_compensation_retries_after_restart_without_losing_its_journal() {
     let filesystem = test_filesystem();
-    let concrete_secret_store = Arc::new(FailFirstDeleteSecretStore::new());
+    let (concrete_secret_store, secret_backend) = faulting_secret_store();
+    arm_first_secret_delete_failure(&secret_backend);
     let secret_store: Arc<dyn SecretStore> = concrete_secret_store.clone();
     let scope = test_scope();
     let service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
@@ -4782,8 +4723,10 @@ async fn filesystem_oauth_compensation_retries_after_restart_without_losing_its_
 
     // Bound OAuth completion may clean the replaced generation first; inject
     // the failure specifically at compensation so the failed flow is already
-    // durable when deletion stops.
-    concrete_secret_store.set_delete_failure(true);
+    // durable when deletion stops. The construction-time arming was consumed by
+    // that completion cleanup delete, so re-arm a fresh one-shot for the
+    // compensation delete.
+    arm_first_secret_delete_failure(&secret_backend);
 
     assert_eq!(
         service.compensate_oauth_completion(request.clone()).await,

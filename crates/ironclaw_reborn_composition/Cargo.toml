@@ -133,6 +133,9 @@ ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support
 ironclaw_run_state = { path = "../ironclaw_run_state", features = ["test-support"] }
 # Enables the in-memory-backed budget-gate store constructor for tests only.
 ironclaw_resources = { path = "../ironclaw_resources", features = ["test-support"] }
+# Enables the `FaultInjecting` backend decorator so store fault paths are tested
+# through the real filesystem-backed store instead of a whole-trait fake.
+ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 http = "1"
 http-body-util = "0.1"
 # Admin-user-management e2e test drives the composed app with a real session

@@ -25,9 +25,8 @@ they run the lane in the merge queue, before landing, without adding the full
 WASM build to ordinary PR feedback. Push and deep-CI runs remain exhaustive.
 
 History: the slim-vs-full clippy matrix violated this — the queue linted only
-`--all-features` while push linted a broader matrix, so
-feature-gated dead code (e.g. a `#[cfg(feature = "postgres")]`-constructed enum
-variant) passed the queue and turned main red post-merge.
+`--all-features` while push linted a broader matrix, so feature-gated dead code
+could pass the queue and turn main red post-merge.
 
 ## Required checks and where they're enforced
 
