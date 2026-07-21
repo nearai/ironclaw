@@ -17,9 +17,8 @@ use std::sync::{
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironclaw::error::LlmError;
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, CompletionStreamSink, LlmProvider,
+    CompletionRequest, CompletionResponse, CompletionStreamSink, LlmError, LlmProvider,
     ToolCompletionRequest, ToolCompletionResponse,
 };
 use rust_decimal::Decimal;

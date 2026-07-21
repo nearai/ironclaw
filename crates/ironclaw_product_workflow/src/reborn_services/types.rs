@@ -547,7 +547,7 @@ impl RebornGetRunStateResponse {
         let priced_model = value
             .resolved_model_route
             .as_ref()
-            .map(|route| route.model_id.as_str())
+            .map(|route| route.model_id())
             .or(active_model_id)
             .map(str::trim)
             .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("default"));

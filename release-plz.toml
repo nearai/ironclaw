@@ -10,18 +10,12 @@ git_release_enable = false
 name = "ironclaw"
 publish = false
 
+# ── Root workspace package ──────────────────────────────────
+# Post-Tier-B the workspace root is a test-only host for the Reborn integration
+# suite (`ironclaw_reborn_integration_tests`); it has no lib/bin and must never
+# be versioned, tagged, or published. (The former `ironclaw_legacy`, `ironclaw_tui`,
+# and `ironclaw_gateway` overrides were dropped with those deleted crates.)
 [[package]]
-name = "ironclaw_legacy"
-publish = false
-release = false
-
-# ── Internal crates (not useful standalone) ─────────────────
-[[package]]
-name = "ironclaw_tui"
-publish = false
-release = false
-
-[[package]]
-name = "ironclaw_gateway"
+name = "ironclaw_reborn_integration_tests"
 publish = false
 release = false

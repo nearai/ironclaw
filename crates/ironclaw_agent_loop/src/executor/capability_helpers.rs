@@ -292,16 +292,8 @@ pub(super) fn provider_tool_call_reference(
 ) -> Option<ProviderToolCallReference> {
     let provider_replay = call.provider_replay.as_ref()?;
     Some(ProviderToolCallReference {
-        provider_id: provider_replay.provider_id.clone(),
-        provider_model_id: provider_replay.provider_model_id.clone(),
-        provider_turn_id: provider_replay.provider_turn_id.clone(),
-        provider_call_id: provider_replay.provider_call_id.clone(),
-        provider_tool_name: provider_replay.provider_tool_name.clone(),
+        replay: provider_replay.clone(),
         capability_id: call.capability_id.clone(),
-        arguments: provider_replay.arguments.clone(),
-        response_reasoning: provider_replay.response_reasoning.clone(),
-        reasoning: provider_replay.reasoning.clone(),
-        signature: provider_replay.signature.clone(),
     })
 }
 

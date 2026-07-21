@@ -50,9 +50,17 @@ ironclaw run
 ironclaw run --confirm-host-access
 ironclaw serve
 ironclaw serve --confirm-host-access
+ironclaw service install
+ironclaw service start
+ironclaw service stop
+ironclaw service restart
+ironclaw service status
+ironclaw service uninstall
 ironclaw skills list
 ironclaw skills list --json
 ironclaw skills list --verbose
+ironclaw status
+ironclaw status --json
 ```
 
 The `traces` command tree is a contributor-only trace client; see
@@ -69,14 +77,19 @@ surface that looks similar (it also used to read a not-yet-real registry) but
 is a genuine working implementation reading real `SKILL.md` files; it is not
 part of this disable.
 
-It intentionally does not yet support:
+Known limitations of this 1.0 release:
 
 - real `channels`/`hooks`/`logs` backends (see above);
-- replacing `ironclaw` behavior;
-- daemon/service installation;
 - v1 config, DB, settings, or secrets migration;
-- production extension/tool execution;
-- long-lived Reborn runtime services.
+- production extension/tool execution: `extension` and `skills` need a
+  local-runtime substrate profile (`local-dev`, `local-dev-yolo`,
+  `hosted-single-tenant`, `hosted-single-tenant-volume`); `production` and
+  `migration-dry-run` fail with `extension lifecycle is available only for
+  local-dev Reborn services`. In a default source build (no `postgres`
+  feature), `hosted-single-tenant`, `production`, and `migration-dry-run`
+  bail even earlier with `` requires a binary built with the `postgres`
+  feature ``, so only `local-dev`, `local-dev-yolo`, and
+  `hosted-single-tenant-volume` work out of the box from source.
 
 The WebChat v2 web UI **is** supported through `serve`. It is an early beta
 operator surface, not a production gateway. See [Running with the WebUI (`serve`)](#running-with-the-webui-serve).
@@ -116,11 +129,13 @@ cargo run -q -p ironclaw --bin ironclaw -- \
   models set-provider nearai
 export NEARAI_API_KEY="your-key-here"
 
-# 3. WebUI auth. serve REQUIRES both values or it refuses to start. The variable
-#    NAMES below are the defaults; override them via [webui].env_token_var and
-#    [webui].env_user_id_var in config.toml if you prefer different names.
+# 3. WebUI auth. serve REQUIRES the token or it refuses to start. USER_ID is
+#    optional: if unset, it falls back to [identity].default_owner, then to
+#    the literal "reborn-cli". The variable NAMES below are the defaults;
+#    override them via [webui].env_token_var and [webui].env_user_id_var in
+#    config.toml if you prefer different names.
 export IRONCLAW_REBORN_WEBUI_TOKEN="$(openssl rand -hex 32)"   # bearer token you log in with
-export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"             # must match [identity].default_owner
+export IRONCLAW_REBORN_WEBUI_USER_ID="reborn-cli"             # optional; must match [identity].default_owner if set
 
 # 4. Launch.
 cargo run -q -p ironclaw --bin ironclaw -- serve
@@ -182,7 +197,6 @@ single-line `Error:` and exits.
 | Error message contains | Cause | Fix |
 | --- | --- | --- |
 | `must be set to the WebChat v2 bearer token` | `IRONCLAW_REBORN_WEBUI_TOKEN` unset | Export the token env var (step 3). |
-| `must be set to the UserId an env-bearer-authenticated caller maps to` | `IRONCLAW_REBORN_WEBUI_USER_ID` unset | Export the user-id env var (step 3). |
 | `default_owner ... must match the WebChat v2 authenticated user` | `[identity].default_owner` ≠ `IRONCLAW_REBORN_WEBUI_USER_ID` | Set the env user to the config owner (default `reborn-cli`), or remove/align `[identity].default_owner`. |
 | `workspace root must not overlap default skill root /skills` | Reborn home is **inside** the current working directory | Point `IRONCLAW_REBORN_HOME` at a path outside your repo/cwd. |
 
@@ -445,6 +459,8 @@ Supported profiles:
 
 - `local-dev` (default)
 - `local-dev-yolo`
+- `hosted-single-tenant`
+- `hosted-single-tenant-volume`
 - `production`
 - `migration-dry-run`
 
@@ -528,8 +544,9 @@ cargo run -q -p ironclaw --bin ironclaw -- repl
 
 ### `serve`
 
-Starts the WebChat v2 HTTP listener (browser UI). Requires the two
-`IRONCLAW_REBORN_WEBUI_*` auth env vars.
+Starts the WebChat v2 HTTP listener (browser UI). Requires
+`IRONCLAW_REBORN_WEBUI_TOKEN`; `IRONCLAW_REBORN_WEBUI_USER_ID` is optional and
+falls back to `[identity].default_owner`, then `"reborn-cli"`.
 See [Running with the WebUI (`serve`)](#running-with-the-webui-serve) for the
 full walkthrough, auth setup, common startup errors, and an API smoke test.
 
@@ -540,11 +557,13 @@ cargo run -q -p ironclaw --bin ironclaw -- serve --host 127.0.0.1 --port 3000
 
 ### `skills list`
 
-Reports configured Reborn local-dev skills from `<reborn-home>/local-dev/skills`
-and `<reborn-home>/local-dev/system/skills` through the Reborn composition
-skill listing function. It does not read v1 skill discovery paths, and a missing
-local-dev storage root is reported as an empty skill list without creating
-directories.
+Reports configured Reborn skills from `<reborn-home>/<profile-subdir>/skills`
+and `<reborn-home>/<profile-subdir>/system/skills` through the Reborn
+composition skill listing function, where `<profile-subdir>` is
+`hosted-single-tenant` or `hosted-single-tenant-volume` for those profiles and
+`local-dev` for `local-dev`, `local-dev-yolo`, `production`, and
+`migration-dry-run`. It does not read v1 skill discovery paths, and a missing
+storage root is reported as an empty skill list without creating directories.
 
 ```bash
 cargo run -q -p ironclaw --bin ironclaw -- skills list
@@ -563,7 +582,8 @@ Expected fields include:
 `--verbose` adds the resolved `profile`, `reborn_home`, `local_dev_root`, and
 `owner_id`; text output also includes per-skill `version`, `keywords`, `tags`,
 and `requires_skills` when present. `skills list` currently supports
-`local-dev` and `local-dev-yolo` profiles and rejects `production` /
+`local-dev`, `local-dev-yolo`, `hosted-single-tenant`, and
+`hosted-single-tenant-volume` profiles and rejects `production` /
 `migration-dry-run` until those catalog backends are wired.
 
 ## State and config root
@@ -585,6 +605,8 @@ Supported values:
 
 - `local-dev` (default)
 - `local-dev-yolo`
+- `hosted-single-tenant`
+- `hosted-single-tenant-volume`
 - `production`
 - `migration-dry-run`
 

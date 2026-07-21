@@ -171,9 +171,10 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
     );
 }
 
-/// A retryable provider error after an externally visible text delta must be
-/// terminal for that attempt: no retry, no assistant/tool-call transcript
-/// commit, and no capability dispatch.
+/// A retryable provider error after an externally visible text delta may use
+/// the provider decorator's single replacement-safe retry. Once that decorated
+/// call fails, the outer loop must not retry, commit assistant/tool-call
+/// transcript history, or dispatch a capability.
 #[tokio::test]
 async fn partial_text_failure_does_not_commit_or_dispatch() {
     let probe = IncompleteModelAttemptProbe::partial_text();
@@ -194,11 +195,15 @@ async fn partial_text_failure_does_not_commit_or_dispatch() {
         .await
         .expect("incomplete attempt fails the run");
 
-    assert_eq!(probe.attempts(), 1, "partial output must suppress retries");
+    assert_eq!(
+        probe.attempts(),
+        2,
+        "only the initial attempt and one replacement-safe retry may run"
+    );
     assert_eq!(
         probe.streaming_attempts(),
-        1,
-        "streaming path must run once"
+        probe.attempts(),
+        "every provider attempt must use the streaming caller path"
     );
     harness
         .assert_conversation_history_role_contains_since(

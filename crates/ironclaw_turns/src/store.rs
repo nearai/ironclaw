@@ -463,11 +463,9 @@ impl TurnIdempotencyRecord {
             TurnIdempotencyReplay::SubmitAdmissionRejected(rejection) => {
                 Some(Err(TurnError::AdmissionRejected(rejection.clone())))
             }
-            TurnIdempotencyReplay::Error(error)
-                if self.operation == TurnIdempotencyOperationKind::Submit =>
-            {
-                Some(Err(error.to_error()))
-            }
+            // `self.operation == Submit` is already guaranteed by the early
+            // return above, so the Error arm needs no operation guard.
+            TurnIdempotencyReplay::Error(error) => Some(Err(error.to_error())),
             _ => None,
         }
     }
@@ -478,11 +476,7 @@ impl TurnIdempotencyRecord {
         }
         match &self.replay {
             TurnIdempotencyReplay::ResumeSucceeded(response) => Some(Ok(response.clone())),
-            TurnIdempotencyReplay::Error(error)
-                if self.operation == TurnIdempotencyOperationKind::Resume =>
-            {
-                Some(Err(error.to_error()))
-            }
+            TurnIdempotencyReplay::Error(error) => Some(Err(error.to_error())),
             _ => None,
         }
     }
@@ -493,11 +487,7 @@ impl TurnIdempotencyRecord {
         }
         match &self.replay {
             TurnIdempotencyReplay::CancelRecorded(response) => Some(Ok(response.clone())),
-            TurnIdempotencyReplay::Error(error)
-                if self.operation == TurnIdempotencyOperationKind::Cancel =>
-            {
-                Some(Err(error.to_error()))
-            }
+            TurnIdempotencyReplay::Error(error) => Some(Err(error.to_error())),
             _ => None,
         }
     }
@@ -510,11 +500,7 @@ impl TurnIdempotencyRecord {
             TurnIdempotencyReplay::RetrySucceeded(response) => Some(Ok(response.clone())),
             // Same-thread busy is a transient lock state, not an idempotent retry outcome.
             TurnIdempotencyReplay::RetryThreadBusy(_) => None,
-            TurnIdempotencyReplay::Error(error)
-                if self.operation == TurnIdempotencyOperationKind::Retry =>
-            {
-                Some(Err(error.to_error()))
-            }
+            TurnIdempotencyReplay::Error(error) => Some(Err(error.to_error())),
             _ => None,
         }
     }

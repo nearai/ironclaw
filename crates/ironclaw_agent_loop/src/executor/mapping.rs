@@ -88,9 +88,10 @@ pub(super) fn model_preference_to_host(
 }
 
 pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelErrorClass> {
-    // The provider-level retry wrapper already suppresses retries once text has
-    // escaped through its stream sink. Preserve that guarantee at the outer
-    // loop recovery boundary, where a fresh attempt could duplicate output.
+    // The provider layer may perform its one replacement-safe retry after text
+    // escapes through the stream sink. Once that decorated call returns this
+    // terminal reason, the outer loop must not start a fresh request that could
+    // duplicate externally visible output.
     if error.reason_kind == Some(AgentLoopHostErrorReasonKind::ModelPartialOutputVisible) {
         return None;
     }

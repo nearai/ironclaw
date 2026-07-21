@@ -102,13 +102,16 @@ database to already be at the schema version it was frozen against and fails
 loud with `LegacyError::SchemaMismatch` (naming the missing column) via
 `ensure_schema_current` rather than silently reading a partial row.
 
-**Known gap**: `tests/migration_roundtrip.rs` still seeds its v1 fixture
-through the *real* v1 write path (`ironclaw_legacy` as a `[dev-dependencies]`
-entry — this doesn't need a `LAYER_MATRIX_EXCEPTIONS` entry, that check only
-walks normal dependencies) for fidelity: the fixture must look exactly like
-what a live v1 install produces. When `src/` is actually deleted under Tier B,
-`seed_v1_fixture` and friends need rewriting to insert raw SQL directly
-against the frozen schema instead.
+**Fully decoupled (Tier B)**: `src/` (the `ironclaw_legacy` monolith) was
+deleted under Tier B, so `tests/migration_roundtrip.rs` no longer has a real v1
+write path to seed through. It now seeds its v1 fixture with **raw SQL** against
+a frozen snapshot of the v1 schema (`tests/fixtures/legacy_v1_schema.sql`,
+ported from the old `src/db/libsql_migrations.rs`); the seeded secret is
+re-encrypted with the same AES-256-GCM + HKDF-SHA256 scheme so the migration's
+frozen decrypt path (`src/legacy_snapshot/secrets.rs`) reads it back. The
+`migration_fails_loud_on_stale_routines_schema` case pins the `SchemaMismatch`
+fail-loud contract against a deliberately-stale fixture. There is no remaining
+`ironclaw_legacy` edge in either `[dependencies]` or `[dev-dependencies]`.
 
 ## Remaining follow-up — wire into `ironclaw` startup
 

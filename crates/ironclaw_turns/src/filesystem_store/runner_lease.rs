@@ -79,18 +79,6 @@ impl RunnerLeaseStore {
         .await
     }
 
-    pub(super) async fn seed_from_snapshot(
-        &self,
-        snapshot: &TurnPersistenceSnapshot,
-        run_id: TurnRunId,
-    ) -> Result<(), TurnError> {
-        self.with_timeout(
-            self.seed_from_snapshot_inner(snapshot, run_id),
-            "seed runner lease",
-        )
-        .await
-    }
-
     pub(super) async fn seed_from_run_record(&self, run: TurnRunRecord) -> Result<(), TurnError> {
         self.with_timeout(
             self.seed_from_run_record_inner(run),
@@ -127,26 +115,6 @@ impl RunnerLeaseStore {
         self.with_timeout(
             self.write_status_from_snapshot(snapshot, run_id, None, TurnStatus::CancelRequested),
             "mark runner lease cancel requested",
-        )
-        .await
-    }
-
-    pub(super) async fn retire_runner_lease_from_snapshot(
-        &self,
-        snapshot: &TurnPersistenceSnapshot,
-        run_id: TurnRunId,
-        runner_id: crate::TurnRunnerId,
-        lease_token: crate::TurnLeaseToken,
-        retired_status: TurnStatus,
-    ) -> Result<Option<RunnerLeaseRecord>, TurnError> {
-        self.with_timeout(
-            self.write_status_from_snapshot(
-                snapshot,
-                run_id,
-                Some((runner_id, lease_token)),
-                retired_status,
-            ),
-            "retire runner lease",
         )
         .await
     }
@@ -294,23 +262,6 @@ impl RunnerLeaseStore {
             apply_runner_lease_overlay(&mut run, lease);
         }
         Ok(run)
-    }
-
-    async fn seed_from_snapshot_inner(
-        &self,
-        snapshot: &TurnPersistenceSnapshot,
-        run_id: TurnRunId,
-    ) -> Result<(), TurnError> {
-        let Some(run) = snapshot.runs.iter().find(|record| record.run_id == run_id) else {
-            return Err(TurnError::ScopeNotFound);
-        };
-        let Some(record) = runner_lease_from_run(run) else {
-            return Err(TurnError::InvalidTransition {
-                from: run.status,
-                to: TurnStatus::Running,
-            });
-        };
-        self.upsert(record).await
     }
 
     async fn seed_from_run_record_inner(&self, run: TurnRunRecord) -> Result<(), TurnError> {

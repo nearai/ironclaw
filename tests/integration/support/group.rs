@@ -102,7 +102,7 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateStore, InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator,
+    FilesystemTurnStateRowStore, InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator,
     TurnEventSink, TurnScope, TurnStateStore, TurnStateStoreLimits,
 };
 
@@ -204,9 +204,9 @@ pub(crate) struct GroupSharedStorage {
     /// model hot path.
     pub(crate) scope_gateway: Arc<ScopeRegistryGateway>,
     /// The group's single shared turn-state store. All threads share one
-    /// `FilesystemTurnStateStore` (isolation is by `run_id`, not by path —
+    /// `FilesystemTurnStateRowStore` (isolation is by `run_id`, not by path —
     /// see `turns_scope_path`, which has no `thread_id` component).
-    pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     /// S2 seam: the SAME canonical binding `turn_store`'s `/turns` mount is
     /// scoped to (`scoped_turns_fs_composite`). Retained so a reopen can
     /// rebuild the identical scoped path independently, instead of
@@ -753,8 +753,8 @@ impl RebornIntegrationGroupBuilder {
         }
         let turns_scoped_fs =
             scoped_turns_fs_composite(Arc::clone(&base.composite), &base.canonical_binding)?;
-        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> = Arc::new(
-            FilesystemTurnStateStore::new(Arc::clone(&turns_scoped_fs))
+        let turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>> = Arc::new(
+            FilesystemTurnStateRowStore::new(Arc::clone(&turns_scoped_fs))
                 .with_limits(turn_state_limits),
         );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
@@ -1269,7 +1269,7 @@ impl<'g> RebornThreadBuilder<'g> {
         // `Parked` swaps in the parking wrapper. `ThreadModelMode` makes the
         // three modes mutually exclusive by construction — no priority rule
         // needed here.
-        let exercise_partial_text_retry_guard = matches!(
+        let exercise_partial_text_retry_safety = matches!(
             &self.model_mode,
             ThreadModelMode::Incomplete(probe)
                 if probe.kind() == IncompleteModelAttemptKind::PartialText
@@ -1291,10 +1291,10 @@ impl<'g> RebornThreadBuilder<'g> {
         })
         .await;
         let mut llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
-        if exercise_partial_text_retry_guard {
-            // A retryable error after an externally visible text delta must not
-            // issue another provider attempt. Enable retries here so the test
-            // proves the guard instead of relying on the harness default of 0.
+        if exercise_partial_text_retry_safety {
+            // Enable retries so the test proves that the provider layer uses at
+            // most its one replacement-safe retry and the outer loop does not
+            // restart the decorated request after its terminal error.
             llm_config.max_retries = 3;
         }
         let provider = provider_chain_over(raw, &llm_config, session).await?;
