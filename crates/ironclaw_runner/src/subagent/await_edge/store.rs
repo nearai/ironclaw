@@ -35,9 +35,8 @@ pub struct CloseCrashHooks<'a> {
 
 /// Thin CAS wrapper around one shared `Arc<ScopedFilesystem<F>>`. Generic
 /// over the backend, matching every other filesystem-backed reborn store
-/// (`goal_store.rs`'s `FilesystemSubagentGoalStore<F>`,
-/// `local_trigger_access::filesystem::RebornFilesystemLocalTriggerAccessStore<F>`)
-/// — never `Arc<dyn RootFilesystem>`.
+/// (`goal_store.rs`'s `FilesystemSubagentGoalStore<F>`) — never
+/// `Arc<dyn RootFilesystem>`.
 pub struct FilesystemAwaitEdgeStore<F: RootFilesystem + ?Sized> {
     fs: Arc<ScopedFilesystem<F>>,
 }

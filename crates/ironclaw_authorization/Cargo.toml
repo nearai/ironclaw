@@ -8,7 +8,6 @@ publish = false
 layer = "kernel"
 
 [features]
-default = []
 # In-memory-backed capability-lease store constructor for this crate's own tests
 # and downstream integration tiers. The store itself is the production
 # `FilesystemCapabilityLeaseStore<InMemoryBackend>`; the helper just wires the
@@ -27,5 +26,8 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
+# FaultInjecting decorator: fold the hand-rolled `CountingFilesystem` op-recorder
+# onto the real backend seam so tests assert on genuine `list_dir` traffic.
+ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }

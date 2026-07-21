@@ -1,13 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::*;
 use ironclaw_filesystem::{
-    DirEntry, DiskFilesystem, FileStat, FilesystemError, InMemoryBackend, RootFilesystem,
+    DiskFilesystem, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
     ScopedFilesystem,
 };
 use ironclaw_host_api::*;
@@ -740,14 +736,17 @@ async fn filesystem_lease_store_persists_and_reloads_issued_leases() {
 
 #[tokio::test]
 async fn filesystem_lease_store_lists_from_owner_index_without_scanning_invocation_roots() {
-    // Wrap the underlying [`DiskFilesystem`] in a [`CountingFilesystem`]
-    // so we can assert that `leases_for_scope` reads the owner index
-    // rather than fanning out to `list_dir` per invocation. The
-    // [`ScopedFilesystem`] layer on top binds the `/authorization` alias
-    // to a tenant/user-scoped target — same as `engine_filesystem()`.
-    let counting = Arc::new(CountingFilesystem::new(local_filesystem_with_engine_mount()));
+    // Wrap the underlying [`DiskFilesystem`] in
+    // [`ironclaw_filesystem::FaultInjecting`] (op-recorder mode, no faults armed)
+    // so we can assert that `leases_for_scope` reads the owner index rather than
+    // fanning out to `list_dir` per invocation. Folds the former hand-rolled
+    // `CountingFilesystem` observer onto the shared decorator, exercising the
+    // real backend traffic instead of a bespoke counting wrapper. The
+    // [`ScopedFilesystem`] layer on top binds the `/authorization` alias to a
+    // tenant/user-scoped target — same as `engine_filesystem()`.
+    let backend = Arc::new(FaultInjecting::new(local_filesystem_with_engine_mount()));
     let fs = build_scoped_fs(
-        Arc::clone(&counting),
+        Arc::clone(&backend),
         "/engine/tenants/test/users/test/authorization",
     );
     let context = execution_context(CapabilitySet::default());
@@ -769,7 +768,7 @@ async fn filesystem_lease_store_lists_from_owner_index_without_scanning_invocati
         store.issue(lease).await.unwrap();
     }
 
-    counting.reset_list_dir_calls();
+    let list_dir_before = backend.count(FilesystemOperation::ListDir);
     let leases = store.leases_for_scope(&context.resource_scope).await;
 
     let mut actual = leases
@@ -780,7 +779,7 @@ async fn filesystem_lease_store_lists_from_owner_index_without_scanning_invocati
     expected.sort_by_key(|lease_id| lease_id.as_uuid());
     assert_eq!(actual, expected);
     assert_eq!(
-        counting.list_dir_calls(),
+        backend.count(FilesystemOperation::ListDir) - list_dir_before,
         0,
         "indexed lease listing should not scan every invocation directory"
     );
@@ -1161,81 +1160,6 @@ async fn revoked_lease_no_longer_authorizes_dispatch() {
             reason: DenyReason::MissingGrant
         }
     ));
-}
-
-struct CountingFilesystem {
-    inner: DiskFilesystem,
-    list_dir_calls: Arc<AtomicUsize>,
-}
-
-impl CountingFilesystem {
-    fn new(inner: DiskFilesystem) -> Self {
-        Self {
-            inner,
-            list_dir_calls: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    fn reset_list_dir_calls(&self) {
-        self.list_dir_calls.store(0, Ordering::SeqCst);
-    }
-
-    fn list_dir_calls(&self) -> usize {
-        self.list_dir_calls.load(Ordering::SeqCst)
-    }
-}
-
-#[async_trait]
-impl RootFilesystem for CountingFilesystem {
-    async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
-        self.inner.read_file(path).await
-    }
-
-    async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        self.inner.write_file(path, bytes).await
-    }
-
-    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
-        self.inner.append_file(path, bytes).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.list_dir_calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-
-    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.create_dir_all(path).await
-    }
-
-    // After PR #3659 the trait default `get`/`put` are `Unsupported`.
-    // Forward to the inner DiskFilesystem (which implements them
-    // natively) so this counting wrapper keeps participating in the
-    // unified surface used by FilesystemCapabilityLeaseStore's read_lease
-    // / write_lease / read_lease_index / write_lease_index ops.
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: ironclaw_filesystem::Entry,
-        cas: ironclaw_filesystem::CasExpectation,
-    ) -> Result<ironclaw_filesystem::RecordVersion, FilesystemError> {
-        self.inner.put(path, entry, cas).await
-    }
-
-    async fn get(
-        &self,
-        path: &VirtualPath,
-    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
-    }
 }
 
 fn trust_decision(

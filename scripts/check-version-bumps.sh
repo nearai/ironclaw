@@ -141,10 +141,12 @@ if $WIT_TOOL_CHANGED; then
         echo "  OK: WIT package version bumped."
     fi
 
-    # Check WIT_TOOL_VERSION constant matches
-    CONST_VER=$(extract_rust_const "src/tools/wasm/mod.rs" "WIT_TOOL_VERSION")
+    # Check WIT_TOOL_VERSION constant matches (Reborn host lives in
+    # crates/ironclaw_wasm/src/config.rs; the v1 src/tools/wasm/mod.rs was
+    # deleted under Tier B).
+    CONST_VER=$(extract_rust_const "crates/ironclaw_wasm/src/config.rs" "WIT_TOOL_VERSION")
     if [[ -n "$NEW_VER" && "$CONST_VER" != "$NEW_VER" ]]; then
-        echo "  ERROR: WIT_TOOL_VERSION in src/tools/wasm/mod.rs is '${CONST_VER}' but wit/tool.wit has '${NEW_VER}'. They must match."
+        echo "  ERROR: WIT_TOOL_VERSION in crates/ironclaw_wasm/src/config.rs is '${CONST_VER}' but wit/tool.wit has '${NEW_VER}'. They must match."
         ERRORS=$((ERRORS + 1))
     elif [[ -n "$NEW_VER" ]]; then
         echo "  OK: WIT_TOOL_VERSION matches wit/tool.wit."
@@ -166,14 +168,10 @@ if $WIT_CHANNEL_CHANGED; then
         echo "  OK: WIT package version bumped."
     fi
 
-    # Check WIT_CHANNEL_VERSION constant matches
-    CONST_VER=$(extract_rust_const "src/tools/wasm/mod.rs" "WIT_CHANNEL_VERSION")
-    if [[ -n "$NEW_VER" && "$CONST_VER" != "$NEW_VER" ]]; then
-        echo "  ERROR: WIT_CHANNEL_VERSION in src/tools/wasm/mod.rs is '${CONST_VER}' but wit/channel.wit has '${NEW_VER}'. They must match."
-        ERRORS=$((ERRORS + 1))
-    elif [[ -n "$NEW_VER" ]]; then
-        echo "  OK: WIT_CHANNEL_VERSION matches wit/channel.wit."
-    fi
+    # No host-side WIT_CHANNEL_VERSION constant to cross-check: the v1
+    # src/tools/wasm/mod.rs (which defined it) was deleted under Tier B and the
+    # Reborn WASM host does not pin a channel WIT version constant. The WIT
+    # package version bump above remains the enforced contract.
 fi
 
 if $WIT_TOOL_CHANGED || $WIT_CHANNEL_CHANGED; then

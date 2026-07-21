@@ -34,8 +34,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ActivityId, CapabilityId, ProductKind, ResourceEstimate, ResourceScope, RoutineId, RunId,
-    UserId,
+    ActivityId, CapabilityId, CorrelationId, ProcessId, ProductKind, ResourceEstimate,
+    ResourceScope, RoutineId, RunId, UserId,
 };
 
 /// Where a capability invocation originated — sealed at the membrane, exactly
@@ -81,23 +81,58 @@ impl InvocationOrigin {
     }
 }
 
-/// The host-side capability payload — resolved at the membrane, referenced by
-/// every layer below it (§3, §4.1).
+/// The authenticated actor an [`Invocation`] runs under, sealed at the membrane
+/// (§5.2.1). Modeled as an explicit two-variant type (not `Option<UserId>`) so
+/// no consumer can silently treat an actor-less system/one-shot context as a
+/// user: the distinction between "sealed to a specific human" and "no human
+/// actor" is unignorable at every `match`. Forge-resistance still comes from the
+/// membrane sealing this — a caller cannot mint [`Actor::Sealed`] for a human it
+/// did not authenticate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Actor {
+    /// A specific authenticated human, sealed at the membrane.
+    Sealed(UserId),
+    /// No authenticated human actor: a system service or one-shot product
+    /// invocation. Policy must treat it as its own class, never as a wildcard or
+    /// a stand-in user.
+    System,
+}
+
+impl Actor {
+    /// The sealed human, if any; `None` for [`Actor::System`]. Consumers that
+    /// need the acting user must handle the `None` (system) case explicitly.
+    pub fn user_id(&self) -> Option<&UserId> {
+        match self {
+            Actor::Sealed(user_id) => Some(user_id),
+            Actor::System => None,
+        }
+    }
+
+    /// Stable discriminant string for logs / per-actor accounting views.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Actor::Sealed(_) => "sealed",
+            Actor::System => "system",
+        }
+    }
+}
+
+/// The host-side capability payload — resolved at the membrane and consumed as
+/// the input of `authorize()`, referenced by every layer below it (§3, §4.1).
 ///
 /// This is the "one payload" the DTO collapse is built around: the fields never
 /// change shape as the invocation moves down the stack. Extra per-layer context is
 /// threaded by reference (`&Invocation`) rather than by re-wrapping.
 ///
-/// Relative to today's [`crate::CapabilityDispatchRequest`] (the shape that already
-/// lives in this crate), `Invocation`:
-///
-/// - **binds `actor` as required**, not `Option<UserId>` — the actor is sealed at
-///   the membrane and always present on a resolved invocation;
-/// - **adds `activity_id`** (idempotency identity, §11.3) and `origin` (§5.2.1),
-///   the loop-vocabulary facts that were previously smeared across upper hops;
-/// - **omits `mounts` and `resource_reservation`** — those are *outputs of
-///   authorization*, not inputs, so they move into the sealed `Authorized` witness
-///   that `authorize()` produces (a later slice), never carried on the request.
+/// It carries the caller-set pre-authorization facts `authorize()` needs and that
+/// are neither derivable nor authorization outputs — `actor`, `origin`,
+/// `correlation_id`, and the spawn-lineage `process_id`/`parent_process_id` — but
+/// **omits `mounts`, `grants`, `trust`, and `resource_reservation`**: trust,
+/// grants, and mounts are *derived or produced by* `authorize()`, and
+/// mounts/reservation are authorization *outputs* that live on the sealed
+/// [`crate::Authorized`] witness, never on the request. `Invocation` is the
+/// pre-auth input; [`crate::Authorized`] is the post-auth witness.
 ///
 /// Like [`crate::CapabilityDispatchRequest`], this is an in-process payload
 /// (`input` is arbitrary JSON, not `Eq`), so it derives `PartialEq` but not `Eq`
@@ -114,13 +149,23 @@ pub struct Invocation {
     /// The authority envelope (tenant/user/project/... identity) this invocation
     /// runs under.
     pub scope: ResourceScope,
-    /// The authenticated human actor, sealed at the membrane. Required.
-    pub actor: UserId,
+    /// The authenticated actor, or an explicit system/one-shot actor — sealed at
+    /// the membrane (§5.2.1).
+    pub actor: Actor,
     /// Where the call came from — the only fact the kernel consults about origin.
     pub origin: InvocationOrigin,
     /// Host-derived resource estimate, consumed by `authorize()` at reservation
     /// (§5.3.3). Never model-supplied.
     pub estimate: ResourceEstimate,
+    /// Correlation identity for this invocation — a distinct identity from
+    /// `activity_id`, restored across an auth-resume so gate-resume correlation
+    /// stays continuous (never re-minted on resume).
+    pub correlation_id: CorrelationId,
+    /// Owning process for a spawn-lineage invocation; `None` for the common
+    /// (non-process) case.
+    pub process_id: Option<ProcessId>,
+    /// Parent process in the spawn lineage; `None` at the root.
+    pub parent_process_id: Option<ProcessId>,
 }
 
 #[cfg(test)]
@@ -178,6 +223,24 @@ mod tests {
     }
 
     #[test]
+    fn actor_kind_matches_serde_tag_and_user_id_accessor() {
+        // Same drift guard as `invocation_origin_kind_matches_serde_tag`, plus the
+        // `user_id()` accessor: `Sealed` must yield its user, `System` must yield
+        // `None` (never a stand-in user).
+        let sealed = Actor::Sealed(UserId::new("user1").unwrap());
+        assert_eq!(sealed.kind(), "sealed");
+        assert_eq!(sealed.user_id(), Some(&UserId::new("user1").unwrap()));
+        assert_eq!(
+            serde_json::to_value(&sealed).unwrap(),
+            serde_json::json!({ "sealed": "user1" })
+        );
+
+        assert_eq!(Actor::System.kind(), "system");
+        assert_eq!(Actor::System.user_id(), None);
+        assert_eq!(serde_json::to_value(&Actor::System).unwrap(), "system");
+    }
+
+    #[test]
     fn origin_id_newtypes_reject_invalid_and_accept_valid() {
         // Assert the specific rejection (kind + reason), not just is_err(), so
         // an infrastructure failure can't masquerade as a validation pass.
@@ -221,9 +284,12 @@ mod tests {
                 capability: CapabilityId::new("shell.exec").unwrap(),
                 input: serde_json::json!({ "cmd": "echo hi" }),
                 scope: sample_scope(),
-                actor: UserId::new("user1").unwrap(),
+                actor: Actor::Sealed(UserId::new("user1").unwrap()),
                 origin,
                 estimate: ResourceEstimate::default(),
+                correlation_id: CorrelationId::new(),
+                process_id: None,
+                parent_process_id: None,
             };
             // The payload shape is identical across origins — origin is one field,
             // not a parallel type (§3.1, Mechanisms 2 & 4 dissolve).

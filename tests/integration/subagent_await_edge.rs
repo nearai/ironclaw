@@ -28,9 +28,10 @@ use ironclaw_runner::subagent::await_edge::{
     store::FilesystemAwaitEdgeStore,
 };
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    DefaultTurnCoordinator, InMemoryTurnStateStore, TurnCoordinator, TurnRunId, TurnScope,
-    TurnSpawnTreePort, runner::TurnRunTransitionPort,
+    DefaultTurnCoordinator, TurnCoordinator, TurnRunId, TurnScope, TurnSpawnTreePort,
+    runner::TurnRunTransitionPort,
 };
 
 fn scope(tenant: &str, user: &str, agent: Option<&str>, project: Option<&str>) -> TurnScope {
@@ -304,7 +305,7 @@ async fn scope_with_unclosed_edge_is_recovered_before_new_spawns_are_admitted() 
     let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
         Arc::new(ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
     let turn_state_store: Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore> =
-        Arc::new(InMemoryTurnStateStore::default());
+        Arc::new(in_memory_turn_state_store());
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
         Arc::clone(&store),
@@ -349,7 +350,7 @@ async fn brand_new_scope_with_no_unclosed_edges_is_admitted_immediately() {
     let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
         Arc::new(ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
     let turn_state_store: Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore> =
-        Arc::new(InMemoryTurnStateStore::default());
+        Arc::new(in_memory_turn_state_store());
     let thread_service = Arc::new(InMemorySessionThreadService::default());
     let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
         Arc::clone(&store),
@@ -389,7 +390,7 @@ async fn brand_new_scope_with_no_unclosed_edges_is_admitted_immediately() {
 #[tokio::test]
 async fn rollback_deleted_edge_is_reconstructed_so_the_parent_still_gets_the_result() {
     let store = real_store();
-    let state_store = Arc::new(InMemoryTurnStateStore::default());
+    let state_store = Arc::new(in_memory_turn_state_store());
     let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::clone(&state_store)));
     let thread_service = Arc::new(InMemorySessionThreadService::default());
 
@@ -686,7 +687,7 @@ async fn rollback_deleted_edge_is_reconstructed_so_the_parent_still_gets_the_res
 #[tokio::test]
 async fn mixed_status_batch_group_reports_each_members_own_status_and_reason() {
     let store = real_store();
-    let state_store = Arc::new(InMemoryTurnStateStore::default());
+    let state_store = Arc::new(in_memory_turn_state_store());
     let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::clone(&state_store)));
     let thread_service = Arc::new(InMemorySessionThreadService::default());
 

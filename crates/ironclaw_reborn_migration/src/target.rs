@@ -15,29 +15,22 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_identity::{FilesystemRebornIdentityStore, RebornUserDirectory};
 
-#[cfg(feature = "full-migration")]
 use ironclaw_host_api::ProjectId;
-#[cfg(feature = "full-migration")]
-use ironclaw_memory::MemoryService;
-#[cfg(feature = "full-migration")]
-use ironclaw_memory_native::NativeMemoryService;
-#[cfg(feature = "full-migration")]
+use ironclaw_memory_native::{
+    ChunkingMemoryDocumentIndexer, DefaultPromptWriteSafetyPolicy,
+    FilesystemMemoryDocumentRepository, MemoryBackend, MemoryBackendCapabilities,
+    PromptProtectedPathRegistry, PromptSafetyPolicyVersion, RepositoryMemoryBackend,
+};
 use ironclaw_reborn_identity::RebornIdentityResolver;
-#[cfg(feature = "full-migration")]
 use ironclaw_secrets::{FilesystemSecretStore, SecretStore, SecretsCrypto};
-#[cfg(feature = "full-migration")]
 use ironclaw_threads::{FilesystemSessionThreadService, SessionThreadService};
-#[cfg(feature = "full-migration")]
 use ironclaw_triggers::TriggerRepository;
-#[cfg(feature = "full-migration")]
 use secrecy::SecretString;
 
 use crate::error::MigrationError;
 use crate::options::TargetStore;
 
-#[cfg(feature = "full-migration")]
 use crate::mounts;
-#[cfg(feature = "full-migration")]
 use crate::options::MigrationOptions;
 
 /// The concrete Reborn backend the migration writes into. Both the KV substrate
@@ -48,20 +41,17 @@ pub(crate) enum Backend {
         root: Arc<ironclaw_filesystem::LibSqlRootFilesystem>,
         /// Shared handle for the triggers repo, which uses the raw DB (not the
         /// KV substrate). `LibSqlRootFilesystem` does not re-expose it.
-        #[cfg(feature = "full-migration")]
         db: Arc<libsql::Database>,
     },
     #[cfg(feature = "postgres")]
     Postgres {
         root: Arc<ironclaw_filesystem::PostgresRootFilesystem>,
-        #[cfg(feature = "full-migration")]
         pool: deadpool_postgres::Pool,
     },
 }
 
 /// Live Reborn write target: opened backend plus every constructed write
 /// service and the scope migrated records are written under.
-#[cfg(feature = "full-migration")]
 pub(crate) struct RebornTarget {
     /// Held for `identity_store` (the identity row-by-row follow-up); the other
     /// services already retain their own root/db Arcs.
@@ -70,7 +60,7 @@ pub(crate) struct RebornTarget {
     pub(crate) tenant_id: TenantId,
     pub(crate) agent_id: AgentId,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
-    pub(crate) memory_service: Arc<dyn MemoryService>,
+    pub(crate) memory_backend: Arc<dyn MemoryBackend>,
     pub(crate) trigger_repo: Arc<dyn TriggerRepository>,
     pub(crate) extension_store: Arc<dyn ExtensionInstallationStore>,
     /// Present only when a secrets master key was supplied.
@@ -124,7 +114,6 @@ impl ExtensionOwnershipTarget {
     }
 }
 
-#[cfg(feature = "full-migration")]
 impl RebornTarget {
     pub(crate) async fn open(options: &MigrationOptions) -> Result<Self, MigrationError> {
         let crypto = match &options.secret_master_key {
@@ -133,11 +122,11 @@ impl RebornTarget {
         };
 
         let backend = open_backend(&options.target).await?;
-        let (thread_service, memory_service, secret_store) = match &backend {
+        let (thread_service, memory_backend, secret_store) = match &backend {
             #[cfg(feature = "libsql")]
-            Backend::LibSql { root, .. } => build_kv_services(root.clone(), crypto.clone()),
+            Backend::LibSql { root, .. } => build_kv_services(root.clone(), crypto.clone())?,
             #[cfg(feature = "postgres")]
-            Backend::Postgres { root, .. } => build_kv_services(root.clone(), crypto.clone()),
+            Backend::Postgres { root, .. } => build_kv_services(root.clone(), crypto.clone())?,
         };
         let trigger_repo = build_trigger_repo(&backend).await?;
 
@@ -161,7 +150,7 @@ impl RebornTarget {
             tenant_id: options.tenant_id.clone(),
             agent_id: options.agent_id.clone(),
             thread_service,
-            memory_service,
+            memory_backend,
             trigger_repo,
             extension_store,
             secret_store,
@@ -188,24 +177,24 @@ impl RebornTarget {
     }
 }
 
-#[cfg(feature = "full-migration")]
 fn build_crypto(key: &SecretString) -> Result<SecretsCrypto, MigrationError> {
     SecretsCrypto::new(key.clone())
         .map_err(|e| MigrationError::OpenTarget(format!("secrets master key: {e}")))
 }
 
 /// The KV-substrate write services built over one backend.
-#[cfg(feature = "full-migration")]
 type KvServices = (
     Arc<dyn SessionThreadService>,
-    Arc<dyn MemoryService>,
+    Arc<dyn MemoryBackend>,
     Option<Arc<dyn SecretStore>>,
 );
 
 /// Build the filesystem-backed KV services over one concrete backend, returning
 /// them as trait objects.
-#[cfg(feature = "full-migration")]
-fn build_kv_services<F>(root: Arc<F>, crypto: Option<Arc<SecretsCrypto>>) -> KvServices
+fn build_kv_services<F>(
+    root: Arc<F>,
+    crypto: Option<Arc<SecretsCrypto>>,
+) -> Result<KvServices, MigrationError>
 where
     F: RootFilesystem + 'static,
 {
@@ -217,8 +206,7 @@ where
         Arc::new(FilesystemSessionThreadService::new(threads_scoped));
 
     let root_dyn: Arc<dyn RootFilesystem> = root.clone();
-    let memory_service: Arc<dyn MemoryService> =
-        Arc::new(NativeMemoryService::from_filesystem(root_dyn, None));
+    let memory_backend = build_memory_backend(root_dyn)?;
 
     let secret_store: Option<Arc<dyn SecretStore>> = crypto.map(|crypto| {
         let secrets_scoped = Arc::new(ScopedFilesystem::new(
@@ -230,10 +218,49 @@ where
         store
     });
 
-    (thread_service, memory_service, secret_store)
+    Ok((thread_service, memory_backend, secret_store))
 }
 
-#[cfg(feature = "full-migration")]
+fn build_memory_backend(
+    filesystem: Arc<dyn RootFilesystem>,
+) -> Result<Arc<dyn MemoryBackend>, MigrationError> {
+    let repository = Arc::new(FilesystemMemoryDocumentRepository::new(filesystem));
+    let indexer = Arc::new(ChunkingMemoryDocumentIndexer::new(repository.clone()));
+    // Intentionally empty, and load-bearing: the migration must be able to
+    // import legacy content into paths that are normally prompt-protected (e.g.
+    // BOOTSTRAP.md). Because `MemoryBackendWriteOptions` leaves
+    // `prompt_safety_already_enforced: false`, the backend consults this
+    // registry on every write and is fail-closed by default; an empty registry
+    // is what makes it match nothing, so no legacy write is blocked. This
+    // bypass is deliberately scoped to this ephemeral, one-shot migration-only
+    // backend — do NOT "fix" it by populating protected paths here, or you will
+    // silently reintroduce write failures for protected legacy documents.
+    let empty_protected_paths = PromptProtectedPathRegistry::new(
+        PromptSafetyPolicyVersion::new("migration-empty-prompt-protected-paths:v1")
+            .map_err(|error| MigrationError::OpenTarget(error.to_string()))?,
+        std::iter::empty::<String>(),
+    )
+    .map_err(|error| MigrationError::OpenTarget(error.to_string()))?;
+    Ok(Arc::new(
+        RepositoryMemoryBackend::new(repository)
+            .with_indexer(indexer)
+            .with_prompt_write_safety_policy(Arc::new(
+                DefaultPromptWriteSafetyPolicy::with_registry(empty_protected_paths.clone()),
+            ))
+            .with_prompt_protected_path_registry(empty_protected_paths)
+            .with_capabilities(
+                MemoryBackendCapabilities::default()
+                    .set_file_documents(true)
+                    .set_metadata(true)
+                    .set_versioning(true)
+                    .set_prompt_write_safety(true)
+                    .set_full_text_search(true)
+                    .set_delete(true)
+                    .set_transactions(true),
+            ),
+    ))
+}
+
 #[allow(dead_code)] // wired for the identity row-by-row follow-up
 fn build_identity_store<F>(
     root: Arc<F>,
@@ -277,7 +304,6 @@ where
     Ok(store)
 }
 
-#[cfg(feature = "full-migration")]
 async fn build_trigger_repo(
     backend: &Backend,
 ) -> Result<Arc<dyn TriggerRepository>, MigrationError> {
@@ -320,11 +346,7 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
             root.run_migrations()
                 .await
                 .map_err(|e| MigrationError::OpenTarget(e.to_string()))?;
-            Ok(Backend::LibSql {
-                root,
-                #[cfg(feature = "full-migration")]
-                db,
-            })
+            Ok(Backend::LibSql { root, db })
         }
         #[cfg(not(feature = "libsql"))]
         TargetStore::LibSql { .. } => Err(MigrationError::OpenTarget(
@@ -339,11 +361,7 @@ async fn open_backend(target: &TargetStore) -> Result<Backend, MigrationError> {
             root.run_migrations()
                 .await
                 .map_err(|e| MigrationError::OpenTarget(e.to_string()))?;
-            Ok(Backend::Postgres {
-                root,
-                #[cfg(feature = "full-migration")]
-                pool,
-            })
+            Ok(Backend::Postgres { root, pool })
         }
         #[cfg(not(feature = "postgres"))]
         TargetStore::Postgres { .. } => Err(MigrationError::OpenTarget(

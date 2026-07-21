@@ -401,12 +401,11 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
 async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones() {
     let cases = [
         (
-            RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
-                capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
-                kind: RuntimeFailureKind::InvalidInput,
-                message: Some("invalid input".to_string()),
-                detail: None,
-            }),
+            RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
+                CapabilityId::new("demo.echo").expect("valid capability id"),
+                RuntimeFailureKind::InvalidInput,
+                Some("invalid input".to_string()),
+            )),
             CapabilityFailureKind::InvalidInput,
         ),
         (

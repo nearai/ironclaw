@@ -715,11 +715,12 @@ async fn cancellation_checkpoint_failure_still_cancels_for_permissive_profile() 
 
 #[tokio::test]
 async fn cancellation_checkpoint_payload_unavailable_propagates_for_permissive_profile() {
+    let raw_summary = "checkpoint store failed at /tmp/{state}";
     let host = MockHost::new(vec![reply_response()])
         .with_require_final_checkpoint(false)
-        .fail_checkpoint_payload(
+        .fail_checkpoint_payload_with_error(
             LoopCheckpointKind::Final,
-            AgentLoopHostErrorKind::Unavailable,
+            AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, raw_summary),
         );
     host.request_cancellation(LoopCancelReasonKind::UserRequested);
     let executor = CanonicalAgentLoopExecutor;
@@ -730,15 +731,18 @@ async fn cancellation_checkpoint_payload_unavailable_propagates_for_permissive_p
         .await
         .expect_err("expected checkpoint staging unavailability to propagate");
 
+    // Phase 1: the raw summary contains `/` and `{` and fails strict
+    // validation, so the card summary degrades to a canned fallback while the
+    // real cause survives (secret-scrubbed) on the detail channel.
     assert_eq!(
         err,
         AgentLoopExecutorError::HostUnavailableWithDiagnostics {
             stage: HostStage::Checkpoint,
             kind: AgentLoopHostErrorKind::Unavailable,
-            safe_summary: LoopSafeSummary::new("scripted checkpoint payload failure").unwrap(),
+            safe_summary: LoopSafeSummary::model_gateway_failed(),
             reason_kind: None,
             diagnostic_ref: None,
-            detail: None,
+            detail: Some(raw_summary.to_string()),
         }
     );
     assert!(host.checkpoint_kinds().is_empty());

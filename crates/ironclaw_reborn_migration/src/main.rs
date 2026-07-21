@@ -68,6 +68,10 @@ struct Cli {
     #[arg(long, env = "MIGRATION_SECRET_MASTER_KEY")]
     secret_master_key: Option<String>,
 
+    /// Resolve the v1 secrets master key from SECRETS_MASTER_KEY or OS keychain.
+    #[arg(long, conflicts_with = "secret_master_key")]
+    resolve_secret_master_key: bool,
+
     /// Report what would be migrated without writing to the Reborn store.
     #[arg(long)]
     dry_run: bool,
@@ -78,7 +82,7 @@ struct Cli {
 }
 
 impl Cli {
-    fn into_options(self) -> anyhow::Result<(MigrationOptions, Option<PathBuf>)> {
+    async fn into_options(self) -> anyhow::Result<(MigrationOptions, Option<PathBuf>)> {
         let source = match (self.source_libsql, self.source_postgres) {
             (Some(path), None) => SourceDb::LibSql { path },
             (None, Some(url)) => SourceDb::Postgres {
@@ -95,15 +99,52 @@ impl Cli {
         };
         let tenant_id = TenantId::new(self.tenant_id)?;
         let agent_id = AgentId::new(self.agent_id)?;
+        // Only touch the env/keychain when the user asked us to resolve; an
+        // explicit `--secret-master-key` (or neither flag) never consults it.
+        let resolved = if self.resolve_secret_master_key {
+            ironclaw_secrets::keychain::resolve_master_key_material().await
+        } else {
+            Ok(None)
+        };
+        let secret_master_key = select_secret_master_key(
+            self.secret_master_key,
+            self.resolve_secret_master_key,
+            resolved,
+        )?;
         let options = MigrationOptions {
             source,
             target,
             tenant_id,
             agent_id,
-            secret_master_key: self.secret_master_key.map(SecretString::from),
+            secret_master_key,
             dry_run: self.dry_run,
         };
         Ok((options, self.report))
+    }
+}
+
+/// Resolve the effective secrets master key from the two mutually-exclusive CLI
+/// inputs (`--secret-master-key` vs `--resolve-secret-master-key`) and the
+/// outcome of the keychain/env lookup.
+///
+/// Fail-loud: when the user explicitly asked us to resolve the key and the
+/// lookup **errored**, the migration aborts. Swallowing that error and
+/// returning `None` would silently skip every secret and leave the target in a
+/// broken half-migrated state, violating the crate's "nothing is silently
+/// dropped" invariant (see `.claude/rules/error-handling.md`). A successful
+/// lookup that simply found no key (`Ok(None)`) is a legitimate absence — the
+/// secrets converter records it as a reported loss, not a swallowed failure.
+fn select_secret_master_key(
+    explicit: Option<String>,
+    resolve: bool,
+    resolved: Result<Option<SecretString>, ironclaw_secrets::SecretError>,
+) -> anyhow::Result<Option<SecretString>> {
+    match (explicit, resolve) {
+        (Some(key), false) => Ok(Some(SecretString::from(key))),
+        (None, true) => resolved
+            .map_err(|error| anyhow::anyhow!("failed to resolve secrets master key: {error}")),
+        (None, false) => Ok(None),
+        (Some(_), true) => unreachable!("clap conflict prevents both secret key sources"),
     }
 }
 
@@ -128,7 +169,7 @@ async fn main() -> ExitCode {
 
 async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let (options, report_path) = cli.into_options()?;
+    let (options, report_path) = cli.into_options().await?;
     let dry_run = options.dry_run;
 
     let report = run_migration(options).await?;
@@ -153,4 +194,62 @@ async fn emit_report(
         None => println!("{json}"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironclaw_secrets::SecretError;
+    use secrecy::ExposeSecret;
+
+    #[test]
+    fn explicit_key_resolution_failure_aborts_rather_than_silently_skipping() {
+        // User asked us to resolve the key (`--resolve-secret-master-key`) and
+        // the lookup errored. This must surface as an error, not a silent
+        // `None` that would skip every secret. Regression for the swallowed
+        // `tracing::warn!` + `return None` fail-loud violation.
+        let result = select_secret_master_key(
+            None,
+            true,
+            Err(SecretError::KeychainError(
+                "keychain unavailable".to_string(),
+            )),
+        );
+        let error = result.expect_err("resolution failure must abort the migration");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to resolve secrets master key"),
+            "error should name the resolution failure, got: {error}"
+        );
+    }
+
+    #[test]
+    fn explicit_key_resolution_success_carries_the_resolved_key() {
+        let result = select_secret_master_key(
+            None,
+            true,
+            Ok(Some(SecretString::from("resolved-key".to_string()))),
+        );
+        let key = result.expect("successful resolution should not error");
+        assert_eq!(key.expect("key present").expose_secret(), "resolved-key");
+    }
+
+    #[test]
+    fn absent_resolved_key_is_a_legitimate_none_not_an_error() {
+        // A successful lookup that found nothing is not a failure — secrets are
+        // reported as unmigrated by the converter, not swallowed here.
+        let result = select_secret_master_key(None, true, Ok(None));
+        assert!(
+            result.expect("Ok(None) is not an error").is_none(),
+            "no key found must flow through as None"
+        );
+    }
+
+    #[test]
+    fn explicit_master_key_flag_never_consults_resolution() {
+        let result = select_secret_master_key(Some("literal-key".to_string()), false, Ok(None));
+        let key = result.expect("explicit key path must not error");
+        assert_eq!(key.expect("key present").expose_secret(), "literal-key");
+    }
 }

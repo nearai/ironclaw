@@ -8,7 +8,7 @@ use std::sync::Arc;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_product_workflow::AutomationProductFacade;
 use ironclaw_triggers::{TriggerActiveRunLookup, TriggerRepository};
-use ironclaw_turns::FilesystemTurnStateStore;
+use ironclaw_turns::FilesystemTurnStateRowStore;
 
 use crate::automation::trigger_poller::SnapshotActiveRunLookup;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
@@ -22,7 +22,7 @@ use crate::turn_run_snapshot::TurnRunSnapshotSource;
 #[cfg(feature = "test-support")]
 pub fn local_dev_automation_product_facade_for_test<F>(
     trigger_repository: Arc<dyn TriggerRepository>,
-    turn_state: Arc<FilesystemTurnStateStore<F>>,
+    turn_state: Arc<FilesystemTurnStateRowStore<F>>,
 ) -> Arc<dyn AutomationProductFacade>
 where
     F: RootFilesystem + Send + Sync + 'static,
@@ -47,7 +47,7 @@ where
 /// `HostRuntimeCapabilityHarness::install_trigger_active_run_lookup_for_test` (#5886).
 #[cfg(feature = "test-support")]
 pub fn local_dev_trigger_active_run_lookup_for_test<F>(
-    turn_state: Arc<FilesystemTurnStateStore<F>>,
+    turn_state: Arc<FilesystemTurnStateRowStore<F>>,
 ) -> Arc<dyn TriggerActiveRunLookup>
 where
     F: RootFilesystem + Send + Sync + 'static,
