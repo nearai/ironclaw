@@ -120,10 +120,11 @@ async fn reborn_model_failure_is_retryable_and_retry_resumes_to_completion() {
 
 /// A host-managed model call can surface `Cancelled` without any cooperative
 /// cancel signal. `planned_driver` maps that executor error to
-/// `interrupted_unexpectedly`; the binary runner currently projects the
-/// non-allowlisted driver failure as the generic driver category.
+/// `interrupted_unexpectedly`, and the binary runner preserves that category
+/// on the durable failure record (§5a.5 closed — it previously overwrote it
+/// with the generic `driver_failed`).
 #[tokio::test]
-async fn reborn_inflight_model_cancelled_projects_driver_failed_divergence() {
+async fn reborn_inflight_model_cancelled_preserves_interrupted_unexpectedly() {
     let model_gateway =
         RebornTraceReplayModelGateway::with_scripted_steps([RebornModelReplayStep::ModelError {
             kind: HostManagedModelErrorKind::Cancelled,
@@ -149,13 +150,13 @@ async fn reborn_inflight_model_cancelled_projects_driver_failed_divergence() {
         .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
         .expect("failed run");
-    // matrix-divergence: `map_executor_error` produces
-    // "interrupted_unexpectedly", but `TurnRunnerWorker::sanitized_driver_failure`
-    // only preserves allowlisted driver reason kinds and currently projects the
-    // binary run category as "driver_failed".
+    // §5a.5 closed: `map_executor_error` produces "interrupted_unexpectedly"
+    // and `sanitized_driver_failure` now preserves it end-to-end, so the
+    // durable run failure carries the original category instead of the
+    // masking "driver_failed".
     assert_failure_lane_alignment(
         &failed,
-        "driver_failed",
+        "interrupted_unexpectedly",
         FailureLane::Retriable,
         RetryDisposition::UserInitiated,
     );

@@ -107,18 +107,27 @@ The table-driven test (`executor/tests/failure_matrix.rs`) asserts what the code
 DOES; these divergences from the original expected rows are documented, not
 silently fixed:
 
-1. **STILL OPEN — Approval gate + `SkipAndContinue` completes instead of
+1. **CLOSED (2026-07-21) — Approval gate + `SkipAndContinue` now fails as
    `DriverBug`.**
-   `GateOutcome::validate_for_gate_kind` declares it invalid, but `GateStage`
-   never enforces it — the run completes (the gated call is skipped, not
-   executed). Enforcement would be a behavior change; flagged for owner review.
-2. **STILL OPEN — `NoProgressDetected` is in the explainable set but gets no
+   `GateStage` enforces `GateOutcome::validate_for_gate_kind`
+   (`enforce_gate_outcome_contract`, executor `gates.rs`): an invalid
+   `SkipAndContinue` on an Approval/ExternalTool gate is downgraded to
+   `Abort { DriverBug }` and the run fails through the standard abort path
+   (matrix row asserts the `Failed(DriverBug)` terminal). REMAINING for owner
+   review: `AwaitDependentRunGateStage` is deliberately NOT enforced — the
+   executor test
+   `await_dependent_run_gate_skip_and_continue_accumulates_byte_len` pins its
+   skip arm as reachable for custom gate resolvers deriving outcomes from
+   external policy, contradicting the validator's declaration for that kind.
+2. **CLOSED (2026-07-21) — `NoProgressDetected` now gets its failure
    explanation.**
-   The `StopKind::NoProgressDetected` failure path never calls
-   `attach_failure_explanation`, contradicting Part-1's own explainable-set
-   intent. Candidate fix on the failed branch only — NOTE: the no-progress path
-   is PinchBench-load-bearing (final-answer nudge), so any change must leave the
-   nudge untouched and be benchmarked.
+   The `StopKind::NoProgressDetected` failed branch calls
+   `attach_failure_explanation` (same path as other explainable kinds) after
+   the final-answer nudge declines and before the Final checkpoint; the
+   explanation ref rides `LoopFailed.explanation_message_refs`. The
+   PinchBench-load-bearing nudge is untouched: a successful nudge still
+   completes with no explanation call, and the explanation is best-effort
+   (fails soft, bounded 10 s).
 3. **RESOLVED BY STACK #5389 — model-fixable capability failures recover and
    complete.** A single `Denied` outcome is fed back to the model as a tool
    error, and the stack now does the same for capability
@@ -134,13 +143,25 @@ silently fixed:
    the runner maps to retryable host-stage failures. The enum origins are
    legacy-`text_loop_driver`-only, confirming §1.4.
 
-5. **STILL OPEN — `interrupted_unexpectedly` is lost at the runner boundary.**
-   The planned
-   driver's `map_executor_error` maps an in-flight `Cancelled` host error to
-   `interrupted_unexpectedly`, but runner sanitization projects the run failure
-   as `driver_failed` — the category is overwritten before it reaches the user
-   (binary-level divergence test locks both sides). Candidate follow-up:
-   preserve the driver-mapped category through runner sanitization.
+5. **CLOSED (2026-07-21) — `interrupted_unexpectedly` is preserved at the
+   runner boundary.**
+   `sanitized_driver_failure` (`ironclaw_runner::turn_runner`) now preserves
+   the driver-mapped `interrupted_unexpectedly` category instead of
+   overwriting it with `driver_failed`; the binary E2E
+   (`reborn_inflight_model_cancelled_preserves_interrupted_unexpectedly`)
+   locks the durable run failure end-to-end. Note: other driver reason kinds
+   (`driver_bug`, `checkpoint_rejected`) are still collapsed to
+   `driver_failed` by the same allowlist — unchanged here, candidate
+   follow-up.
+
+6. **CLOSED (2026-07-21) — loop-exit violation kinds now survive on the
+   durable failure record.** Rejected `LoopExit` claims used to collapse all
+   eight `LoopExitViolationKind`s into the bare `driver_protocol_violation` /
+   `interrupted_unexpectedly` categories. `invalid_exit_decision`
+   (`ironclaw_turns::loop_exit`) now persists the specific kind as the
+   sanitized failure `detail` (`"loop exit violation: <kind>"`), so the run
+   record, `TurnLifecycleEvent.detail`, and the failure explainer keep WHICH
+   protocol rule was broken while the wire-stable category set is unchanged.
 
 ## 6. Relationship to #5390 FailureLane
 

@@ -47,9 +47,16 @@ async fn reborn_trace_error_path_parity() {
         .wait_for_status(submitted.run_id, TurnStatus::Failed)
         .await
         .expect("failed run");
+    let failure = state.failure.expect("failure category");
+    assert_eq!(failure.category(), "driver_protocol_violation");
+    // The durable failure record must name WHICH loop-exit protocol rule was
+    // broken (loop-failure matrix §5a.6): the driver's Failed exit could not be
+    // evidence-verified, and that specific violation kind survives on the
+    // sanitized failure detail instead of collapsing into the bare category.
     assert_eq!(
-        state.failure.expect("failure category").category(),
-        "driver_protocol_violation"
+        failure.detail(),
+        Some("loop exit violation: unverified_failure_evidence"),
+        "the specific loop-exit violation kind must survive on the durable failure detail"
     );
 
     let invocations = harness.capability_invocations();
