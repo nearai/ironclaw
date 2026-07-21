@@ -1374,8 +1374,8 @@ mod tests {
     /// real `FilesystemError::Backend -> SecretStoreError::StoreUnavailable`
     /// mapping fire (a `NotFound` fault would instead surface as `Ok(empty)` /
     /// `Ok(None)` and never error).
-    fn metadata_unavailable_secret_store() -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>
-    {
+    fn metadata_unavailable_secret_store()
+    -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>> {
         let backend = Arc::new(
             FaultInjecting::new(InMemoryBackend::new())
                 .with_fault(
@@ -1398,13 +1398,15 @@ mod tests {
     /// removed): the injected backend fault flows through the store's real
     /// `delete` -> `FilesystemError::Backend -> SecretStoreError::StoreUnavailable`
     /// mapping.
-    fn delete_unavailable_secret_store() -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>
-    {
-        let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
-            Fault::on(FilesystemOperation::Delete)
-                .path("secrets")
-                .backend("secret delete unavailable"),
-        ));
+    fn delete_unavailable_secret_store()
+    -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>> {
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new()).with_fault(
+                Fault::on(FilesystemOperation::Delete)
+                    .path("secrets")
+                    .backend("secret delete unavailable"),
+            ),
+        );
         Arc::new(FilesystemSecretStore::ephemeral_over(backend))
     }
 

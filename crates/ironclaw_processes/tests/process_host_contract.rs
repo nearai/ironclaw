@@ -303,12 +303,14 @@ fn result_store_failing_first_kill_write() -> (
     Arc<FilesystemProcessResultStore<FaultInjecting<InMemoryBackend>>>,
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
-    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
-        Fault::on(FilesystemOperation::WriteFile)
-            .path("results")
-            .nth(1)
-            .backend("injected kill result write failure"),
-    ));
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("results")
+                .nth(1)
+                .backend("injected kill result write failure"),
+        ),
+    );
     let store = Arc::new(FilesystemProcessResultStore::new(processes_fs_over(
         backend.clone(),
     )));

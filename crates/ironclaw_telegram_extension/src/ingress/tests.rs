@@ -360,7 +360,9 @@ async fn telegram_updates_handler_returns_401_when_unconfigured() {
 #[tokio::test]
 async fn telegram_updates_handler_returns_503_when_setup_store_is_down() {
     let (state, backend) = fault_injecting_telegram_state();
-    backend.add_fault(Fault::on(FilesystemOperation::ReadFile).backend("test-injected filesystem failure"));
+    backend.add_fault(
+        Fault::on(FilesystemOperation::ReadFile).backend("test-injected filesystem failure"),
+    );
     let setup = unconfigured_setup_service_with_state(Arc::new(RecordingBotApi::default()), state);
     let pairing = pairing_service_with(Arc::clone(&setup));
     let resolver = Arc::new(DynamicTelegramInstallationResolver::new(

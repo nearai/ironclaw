@@ -353,11 +353,7 @@ where
         self.inner.begin(path).await
     }
 
-    async fn append(
-        &self,
-        path: &VirtualPath,
-        payload: Vec<u8>,
-    ) -> Result<SeqNo, FilesystemError> {
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
         self.gate(FilesystemOperation::Append, path)?;
         self.inner.append(path, payload).await
     }
@@ -393,12 +389,34 @@ where
         self.gate(FilesystemOperation::ReserveSeq, path)?;
         self.inner.reserve_sequence(path).await
     }
+
+    // ─── Legacy bytes plane ───────────────────────────────────────────────
+    //
+    // These have *non-delegating* trait defaults that return `Unsupported`
+    // unconditionally (unlike `read_file`/`write_file`/`*_bounded`, whose
+    // defaults route through the forwarded `get`/`put`/`list_dir`/`tail`
+    // primitives and therefore already reach the inner backend). If the
+    // decorator did not override them, a call would hit the trait default and
+    // report `Unsupported` even when the wrapped backend supports the op —
+    // masking real behavior. Forward them with the same fault gating the other
+    // ops use.
+
+    async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
+        self.gate(FilesystemOperation::AppendFile, path)?;
+        self.inner.append_file(path, bytes).await
+    }
+
+    async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.gate(FilesystemOperation::CreateDirAll, path)?;
+        self.inner.create_dir_all(path).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InMemoryBackend;
+    use crate::{DiskFilesystem, InMemoryBackend};
+    use ironclaw_host_api::HostPath;
 
     fn path(p: &str) -> VirtualPath {
         VirtualPath::new(p).unwrap()
@@ -406,17 +424,28 @@ mod tests {
 
     #[tokio::test]
     async fn nth_fault_fires_once_then_passes_through() {
-        let fs = FaultInjecting::new(InMemoryBackend::new())
-            .with_fault(Fault::on(FilesystemOperation::WriteFile).nth(2).backend("boom"));
+        let fs = FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .nth(2)
+                .backend("boom"),
+        );
 
         // First write succeeds, reaching the real backend.
-        fs.put(&path("/projects/1"), Entry::bytes(b"one".to_vec()), CasExpectation::Any)
-            .await
-            .expect("first put succeeds");
+        fs.put(
+            &path("/projects/1"),
+            Entry::bytes(b"one".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("first put succeeds");
 
         // Second write is faulted with the configured Backend error + context.
         let err = fs
-            .put(&path("/projects/2"), Entry::bytes(b"two".to_vec()), CasExpectation::Any)
+            .put(
+                &path("/projects/2"),
+                Entry::bytes(b"two".to_vec()),
+                CasExpectation::Any,
+            )
             .await
             .expect_err("second put is faulted");
         assert!(matches!(
@@ -426,9 +455,13 @@ mod tests {
         ));
 
         // Third write passes through again — Nth is a one-shot.
-        fs.put(&path("/projects/3"), Entry::bytes(b"three".to_vec()), CasExpectation::Any)
-            .await
-            .expect("third put succeeds");
+        fs.put(
+            &path("/projects/3"),
+            Entry::bytes(b"three".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("third put succeeds");
 
         // The faulted write did not reach the backend: /projects/2 is absent.
         assert!(fs.get(&path("/projects/2")).await.unwrap().is_none());
@@ -438,9 +471,13 @@ mod tests {
     #[tokio::test]
     async fn records_gated_ops_in_call_order() {
         let fs = FaultInjecting::new(InMemoryBackend::new());
-        fs.put(&path("/projects/x"), Entry::bytes(b"v".to_vec()), CasExpectation::Any)
-            .await
-            .unwrap();
+        fs.put(
+            &path("/projects/x"),
+            Entry::bytes(b"v".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .unwrap();
         let _ = fs.get(&path("/projects/x")).await.unwrap();
         fs.delete(&path("/projects/x")).await.unwrap();
 
@@ -462,9 +499,13 @@ mod tests {
         );
 
         // A non-matching path is untouched.
-        fs.put(&path("/projects/a"), Entry::bytes(b"a".to_vec()), CasExpectation::Any)
-            .await
-            .expect("non-secrets write passes");
+        fs.put(
+            &path("/projects/a"),
+            Entry::bytes(b"a".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .expect("non-secrets write passes");
 
         // A matching path is faulted (Always trigger — every match fails).
         let err = fs
@@ -476,5 +517,60 @@ mod tests {
             .await
             .expect_err("secrets write is faulted");
         assert!(matches!(err, FilesystemError::Backend { .. }));
+    }
+
+    /// The legacy bytes-plane methods `append_file` / `create_dir_all` have
+    /// non-delegating trait defaults (they return `Unsupported` outright rather
+    /// than routing through a forwarded primitive). The decorator must override
+    /// them to reach the inner backend, or a supporting backend's op is masked
+    /// as `Unsupported`. Uses a real `DiskFilesystem` — which supports both —
+    /// so this pins genuine forwarding, gating, and recording end-to-end.
+    #[tokio::test]
+    async fn forwards_legacy_bytes_plane_to_supporting_inner() {
+        let storage = tempfile::tempdir().unwrap();
+        let mut disk = DiskFilesystem::new();
+        disk.mount_local(
+            path("/projects"),
+            HostPath::from_path_buf(storage.path().to_path_buf()),
+        )
+        .unwrap();
+        let fs = FaultInjecting::new(disk);
+
+        // create_dir_all forwards to the inner backend and succeeds — not the
+        // trait default's `Unsupported`.
+        fs.create_dir_all(&path("/projects/nested"))
+            .await
+            .expect("create_dir_all forwards to a supporting inner backend");
+
+        // append_file forwards too; two appends concatenate on the real file.
+        fs.append_file(&path("/projects/nested/log"), b"one")
+            .await
+            .expect("first append_file forwards");
+        fs.append_file(&path("/projects/nested/log"), b"two")
+            .await
+            .expect("second append_file forwards");
+        assert_eq!(
+            fs.read_file(&path("/projects/nested/log")).await.unwrap(),
+            b"onetwo".to_vec()
+        );
+
+        // Both ops were gated and recorded, like every other forwarded op.
+        assert_eq!(fs.count(FilesystemOperation::CreateDirAll), 1);
+        assert_eq!(fs.count(FilesystemOperation::AppendFile), 2);
+
+        // The gate applies to these ops too: an injected fault fires.
+        let faulted = FaultInjecting::new(DiskFilesystem::new())
+            .with_fault(Fault::on(FilesystemOperation::CreateDirAll).backend("no dirs"));
+        let err = faulted
+            .create_dir_all(&path("/projects/x"))
+            .await
+            .expect_err("create_dir_all is faulted");
+        assert!(matches!(
+            err,
+            FilesystemError::Backend {
+                operation: FilesystemOperation::CreateDirAll,
+                ..
+            }
+        ));
     }
 }

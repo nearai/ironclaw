@@ -197,7 +197,9 @@ mod tests {
     async fn scripted_returns_each_response_once_in_order() {
         let d = TestDispatcher::scripted(vec![
             Err(auth_required_err("test.first")),
-            Err(DispatchError::UnknownCapability { capability: CapabilityId::new("test.other").unwrap() }),
+            Err(DispatchError::UnknownCapability {
+                capability: CapabilityId::new("test.other").unwrap(),
+            }),
         ]);
         assert!(matches!(
             d.dispatch_json(request("test.x")).await,
@@ -229,7 +231,9 @@ mod tests {
                     credential_requirements: Vec::new(),
                 })
             } else {
-                Err(DispatchError::UnknownCapability { capability: CapabilityId::new("test.other").unwrap() })
+                Err(DispatchError::UnknownCapability {
+                    capability: CapabilityId::new("test.other").unwrap(),
+                })
             }
         });
         assert!(matches!(

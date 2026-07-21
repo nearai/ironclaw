@@ -1022,7 +1022,9 @@ async fn resolver_propagates_backend_error_when_access_secret_metadata_is_unread
         .await;
     accounts.fail_next_refresh_backend_for_tests(account.id);
     let secret_backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
-    let secret_store = Arc::new(FilesystemSecretStore::ephemeral_over(secret_backend.clone()));
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral_over(
+        secret_backend.clone(),
+    ));
     secret_store
         .put(
             scope.clone(),

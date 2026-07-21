@@ -1420,12 +1420,14 @@ mod tests {
         Arc<ironclaw_secrets::FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
         Arc<FaultInjecting<InMemoryBackend>>,
     ) {
-        let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
-            Fault::on(FilesystemOperation::WriteFile)
-                .path("secrets")
-                .nth(2)
-                .backend("injected second put failure"),
-        ));
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new()).with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .path("secrets")
+                    .nth(2)
+                    .backend("injected second put failure"),
+            ),
+        );
         let store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral_over(
             backend.clone(),
         ));

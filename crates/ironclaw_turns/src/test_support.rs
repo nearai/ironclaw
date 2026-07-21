@@ -46,9 +46,7 @@ pub fn in_memory_turns_filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
 /// [`InMemoryBackend`], or an
 /// [`ironclaw_filesystem::FaultInjecting`]`<InMemoryBackend>` so a store fault
 /// path runs through the real store's `FilesystemError -> TurnError` mapping.
-pub fn scoped_turns_filesystem<F: RootFilesystem>(
-    backend: Arc<F>,
-) -> Arc<ScopedFilesystem<F>> {
+pub fn scoped_turns_filesystem<F: RootFilesystem>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>> {
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/turns").expect("turns alias"),
         VirtualPath::new("/turns").expect("turns target"),

@@ -1403,7 +1403,8 @@ async fn background_process_manager_stores_filesystem_output_ref() {
 
 #[tokio::test]
 async fn filesystem_process_store_preserves_typed_backend_errors_that_mention_not_found() {
-    let fs = scoped_processes_filesystem(backend_error_filesystem(), &default_mount_target_string());
+    let fs =
+        scoped_processes_filesystem(backend_error_filesystem(), &default_mount_target_string());
     let store = FilesystemProcessStore::new(fs);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -1421,7 +1422,8 @@ async fn filesystem_process_store_preserves_typed_backend_errors_that_mention_no
 
 #[tokio::test]
 async fn filesystem_process_result_store_preserves_typed_backend_write_errors() {
-    let fs = scoped_processes_filesystem(backend_error_filesystem(), &default_mount_target_string());
+    let fs =
+        scoped_processes_filesystem(backend_error_filesystem(), &default_mount_target_string());
     let store = FilesystemProcessResultStore::new(fs);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -2324,10 +2326,9 @@ fn result_store_failing_all_writes() -> (
     let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
         Fault::on(FilesystemOperation::WriteFile).backend("injected result store write failure"),
     ));
-    let store = Arc::new(FilesystemProcessResultStore::new(scoped_processes_filesystem(
-        backend.clone(),
-        &default_mount_target_string(),
-    )));
+    let store = Arc::new(FilesystemProcessResultStore::new(
+        scoped_processes_filesystem(backend.clone(), &default_mount_target_string()),
+    ));
     (store, backend)
 }
 

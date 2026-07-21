@@ -3014,13 +3014,12 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
 
         let registry = echo_registry();
         // Never dispatched on this authorize-only path; errors if it ever is.
-        let dispatcher = ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(
-            |req, _| {
+        let dispatcher =
+            ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|req, _| {
                 Err(DispatchError::UnknownCapability {
                     capability: req.capability_id.clone(),
                 })
-            },
-        );
+            });
         let authorizer = AllowAuthorizer;
         let host = CapabilityHost::new(&registry, &dispatcher, &authorizer);
 

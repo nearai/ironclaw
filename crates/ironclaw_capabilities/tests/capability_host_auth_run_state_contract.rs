@@ -189,4 +189,3 @@ impl TrustAwareCapabilityDispatchAuthorizer for PlainAllowAuthorizer {
         }
     }
 }
-

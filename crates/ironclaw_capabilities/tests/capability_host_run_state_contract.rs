@@ -796,7 +796,8 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
     assert_eq!(result.dispatch.output, json!({"ok": true}));
     assert_eq!(
         dispatcher
-            .last_request().unwrap()
+            .last_request()
+            .unwrap()
             .authenticated_actor_user_id
             .as_ref()
             .map(UserId::as_str),

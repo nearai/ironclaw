@@ -555,7 +555,11 @@ async fn install_metadata_write_failure_cleans_up_partial_directory() {
     .unwrap_err();
     assert_eq!(error.kind(), SkillManagementErrorKind::InvalidSkill);
 
-    assert_missing(backend.as_ref(), "/projects/skills/metadata-helper/SKILL.md").await;
+    assert_missing(
+        backend.as_ref(),
+        "/projects/skills/metadata-helper/SKILL.md",
+    )
+    .await;
     assert_missing(
         backend.as_ref(),
         "/projects/skills/metadata-helper/references/guide.md",

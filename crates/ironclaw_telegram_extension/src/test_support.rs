@@ -6,8 +6,9 @@ use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_filesystem::{
-    BackendCapabilities, CasExpectation, DirEntry, Entry, FaultInjecting, FileStat, FilesystemError,
-    InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    BackendCapabilities, CasExpectation, DirEntry, Entry, FaultInjecting, FileStat,
+    FilesystemError, InMemoryBackend, RecordVersion, RootFilesystem, ScopedFilesystem,
+    VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, TenantId, UserId,
@@ -364,10 +365,8 @@ pub(crate) fn fault_injecting_telegram_state() -> (
 /// rotation concurrency tests. This is a synchronization seam, not a fault, so
 /// it deliberately cannot fold into `ironclaw_filesystem::FaultInjecting`
 /// (which only injects errors and records ops).
-pub(crate) fn read_barrier_telegram_state() -> (
-    Arc<FilesystemTelegramHostState>,
-    Arc<ReadBarrierFilesystem>,
-) {
+pub(crate) fn read_barrier_telegram_state()
+-> (Arc<FilesystemTelegramHostState>, Arc<ReadBarrierFilesystem>) {
     let filesystem = Arc::new(ReadBarrierFilesystem::new(Arc::new(
         InMemoryBackend::default(),
     )));

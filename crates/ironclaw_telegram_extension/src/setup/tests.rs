@@ -54,12 +54,14 @@ fn service_with_secret_store(
 /// toggle without needing to disarm.
 fn secret_store_failing_first_delete() -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>
 {
-    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
-        Fault::on(FilesystemOperation::Delete)
-            .path("secrets")
-            .nth(1)
-            .backend("injected secret deletion outage"),
-    ));
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::Delete)
+                .path("secrets")
+                .nth(1)
+                .backend("injected secret deletion outage"),
+        ),
+    );
     Arc::new(FilesystemSecretStore::ephemeral_over(backend))
 }
 
@@ -68,11 +70,13 @@ fn secret_store_failing_first_delete() -> Arc<FilesystemSecretStore<FaultInjecti
 /// `fail_puts()`: the first secret persist hits the injected backend fault and
 /// the store surfaces it as `SecretStoreError::StoreUnavailable`.
 fn secret_store_failing_writes() -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>> {
-    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
-        Fault::on(FilesystemOperation::WriteFile)
-            .path("secrets")
-            .backend("injected secret put outage"),
-    ));
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("secrets")
+                .backend("injected secret put outage"),
+        ),
+    );
     Arc::new(FilesystemSecretStore::ephemeral_over(backend))
 }
 

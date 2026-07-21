@@ -945,14 +945,16 @@ mod tests {
             _home_path: &Path,
         ) -> anyhow::Result<ironclaw_reborn_composition::LlmKeyStore> {
             let backend = Arc::new(
-                ironclaw_filesystem::FaultInjecting::new(ironclaw_filesystem::InMemoryBackend::new())
-                    .with_fault(
-                        ironclaw_filesystem::Fault::on(
-                            ironclaw_filesystem::FilesystemOperation::WriteFile,
-                        )
-                        .path("secrets")
-                        .backend("simulated failure for write-ordering RED test"),
-                    ),
+                ironclaw_filesystem::FaultInjecting::new(
+                    ironclaw_filesystem::InMemoryBackend::new(),
+                )
+                .with_fault(
+                    ironclaw_filesystem::Fault::on(
+                        ironclaw_filesystem::FilesystemOperation::WriteFile,
+                    )
+                    .path("secrets")
+                    .backend("simulated failure for write-ordering RED test"),
+                ),
             );
             let store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral_over(
                 backend,

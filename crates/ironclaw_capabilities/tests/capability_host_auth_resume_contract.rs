@@ -2318,10 +2318,11 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
         grants: vec![dispatch_grant()],
     };
     let resume_grant_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &always_auth_required, &resume_grant_authorizer)
-        .with_run_state(&run_state)
-        .with_approval_requests(&approval_requests)
-        .with_capability_leases(&leases);
+    let resume_host =
+        CapabilityHost::new(&registry, &always_auth_required, &resume_grant_authorizer)
+            .with_run_state(&run_state)
+            .with_approval_requests(&approval_requests)
+            .with_capability_leases(&leases);
 
     resume_host
         .resume_json(CapabilityResumeRequest {

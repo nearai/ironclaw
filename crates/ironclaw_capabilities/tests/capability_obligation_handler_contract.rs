@@ -165,7 +165,10 @@ async fn capability_host_completes_post_dispatch_obligations_before_returning() 
 async fn capability_host_aborts_staged_obligations_when_completion_fails() {
     let registry = registry_with_echo_capability();
     let dispatcher = TestDispatcher::responding(|request, _| {
-        Ok(dispatch_result_with_output(request, json!({"oversized": true})))
+        Ok(dispatch_result_with_output(
+            request,
+            json!({"oversized": true}),
+        ))
     });
     let aborted_outcome = Arc::new(Mutex::new(None));
     let reservation_id = ResourceReservationId::new();

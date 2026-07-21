@@ -343,7 +343,9 @@ fn faulting_secret_store() -> (
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
     let secret_backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
-    let store = Arc::new(FilesystemSecretStore::ephemeral_over(secret_backend.clone()));
+    let store = Arc::new(FilesystemSecretStore::ephemeral_over(
+        secret_backend.clone(),
+    ));
     (store, secret_backend)
 }
 

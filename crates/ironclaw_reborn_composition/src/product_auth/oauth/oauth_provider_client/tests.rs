@@ -3,10 +3,10 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
     OAuthAuthorizationCode, PkceVerifierHash, PkceVerifierSecret,
 };
+use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 use ironclaw_host_api::{
     InvocationId, RuntimeHttpEgressError, RuntimeHttpEgressResponse, TenantId, UserId,
 };
-use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 use ironclaw_secrets::FilesystemSecretStore;
 use std::sync::Mutex;
 
@@ -34,11 +34,13 @@ fn secret_store_failing_access_put() -> (
     Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
-    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
-        Fault::on(FilesystemOperation::WriteFile)
-            .path("access")
-            .backend("access write failed"),
-    ));
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("access")
+                .backend("access write failed"),
+        ),
+    );
     let store = Arc::new(FilesystemSecretStore::ephemeral_over(backend.clone()));
     (store, backend)
 }

@@ -312,12 +312,14 @@ fn status_update_failing_outbound_store() -> (
     FilesystemOutboundStateStore<FaultInjecting<InMemoryBackend>>,
     Arc<FaultInjecting<InMemoryBackend>>,
 ) {
-    let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()).with_fault(
-        Fault::on(FilesystemOperation::WriteFile)
-            .path("deliveries")
-            .nth(2)
-            .backend("injected delivery status-update write failure"),
-    ));
+    let backend = Arc::new(
+        FaultInjecting::new(InMemoryBackend::new()).with_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("deliveries")
+                .nth(2)
+                .backend("injected delivery status-update write failure"),
+        ),
+    );
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/outbound").expect("static valid mount alias"),
         VirtualPath::new("/engine/outbound").expect("static valid virtual path"),
