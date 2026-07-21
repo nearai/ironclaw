@@ -37,30 +37,41 @@ export function useAdminUsers() {
     errorCode === "forbidden" ||
     errorCode === "participant_denied";
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
-  const syncUser = (user) => {
-    if (user?.id) {
-      queryClient.setQueryData(["admin", "user", user.id], user);
+  const invalidateUsers = () =>
+    queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
+  const refreshUser = (userId, user) => {
+    if (userId && user?.id === userId) {
+      queryClient.setQueryData(["admin", "user", userId], user);
     }
-    return invalidate();
+    const invalidations = [invalidateUsers()];
+    if (userId) {
+      invalidations.push(
+        queryClient.invalidateQueries({
+          queryKey: ["admin", "user", userId],
+          exact: true,
+          refetchType: "active",
+        }),
+      );
+    }
+    return Promise.all(invalidations);
   };
 
-  const createMut = useMutation({ mutationFn: createAdminUser, onSuccess: invalidate });
+  const createMut = useMutation({ mutationFn: createAdminUser, onSuccess: invalidateUsers });
   const updateMut = useMutation({
     mutationFn: ({ id, payload }) => updateAdminUser(id, payload),
-    onSuccess: syncUser,
+    onSuccess: (user, { id }) => refreshUser(id, user),
   });
   const deleteMut = useMutation({
     mutationFn: (id) => deleteAdminUser(id),
-    onSuccess: invalidate,
+    onSuccess: invalidateUsers,
   });
   const suspendMut = useMutation({
     mutationFn: (id) => suspendAdminUser(id),
-    onSuccess: syncUser,
+    onSuccess: (user, id) => refreshUser(id, user),
   });
   const activateMut = useMutation({
     mutationFn: (id) => activateAdminUser(id),
-    onSuccess: syncUser,
+    onSuccess: (user, id) => refreshUser(id, user),
   });
 
   const resetActionErrors = () => {
