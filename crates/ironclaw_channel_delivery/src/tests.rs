@@ -140,7 +140,7 @@ mod tests {
     // `RebornRuntime` for that purpose.
 
     use ironclaw_channel_host::outbound_targets::{
-        OutboundDeliveryTargetEntry, OutboundDeliveryTargetProvider,
+        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
     };
     use ironclaw_outbound::{
         CommunicationPreferenceRecord, DeliveryDefaultScope,
@@ -1233,6 +1233,13 @@ mod tests {
                 },
                 reply_target_binding_ref: ReplyTargetBindingRef::new(format!("reply:{raw}"))
                     .expect("shared target binding ref"),
+                // channel_delivery consumes providers directly and does not
+                // apply the composition registry's caller-scoping filter, so
+                // this owner is informational; it mirrors `personal_turn_scope`.
+                owner: OutboundDeliveryTargetOwner::new(
+                    ironclaw_host_api::TenantId::new("test-tenant").expect("tenant"),
+                    ironclaw_host_api::UserId::new("creator-user").expect("user"),
+                ),
             }],
         })
     }

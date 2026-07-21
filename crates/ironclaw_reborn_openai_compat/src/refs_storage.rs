@@ -16,17 +16,14 @@ use crate::{
     OpenAiCompatResourceBinding, OpenAiCompatResourceMapping, OpenAiCompatRouteSurface,
 };
 use async_trait::async_trait;
+use ironclaw_filesystem::LibSqlRootFilesystem;
+use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{
     CasExpectation, Entry, FilesystemError, RecordKind, RecordVersion, RootFilesystem,
 };
 use ironclaw_host_api::VirtualPath;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-
-#[cfg(feature = "libsql")]
-use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
-use ironclaw_filesystem::PostgresRootFilesystem;
 
 const DEFAULT_REF_ROOT: &str = "/engine/openai_compat/refs";
 const MAPPING_RECORD_KIND: &str = "openai_compat_ref_mapping";
@@ -313,13 +310,9 @@ impl FilesystemOpenAiCompatRefStore {
         Err(OpenAiCompatRefError::StoreUnavailable)
     }
 }
-
-#[cfg(feature = "libsql")]
 pub struct RebornLibSqlOpenAiCompatRefStore {
     inner: FilesystemOpenAiCompatRefStore,
 }
-
-#[cfg(feature = "libsql")]
 impl RebornLibSqlOpenAiCompatRefStore {
     pub fn new(filesystem: Arc<LibSqlRootFilesystem>) -> Self {
         Self {
@@ -333,8 +326,6 @@ impl RebornLibSqlOpenAiCompatRefStore {
         }
     }
 }
-
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl OpenAiCompatRefStore for RebornLibSqlOpenAiCompatRefStore {
     async fn reserve(
@@ -374,13 +365,9 @@ impl OpenAiCompatRefStore for RebornLibSqlOpenAiCompatRefStore {
         self.inner.lookup_authorized(request).await
     }
 }
-
-#[cfg(feature = "postgres")]
 pub struct RebornPostgresOpenAiCompatRefStore {
     inner: FilesystemOpenAiCompatRefStore,
 }
-
-#[cfg(feature = "postgres")]
 impl RebornPostgresOpenAiCompatRefStore {
     pub fn new(filesystem: Arc<PostgresRootFilesystem>) -> Self {
         Self {
@@ -394,8 +381,6 @@ impl RebornPostgresOpenAiCompatRefStore {
         }
     }
 }
-
-#[cfg(feature = "postgres")]
 #[async_trait]
 impl OpenAiCompatRefStore for RebornPostgresOpenAiCompatRefStore {
     async fn reserve(

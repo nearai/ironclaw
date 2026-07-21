@@ -5,8 +5,8 @@
 //! coverage-lane invocation (which passes only suite names, never `--lib`).
 //!
 //! Reaches the crate through the composition facade only —
-//! `open_reborn_identity_resolver` (the existing `test-support` +
-//! `webui-v2-beta` gated factory mirroring production's
+//! `open_reborn_identity_resolver` (the existing `test-support` gated
+//! factory mirroring production's
 //! `RebornRuntime::open_reborn_identity_resolver`) plus the re-exported
 //! resolver vocabulary. Composition deliberately keeps the concrete
 //! `FilesystemRebornIdentityStore` private ("keep lower substrate handles

@@ -1,3 +1,4 @@
+// arch-exempt: large_file, serve command aggregates config+wiring+mounts, plan #6310
 use std::env;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -5,26 +6,16 @@ use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
 use clap::Args;
-#[cfg(feature = "openai-compat-beta")]
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
-#[cfg(feature = "telegram-v2-host-beta")]
 use ironclaw_reborn_composition::build_telegram_host_runtime_mounts;
-#[cfg(not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")))]
-use ironclaw_reborn_composition::build_webui_services;
-#[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
 use ironclaw_reborn_composition::build_webui_services_with_slack_and_telegram_host_mounts;
-#[cfg(all(not(feature = "slack-v2-host-beta"), feature = "telegram-v2-host-beta"))]
-use ironclaw_reborn_composition::build_webui_services_with_telegram_host_mounts;
 use ironclaw_reborn_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, LocalTriggerAccessReconciliation, LocalTriggerAccessRole,
-    LocalTriggerAccessSource, LocalTriggerAccessStore, RebornBuildInput, RebornReadiness,
-    RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle, build_reborn_runtime,
-    local_trigger_access_fire_checker,
+    GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornWebuiBundle, TriggerFireAccessPolicy, build_reborn_runtime,
 };
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::{
     SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
     build_webui_services_with_slack_host_beta_mounts,
@@ -40,10 +31,7 @@ use ironclaw_webui::{
 use secrecy::SecretString;
 
 use crate::context::RebornCliContext;
-use crate::runtime::{
-    RuntimeInputOptions, open_trigger_access_store_for_profile,
-    resolve_google_oauth_config_from_env,
-};
+use crate::runtime::{RuntimeInputOptions, resolve_google_oauth_config_from_env};
 
 // pub(crate): reused by onboard's finale login-link print (same default host:port).
 pub(crate) const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
@@ -148,7 +136,6 @@ impl ServeCommand {
                 confirm_host_access: self.confirm_host_access,
             },
         )?;
-        #[cfg(feature = "slack-v2-host-beta")]
         let slack_personal_lazy_slot = built.slack_personal_lazy_slot;
         let runtime_input = built.inner;
         let boot_config = context.boot_config();
@@ -229,7 +216,6 @@ impl ServeCommand {
         let mut runtime_input = runtime_input.with_owner_id(runtime_owner);
         // Carry the boot config so the WebUI facade can compose the operator
         // LLM-config settings service over `providers.json` / `config.toml`.
-        #[cfg(feature = "root-llm-provider")]
         {
             runtime_input = runtime_input.with_boot_config(boot_config.clone());
         }
@@ -268,8 +254,19 @@ impl ServeCommand {
             &user_id,
             &boot_config.home().config_file_path(),
         )?;
-        #[cfg(not(feature = "slack-v2-host-beta"))]
-        let _ = slack_host_beta_config;
+        // Resolved BEFORE the composition build (`build_reborn_runtime` below)
+        // so `provider_instance_readiness_map` sees the same build-time
+        // signal the post-build Slack mount step below consumes (mirrors how
+        // `google_oauth_configured` arrives via `with_google_oauth_backend`).
+        runtime_input =
+            runtime_input.with_slack_host_beta_enabled(slack_host_beta_config.is_some());
+        // Second Slack readiness axis, from the redirect URI already resolved
+        // by `build_runtime_input_with_options` above (line ~144) — not a
+        // second read of the environment. Without it the extension route
+        // mounts but the WebUI Connect button 503s, which is the dead end the
+        // readiness map exists to replace with actionable text.
+        runtime_input = runtime_input
+            .with_slack_personal_oauth_redirect_uri_configured(slack_personal_lazy_slot.is_some());
         let telegram_host_config = resolve_telegram_host_config_for_serve_command(
             config_file.as_ref(),
             &tenant_id,
@@ -277,8 +274,6 @@ impl ServeCommand {
             default_project_id.as_ref(),
             &user_id,
         )?;
-        #[cfg(not(feature = "telegram-v2-host-beta"))]
-        let _ = telegram_host_config;
 
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
@@ -380,15 +375,7 @@ impl ServeCommand {
         // `crate::webui_token::resolve_webui_token` already enforced the
         // >=32-byte floor when `token_value` was resolved above, so no
         // separate check is needed here.
-        // Sidecar DB used by the local-runtime trigger-fire access checker. It
-        // backs the local trigger-fire
-        // access store used to seed default-user and SSO-user trigger access;
-        // canonical identity itself lives on the runtime's scoped filesystem,
-        // not in this file.
         let profile = crate::runtime::effective_profile(boot_config, config_file.as_ref())?;
-        let user_store_path = ironclaw_reborn_composition::local_dev_db_path(
-            &crate::runtime::local_runtime_storage_root(boot_config, profile),
-        );
         // CORS allow-origin list. Empty = fail-closed on every
         // cross-origin preflight; operators MUST opt in to the
         // specific origins the host installation actually serves.
@@ -470,28 +457,18 @@ impl ServeCommand {
                 None
             };
 
-            let trigger_access_store = if trigger_poller_enabled || sso_enabled {
-                Some(
-                    open_trigger_access_store_for_profile(&runtime_input, profile, &user_store_path)
-                        .await?,
-                )
-            } else {
-                None
-            };
-            if trigger_poller_enabled {
-                let access_store = trigger_access_store
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("trigger access store was not opened"))?;
-                runtime_input = with_local_trigger_fire_access_checker(
-                    runtime_input,
-                    Arc::clone(access_store),
-                    &tenant_id,
-                    &user_id,
-                    &default_agent_id,
-                    default_project_id.as_ref(),
-                )
-                .await?;
-            }
+            // Fire-time trigger access is a config value, not a persisted store
+            // (arch-simplification §4.4). When the poller is on, the operator
+            // owner may always fire; when SSO is also on, any active tenant
+            // member (the users SSO login persists in the identity store) may
+            // too — the union the former single trigger-access store expressed.
+            runtime_input = runtime_input.with_trigger_fire_access_policy(trigger_fire_access_policy(
+                trigger_poller_enabled,
+                sso_enabled,
+                &user_id,
+                &default_agent_id,
+                default_project_id.as_ref(),
+            ));
 
             let runtime = build_reborn_runtime(runtime_input)
                 .await
@@ -524,7 +501,6 @@ impl ServeCommand {
                 );
             }
 
-            #[cfg(feature = "slack-v2-host-beta")]
             let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
                 match build_slack_host_beta_runtime_mounts(&runtime, slack_config)
                     .await
@@ -551,7 +527,6 @@ impl ServeCommand {
             };
             // Telegram host mounts, after Slack's: same fail-closed shutdown
             // path when route composition fails.
-            #[cfg(feature = "telegram-v2-host-beta")]
             let telegram_mounts = if let Some(telegram_config) = telegram_host_config {
                 match build_telegram_host_runtime_mounts(&runtime, telegram_config)
                     .await
@@ -571,10 +546,8 @@ impl ServeCommand {
             } else {
                 None
             };
-            #[cfg(feature = "slack-v2-host-beta")]
             let operator_route_visibility =
                 slack_operator_route_visibility_for_authenticator(env_authenticator.as_ref());
-            #[cfg(all(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta"))]
             let bundle: RebornWebuiBundle = match telegram_mounts.as_ref() {
                 Some(telegram_mounts) => build_webui_services_with_slack_and_telegram_host_mounts(
                     &runtime,
@@ -590,19 +563,6 @@ impl ServeCommand {
                     operator_route_visibility,
                 )?,
             };
-            #[cfg(all(feature = "slack-v2-host-beta", not(feature = "telegram-v2-host-beta")))]
-            let bundle: RebornWebuiBundle = build_webui_services_with_slack_host_beta_mounts(
-                &runtime,
-                None,
-                slack_mounts.as_ref(),
-                operator_route_visibility,
-            )?;
-            #[cfg(all(not(feature = "slack-v2-host-beta"), feature = "telegram-v2-host-beta"))]
-            let bundle: RebornWebuiBundle =
-                build_webui_services_with_telegram_host_mounts(&runtime, None, telegram_mounts.as_ref())?;
-            #[cfg(not(any(feature = "slack-v2-host-beta", feature = "telegram-v2-host-beta")))]
-            let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
-            #[cfg(feature = "openai-compat-beta")]
             let openai_compat_mount = build_openai_compat_route_mount(
                 &runtime,
                 tenant_id.clone(),
@@ -639,10 +599,11 @@ impl ServeCommand {
 
             // Assemble the WebChat v2 auth surface (authenticator + optional
             // public login mount). The auth/identity module owns the
-            // signed-session wiring; `serve` supplies host config, the
-            // runtime-owned identity resolver, and the local trigger-access
-            // bootstrap that seeds an admitted SSO user's trigger access on
-            // login.
+            // signed-session wiring; `serve` supplies host config and the
+            // runtime-owned identity resolver. An admitted SSO user's trigger
+            // access is no longer separately seeded here — the identity
+            // `StoredUser` the login persists IS the membership the fire-time
+            // checker reads (arch-simplification §4.4).
             let crate::commands::webui_auth::WebuiAuthSurface {
                 authenticator,
                 public_mount,
@@ -652,14 +613,6 @@ impl ServeCommand {
                 tenant_id.clone(),
                 session_signing_secret,
                 env_authenticator,
-                trigger_access_store.as_ref().map(|store| {
-                    crate::commands::webui_auth::LocalTriggerAccessBootstrapConfig {
-                        store: Arc::clone(store),
-                        tenant_id: tenant_id.clone(),
-                        agent_id: default_agent_id.clone(),
-                        project_id: default_project_id.clone(),
-                    }
-                }),
             )
             .await?;
 
@@ -700,7 +653,6 @@ impl ServeCommand {
             if let Some(project_id) = default_project_id.clone() {
                 serve_config = serve_config.with_default_project_id(project_id);
             }
-            #[cfg(feature = "openai-compat-beta")]
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }
@@ -717,7 +669,6 @@ impl ServeCommand {
                 }
                 serve_config = serve_config.with_google_oauth(route_config);
             }
-            #[cfg(feature = "slack-v2-host-beta")]
             {
                 if let Some(slot) = slack_personal_lazy_slot {
                     serve_config = serve_config.with_slack_personal_oauth(slot);
@@ -734,7 +685,6 @@ impl ServeCommand {
             if let Some(host) = canonical_host {
                 serve_config = serve_config.with_canonical_host(host);
             }
-            #[cfg(feature = "slack-v2-host-beta")]
             if let Some(slack_mounts) = slack_mounts {
                 let slack_personal_oauth_binding = slack_mounts.personal_oauth_binding_config();
                 serve_config = serve_config
@@ -742,7 +692,6 @@ impl ServeCommand {
                     .with_slack_personal_oauth_binding(slack_personal_oauth_binding)
                     .with_slack_channel_routes(slack_mounts.channel_routes);
             }
-            #[cfg(feature = "telegram-v2-host-beta")]
             if let Some(telegram_mounts) = telegram_mounts {
                 // Bearer-authed setup/pairing routes ride the generic
                 // protected-route seam; the updates webhook is public.
@@ -753,7 +702,6 @@ impl ServeCommand {
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
-            #[cfg(feature = "root-llm-provider")]
             if let Some(nearai_mount) = runtime.nearai_login_callback_mount() {
                 serve_config = serve_config.with_public_route_mount(nearai_mount);
             }
@@ -805,7 +753,6 @@ impl ServeCommand {
     }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn resolve_slack_host_beta_config_for_serve_command(
     config_file: Option<&RebornConfigFile>,
     tenant_id: &TenantId,
@@ -824,26 +771,6 @@ fn resolve_slack_host_beta_config_for_serve_command(
     )
 }
 
-#[cfg(not(feature = "slack-v2-host-beta"))]
-fn resolve_slack_host_beta_config_for_serve_command(
-    config_file: Option<&RebornConfigFile>,
-    tenant_id: &TenantId,
-    default_agent_id: &AgentId,
-    default_project_id: Option<&ProjectId>,
-    default_user_id: &UserId,
-    config_path: &std::path::Path,
-) -> anyhow::Result<Option<()>> {
-    crate::commands::serve_slack::resolve_slack_config_for_serve(
-        config_file.and_then(|file| file.slack.as_ref()),
-        tenant_id,
-        default_agent_id,
-        default_project_id,
-        default_user_id,
-        config_path,
-    )
-}
-
-#[cfg(feature = "telegram-v2-host-beta")]
 fn resolve_telegram_host_config_for_serve_command(
     config_file: Option<&RebornConfigFile>,
     tenant_id: &TenantId,
@@ -865,24 +792,6 @@ fn resolve_telegram_host_config_for_serve_command(
         default_project_id,
         default_user_id,
         public_base_url,
-    )
-}
-
-#[cfg(not(feature = "telegram-v2-host-beta"))]
-fn resolve_telegram_host_config_for_serve_command(
-    config_file: Option<&RebornConfigFile>,
-    tenant_id: &TenantId,
-    default_agent_id: &AgentId,
-    default_project_id: Option<&ProjectId>,
-    default_user_id: &UserId,
-) -> anyhow::Result<Option<()>> {
-    crate::commands::serve_telegram::resolve_telegram_config_for_serve(
-        config_file.and_then(|file| file.telegram.as_ref()),
-        tenant_id,
-        default_agent_id,
-        default_project_id,
-        default_user_id,
-        None,
     )
 }
 
@@ -1089,32 +998,30 @@ fn canonical_host_name(host: &str) -> &str {
     host.split_once(':').map(|(host, _)| host).unwrap_or(host)
 }
 
-async fn with_local_trigger_fire_access_checker(
-    runtime_input: RebornRuntimeInput,
-    access_store: Arc<dyn LocalTriggerAccessStore>,
-    tenant_id: &TenantId,
+/// Resolve the fire-time trigger access policy for `serve` from the enabled
+/// surfaces (arch-simplification §4.4). Poller off → no authorizer. Poller on →
+/// the configured operator owner may fire; with SSO also on, any active tenant
+/// member may too (the union the former single trigger-access store expressed).
+fn trigger_fire_access_policy(
+    trigger_poller_enabled: bool,
+    sso_enabled: bool,
     user_id: &UserId,
     default_agent_id: &AgentId,
     default_project_id: Option<&ProjectId>,
-) -> anyhow::Result<RebornRuntimeInput> {
-    if !runtime_input.trigger_poller.enabled {
-        return Ok(runtime_input);
+) -> TriggerFireAccessPolicy {
+    if !trigger_poller_enabled {
+        return TriggerFireAccessPolicy::disabled();
     }
-
-    let user_ids = [user_id.clone()];
-    access_store
-        .reconcile_local_access(LocalTriggerAccessReconciliation {
-            tenant_id,
-            user_ids: &user_ids,
-            agent_id: Some(default_agent_id),
-            project_id: default_project_id,
-            role: LocalTriggerAccessRole::Owner,
-            source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
-        })
-        .await
-        .context("failed to reconcile local trigger-fire access")?;
-    Ok(runtime_input
-        .with_trigger_fire_access_checker(local_trigger_access_fire_checker(access_store)))
+    let mut policy = TriggerFireAccessPolicy::disabled().with_static_owner(
+        user_id.clone(),
+        default_agent_id.clone(),
+        default_project_id.cloned(),
+    );
+    if sso_enabled {
+        policy =
+            policy.with_tenant_membership(default_agent_id.clone(), default_project_id.cloned());
+    }
+    policy
 }
 
 fn resolve_webui_default_agent(
@@ -1179,7 +1086,6 @@ fn resolve_webui_runtime_owner(
     Ok(webui_user_id.to_string())
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn slack_operator_route_visibility_for_authenticator(
     authenticator: &dyn WebuiAuthenticator,
 ) -> SlackOperatorRouteVisibility {
@@ -1585,7 +1491,6 @@ mod tests {
         assert!(message.contains("local-user"), "message: {message}");
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn serve_startup_rejects_loaded_config_with_legacy_slack_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1626,7 +1531,6 @@ slack_user_id = "U123"
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_operator_route_visibility_follows_authenticator_route_mount_capability() {
         struct HiddenAuth;
@@ -1667,222 +1571,54 @@ slack_user_id = "U123"
         );
     }
 
-    #[tokio::test]
-    async fn trigger_poller_disabled_does_not_wire_local_access_checker() {
-        struct PanicLocalTriggerAccessStore;
-
-        #[async_trait::async_trait]
-        impl LocalTriggerAccessStore for PanicLocalTriggerAccessStore {
-            async fn seed_local_access(
-                &self,
-                _seed: ironclaw_reborn_composition::LocalTriggerAccessSeed<'_>,
-            ) -> Result<(), ironclaw_reborn_composition::RebornLocalTriggerAccessStoreError>
-            {
-                panic!("disabled trigger poller must not seed local access")
-            }
-
-            async fn reconcile_local_access(
-                &self,
-                _reconciliation: LocalTriggerAccessReconciliation<'_>,
-            ) -> Result<(), ironclaw_reborn_composition::RebornLocalTriggerAccessStoreError>
-            {
-                panic!("disabled trigger poller must not reconcile local access")
-            }
-
-            async fn has_active_local_access(
-                &self,
-                _tenant_id: &TenantId,
-                _user_id: &UserId,
-                _agent_id: Option<&AgentId>,
-                _project_id: Option<&ProjectId>,
-            ) -> Result<bool, ironclaw_reborn_composition::RebornLocalTriggerAccessStoreError>
-            {
-                panic!("disabled trigger poller must not check local access")
-            }
-        }
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tenant_id = TenantId::new("serve-trigger-disabled-tenant").expect("tenant id");
+    #[test]
+    fn trigger_poller_disabled_yields_empty_access_policy() {
         let user_id = UserId::new("serve-trigger-disabled-user").expect("user id");
         let agent_id = AgentId::new("serve-trigger-disabled-agent").expect("agent id");
-        let runtime_input = RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
-            "serve-trigger-owner",
-            dir.path().join("runtime"),
-        ));
-        let access_store: Arc<dyn LocalTriggerAccessStore> = Arc::new(PanicLocalTriggerAccessStore);
-
-        let runtime_input = with_local_trigger_fire_access_checker(
-            runtime_input,
-            access_store,
-            &tenant_id,
-            &user_id,
-            &agent_id,
-            None,
-        )
-        .await
-        .expect("disabled trigger poller skips local access store");
-
-        assert!(
-            runtime_input.trigger_fire_access_checker.is_none(),
-            "disabled trigger poller must not wire a local access checker"
+        // Poller off: no fire-time authorizer, regardless of SSO.
+        assert_eq!(
+            trigger_fire_access_policy(false, false, &user_id, &agent_id, None),
+            TriggerFireAccessPolicy::disabled()
+        );
+        assert_eq!(
+            trigger_fire_access_policy(false, true, &user_id, &agent_id, None),
+            TriggerFireAccessPolicy::disabled()
         );
     }
 
-    #[tokio::test]
-    async fn trigger_poller_bootstrap_seeds_local_access_checker() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tenant_id = TenantId::new("serve-trigger-tenant").expect("tenant id");
+    #[test]
+    fn trigger_poller_without_sso_grants_only_static_owner() {
         let user_id = UserId::new("serve-trigger-user").expect("user id");
-        let stale_user_id = UserId::new("serve-trigger-stale").expect("stale user id");
         let agent_id = AgentId::new("serve-trigger-agent").expect("agent id");
         let project_id = ProjectId::new("serve-trigger-project").expect("project id");
-        let user_store_path = dir.path().join("reborn-local-dev.db");
-        let access_store =
-            ironclaw_reborn_composition::open_local_trigger_access_store(&user_store_path)
-                .await
-                .expect("open local trigger access store");
-        access_store
-            .seed_local_access(ironclaw_reborn_composition::LocalTriggerAccessSeed {
-                tenant_id: &tenant_id,
-                user_id: &stale_user_id,
-                agent_id: Some(&agent_id),
-                project_id: Some(&project_id),
-                role: LocalTriggerAccessRole::Owner,
-                source: LocalTriggerAccessSource::LocalDevEnvBootstrap,
-            })
-            .await
-            .expect("seed stale local trigger access");
-        let runtime_input =
-            RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
-                "serve-trigger-owner",
-                dir.path().join("runtime"),
-            ))
-            .with_trigger_poller_settings(
-                ironclaw_reborn_composition::TriggerPollerSettings::enabled(),
-            );
-
-        let runtime_input = with_local_trigger_fire_access_checker(
-            runtime_input,
-            access_store,
-            &tenant_id,
-            &user_id,
-            &agent_id,
-            Some(&project_id),
-        )
-        .await
-        .expect("bootstrap trigger fire access checker");
-
-        let checker = runtime_input
-            .trigger_fire_access_checker
-            .expect("checker is wired");
-        let decision = checker
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id: tenant_id.clone(),
-                creator_user_id: user_id,
-                agent_id: Some(agent_id.clone()),
-                project_id: Some(project_id.clone()),
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check trigger fire access");
-
+        // Poller on, SSO off: the operator owner is the sole grant.
         assert_eq!(
-            decision,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Allowed
+            trigger_fire_access_policy(true, false, &user_id, &agent_id, Some(&project_id)),
+            TriggerFireAccessPolicy::disabled().with_static_owner(
+                user_id.clone(),
+                agent_id.clone(),
+                Some(project_id.clone()),
+            )
         );
-
-        let stale_decision = checker
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id,
-                creator_user_id: stale_user_id,
-                agent_id: Some(agent_id),
-                project_id: Some(project_id),
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check stale trigger fire access");
-
+        // No project scope is carried through exactly (not a wildcard).
         assert_eq!(
-            stale_decision,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
-                reason: "trigger creator does not have active local access for this scope"
-                    .to_string(),
-            }
+            trigger_fire_access_policy(true, false, &user_id, &agent_id, None),
+            TriggerFireAccessPolicy::disabled().with_static_owner(user_id, agent_id, None)
         );
     }
 
-    #[tokio::test]
-    async fn trigger_poller_bootstrap_seeds_no_project_local_access_checker() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tenant_id = TenantId::new("serve-trigger-no-project-tenant").expect("tenant id");
-        let user_id = UserId::new("serve-trigger-no-project-user").expect("user id");
-        let agent_id = AgentId::new("serve-trigger-no-project-agent").expect("agent id");
-        let project_id = ProjectId::new("serve-trigger-no-project-project").expect("project id");
-        let user_store_path = dir.path().join("reborn-local-dev.db");
-        let access_store =
-            ironclaw_reborn_composition::open_local_trigger_access_store(&user_store_path)
-                .await
-                .expect("open local trigger access store");
-        let runtime_input =
-            RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
-                "serve-trigger-owner",
-                dir.path().join("runtime"),
-            ))
-            .with_trigger_poller_settings(
-                ironclaw_reborn_composition::TriggerPollerSettings::enabled(),
-            );
-
-        let runtime_input = with_local_trigger_fire_access_checker(
-            runtime_input,
-            access_store,
-            &tenant_id,
-            &user_id,
-            &agent_id,
-            None,
-        )
-        .await
-        .expect("bootstrap trigger fire access checker");
-
-        let checker = runtime_input
-            .trigger_fire_access_checker
-            .expect("checker is wired");
-        let decision = checker
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id: tenant_id.clone(),
-                creator_user_id: user_id.clone(),
-                agent_id: Some(agent_id.clone()),
-                project_id: None,
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check trigger fire access");
-
+    #[test]
+    fn trigger_poller_with_sso_grants_static_owner_and_tenant_membership() {
+        let user_id = UserId::new("serve-trigger-user").expect("user id");
+        let agent_id = AgentId::new("serve-trigger-agent").expect("agent id");
+        let project_id = ProjectId::new("serve-trigger-project").expect("project id");
+        // Poller on, SSO on: the union of the operator owner and any active
+        // tenant member (the users SSO login persists in the identity store).
         assert_eq!(
-            decision,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Allowed
-        );
-
-        let project_scoped_decision = checker
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id,
-                creator_user_id: user_id,
-                agent_id: Some(agent_id),
-                project_id: Some(project_id),
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check project-scoped trigger fire access");
-
-        assert_eq!(
-            project_scoped_decision,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
-                reason: "trigger creator does not have active local access for this scope"
-                    .to_string(),
-            }
+            trigger_fire_access_policy(true, true, &user_id, &agent_id, Some(&project_id)),
+            TriggerFireAccessPolicy::disabled()
+                .with_static_owner(user_id, agent_id.clone(), Some(project_id.clone()))
+                .with_tenant_membership(agent_id, Some(project_id))
         );
     }
 

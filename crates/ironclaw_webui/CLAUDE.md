@@ -13,7 +13,7 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
    composes the full `Router` and layers the fixed middleware stack; owns the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   feature-gated Slack / OpenAI-compat mounts.
+   Slack / OpenAI-compat mounts.
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`) — `serve_webui_v2` binds the listener and
    runs `axum::serve`; the `Env`/`Session`/`Oidc` authenticators, the
@@ -41,7 +41,7 @@ composition's facade). Enforced by `ironclaw_architecture`
 | `WebUiV2State` | Handler state: the `RebornServicesApi` facade + `SseCapacity` + route options. |
 | `WebUiV2HttpError` / `WebUiV2HttpErrorBody` | The only path handlers return HTTP errors through — keeps the redacted-error vocabulary intact. |
 | `webui_v2_app(bundle, config) -> WebuiV2App` | Compose composition's `RebornWebuiBundle` + a host `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
-| `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth, and — under `slack-v2-host-beta` — the Slack setup/route slots). |
+| `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth, and the Slack setup/route slots). |
 | `WebuiAuthenticator` trait / `WebuiAuthentication` | Host-auth vocabulary the bearer middleware resolves each token through. |
 
 Middleware modules (`src/webui_*.rs`) layer in a fixed order —
@@ -65,7 +65,7 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 | `GitHubProvider` (in `auth/github.rs`) | GitHub OAuth App provider (scopes `read:user user:email`, no PKCE, verified-email preference). Built from `GitHubOAuthConfig`. |
 | `OAuthRouterConfig` | Tenant + `SessionStore` + `UserDirectory` + provider list + base URL |
 | `UserDirectory` trait | Host-supplied mapping from `(provider, OAuthUserProfile)` to `UserId` |
-| `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `dev-in-memory-session` |
+| `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `test-support` |
 
 ## WebChat v2 route surface (folded from `ironclaw_webui_v2`)
 
@@ -84,6 +84,7 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.delete_thread` | DELETE | `/api/webchat/v2/threads/{thread_id}` | — | `ProductWorkflow` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | — | `TurnCoordinator` |
 | `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (`?limit&cursor`) | — | `ProjectionOnly` |
+| `webui.v2.get_run_artifact` | GET | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/artifact` | — | `ProjectionOnly` |
 | `webui.v2.logs` | GET | `/api/webchat/v2/logs` | — | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | **SSE** | `ProjectionOnly` |
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
@@ -101,6 +102,15 @@ The exact per-route set (methods, query params, auth, rate/body limits) is the
 descriptor table in `src/webui_v2/descriptors.rs`; the count/shape is locked by
 `tests/webui_v2_descriptors_contract.rs`. Add a route → add a handler **and** a
 `webui_v2_routes()` entry, or that test fails.
+
+`webui.v2.get_run_artifact` exports one exact caller-owned run as the versioned
+`ironclaw.run_artifact.v1` evidence schema. The facade authorizes the thread
+from authenticated tenant/user scope before selecting records by `turn_run_id`,
+reconstructs provider tool-call metadata through the model-context read path,
+and applies deterministic trace redaction before serialization. Its logs are a
+bounded process-local diagnostic sidecar: `logs.complete` is always false and
+availability/truncation are explicit. Deployment-wide logs are not exposed
+through this caller route.
 
 **Operator-gating.** LLM config, operator setup/config/service-control, and
 extension zip-import routes are operator-wide: `webui_v2_app` mounts them only
@@ -291,10 +301,9 @@ composition):
   `tests/auth_route_contract.rs` — middleware stack (security headers, body/rate
   limits, bearer auth) over the composed `webui_v2_app`.
 - `tests/serve_loop.rs` — listener bind + graceful shutdown.
-- `tests/slack_host_beta_webui_v2.rs` — Slack host-beta channel-route /
-  connectable surfaces composed into `webui_v2_app` (gated on
-  `slack-v2-host-beta`; relocated here because `webui_v2_app` lives in this
-  crate).
+- `tests/slack_host_beta_webui_v2.rs` — Slack channel-route /
+  connectable surfaces composed into `webui_v2_app` (relocated here because
+  `webui_v2_app` lives in this crate).
 
 **Host authentication:**
 

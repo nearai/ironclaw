@@ -1,8 +1,8 @@
 //! Reborn WebChat v2 HTTP route surface.
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
-//! [`ironclaw_product_workflow::RebornServicesApi`] facade. It is off by
-//! default — enable the `webui-v2-beta` Cargo feature to compile it in.
+//! [`ironclaw_product_workflow::RebornServicesApi`] facade. It is compiled into
+//! every build.
 //!
 //! ## Boundaries
 //!
@@ -46,7 +46,7 @@ mod router;
 mod schema;
 mod sse_capacity;
 // Browser SPA asset bundle: the JSON route surface and the static bytes it
-// drives now ship from one crate behind the single `webui-v2-beta` feature.
+// drives now ship from one crate.
 pub mod static_assets;
 
 #[allow(deprecated)]
@@ -65,8 +65,8 @@ pub use descriptors::{
     WEBUI_V2_ROUTE_DELETE_THREAD, WEBUI_V2_ROUTE_GET_ATTACHMENT,
     WEBUI_V2_ROUTE_GET_EXTENSION_SETUP, WEBUI_V2_ROUTE_GET_LLM_CONFIG,
     WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES, WEBUI_V2_ROUTE_GET_PROJECT,
-    WEBUI_V2_ROUTE_GET_SESSION, WEBUI_V2_ROUTE_GET_SKILL, WEBUI_V2_ROUTE_GET_TIMELINE,
-    WEBUI_V2_ROUTE_IMPORT_EXTENSION, WEBUI_V2_ROUTE_INSTALL_EXTENSION,
+    WEBUI_V2_ROUTE_GET_RUN_ARTIFACT, WEBUI_V2_ROUTE_GET_SESSION, WEBUI_V2_ROUTE_GET_SKILL,
+    WEBUI_V2_ROUTE_GET_TIMELINE, WEBUI_V2_ROUTE_IMPORT_EXTENSION, WEBUI_V2_ROUTE_INSTALL_EXTENSION,
     WEBUI_V2_ROUTE_INSTALL_SKILL, WEBUI_V2_ROUTE_LIST_AUTOMATIONS,
     WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS, WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY,
     WEBUI_V2_ROUTE_LIST_EXTENSIONS, WEBUI_V2_ROUTE_LIST_FS_MOUNTS, WEBUI_V2_ROUTE_LIST_LLM_MODELS,
@@ -101,11 +101,11 @@ pub use handlers::{
     activate_extension, browse_fs_dir, cancel_run, complete_nearai_wallet_login, create_thread,
     delete_automation, delete_llm_provider, delete_thread, get_attachment, get_extension_setup,
     get_llm_config, get_operator_config_key, get_operator_diagnostics, get_operator_setup,
-    get_operator_status, get_outbound_preferences, get_session, get_skill_content, get_timeline,
-    install_extension, install_skill, list_automations, list_connectable_channels,
-    list_extension_registry, list_extensions, list_fs_mounts, list_llm_models,
-    list_operator_config, list_outbound_delivery_targets, list_settings_tools, list_skills,
-    list_threads, pause_automation, query_logs, query_operator_logs, read_fs_file,
+    get_operator_status, get_outbound_preferences, get_run_artifact, get_session,
+    get_skill_content, get_timeline, install_extension, install_skill, list_automations,
+    list_connectable_channels, list_extension_registry, list_extensions, list_fs_mounts,
+    list_llm_models, list_operator_config, list_outbound_delivery_targets, list_settings_tools,
+    list_skills, list_threads, pause_automation, query_logs, query_operator_logs, read_fs_file,
     remove_extension, remove_skill, rename_automation, resolve_gate, resume_automation, retry_run,
     run_operator_service_lifecycle, run_operator_setup, search_skills, send_message,
     set_active_llm, set_auto_activate_learned, set_operator_config_key, set_outbound_preferences,
@@ -122,8 +122,7 @@ pub use schema::{WebChatV2Event, WebChatV2EventFrame};
 // Re-export the static-bundle router factory at the crate root so host
 // composition can mount the canonical root surface as one owned unit. This
 // crate folds the former `ironclaw_webui_v2` module in unconditionally, so the
-// re-exports are not gated on the `webui-v2-beta` feature (which lived on the
-// standalone crate).
+// re-exports are always available.
 pub use sse_capacity::DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER;
 pub use static_assets::{
     StaticRouterConfig, StaticRouterConfigError, serve_root, serve_wildcard, static_router,

@@ -331,7 +331,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | `agents.defaults.contextInjection: "never"` | ✅ | ❌ | Disable workspace bootstrap injection per-agent |
 | `agents.defaults.experimental.localModelLean` | ✅ | ❌ | Drop heavyweight default tools for weaker local models |
 | `agents.files.get/set` workspace tools | ✅ | 🚧 | First-party scoped read/write/list/glob/grep/apply_patch capabilities exist through Reborn HostRuntime; OpenClaw-compatible `agents.files.*` aliases and realpath-via-fd hardening still pending |
-| Trajectory export | ✅ | ❌ | Default-on local trajectory capture; `/export-trajectory` bundles with redacted transcripts/events/artifacts |
+| Trajectory export | ✅ | 🚧 | WebChat v2 can download a caller-owned, deterministically redacted `ironclaw.run_artifact.v1` bundle for one exact run, including replay metadata and bounded scoped logs; default-on local capture and full event/artifact parity remain follow-up |
 | Block-level streaming | ✅ | ❌ | |
 | Tool-level streaming | ✅ | ❌ | |
 | Z.AI tool_stream | ✅ | ❌ | Real-time tool call streaming |
@@ -551,7 +551,7 @@ Trace Commons issuer/TenantCtx note: the server-side `zmanian/tracedao-server` s
 | Config recovery on clobber | ✅ | ❌ | Restore last-known-good config on critical clobber signatures (missing metadata, missing `gateway.mode`, sharp size drops); foreground/service notices include rejected paths |
 | Modular `$include` files | ✅ | ❌ | Single-file top-level includes for isolated mutations; `plugins install`/`update` updates `plugins.json5` instead of flattening |
 | `config set --merge`/`--replace` | ✅ | ❌ | Additive vs intentional clobber for provider model maps |
-| Wrapper-based service install | ✅ | ✅ (Reborn) | `--wrapper`/`OPENCLAW_WRAPPER` validated executable LaunchAgent/systemd wrappers; Reborn's `ironclaw-reborn service install` covers launchd (macOS)/systemd (Linux) with a webui-token-file fallback and atomic install + rollback on failure |
+| Wrapper-based service install | ✅ | ✅ (Reborn) | `--wrapper`/`OPENCLAW_WRAPPER` validated executable LaunchAgent/systemd wrappers; Reborn's `ironclaw service install` covers launchd (macOS)/systemd (Linux) with a webui-token-file fallback and atomic install + rollback on failure |
 
 ### Owner: _Unassigned_
 
@@ -736,7 +736,7 @@ CLAUDE.md for the full mapping + gap catalog.
 | Device pairing | ✅ | ❌ | Single-use bootstrap setup codes; metadata-upgrade auto-approval for shared-secret loopback; scope/role/metadata pairing approval flows |
 | Tailscale identity | ✅ | ❌ | Tailscale-authenticated Control UI bypass for browser device identity |
 | Trusted-proxy auth | ✅ | ❌ | Header-based reverse proxy auth; `trustedProxy.allowLoopback` |
-| OAuth flows | ✅ | 🚧 | NEAR AI OAuth + Gemini OAuth (PKCE, S256) + hosted extension/MCP OAuth broker; external auth-proxy rollout still pending; OpenClaw added bootstrap-token redemption scope allowlist. Reborn `serve` now has browser SSO login for WebChat v2 (Google + GitHub; Google PKCE S256, state CSRF, cleartext-redirect guard) behind `webui-v2-beta`, with fail-closed verified-email-domain admission and per-user identity binding (distinct OAuth identity → distinct user, stateless tenant-bound HMAC session). Local-dev trigger polling also seeds admitted WebUI SSO users into trigger-fire access when enabled |
+| OAuth flows | ✅ | 🚧 | NEAR AI OAuth + Gemini OAuth (PKCE, S256) + hosted extension/MCP OAuth broker; external auth-proxy rollout still pending; OpenClaw added bootstrap-token redemption scope allowlist. Reborn `serve` now has browser SSO login for WebChat v2 (Google + GitHub; Google PKCE S256, state CSRF, cleartext-redirect guard), with fail-closed verified-email-domain admission and per-user identity binding (distinct OAuth identity → distinct user, stateless tenant-bound HMAC session). Local-dev trigger polling also seeds admitted WebUI SSO users into trigger-fire access when enabled |
 | DM pairing verification | ✅ | ✅ | ironclaw pairing approve, host APIs |
 | Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store; canonical `dmPolicy="open"` only with effective wildcard across all channels |
 | Per-group tool policies | ✅ | ❌ | Group-id validation against session/spawned context before applying group-scoped tool policies |
@@ -835,7 +835,7 @@ CLAUDE.md for the full mapping + gap catalog.
 
 ### P1 - High Priority
 
-- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw-reborn serve` with Slack Events API signing, extension-card personal OAuth setup that binds Slack `authed_user.id` to the authenticated Reborn user, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API; DMs execute as the OAuth-bound actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; broader production install/setup hardening remains follow-up.
+- 🚧 Slack channel (real implementation): Reborn host-beta route can be explicitly mounted by `ironclaw serve` with Slack Events API signing, extension-card personal OAuth setup that binds Slack `authed_user.id` to the authenticated Reborn user, DM/app-mention routing through Product Workflow/Reborn, final-reply delivery, admin-managed allowed-channel picker, durable WebUI channel-route assignment APIs, provider-side default outbound target inventory for shared channels and explicitly provisioned personal DMs, and a host-bundled Reborn extension manifest declaring the Slack ProductAdapter host API; DMs execute as the OAuth-bound actor, while shared channel turns route to allowed dynamic or static channel subjects and fail closed for unrouted channels in admin-managed mode; broader production install/setup hardening remains follow-up.
 - ✅ Telegram channel (WASM, polling-first setup, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)
@@ -866,7 +866,7 @@ CLAUDE.md for the full mapping + gap catalog.
 - ❌ Codex native app-server runtime + Computer Use
 - ❌ Talk Mode / realtime voice (browser + backend)
 - ❌ OpenTelemetry diagnostics + Prometheus exporter
-- ❌ Active Memory + Skill Workshop + Trajectory export
+- ❌ Active Memory + Skill Workshop; 🚧 Trajectory export (caller-owned, redacted single-run export; full parity remains pending)
 - ❌ Outbound proxy routing + `proxy validate`
 - ❌ `migrate` (Claude/Hermes import)
 

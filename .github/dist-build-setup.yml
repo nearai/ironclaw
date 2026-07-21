@@ -1,0 +1,8 @@
+- name: Install Node.js for the embedded WebUI
+  uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
+  with:
+    node-version: 22
+
+- name: Enable pnpm
+  shell: bash
+  run: corepack enable pnpm

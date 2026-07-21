@@ -1,6 +1,6 @@
 //! Part 2a (#5466 / F-CAS-CONTENTION): real `tokio::join!` parallel pressure
 //! against the group's ONE shared CAS turn-state store
-//! (`FilesystemTurnStateStore` over `InMemoryBackend` -- the same concrete
+//! (`FilesystemTurnStateRowStore` over `InMemoryBackend` -- the same concrete
 //! CAS-over-`RootFilesystem` mechanism prod uses, independent of
 //! `StorageMode`). Sibling of `scenario_concurrent_dual_gate_resume.rs`,
 //! whose own module doc explicitly defers this: "truly parallel
@@ -9,7 +9,7 @@
 //!
 //! #5466 measured ~10% of single-attempt real-parallel exchanges landing on
 //! a sanitized `exit_application_failed` catch-all instead of `Completed`,
-//! root-caused to `FilesystemTurnStateStore`'s lock-free CAS retry churning
+//! root-caused to `FilesystemTurnStateRowStore`'s lock-free CAS retry churning
 //! a fresh libsql connection per attempt under concurrent contention (see
 //! `crates/ironclaw_turns/src/filesystem_store.rs`'s `cas_update`). #5751
 //! fixed the root cause with a bounded deadpool connection pool. Verified

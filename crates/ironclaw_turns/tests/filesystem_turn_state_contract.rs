@@ -1,5 +1,5 @@
 // arch-exempt: large_file, filesystem turn-state contract suite decomposition, plan #5662
-//! Contract tests for [`FilesystemTurnStateStore`] against a
+//! Contract tests for [`FilesystemTurnStateRowStore`] against a
 //! [`ScopedFilesystem`] over a CAS-capable filesystem backend. The persistent
 //! shape is a lower-churn `/turns/state.json` snapshot; active runner leases
 //! are memory-backed and fall back to the snapshot after restart.
@@ -16,26 +16,27 @@ use async_trait::async_trait;
 use chrono::{TimeZone, Utc};
 use ironclaw_filesystem::{
     BackendCapabilities, BackendId, BackendKind, CasExpectation, CompositeRootFilesystem,
-    ContentKind, DirEntry, DiskFilesystem, Entry, FileStat, FilesystemError, FilesystemOperation,
-    InMemoryBackend, IndexPolicy, MountDescriptor, RecordVersion, RootFilesystem, ScopedFilesystem,
-    SeqNo, StorageClass, VersionedEntry,
+    ContentKind, ContentType, DirEntry, DiskFilesystem, Entry, FileStat, FilesystemError,
+    FilesystemOperation, InMemoryBackend, IndexPolicy, MountDescriptor, RecordVersion,
+    RootFilesystem, ScopedFilesystem, SeqNo, StorageClass, VersionedEntry,
 };
 use ironclaw_host_api::{
-    AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, ScopedPath,
-    TenantId, ThreadId, UserId, VirtualPath,
+    AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId,
+    ResourceScope, ScopedPath, TenantId, ThreadId, UserId, VirtualPath,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AllowAllTurnAdmissionPolicy, BlockedReason,
-    CheckpointSchemaId, FilesystemTurnStateRowStore, FilesystemTurnStateStore, GateRef,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStore, LoopExitMapping, ProductTurnContext,
-    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    RunOriginAdapter, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
-    SanitizedFailure, SourceBindingRef, SubmitChildRunRequest, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnEventKind,
-    TurnEventProjectionSource, TurnId, TurnLeaseToken, TurnOriginKind, TurnOwner,
-    TurnPersistenceSnapshot, TurnRunId, TurnRunnerId, TurnScope, TurnSpawnTreeStateStore,
-    TurnStateStore, TurnStatus,
+    CheckpointSchemaId, EventCursor, FilesystemTurnStateBlockPersistence,
+    FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest, GetRunStateRequest,
+    IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointStore, LoopExitMapping,
+    ProductTurnContext, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
+    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, SubmitChildRunRequest,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnError, TurnEventKind, TurnEventProjectionSource, TurnId, TurnLeaseToken,
+    TurnLifecycleEvent, TurnOriginKind, TurnOwner, TurnRunId, TurnRunnerId, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateBlockPersistence, TurnStateStore, TurnStateStoreLimits,
+    TurnStatus,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, ClaimRunRequest, CompleteRunRequest,
@@ -205,7 +206,7 @@ fn strict_row_store<F>(scoped: Arc<ScopedFilesystem<F>>) -> FilesystemTurnStateR
 where
     F: RootFilesystem + 'static,
 {
-    FilesystemTurnStateRowStore::new(scoped).with_preappend_row_reservations()
+    FilesystemTurnStateRowStore::new(scoped)
 }
 
 async fn retry_get_run_state<F>(
@@ -276,36 +277,6 @@ fn row_run_virtual_path(run_id: TurnRunId) -> VirtualPath {
         "/engine/tenants/test-tenant/users/test-user/turns/rows/v1/runs/{run_id}.json"
     ))
     .unwrap()
-}
-
-async fn overwrite_snapshot_lease_expiry(
-    backend: &InMemoryBackend,
-    run_id: TurnRunId,
-    lease_expires_at: chrono::DateTime<Utc>,
-) {
-    let versioned = backend
-        .get(&snapshot_virtual_path())
-        .await
-        .unwrap()
-        .expect("snapshot");
-    let mut snapshot: TurnPersistenceSnapshot =
-        serde_json::from_slice(&versioned.entry.body).unwrap();
-    let run = snapshot
-        .runs
-        .iter_mut()
-        .find(|record| record.run_id == run_id)
-        .expect("run in snapshot");
-    run.lease_expires_at = Some(lease_expires_at);
-    let mut entry = versioned.entry;
-    entry.body = serde_json::to_vec_pretty(&snapshot).unwrap();
-    backend
-        .put(
-            &snapshot_virtual_path(),
-            entry,
-            CasExpectation::Version(versioned.version),
-        )
-        .await
-        .unwrap();
 }
 
 struct BlockingPutFilesystem<F> {
@@ -385,59 +356,6 @@ impl<F> BlockingAppendFilesystem<F> {
     }
 }
 
-struct BlockingSnapshotPutFilesystem<F> {
-    inner: F,
-    block_snapshot_puts: AtomicBool,
-    snapshot_put_blocked: AtomicBool,
-    snapshot_put_started: tokio::sync::Notify,
-    release_snapshot_puts: tokio::sync::Notify,
-}
-
-struct RejectSnapshotGetFilesystem<F> {
-    inner: F,
-    reject_snapshot_gets: AtomicBool,
-}
-
-impl<F> BlockingSnapshotPutFilesystem<F> {
-    fn new(inner: F) -> Self {
-        Self {
-            inner,
-            block_snapshot_puts: AtomicBool::new(false),
-            snapshot_put_blocked: AtomicBool::new(false),
-            snapshot_put_started: tokio::sync::Notify::new(),
-            release_snapshot_puts: tokio::sync::Notify::new(),
-        }
-    }
-
-    fn block_snapshot_puts(&self) {
-        self.block_snapshot_puts.store(true, Ordering::SeqCst);
-    }
-
-    async fn wait_for_blocked_snapshot_put(&self) {
-        while !self.snapshot_put_blocked.load(Ordering::SeqCst) {
-            self.snapshot_put_started.notified().await;
-        }
-    }
-
-    fn release_snapshot_puts(&self) {
-        self.block_snapshot_puts.store(false, Ordering::SeqCst);
-        self.release_snapshot_puts.notify_waiters();
-    }
-}
-
-impl<F> RejectSnapshotGetFilesystem<F> {
-    fn new(inner: F) -> Self {
-        Self {
-            inner,
-            reject_snapshot_gets: AtomicBool::new(false),
-        }
-    }
-
-    fn reject_snapshot_gets(&self) {
-        self.reject_snapshot_gets.store(true, Ordering::SeqCst);
-    }
-}
-
 struct BlockingAdmissionPolicy {
     state: StdMutex<BlockingAdmissionState>,
     entered: Condvar,
@@ -493,85 +411,6 @@ impl TurnAdmissionPolicy for BlockingAdmissionPolicy {
     }
 }
 
-struct FirstWaveBlockingPutFilesystem<F> {
-    inner: F,
-    expected_first_wave_puts: AtomicUsize,
-    first_wave_arrivals: AtomicUsize,
-    version_mismatches: AtomicUsize,
-    reject_puts: AtomicBool,
-    first_wave_released: AtomicBool,
-    first_wave_ready: tokio::sync::Notify,
-    release_first_wave: tokio::sync::Notify,
-    mismatch_retry_seen: AtomicBool,
-    mismatch_retry_ready: tokio::sync::Notify,
-}
-
-impl<F> FirstWaveBlockingPutFilesystem<F> {
-    fn new(inner: F) -> Self {
-        Self {
-            inner,
-            expected_first_wave_puts: AtomicUsize::new(0),
-            first_wave_arrivals: AtomicUsize::new(0),
-            version_mismatches: AtomicUsize::new(0),
-            reject_puts: AtomicBool::new(false),
-            first_wave_released: AtomicBool::new(false),
-            first_wave_ready: tokio::sync::Notify::new(),
-            release_first_wave: tokio::sync::Notify::new(),
-            mismatch_retry_seen: AtomicBool::new(false),
-            mismatch_retry_ready: tokio::sync::Notify::new(),
-        }
-    }
-
-    fn block_first_put_wave(&self, expected_puts: usize) {
-        self.first_wave_arrivals.store(0, Ordering::SeqCst);
-        self.expected_first_wave_puts
-            .store(expected_puts, Ordering::SeqCst);
-        self.first_wave_released.store(false, Ordering::SeqCst);
-        self.mismatch_retry_seen.store(false, Ordering::SeqCst);
-    }
-
-    async fn wait_for_first_wave(&self) {
-        let expected = self.expected_first_wave_puts.load(Ordering::SeqCst);
-        while self.first_wave_arrivals.load(Ordering::SeqCst) < expected {
-            self.first_wave_ready.notified().await;
-        }
-    }
-
-    fn release_first_wave(&self) {
-        self.first_wave_released.store(true, Ordering::SeqCst);
-        self.release_first_wave.notify_waiters();
-    }
-
-    async fn wait_for_mismatch_retry_read(&self) {
-        while !self.mismatch_retry_seen.load(Ordering::SeqCst) {
-            self.mismatch_retry_ready.notified().await;
-        }
-    }
-
-    fn version_mismatches(&self) -> usize {
-        self.version_mismatches.load(Ordering::SeqCst)
-    }
-
-    fn set_reject_puts(&self, reject_puts: bool) {
-        self.reject_puts.store(reject_puts, Ordering::SeqCst);
-    }
-}
-
-struct VersionMismatchFilesystem<F> {
-    inner: F,
-}
-
-impl<F> VersionMismatchFilesystem<F> {
-    fn new(inner: F) -> Self {
-        Self { inner }
-    }
-}
-
-struct RejectingPutFilesystem<F> {
-    inner: F,
-    put_calls: AtomicUsize,
-}
-
 struct RejectingAppendFilesystem<F> {
     inner: F,
     append_calls: AtomicUsize,
@@ -580,19 +419,6 @@ struct RejectingAppendFilesystem<F> {
 struct FailOncePutFilesystem<F> {
     inner: F,
     fail_next_put: AtomicBool,
-}
-
-impl<F> RejectingPutFilesystem<F> {
-    fn new(inner: F) -> Self {
-        Self {
-            inner,
-            put_calls: AtomicUsize::new(0),
-        }
-    }
-
-    fn put_calls(&self) -> usize {
-        self.put_calls.load(Ordering::SeqCst)
-    }
 }
 
 impl<F> RejectingAppendFilesystem<F> {
@@ -614,74 +440,6 @@ impl<F> FailOncePutFilesystem<F> {
             inner,
             fail_next_put: AtomicBool::new(true),
         }
-    }
-}
-
-#[async_trait]
-impl<F> RootFilesystem for RejectingPutFilesystem<F>
-where
-    F: RootFilesystem,
-{
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        _entry: Entry,
-        _cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        self.put_calls.fetch_add(1, Ordering::SeqCst);
-        Err(FilesystemError::PermissionDenied {
-            path: ScopedPath::new(path.as_str().to_string()).expect("scoped path"),
-            operation: FilesystemOperation::WriteFile,
-        })
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-
-    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
-        self.inner.append(path, payload).await
-    }
-
-    async fn append_batch(
-        &self,
-        path: &VirtualPath,
-        payloads: Vec<Vec<u8>>,
-    ) -> Result<Vec<SeqNo>, FilesystemError> {
-        self.inner.append_batch(path, payloads).await
-    }
-
-    async fn tail(
-        &self,
-        path: &VirtualPath,
-        from: SeqNo,
-    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
-        self.inner.tail(path, from).await
-    }
-
-    async fn tail_bounded(
-        &self,
-        path: &VirtualPath,
-        from: SeqNo,
-        max_records: usize,
-    ) -> Result<Vec<ironclaw_filesystem::EventRecord>, FilesystemError> {
-        self.inner.tail_bounded(path, from, max_records).await
     }
 }
 
@@ -834,50 +592,6 @@ where
 }
 
 #[async_trait]
-impl<F> RootFilesystem for VersionMismatchFilesystem<F>
-where
-    F: RootFilesystem,
-{
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        _entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        let expected = match cas {
-            CasExpectation::Any => None,
-            CasExpectation::Absent => None,
-            CasExpectation::Version(version) => Some(version),
-        };
-        Err(FilesystemError::VersionMismatch {
-            path: path.clone(),
-            expected,
-            found: None,
-        })
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-}
-
-#[async_trait]
 impl<F> RootFilesystem for BlockingPutFilesystem<F>
 where
     F: RootFilesystem,
@@ -1013,159 +727,6 @@ where
     }
 }
 
-#[async_trait]
-impl<F> RootFilesystem for BlockingSnapshotPutFilesystem<F>
-where
-    F: RootFilesystem,
-{
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        if path == &snapshot_virtual_path() && self.block_snapshot_puts.load(Ordering::SeqCst) {
-            self.snapshot_put_blocked.store(true, Ordering::SeqCst);
-            self.snapshot_put_started.notify_one();
-            while self.block_snapshot_puts.load(Ordering::SeqCst) {
-                self.release_snapshot_puts.notified().await;
-            }
-            self.snapshot_put_blocked.store(false, Ordering::SeqCst);
-        }
-        self.inner.put(path, entry, cas).await
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-}
-
-#[async_trait]
-impl<F> RootFilesystem for RejectSnapshotGetFilesystem<F>
-where
-    F: RootFilesystem,
-{
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        self.inner.put(path, entry, cas).await
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        if path == &snapshot_virtual_path() && self.reject_snapshot_gets.load(Ordering::SeqCst) {
-            return Err(FilesystemError::PermissionDenied {
-                path: ScopedPath::new(path.as_str().to_string()).expect("scoped path"),
-                operation: FilesystemOperation::ReadFile,
-            });
-        }
-        self.inner.get(path).await
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-}
-
-#[async_trait]
-impl<F> RootFilesystem for FirstWaveBlockingPutFilesystem<F>
-where
-    F: RootFilesystem,
-{
-    fn capabilities(&self) -> BackendCapabilities {
-        self.inner.capabilities()
-    }
-
-    async fn put(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        let expected = self.expected_first_wave_puts.load(Ordering::SeqCst);
-        if expected > 0 {
-            let arrival = self.first_wave_arrivals.fetch_add(1, Ordering::SeqCst) + 1;
-            if arrival <= expected {
-                if arrival == expected {
-                    self.first_wave_ready.notify_one();
-                }
-                while !self.first_wave_released.load(Ordering::SeqCst) {
-                    self.release_first_wave.notified().await;
-                }
-            }
-        }
-        if self.reject_puts.load(Ordering::SeqCst) {
-            self.version_mismatches.fetch_add(1, Ordering::SeqCst);
-            return Err(FilesystemError::VersionMismatch {
-                path: path.clone(),
-                expected: match cas {
-                    CasExpectation::Any => None,
-                    CasExpectation::Absent => None,
-                    CasExpectation::Version(version) => Some(version),
-                },
-                found: None,
-            });
-        }
-        let result = self.inner.put(path, entry, cas).await;
-        if matches!(result, Err(FilesystemError::VersionMismatch { .. })) {
-            self.version_mismatches.fetch_add(1, Ordering::SeqCst);
-        }
-        result
-    }
-
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        let result = self.inner.get(path).await;
-        if self.version_mismatches.load(Ordering::SeqCst) > 0
-            && !self.mismatch_retry_seen.swap(true, Ordering::SeqCst)
-        {
-            self.mismatch_retry_ready.notify_waiters();
-        }
-        result
-    }
-
-    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        self.inner.stat(path).await
-    }
-
-    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
-        self.inner.delete(path).await
-    }
-}
-
 fn turn_scope(thread: &str) -> TurnScope {
     TurnScope::new(
         TenantId::new("tenant1").unwrap(),
@@ -1213,7 +774,7 @@ fn accepted_turn_id(response: &SubmitTurnResponse) -> TurnId {
 async fn filesystem_turn_state_store_does_not_write_unchanged_idle_runner_snapshot() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(scoped);
+    let store = FilesystemTurnStateRowStore::new(scoped);
 
     let claimed = store
         .claim_next_run(ClaimRunRequest {
@@ -1379,160 +940,6 @@ async fn filesystem_turn_state_row_store_persists_rows_without_state_blob() {
 }
 
 #[tokio::test]
-async fn filesystem_turn_state_row_store_rejects_stale_cross_store_active_lock_create() {
-    let backend = Arc::new(engine_filesystem());
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = strict_row_store(Arc::clone(&scoped));
-    let second_store = strict_row_store(Arc::clone(&scoped));
-    let resolver = InMemoryRunProfileResolver::default();
-    let policy = AllowAllTurnAdmissionPolicy;
-    let scope = turn_scope("thread-fs-row-stale-active-lock");
-
-    first_store.persistence_snapshot().await.unwrap();
-    second_store.persistence_snapshot().await.unwrap();
-
-    let first = first_store.submit_turn(
-        submit_request_for(scope.clone(), "idem-row-stale-active-lock-a"),
-        &policy,
-        &resolver,
-    );
-    let second = second_store.submit_turn(
-        submit_request_for(scope, "idem-row-stale-active-lock-b"),
-        &policy,
-        &resolver,
-    );
-    let (first, second) = tokio::join!(first, second);
-    let successes = [first.as_ref(), second.as_ref()]
-        .into_iter()
-        .filter(|result| result.is_ok())
-        .count();
-    let conflicts = [first, second]
-        .into_iter()
-        .filter(|result| matches!(result, Err(TurnError::Conflict { .. })))
-        .count();
-
-    assert_eq!(successes, 1);
-    assert_eq!(conflicts, 1);
-}
-
-#[tokio::test]
-async fn filesystem_turn_state_row_store_rejects_stale_cross_store_claim() {
-    let backend = Arc::new(engine_filesystem());
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = strict_row_store(Arc::clone(&scoped));
-    let second_store = strict_row_store(Arc::clone(&scoped));
-    let resolver = InMemoryRunProfileResolver::default();
-    let policy = AllowAllTurnAdmissionPolicy;
-    let scope = turn_scope("thread-fs-row-stale-claim");
-
-    let submitted = first_store
-        .submit_turn(
-            submit_request_for(scope, "idem-row-stale-claim"),
-            &policy,
-            &resolver,
-        )
-        .await
-        .unwrap();
-    let run_id = accepted_run_id(&submitted);
-
-    first_store.persistence_snapshot().await.unwrap();
-    second_store.persistence_snapshot().await.unwrap();
-
-    let first = first_store.claim_next_run(ClaimRunRequest {
-        runner_id: TurnRunnerId::new(),
-        lease_token: TurnLeaseToken::new(),
-        scope_filter: None,
-    });
-    let second = second_store.claim_next_run(ClaimRunRequest {
-        runner_id: TurnRunnerId::new(),
-        lease_token: TurnLeaseToken::new(),
-        scope_filter: None,
-    });
-    let (first, second) = tokio::join!(first, second);
-    let successes = [&first, &second]
-        .into_iter()
-        .filter(|result| matches!(result, Ok(Some(claimed)) if claimed.state.run_id == run_id))
-        .count();
-    let conflicts = [first, second]
-        .into_iter()
-        .filter(|result| matches!(result, Err(TurnError::Conflict { .. })))
-        .count();
-
-    assert_eq!(successes, 1);
-    assert_eq!(conflicts, 1);
-}
-
-#[tokio::test]
-async fn filesystem_turn_state_row_store_rejects_preappend_cross_store_claim() {
-    let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = Arc::new(strict_row_store(Arc::clone(&scoped)));
-    let resolver = InMemoryRunProfileResolver::default();
-    let policy = AllowAllTurnAdmissionPolicy;
-    let scope = turn_scope("thread-fs-row-preappend-claim");
-
-    let submitted = first_store
-        .submit_turn(
-            submit_request_for(scope.clone(), "idem-row-preappend-claim"),
-            &policy,
-            &resolver,
-        )
-        .await
-        .unwrap();
-    let run_id = accepted_run_id(&submitted);
-
-    backend.block_next_append();
-    let first_claim = {
-        let first_store = Arc::clone(&first_store);
-        tokio::spawn(async move {
-            first_store
-                .claim_next_run(ClaimRunRequest {
-                    runner_id: TurnRunnerId::new(),
-                    lease_token: TurnLeaseToken::new(),
-                    scope_filter: None,
-                })
-                .await
-        })
-    };
-    backend.wait_for_blocked_append().await;
-
-    let second_store = strict_row_store(Arc::clone(&scoped));
-    let preappend_snapshot = second_store.persistence_snapshot().await.unwrap();
-    assert!(
-        preappend_snapshot
-            .runs
-            .iter()
-            .any(|record| record.run_id == run_id && record.status == TurnStatus::Running)
-    );
-    assert!(
-        preappend_snapshot
-            .active_locks
-            .iter()
-            .any(|record| record.run_id == run_id && record.status == TurnStatus::Running)
-    );
-    let second = second_store
-        .claim_next_run(ClaimRunRequest {
-            runner_id: TurnRunnerId::new(),
-            lease_token: TurnLeaseToken::new(),
-            scope_filter: None,
-        })
-        .await;
-    assert!(
-        matches!(second, Ok(None) | Err(TurnError::Conflict { .. })),
-        "fresh store must not double-claim a run while another claim's append is blocked"
-    );
-
-    backend.release_blocked_append();
-    let first = first_claim
-        .await
-        .expect("first claim task joins")
-        .unwrap()
-        .expect("first claim succeeds");
-    assert_eq!(first.state.run_id, run_id);
-    assert_eq!(first.state.status, TurnStatus::Running);
-}
-
-#[tokio::test]
 async fn filesystem_turn_state_row_store_refreshes_stale_active_lock_cache_before_submit() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
@@ -1582,17 +989,23 @@ async fn filesystem_turn_state_row_store_refreshes_stale_active_lock_cache_befor
     assert_eq!(accepted_run_id(&submitted), second_run_id);
 }
 
+/// #6263 Step 5b: `get_run_state` prefers the process-local hot cache under
+/// (now-unconditional) write-behind — the single-writer authority model, where
+/// a live SECOND instance over the same backend is not a supported production
+/// shape (each scope has exactly one authoritative writer/reader instance;
+/// see `filesystem_store/row_store.rs`). The refresh-from-durable-rows path
+/// this test locks is REOPEN after a drop (crash/restart), not a second live
+/// instance staying open alongside the first.
 #[tokio::test]
 async fn filesystem_turn_state_row_store_get_run_state_refreshes_stale_cached_run() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
-    let second_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let policy = AllowAllTurnAdmissionPolicy;
     let scope = turn_scope("thread-fs-row-stale-get-run-state");
 
-    let submitted = first_store
+    let submitted = store
         .submit_turn(
             submit_request_for(scope.clone(), "idem-row-stale-get-run-state"),
             &policy,
@@ -1604,7 +1017,7 @@ async fn filesystem_turn_state_row_store_get_run_state_refreshes_stale_cached_ru
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
 
-    let cached = second_store
+    let cached = store
         .get_run_state(GetRunStateRequest {
             scope: scope.clone(),
             run_id,
@@ -1613,7 +1026,7 @@ async fn filesystem_turn_state_row_store_get_run_state_refreshes_stale_cached_ru
         .unwrap();
     assert_eq!(cached.status, TurnStatus::Queued);
 
-    first_store
+    store
         .claim_next_run(ClaimRunRequest {
             runner_id,
             lease_token,
@@ -1622,8 +1035,15 @@ async fn filesystem_turn_state_row_store_get_run_state_refreshes_stale_cached_ru
         .await
         .unwrap()
         .expect("run claimed");
+    // The claim (Queued -> Running) is non-critical claim churn — drain before
+    // the drop so the crash-free reopen below sees it (this test's point is
+    // the durable-rows refresh on reopen, not the write's own crash-loss
+    // window, which the crash-consistency suite covers separately).
+    store.drain().await.expect("drain claim");
+    drop(store);
 
-    let refreshed = second_store
+    let reopened = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let refreshed = reopened
         .get_run_state(GetRunStateRequest { scope, run_id })
         .await
         .unwrap();
@@ -1631,116 +1051,24 @@ async fn filesystem_turn_state_row_store_get_run_state_refreshes_stale_cached_ru
 }
 
 #[tokio::test]
-async fn filesystem_turn_state_row_store_rejects_uncommitted_active_lock_reservation() {
-    let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = Arc::new(strict_row_store(Arc::clone(&scoped)));
-    let second_store = strict_row_store(Arc::clone(&scoped));
-    let resolver = InMemoryRunProfileResolver::default();
-    let policy = AllowAllTurnAdmissionPolicy;
-    let scope = turn_scope("thread-fs-row-uncommitted-active-lock");
-    let first_run_id = TurnRunId::new();
-    let second_run_id = TurnRunId::new();
-    let mut first_request = submit_request_for(scope.clone(), "idem-row-uncommitted-active-lock-a");
-    first_request.requested_run_id = Some(first_run_id);
-
-    backend.block_next_append();
-    let first_submit = {
-        let first_store = Arc::clone(&first_store);
-        tokio::spawn(async move {
-            let resolver = InMemoryRunProfileResolver::default();
-            let policy = AllowAllTurnAdmissionPolicy;
-            first_store
-                .submit_turn(first_request, &policy, &resolver)
-                .await
-        })
-    };
-    backend.wait_for_blocked_append().await;
-
-    let snapshot = second_store.persistence_snapshot().await.unwrap();
-    assert_eq!(snapshot.turns.len(), 1);
-    assert_eq!(snapshot.runs.len(), 1);
-    assert_eq!(snapshot.active_locks.len(), 1);
-
-    let mut second_request =
-        submit_request_for(scope.clone(), "idem-row-uncommitted-active-lock-b");
-    second_request.requested_run_id = Some(second_run_id);
-    let second = second_store
-        .submit_turn(second_request, &policy, &resolver)
-        .await;
-    assert!(
-        matches!(
-            second,
-            Err(TurnError::Conflict { .. }) | Err(TurnError::ThreadBusy(_))
-        ),
-        "fresh store must not accept a same-thread run when it only sees another writer's pre-append active-lock reservation"
-    );
-
-    backend.release_blocked_append();
-    let first = first_submit
-        .await
-        .expect("first submit task joins")
-        .unwrap();
-    assert_eq!(accepted_run_id(&first), first_run_id);
-}
-
-#[tokio::test]
-async fn filesystem_turn_state_row_store_recovers_preappend_active_lock_reservation() {
-    let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let first_store = Arc::new(strict_row_store(Arc::clone(&scoped)));
-    let scope = turn_scope("thread-fs-row-recover-preappend-active-lock");
-    let run_id = TurnRunId::new();
-    let mut request = submit_request_for(scope, "idem-row-recover-preappend-active-lock");
-    request.requested_run_id = Some(run_id);
-
-    backend.block_next_append();
-    let first_submit = {
-        let first_store = Arc::clone(&first_store);
-        tokio::spawn(async move {
-            let resolver = InMemoryRunProfileResolver::default();
-            let policy = AllowAllTurnAdmissionPolicy;
-            first_store.submit_turn(request, &policy, &resolver).await
-        })
-    };
-    backend.wait_for_blocked_append().await;
-    first_submit.abort();
-
-    let recovered_store = strict_row_store(Arc::clone(&scoped));
-    let snapshot = recovered_store.persistence_snapshot().await.unwrap();
-    assert_eq!(snapshot.turns.len(), 1);
-    assert_eq!(snapshot.runs.len(), 1);
-    assert_eq!(snapshot.active_locks.len(), 1);
-
-    let claimed = recovered_store
-        .claim_next_run(ClaimRunRequest {
-            runner_id: TurnRunnerId::new(),
-            lease_token: TurnLeaseToken::new(),
-            scope_filter: None,
-        })
-        .await
-        .unwrap()
-        .expect("pre-append reservation recovers as queued run");
-    assert_eq!(claimed.state.run_id, run_id);
-    assert_eq!(claimed.state.status, TurnStatus::Running);
-}
-
-#[tokio::test]
 async fn filesystem_turn_state_row_store_migrates_legacy_state_blob() {
-    let backend = Arc::new(engine_filesystem());
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let legacy_store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    // Build a legacy `/turns/state.json` blob the way a pre-#6263
+    // `inmemory-turn-state` deployment did: produce a Queued run on a throwaway
+    // store, snapshot it, and write that snapshot through the block-persistence
+    // sink (the row store's legacy-blob importer reads exactly this artifact).
+    let source_backend = Arc::new(engine_filesystem());
+    let source_scoped = scoped_turns_fs(Arc::clone(&source_backend));
+    let source = FilesystemTurnStateRowStore::new(Arc::clone(&source_scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let scope = turn_scope("thread-fs-row-migrate-legacy");
     let run_id = TurnRunId::new();
     let mut request = submit_request_for(scope.clone(), "idem-fs-row-migrate-legacy");
     request.requested_run_id = Some(run_id);
-
-    legacy_store
+    source
         .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
         .await
         .unwrap();
-    let legacy_snapshot = legacy_store.persistence_snapshot().await.unwrap();
+    let legacy_snapshot = source.persistence_snapshot().await.unwrap();
     assert!(
         legacy_snapshot
             .runs
@@ -1748,13 +1076,21 @@ async fn filesystem_turn_state_row_store_migrates_legacy_state_blob() {
             .any(|record| record.run_id == run_id),
         "legacy blob fixture must contain the submitted run"
     );
+
+    // Fresh backend with no row data (first boot after the flip): seed only the
+    // legacy blob via the block-persistence sink.
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    FilesystemTurnStateBlockPersistence::new(Arc::clone(&scoped))
+        .persist(&legacy_snapshot)
+        .await;
     assert!(
         backend
             .get(&snapshot_virtual_path())
             .await
             .unwrap()
             .is_some(),
-        "legacy store must write the blob-shaped state snapshot"
+        "block-persistence must write the blob-shaped state snapshot"
     );
 
     let row_store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
@@ -1813,6 +1149,107 @@ async fn filesystem_turn_state_row_store_migrates_legacy_state_blob() {
     );
 }
 
+/// #6263 Step 4 migration proof. An existing `inmemory-turn-state` deployment
+/// persisted its gate-parked (approval/auth) turns through
+/// [`FilesystemTurnStateBlockPersistence`], which writes the full
+/// [`TurnPersistenceSnapshot`] to `/turns/state.json`. After the profile flips
+/// onto the row store, first boot MUST import that exact artifact so no
+/// approval-parked turn is silently dropped. The block-persistence sink and the
+/// row store's legacy-blob importer share `io::snapshot_path()` +
+/// `io::snapshot_entry`, so the migration is automatic — this pins it for the
+/// real gate-parked artifact, not just a generic Queued-run blob.
+#[tokio::test]
+async fn filesystem_turn_state_row_store_migrates_block_persistence_gate_park_snapshot() {
+    // 1) Produce a genuine BlockedApproval run and snapshot it exactly as the old
+    //    in-memory authority did when a run parked on a gate.
+    let source_backend = Arc::new(engine_filesystem());
+    let source_scoped = scoped_turns_fs(Arc::clone(&source_backend));
+    let source = FilesystemTurnStateRowStore::new(Arc::clone(&source_scoped));
+    let resolver = InMemoryRunProfileResolver::default();
+    let scope = turn_scope("thread-block-persist-migrate");
+    let request = submit_request_for(scope.clone(), "idem-block-persist-migrate");
+    let response = source
+        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
+        .await
+        .unwrap();
+    let run_id = accepted_run_id(&response);
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    source
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope.clone()),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("gate-block-persist-migrate").unwrap();
+    let checkpoint_id = TurnCheckpointId::new();
+    let blocked = source
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id,
+            state_ref: LoopCheckpointStateRef::new("checkpoint:block-persist-migrate").unwrap(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+    assert_eq!(blocked.status, TurnStatus::BlockedApproval);
+    let gate_parked_snapshot = source.persistence_snapshot().await.unwrap();
+    assert!(
+        gate_parked_snapshot
+            .runs
+            .iter()
+            .any(|record| record.run_id == run_id && record.status == TurnStatus::BlockedApproval),
+        "fixture snapshot must carry the gate-parked run"
+    );
+
+    // 2) Write that snapshot the way the OLD deployment's block-persistence sink
+    //    did, onto a FRESH backend that has no row data (a first boot after the
+    //    flip).
+    let target_backend = Arc::new(engine_filesystem());
+    let target_scoped = scoped_turns_fs(Arc::clone(&target_backend));
+    let block_persistence = FilesystemTurnStateBlockPersistence::new(Arc::clone(&target_scoped));
+    block_persistence.persist(&gate_parked_snapshot).await;
+    assert!(
+        target_backend
+            .get(&snapshot_virtual_path())
+            .await
+            .unwrap()
+            .is_some(),
+        "block-persistence must leave the legacy blob the row store imports from"
+    );
+
+    // 3) Open the row store over the same fresh backend; the first read triggers
+    //    the automatic legacy-blob import, recovering the gate-parked turn.
+    let row_store = FilesystemTurnStateRowStore::new(Arc::clone(&target_scoped));
+    let migrated = row_store
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        migrated.status,
+        TurnStatus::BlockedApproval,
+        "block-persistence gate-parked turn must survive the row-store migration"
+    );
+
+    // 4) The gate-parked run is durable rows now: it rehydrates on a fresh reopen.
+    let reopened = FilesystemTurnStateRowStore::new(target_scoped);
+    let reopened_state = reopened
+        .get_run_state(GetRunStateRequest { scope, run_id })
+        .await
+        .unwrap();
+    assert_eq!(reopened_state.status, TurnStatus::BlockedApproval);
+}
+
 #[tokio::test]
 async fn filesystem_turn_state_row_store_does_not_remigrate_stale_blob_after_rows_exist() {
     let backend = Arc::new(engine_filesystem());
@@ -1833,15 +1270,26 @@ async fn filesystem_turn_state_row_store_does_not_remigrate_stale_blob_after_row
         .await
         .unwrap();
 
+    // Build a stale legacy `/turns/state.json` blob (as a pre-#6263 deployment
+    // would have) carrying a run the row store has never seen, and drop it next
+    // to the existing rows via the block-persistence sink. The fixture snapshot
+    // is produced on a throwaway store over its OWN backend, then persisted onto
+    // this store's backend.
     let stale_scope = turn_scope("thread-fs-row-stale-legacy");
     let stale_run_id = TurnRunId::new();
     let mut stale_request = submit_request_for(stale_scope.clone(), "idem-fs-row-stale-legacy");
     stale_request.requested_run_id = Some(stale_run_id);
-    let legacy_store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
-    legacy_store
+    let stale_source_backend = Arc::new(engine_filesystem());
+    let stale_source_scoped = scoped_turns_fs(Arc::clone(&stale_source_backend));
+    let stale_source = FilesystemTurnStateRowStore::new(Arc::clone(&stale_source_scoped));
+    stale_source
         .submit_turn(stale_request, &AllowAllTurnAdmissionPolicy, &resolver)
         .await
         .unwrap();
+    let stale_snapshot = stale_source.persistence_snapshot().await.unwrap();
+    FilesystemTurnStateBlockPersistence::new(Arc::clone(&scoped))
+        .persist(&stale_snapshot)
+        .await;
     assert!(
         backend
             .get(&snapshot_virtual_path())
@@ -2001,6 +1449,17 @@ async fn filesystem_turn_state_row_store_publish_is_optimistic_but_waits_for_app
     assert_eq!(state.status, TurnStatus::Queued);
 }
 
+/// #6263 Step 5b: a `BeforeSideEffect` checkpoint is critical (it is a
+/// durability barrier — expired-lease recovery treats its ABSENCE as proof no
+/// side effect ran, so it must be durable before the caller proceeds), so its
+/// writer genuinely awaits the durable append ack, unlike a `BeforeModel`
+/// checkpoint (non-critical, returns before its append). This locks two
+/// things: the critical writer really does wait on a blocked append (not just
+/// return immediately), and a SECOND concurrent critical writer's row becomes
+/// visible via the hot cache before its OWN ack resolves (the cache updates
+/// synchronously under the commit lock, before the ack-await) — so unrelated
+/// concurrent writers are not needlessly serialized on each other's visibility,
+/// only on the shared journal's append order.
 #[tokio::test]
 async fn filesystem_turn_state_row_store_loop_checkpoint_releases_gate_before_append_ack() {
     let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
@@ -2034,7 +1493,7 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_releases_gate_before_ap
                 state_ref: LoopCheckpointStateRef::new("checkpoint:blocked-append").unwrap(),
                 schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
                 schema_version: RunProfileVersion::new(1),
-                kind: LoopCheckpointKind::BeforeModel,
+                kind: LoopCheckpointKind::BeforeSideEffect,
                 gate_ref: None,
             })
             .await
@@ -2042,7 +1501,7 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_releases_gate_before_ap
     backend.wait_for_blocked_append().await;
     assert!(
         !checkpoint.is_finished(),
-        "checkpoint writer must still wait for the durable append ack"
+        "a critical BeforeSideEffect checkpoint writer must still wait for the durable append ack"
     );
 
     let second_scope = turn_scope("thread-fs-row-checkpoint-blocked-append-second");
@@ -2098,6 +1557,10 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_releases_gate_before_ap
     );
 }
 
+/// #6263 Step 5b: only a `BeforeSideEffect` checkpoint is critical (a
+/// durability barrier), so only it awaits its append and can hit the bounded
+/// `apply_timeout`; a `BeforeModel` checkpoint is non-critical and would
+/// return immediately without ever touching this timeout.
 #[tokio::test]
 async fn filesystem_turn_state_row_store_loop_checkpoint_times_out_without_losing_unknown_commit() {
     let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
@@ -2131,7 +1594,7 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_times_out_without_losin
                 state_ref: LoopCheckpointStateRef::new("checkpoint:timeout").unwrap(),
                 schema_id: CheckpointSchemaId::new("interactive_checkpoint_v1").unwrap(),
                 schema_version: RunProfileVersion::new(1),
-                kind: LoopCheckpointKind::BeforeModel,
+                kind: LoopCheckpointKind::BeforeSideEffect,
                 gate_ref: None,
             })
             .await
@@ -2195,6 +1658,12 @@ async fn filesystem_turn_state_row_store_get_loop_checkpoint_refreshes_stale_cac
         })
         .await
         .unwrap();
+    // A `BeforeModel` checkpoint is non-critical (only `BeforeSideEffect` is a
+    // durability barrier) — drain `writer` so it is durable before `reader` (a
+    // different cached instance over the same backend) reads it. This test's
+    // point is the stale-cache refresh from durable rows, not the write's own
+    // crash-loss window.
+    writer.drain().await.expect("drain checkpoint");
 
     let loaded = reader
         .get_loop_checkpoint(GetLoopCheckpointRequest {
@@ -2398,7 +1867,7 @@ async fn filesystem_turn_state_row_store_loop_checkpoint_survives_concurrent_ful
 async fn filesystem_turn_state_row_store_evicted_terminal_run_remains_queryable() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let limits = InMemoryTurnStateStoreLimits::default()
+    let limits = TurnStateStoreLimits::default()
         .set_max_events(2)
         .set_max_terminal_records(1)
         .set_max_idempotency_records(1);
@@ -2541,11 +2010,11 @@ async fn filesystem_turn_state_row_store_evicted_terminal_run_remains_queryable(
 async fn filesystem_turn_state_row_store_validated_loop_exit_completion_remains_queryable() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let limits = InMemoryTurnStateStoreLimits {
+    let limits = TurnStateStoreLimits {
         max_events: 2,
         max_terminal_records: 1,
         max_idempotency_records: 1,
-        ..InMemoryTurnStateStoreLimits::default()
+        ..TurnStateStoreLimits::default()
     };
     let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped)).with_limits(limits);
     let resolver = InMemoryRunProfileResolver::default();
@@ -2682,6 +2151,11 @@ async fn filesystem_turn_state_row_store_heartbeat_does_not_rewrite_run_row() {
         .await
         .unwrap()
         .unwrap();
+    // The claim (Queued -> Running) is non-critical claim churn — drain it so
+    // its append has landed before the baseline read below. Otherwise the
+    // claim's own async append could land DURING the heartbeat window and be
+    // mistaken for a durable write heartbeat caused.
+    store.drain().await.expect("drain claim");
     let head_after_claim = backend
         .head_seq(&row_delta_log_virtual_path(), SeqNo::ZERO)
         .await
@@ -2725,114 +2199,34 @@ async fn filesystem_turn_state_row_store_heartbeat_does_not_rewrite_run_row() {
     );
 }
 
-#[tokio::test]
-async fn filesystem_turn_state_store_heartbeat_updates_lease_without_rewriting_snapshot() {
-    let backend = Arc::new(engine_filesystem());
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(scoped);
-    let resolver = InMemoryRunProfileResolver::default();
-
-    let request = submit_request_for(
-        turn_scope("thread-fs-heartbeat-memory"),
-        "idem-fs-heartbeat-memory",
-    );
-    let response = store
-        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
-        .await
-        .unwrap();
-    let run_id = accepted_run_id(&response);
-    let runner_id = TurnRunnerId::new();
-    let lease_token = TurnLeaseToken::new();
-    let claimed = store
-        .claim_next_run(ClaimRunRequest {
-            runner_id,
-            lease_token,
-            scope_filter: None,
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(claimed.state.run_id, run_id);
-
-    let version_after_claim = backend
-        .get(&snapshot_virtual_path())
-        .await
-        .unwrap()
-        .expect("snapshot after claim")
-        .version;
-    let claimed_snapshot = store.persistence_snapshot().await.unwrap();
-    let claimed_run = claimed_snapshot
-        .runs
-        .iter()
-        .find(|record| record.run_id == run_id)
-        .expect("claimed run");
-    let first_heartbeat_at = claimed_run.last_heartbeat_at.expect("heartbeat timestamp");
-    let first_expiry = claimed_run.lease_expires_at.expect("lease expiry");
-
-    tokio::time::sleep(Duration::from_millis(5)).await;
-    store
-        .heartbeat(HeartbeatRequest {
-            run_id,
-            runner_id,
-            lease_token,
-        })
-        .await
-        .unwrap();
-
-    let version_after_heartbeat = backend
-        .get(&snapshot_virtual_path())
-        .await
-        .unwrap()
-        .expect("snapshot after heartbeat")
-        .version;
-    assert_eq!(
-        version_after_heartbeat, version_after_claim,
-        "heartbeat must refresh the runner lease without rewriting state.json"
-    );
-    let heartbeat_snapshot = store.persistence_snapshot().await.unwrap();
-    let heartbeat_run = heartbeat_snapshot
-        .runs
-        .iter()
-        .find(|record| record.run_id == run_id)
-        .expect("heartbeat run");
-    assert!(
-        heartbeat_run
-            .last_heartbeat_at
-            .expect("heartbeat timestamp")
-            > first_heartbeat_at,
-        "heartbeat read model should expose the refreshed memory lease timestamp"
-    );
-    assert!(
-        heartbeat_run.lease_expires_at.expect("lease expiry") > first_expiry,
-        "heartbeat read model should expose the refreshed memory lease expiry"
-    );
-    assert!(
-        backend
-            .get(&runner_lease_virtual_path(run_id))
-            .await
-            .unwrap()
-            .is_none(),
-        "runner leases are memory-backed and must not materialize durable sidecar records"
-    );
-}
+// DELETED: filesystem_turn_state_store_heartbeat_updates_lease_without_rewriting_snapshot
+// asserted the deleted blob store's `state.json` version staying unchanged
+// across a heartbeat. The row store's equivalent — a heartbeat refreshes the
+// memory-backed runner lease WITHOUT appending a durable delta (and never
+// materializes a runner-lease sidecar) — is covered by
+// `filesystem_turn_state_row_store_heartbeat_does_not_rewrite_run_row` and
+// `filesystem_turn_state_store_heartbeat_does_not_write_runner_lease_sidecar`
+// (both in this file).
 
 /// Regression: a no-op apply that runs under a non-`None` runner-lease overlay
-/// (`Run`/`All`) must NOT rewrite `state.json`.
+/// (`Run`/`All`) must NOT append a durable delta.
 ///
 /// The overlay patches time-varying lease fields (`last_heartbeat_at`,
-/// `lease_expires_at`) from the per-run sidecar into the snapshot the apply
-/// closure sees, so the overlaid snapshot diverges from the raw backend body
-/// (whose lease fields are frozen at claim time once heartbeats only touch the
-/// sidecar). The no-op baseline must therefore be the OVERLAID snapshot — if it
-/// is taken from the raw body, an inert transition is misread as a real
-/// mutation and the snapshot is rewritten on every call (version churn + CAS
-/// retries under load). `recover_expired_leases` with nothing expired is a true
-/// no-op apply under the `All` overlay, so it exercises exactly this path.
+/// `lease_expires_at`) from the memory-backed lease into the snapshot the apply
+/// closure sees, so the overlaid snapshot diverges from the durable rows (whose
+/// lease fields are frozen at claim time once heartbeats only touch memory). The
+/// no-op baseline must therefore be the OVERLAID snapshot — if it is taken from
+/// the raw durable rows, an inert transition is misread as a real mutation and a
+/// spurious delta is appended on every call (journal churn under load).
+/// `recover_expired_leases` with nothing expired is a true no-op apply under the
+/// `All` overlay, so it exercises exactly this path. This asserts through the
+/// row store's durable delta journal (the row-store analog of the deleted blob
+/// store's `state.json` version check).
 #[tokio::test]
-async fn filesystem_turn_state_store_no_op_under_active_lease_overlay_does_not_rewrite_snapshot() {
+async fn filesystem_turn_state_store_no_op_under_active_lease_overlay_does_not_append_delta() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(scoped);
+    let store = FilesystemTurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -2856,9 +2250,9 @@ async fn filesystem_turn_state_store_no_op_under_active_lease_overlay_does_not_r
         .unwrap()
         .unwrap();
 
-    // Heartbeat updates only the sidecar lease, leaving state.json's lease
-    // fields frozen at claim time. This is the divergence the overlay bridges
-    // and the exact condition under which the no-op baseline matters.
+    // Heartbeat updates only the memory lease, leaving the durable run row's
+    // lease fields frozen at claim time. This is the divergence the overlay
+    // bridges and the exact condition under which the no-op baseline matters.
     tokio::time::sleep(Duration::from_millis(5)).await;
     store
         .heartbeat(HeartbeatRequest {
@@ -2868,13 +2262,14 @@ async fn filesystem_turn_state_store_no_op_under_active_lease_overlay_does_not_r
         })
         .await
         .unwrap();
+    // Drain the (non-critical) claim's async append so the baseline head below
+    // is stable and cannot be advanced by claim churn landing mid-window.
+    store.drain().await.expect("drain claim");
 
-    let version_before = backend
-        .get(&snapshot_virtual_path())
+    let head_before = backend
+        .head_seq(&row_delta_log_virtual_path(), SeqNo::ZERO)
         .await
-        .unwrap()
-        .expect("snapshot after heartbeat")
-        .version;
+        .unwrap();
 
     // `now` well before the (heartbeat-refreshed) lease expiry, so nothing is
     // recovered: the apply closure leaves the overlaid snapshot unchanged.
@@ -2890,16 +2285,14 @@ async fn filesystem_turn_state_store_no_op_under_active_lease_overlay_does_not_r
         "active lease must not be recovered before its expiry"
     );
 
-    let version_after = backend
-        .get(&snapshot_virtual_path())
+    let head_after = backend
+        .head_seq(&row_delta_log_virtual_path(), SeqNo::ZERO)
         .await
-        .unwrap()
-        .expect("snapshot after no-op recover")
-        .version;
+        .unwrap();
     assert_eq!(
-        version_after, version_before,
-        "a no-op apply under an active-lease overlay must not rewrite state.json \
-         (the no-op baseline is the overlaid snapshot, not the raw backend body)"
+        head_after, head_before,
+        "a no-op apply under an active-lease overlay must not append a durable delta \
+         (the no-op baseline is the overlaid snapshot, not the raw durable rows)"
     );
 }
 
@@ -2907,7 +2300,7 @@ async fn filesystem_turn_state_store_no_op_under_active_lease_overlay_does_not_r
 async fn filesystem_turn_state_store_heartbeat_seeds_memory_lease_from_snapshot_after_reopen() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -2938,7 +2331,7 @@ async fn filesystem_turn_state_store_heartbeat_seeds_memory_lease_from_snapshot_
         .and_then(|record| record.last_heartbeat_at)
         .expect("claimed heartbeat timestamp");
 
-    let reopened = FilesystemTurnStateStore::new(scoped);
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
     tokio::time::sleep(Duration::from_millis(5)).await;
     reopened
         .heartbeat(HeartbeatRequest {
@@ -2968,7 +2361,7 @@ async fn filesystem_turn_state_store_heartbeat_seeds_memory_lease_from_snapshot_
 async fn filesystem_turn_state_store_recover_expired_leases_uses_memory_runner_lease() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(scoped);
+    let store = FilesystemTurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -3046,11 +2439,18 @@ async fn filesystem_turn_state_store_recover_expired_leases_uses_memory_runner_l
     assert_eq!(recovered.recovered[0].status, TurnStatus::Queued);
 }
 
+/// The terminal `complete_run` transition validates the runner lease against
+/// the memory-backed lease store (runner leases are no longer durable). This
+/// exercises that authority directly through the public API: a completion with a
+/// mismatched lease is rejected, and only the live memory lease (refreshed by a
+/// heartbeat) authorizes the terminal transition. (Replaces the deleted blob
+/// store's variant that overwrote a stale `state.json` lease expiry to prove the
+/// memory lease overlay won.)
 #[tokio::test]
 async fn filesystem_turn_state_store_complete_run_uses_memory_runner_lease() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(scoped);
+    let store = FilesystemTurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -3083,8 +2483,18 @@ async fn filesystem_turn_state_store_complete_run_uses_memory_runner_lease() {
         .await
         .unwrap();
 
-    overwrite_snapshot_lease_expiry(&backend, run_id, Utc::now() - chrono::Duration::seconds(1))
-        .await;
+    // A completion whose lease does not match the memory-backed runner lease is
+    // rejected — proving the terminal transition is gated on the memory lease,
+    // not merely on the durable run row.
+    let mismatch = store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+        })
+        .await
+        .expect_err("mismatched lease must not complete the run");
+    assert_eq!(mismatch, TurnError::LeaseMismatch);
 
     let completed = store
         .complete_run(CompleteRunRequest {
@@ -3101,7 +2511,7 @@ async fn filesystem_turn_state_store_complete_run_uses_memory_runner_lease() {
 async fn filesystem_turn_state_store_heartbeat_does_not_write_runner_lease_sidecar() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(scoped);
+    let store = FilesystemTurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -3160,54 +2570,25 @@ async fn filesystem_turn_state_store_heartbeat_does_not_write_runner_lease_sidec
     );
 }
 
-#[tokio::test]
-async fn filesystem_turn_state_store_heartbeat_does_not_read_snapshot() {
-    let backend = Arc::new(RejectSnapshotGetFilesystem::new(engine_filesystem()));
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(scoped);
-    let resolver = InMemoryRunProfileResolver::default();
+// DELETED: filesystem_turn_state_store_heartbeat_does_not_read_snapshot asserted
+// the deleted blob store never touched the `state.json` GET during a heartbeat
+// (via a filesystem that rejected snapshot reads). The row store services a
+// heartbeat entirely from the in-memory runner lease — it appends no durable
+// delta and writes no sidecar — which is covered by
+// `filesystem_turn_state_row_store_heartbeat_does_not_rewrite_run_row` and
+// `filesystem_turn_state_store_heartbeat_does_not_write_runner_lease_sidecar`
+// (both in this file).
 
-    let response = store
-        .submit_turn(
-            submit_request_for(
-                turn_scope("thread-fs-heartbeat-memory-only"),
-                "idem-fs-heartbeat-memory-only",
-            ),
-            &AllowAllTurnAdmissionPolicy,
-            &resolver,
-        )
-        .await
-        .unwrap();
-    let run_id = accepted_run_id(&response);
-    let runner_id = TurnRunnerId::new();
-    let lease_token = TurnLeaseToken::new();
-    let claimed = store
-        .claim_next_run(ClaimRunRequest {
-            runner_id,
-            lease_token,
-            scope_filter: None,
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(claimed.state.run_id, run_id);
-
-    backend.reject_snapshot_gets();
-    store
-        .heartbeat(HeartbeatRequest {
-            run_id,
-            runner_id,
-            lease_token,
-        })
-        .await
-        .expect("heartbeat must use only the memory runner lease");
-}
-
+/// The memory-backed runner lease carries the run's current lifecycle status, so
+/// a heartbeat on a run that has moved to `CancelRequested` is rejected as an
+/// invalid `-> Running` transition without consulting durable state. (Replaces
+/// the deleted blob store's variant that additionally rejected `state.json`
+/// reads to prove the status came from memory.)
 #[tokio::test]
 async fn filesystem_turn_state_store_cancel_requested_heartbeat_uses_memory_lease_status() {
-    let backend = Arc::new(RejectSnapshotGetFilesystem::new(engine_filesystem()));
+    let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(scoped);
+    let store = FilesystemTurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
@@ -3243,7 +2624,6 @@ async fn filesystem_turn_state_store_cancel_requested_heartbeat_uses_memory_leas
         .unwrap();
     assert_eq!(cancel.status, TurnStatus::CancelRequested);
 
-    backend.reject_snapshot_gets();
     let heartbeat = store
         .heartbeat(HeartbeatRequest {
             run_id,
@@ -3261,16 +2641,20 @@ async fn filesystem_turn_state_store_cancel_requested_heartbeat_uses_memory_leas
     );
 }
 
+/// A heartbeat is serviced entirely from the memory-backed runner lease, so it
+/// must not be serialized behind a concurrent writer's blocked durable append.
+/// (Replaces the deleted blob store's variant that blocked the `state.json`
+/// put; the row store's durable write is the delta-journal append.)
 #[tokio::test]
-async fn filesystem_turn_state_store_heartbeat_succeeds_while_snapshot_put_is_blocked() {
-    let backend = Arc::new(BlockingSnapshotPutFilesystem::new(engine_filesystem()));
+async fn filesystem_turn_state_store_heartbeat_succeeds_while_durable_append_is_blocked() {
+    let backend = Arc::new(BlockingAppendFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateStore::new(scoped));
+    let store = Arc::new(FilesystemTurnStateRowStore::new(scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(
-        turn_scope("thread-fs-heartbeat-blocked-snapshot"),
-        "idem-fs-heartbeat-blocked-snapshot",
+        turn_scope("thread-fs-heartbeat-blocked-append"),
+        "idem-fs-heartbeat-blocked-append",
     );
     let response = store
         .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
@@ -3289,8 +2673,11 @@ async fn filesystem_turn_state_store_heartbeat_succeeds_while_snapshot_put_is_bl
         .unwrap()
         .unwrap();
     assert_eq!(claimed.state.run_id, run_id);
+    // Drain the claim's async append so the next blocked append is the
+    // concurrent writer's, not leftover claim churn.
+    store.drain().await.expect("drain claim");
 
-    backend.block_snapshot_puts();
+    backend.block_next_append();
     let blocked_store = Arc::clone(&store);
     let blocked_writer = tokio::spawn(async move {
         let resolver = InMemoryRunProfileResolver::default();
@@ -3306,12 +2693,9 @@ async fn filesystem_turn_state_store_heartbeat_succeeds_while_snapshot_put_is_bl
             .await
     });
 
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        backend.wait_for_blocked_snapshot_put(),
-    )
-    .await
-    .expect("writer should reach the blocked state.json put");
+    tokio::time::timeout(Duration::from_secs(1), backend.wait_for_blocked_append())
+        .await
+        .expect("writer should reach the blocked durable append");
 
     tokio::time::timeout(
         Duration::from_secs(1),
@@ -3322,10 +2706,10 @@ async fn filesystem_turn_state_store_heartbeat_succeeds_while_snapshot_put_is_bl
         }),
     )
     .await
-    .expect("heartbeat must not wait behind a blocked state.json put")
+    .expect("heartbeat must not wait behind a blocked durable append")
     .unwrap();
 
-    backend.release_snapshot_puts();
+    backend.release_blocked_append();
     blocked_writer.await.unwrap().unwrap();
 }
 
@@ -3357,7 +2741,7 @@ fn child_run_request(
 async fn filesystem_turn_state_store_persists_submit_and_reopens() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(turn_scope("thread-fs-persist"), "idem-fs-persist");
@@ -3369,7 +2753,7 @@ async fn filesystem_turn_state_store_persists_submit_and_reopens() {
 
     // Re-construct the store over the same scoped filesystem; the on-disk
     // snapshot must rehydrate the queued run.
-    let reopened = FilesystemTurnStateStore::new(scoped);
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
     let state = reopened
         .get_run_state(GetRunStateRequest {
             scope: request.scope,
@@ -3385,7 +2769,7 @@ async fn filesystem_turn_state_store_persists_submit_and_reopens() {
 async fn filesystem_turn_state_store_reuses_fresh_snapshot_for_read_only_lookup() {
     let backend = Arc::new(CountingFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(scoped);
+    let store = FilesystemTurnStateRowStore::new(scoped);
     let resolver = InMemoryRunProfileResolver::default();
 
     let request = submit_request_for(turn_scope("thread-fs-read-cache"), "idem-fs-read-cache");
@@ -3412,100 +2796,19 @@ async fn filesystem_turn_state_store_reuses_fresh_snapshot_for_read_only_lookup(
     );
 }
 
-#[tokio::test]
-async fn filesystem_turn_state_store_clears_stale_snapshot_cache_after_version_mismatch() {
-    let backend = Arc::new(FirstWaveBlockingPutFilesystem::new(
-        CountingFilesystem::new(engine_filesystem()),
-    ));
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&scoped)));
-    let external_store = FilesystemTurnStateStore::new(scoped);
-    let resolver = InMemoryRunProfileResolver::default();
-
-    let seed_scope = turn_scope("thread-fs-vm-cache-seed");
-    let seed_request = submit_request_for(seed_scope, "idem-fs-vm-cache-seed");
-    store
-        .submit_turn(seed_request, &AllowAllTurnAdmissionPolicy, &resolver)
-        .await
-        .unwrap();
-
-    let external_request = submit_request_for(
-        turn_scope("thread-fs-vm-cache-external"),
-        "idem-fs-vm-cache-ext",
-    );
-    external_store
-        .submit_turn(external_request, &AllowAllTurnAdmissionPolicy, &resolver)
-        .await
-        .unwrap();
-
-    backend.block_first_put_wave(1);
-
-    let raced_scope = turn_scope("thread-fs-vm-cache-raced");
-    let raced_request = submit_request_for(raced_scope, "idem-fs-vm-cache-raced");
-    let raced_store = Arc::clone(&store);
-    let raced = tokio::spawn(async move {
-        let resolver = InMemoryRunProfileResolver::default();
-        raced_store
-            .submit_turn(raced_request, &AllowAllTurnAdmissionPolicy, &resolver)
-            .await
-    });
-
-    tokio::time::timeout(Duration::from_secs(1), backend.wait_for_first_wave())
-        .await
-        .expect("first version-mismatching writer should block on its initial put");
-
-    let competing_scope = turn_scope("thread-fs-vm-cache-competing");
-    let competing_request =
-        submit_request_for(competing_scope.clone(), "idem-fs-vm-cache-competing");
-    let competing_response = external_store
-        .submit_turn(competing_request, &AllowAllTurnAdmissionPolicy, &resolver)
-        .await
-        .unwrap();
-    let competing_run_id = accepted_run_id(&competing_response);
-
-    backend.set_reject_puts(true);
-    backend.release_first_wave();
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while backend.version_mismatches() == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("first writer should observe a version mismatch before retrying");
-
-    tokio::time::timeout(
-        Duration::from_secs(1),
-        backend.wait_for_mismatch_retry_read(),
-    )
-    .await
-    .expect("store should retry with a fresh snapshot after clearing stale cache");
-
-    raced.abort();
-    let _ = raced.await;
-
-    backend.inner.reset_get_calls();
-    let state = store
-        .get_run_state(GetRunStateRequest {
-            scope: competing_scope,
-            run_id: competing_run_id,
-        })
-        .await
-        .unwrap();
-
-    assert_eq!(state.run_id, competing_run_id);
-    assert_eq!(
-        backend.inner.get_calls(),
-        1,
-        "version mismatch must clear stale snapshot cache before retry/backoff"
-    );
-}
+// DELETED: filesystem_turn_state_store_clears_stale_snapshot_cache_after_version_mismatch
+// asserted the deleted blob store's single-document snapshot cache being
+// invalidated on a CAS version mismatch before retry. The row store has no
+// single-document snapshot cache; its stale-cache-refresh-from-durable-rows
+// behavior is covered by
+// `filesystem_turn_state_row_store_get_run_state_refreshes_stale_cached_run`
+// (this file) and `row_store_crash_consistency::live_reads_are_read_your_writes_consistent`.
 
 #[tokio::test]
 async fn filesystem_turn_state_store_snapshot_reads_overlap_apply_write() {
     let backend = Arc::new(BlockingPutFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&scoped)));
+    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
     let resolver = InMemoryRunProfileResolver::default();
 
     let existing_request = submit_request_for(turn_scope("thread-fs-overlap-a"), "idem-overlap-a");
@@ -3557,7 +2860,7 @@ async fn filesystem_turn_state_store_snapshot_reads_overlap_apply_write() {
 async fn filesystem_turn_state_store_cas_writers_overlap_blocked_snapshot_write() {
     let backend = Arc::new(BlockingPutFilesystem::new(engine_filesystem()));
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&scoped)));
+    let store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(&scoped)));
     let resolver = InMemoryRunProfileResolver::default();
 
     store
@@ -3633,263 +2936,50 @@ async fn filesystem_turn_state_store_cas_writers_overlap_blocked_snapshot_write(
     assert_eq!(next_state.status, TurnStatus::Queued);
 }
 
-#[tokio::test]
-async fn filesystem_turn_state_store_cas_storm_preserves_all_submits() {
-    const CONCURRENT_SUBMITS: usize = 24;
+// DELETED: filesystem_turn_state_store_cas_storm_preserves_all_submits exercised
+// the deleted blob store's single-document CAS-retry storm (all writers
+// contending on one `state.json` document). The row store's per-run/append-log
+// durability preserves all concurrent submits without a single-document CAS
+// funnel; that is covered by
+// `filesystem_turn_state_row_store_concurrent_submits_preserve_all_runs`
+// (this file) and
+// `row_store_crash_consistency::write_behind_concurrent_writers_under_cap_stay_consistent`.
 
-    let backend = Arc::new(FirstWaveBlockingPutFilesystem::new(engine_filesystem()));
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(FilesystemTurnStateStore::new(Arc::clone(&scoped)));
-    let resolver = InMemoryRunProfileResolver::default();
+// DELETED: filesystem_turn_state_store_timed_out_apply_does_not_wedge_subsequent_writes
+// and filesystem_turn_state_store_timed_out_claim_does_not_wedge_scheduler_writes
+// asserted the deleted blob store's bounded single-document apply timeout
+// ("turn state filesystem apply timed out") not wedging later writers. The row
+// store has its own bounded apply timeout on the critical (durable) path; that a
+// timed-out critical write surfaces `Unavailable` without losing the eventual
+// commit is covered by
+// `filesystem_turn_state_row_store_loop_checkpoint_times_out_without_losing_unknown_commit`
+// (this file).
 
-    store
-        .submit_turn(
-            submit_request_for(
-                turn_scope("thread-fs-cas-storm-seed"),
-                "idem-cas-storm-seed",
-            ),
-            &AllowAllTurnAdmissionPolicy,
-            &resolver,
-        )
-        .await
-        .unwrap();
+// DELETED: filesystem_turn_state_store_returns_unavailable_after_persistent_version_mismatches
+// asserted the deleted blob store's single-document CAS-retry-exhaustion path
+// ("turn state filesystem CAS retries exhausted"). The row store's durable
+// append/CAS-budget exhaustion is covered by
+// `row_store_crash_consistency::lease_expiry_crash_retry_bound_fails_with_crash_retry_exhausted`
+// and `write_behind_append_failure_halts_degrades_and_recovers_consistently`.
 
-    backend.block_first_put_wave(CONCURRENT_SUBMITS);
-    let start = Arc::new(tokio::sync::Barrier::new(CONCURRENT_SUBMITS + 1));
-
-    let mut tasks = Vec::new();
-    for index in 0..CONCURRENT_SUBMITS {
-        let task_store = Arc::clone(&store);
-        let task_start = Arc::clone(&start);
-        tasks.push(tokio::spawn(async move {
-            task_start.wait().await;
-            let resolver = InMemoryRunProfileResolver::default();
-            let request = submit_request_for(
-                turn_scope(&format!("thread-fs-cas-storm-{index}")),
-                &format!("idem-cas-storm-{index}"),
-            );
-            let response = task_store
-                .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
-                .await?;
-            Ok::<_, TurnError>((request.scope, accepted_run_id(&response)))
-        }));
-    }
-
-    start.wait().await;
-    tokio::time::timeout(Duration::from_secs(1), backend.wait_for_first_wave())
-        .await
-        .expect("all first-wave writers must reach the CAS write together");
-    backend.release_first_wave();
-
-    let mut accepted = Vec::new();
-    for task in tasks {
-        accepted.push(
-            tokio::time::timeout(Duration::from_secs(2), task)
-                .await
-                .expect("concurrent submit must not exhaust CAS retries")
-                .unwrap()
-                .unwrap(),
-        );
-    }
-    assert!(
-        backend.version_mismatches() > 0,
-        "test must exercise real CAS retry path, not just serialized writes"
-    );
-
-    for (scope, run_id) in accepted {
-        let state = store
-            .get_run_state(GetRunStateRequest { scope, run_id })
-            .await
-            .unwrap();
-        assert_eq!(state.run_id, run_id);
-        assert_eq!(state.status, TurnStatus::Queued);
-    }
-}
+// DELETED: filesystem_turn_state_store_returns_unavailable_on_non_version_mismatch_put_error
+// asserted the deleted blob store's single-put-no-retry error surface. The row
+// store's equivalent — a durable delta append failure surfaces as
+// `TurnError::Unavailable` and does not publish hot-cache state — is covered by
+// `filesystem_turn_state_row_store_append_failure_clears_hot_cache` in this file.
 
 #[tokio::test]
-async fn filesystem_turn_state_store_timed_out_apply_does_not_wedge_subsequent_writes() {
-    let backend = Arc::new(BlockingPutFilesystem::new(engine_filesystem()));
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(
-        FilesystemTurnStateStore::new(Arc::clone(&scoped))
-            .with_apply_timeout(Duration::from_millis(100)),
-    );
-    let resolver = InMemoryRunProfileResolver::default();
-
-    store
-        .submit_turn(
-            submit_request_for(turn_scope("thread-fs-timeout-seed"), "idem-timeout-seed"),
-            &AllowAllTurnAdmissionPolicy,
-            &resolver,
-        )
-        .await
-        .unwrap();
-
-    backend.block_next_put();
-    let blocked_store = Arc::clone(&store);
-    let blocked_writer = tokio::spawn(async move {
-        let resolver = InMemoryRunProfileResolver::default();
-        blocked_store
-            .submit_turn(
-                submit_request_for(
-                    turn_scope("thread-fs-timeout-blocked"),
-                    "idem-timeout-blocked",
-                ),
-                &AllowAllTurnAdmissionPolicy,
-                &resolver,
-            )
-            .await
-    });
-
-    tokio::time::timeout(Duration::from_secs(1), backend.wait_for_blocked_put())
-        .await
-        .expect("first writer should reach the delayed snapshot write");
-
-    let blocked_result = tokio::time::timeout(Duration::from_secs(1), blocked_writer)
-        .await
-        .expect("blocked snapshot write must hit the bounded apply timeout")
-        .unwrap();
-    assert!(
-        matches!(blocked_result, Err(TurnError::Unavailable { reason }) if reason == "turn state filesystem apply timed out")
-    );
-
-    backend.release_blocked_put();
-
-    let next_request =
-        submit_request_for(turn_scope("thread-fs-timeout-next"), "idem-timeout-next");
-    let next_response = tokio::time::timeout(
-        Duration::from_secs(1),
-        store.submit_turn(
-            next_request.clone(),
-            &AllowAllTurnAdmissionPolicy,
-            &resolver,
-        ),
-    )
-    .await
-    .expect("turn state must be usable after the timed-out writer")
-    .unwrap();
-    let next_run_id = accepted_run_id(&next_response);
-    let next_state = store
-        .get_run_state(GetRunStateRequest {
-            scope: next_request.scope,
-            run_id: next_run_id,
-        })
-        .await
-        .unwrap();
-    assert_eq!(next_state.status, TurnStatus::Queued);
-}
-
-#[tokio::test]
-async fn filesystem_turn_state_store_timed_out_claim_does_not_wedge_scheduler_writes() {
-    let backend = Arc::new(BlockingPutFilesystem::new(engine_filesystem()));
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = Arc::new(
-        FilesystemTurnStateStore::new(Arc::clone(&scoped))
-            .with_apply_timeout(Duration::from_millis(100)),
-    );
-    let resolver = InMemoryRunProfileResolver::default();
-    let request = submit_request_for(turn_scope("thread-fs-timeout-claim"), "idem-timeout-claim");
-    let response = store
-        .submit_turn(request.clone(), &AllowAllTurnAdmissionPolicy, &resolver)
-        .await
-        .unwrap();
-    let run_id = accepted_run_id(&response);
-
-    backend.block_next_put();
-    let blocked_store = Arc::clone(&store);
-    let blocked_claim = tokio::spawn(async move {
-        blocked_store
-            .claim_next_run(ClaimRunRequest {
-                runner_id: TurnRunnerId::new(),
-                lease_token: TurnLeaseToken::new(),
-                scope_filter: None,
-            })
-            .await
-    });
-
-    tokio::time::timeout(Duration::from_secs(1), backend.wait_for_blocked_put())
-        .await
-        .expect("scheduler claim should reach the delayed snapshot write");
-
-    let blocked_result = tokio::time::timeout(Duration::from_secs(1), blocked_claim)
-        .await
-        .expect("blocked scheduler claim must hit the bounded apply timeout")
-        .unwrap();
-    assert!(
-        matches!(blocked_result, Err(TurnError::Unavailable { reason }) if reason == "turn state filesystem apply timed out")
-    );
-
-    backend.release_blocked_put();
-
-    let claimed = store
-        .claim_next_run(ClaimRunRequest {
-            runner_id: TurnRunnerId::new(),
-            lease_token: TurnLeaseToken::new(),
-            scope_filter: None,
-        })
-        .await
-        .unwrap()
-        .expect("queued run should still be claimable after timed-out claim");
-    assert_eq!(claimed.state.run_id, run_id);
-    assert_eq!(claimed.state.scope, request.scope);
-}
-
-#[tokio::test]
-async fn filesystem_turn_state_store_returns_unavailable_after_persistent_version_mismatches() {
-    let backend = Arc::new(VersionMismatchFilesystem::new(engine_filesystem()));
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
-    let resolver = InMemoryRunProfileResolver::default();
-
-    let error = match store
-        .submit_turn(
-            submit_request_for(turn_scope("thread-fs-cas-exhausted"), "idem-cas-exhausted"),
-            &AllowAllTurnAdmissionPolicy,
-            &resolver,
-        )
-        .await
-    {
-        Ok(_) => panic!("persistent version mismatch should exhaust CAS retries"),
-        Err(error) => error,
-    };
-
-    assert!(
-        matches!(error, TurnError::Unavailable { reason } if reason == "turn state filesystem CAS retries exhausted")
-    );
-}
-
-#[tokio::test]
-async fn filesystem_turn_state_store_returns_unavailable_on_non_version_mismatch_put_error() {
-    let backend = Arc::new(RejectingPutFilesystem::new(engine_filesystem()));
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
-    let resolver = InMemoryRunProfileResolver::default();
-
-    let error = match store
-        .submit_turn(
-            submit_request_for(turn_scope("thread-fs-put-error"), "idem-put-error"),
-            &AllowAllTurnAdmissionPolicy,
-            &resolver,
-        )
-        .await
-    {
-        Ok(_) => panic!("put failure should surface as unavailable"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(error, TurnError::Unavailable { .. }));
-    assert_eq!(
-        backend.put_calls(),
-        1,
-        "non-version-mismatch put errors must not retry"
-    );
-}
-
-#[tokio::test]
-async fn filesystem_turn_state_store_rejects_byte_only_backend_before_snapshot_write() {
+async fn filesystem_turn_state_store_rejects_byte_only_backend_before_persisting_rows() {
+    // A byte-only backend (no versioned CAS / structured-record append) cannot
+    // back the row store's durable delta journal. A submit must fail loudly with
+    // a retryable `TurnError::Unavailable` and leave no durable row artifacts
+    // behind, rather than silently accepting state it can never persist
+    // consistently. (The old blob store surfaced a specific
+    // "backend must support versioned CAS" string; the row store rejects the
+    // same class of backend when the durable journal append fails.)
     let backend = Arc::new(byte_only_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
     let request = submit_request_for(turn_scope("thread-fs-byte-only"), "idem-byte-only");
 
@@ -3897,19 +2987,20 @@ async fn filesystem_turn_state_store_rejects_byte_only_backend_before_snapshot_w
         .submit_turn(request, &AllowAllTurnAdmissionPolicy, &resolver)
         .await
     {
-        Ok(_) => panic!("byte-only backend must not accept turn-state snapshots"),
+        Ok(_) => panic!("byte-only backend must not accept durable turn-state rows"),
         Err(error) => error,
     };
     assert!(
-        matches!(error, TurnError::Unavailable { reason } if reason == "turn state filesystem backend must support versioned CAS")
+        matches!(error, TurnError::Unavailable { .. }),
+        "byte-only backend rejection must surface as retryable Unavailable: {error:?}"
     );
     assert!(
         backend
-            .get(&snapshot_virtual_path())
+            .tail(&row_delta_log_virtual_path(), SeqNo::ZERO)
             .await
-            .unwrap()
-            .is_none(),
-        "non-CAS backend rejection must happen before writing state.json"
+            .unwrap_or_default()
+            .is_empty(),
+        "a rejected byte-only backend must not commit durable delta rows"
     );
 }
 
@@ -3926,8 +3017,8 @@ async fn filesystem_turn_state_store_hides_records_from_other_tenants_via_mount_
     let scoped_a = scoped_turns_fs_at(Arc::clone(&backend), "tenant-a", "alice");
     let scoped_b = scoped_turns_fs_at(Arc::clone(&backend), "tenant-b", "alice");
 
-    let store_a = FilesystemTurnStateStore::new(Arc::clone(&scoped_a));
-    let store_b = FilesystemTurnStateStore::new(Arc::clone(&scoped_b));
+    let store_a = FilesystemTurnStateRowStore::new(Arc::clone(&scoped_a));
+    let store_b = FilesystemTurnStateRowStore::new(Arc::clone(&scoped_b));
     let resolver = InMemoryRunProfileResolver::default();
 
     let scope_a = TurnScope::new(
@@ -3997,7 +3088,7 @@ async fn filesystem_turn_state_store_hides_records_from_other_tenants_via_mount_
 async fn filesystem_turn_state_store_persists_lineage_and_tree_reservations() {
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let parent_scope = turn_scope("thread-fs-parent");
@@ -4047,7 +3138,7 @@ async fn filesystem_turn_state_store_persists_lineage_and_tree_reservations() {
         .await
         .unwrap();
 
-    let reopened = FilesystemTurnStateStore::new(scoped);
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
     let children = reopened.children_of(&parent_scope, parent).await.unwrap();
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].run_id, child_run_id);
@@ -4073,9 +3164,19 @@ async fn filesystem_turn_state_store_persists_lineage_and_tree_reservations() {
 
 #[tokio::test]
 async fn filesystem_spawn_tree_reads_are_scope_checked() {
-    let backend = Arc::new(engine_filesystem());
-    let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    // Build a parent + child spawn tree on a throwaway row store, then snapshot
+    // it and splice in a SHADOW parent — a clone of the parent run under a
+    // different tenant scope but sharing the parent's run_id. Persist the spliced
+    // snapshot as a legacy `/turns/state.json` blob on a FRESH backend via the
+    // block-persistence sink; opening the row store there migrates all three
+    // runs into durable rows. The adversarial shadow (same run_id, foreign
+    // scope) proves spawn-tree reads filter by scope, not run_id alone. (The
+    // deleted blob store spliced the shadow into its live `state.json`; the row
+    // store never writes that blob, so the shadow is injected through the
+    // one-shot legacy-blob migration instead.)
+    let source_backend = Arc::new(engine_filesystem());
+    let source_scoped = scoped_turns_fs(Arc::clone(&source_backend));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&source_scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     let parent_scope = turn_scope("thread-fs-scope-parent");
@@ -4107,18 +3208,12 @@ async fn filesystem_spawn_tree_reads_are_scope_checked() {
             .unwrap(),
     );
 
-    let versioned = backend
-        .get(&snapshot_virtual_path())
-        .await
-        .unwrap()
-        .expect("snapshot after child submit");
-    let mut snapshot: TurnPersistenceSnapshot =
-        serde_json::from_slice(&versioned.entry.body).unwrap();
+    let mut snapshot = store.persistence_snapshot().await.unwrap();
     let mut shadow_parent = snapshot
         .runs
         .iter()
         .find(|record| record.run_id == parent && record.scope == parent_scope)
-        .expect("parent run in snapshot")
+        .expect("parent run in fixture snapshot")
         .clone();
     shadow_parent.scope = TurnScope::new(
         TenantId::new("shadow-tenant").unwrap(),
@@ -4127,18 +3222,14 @@ async fn filesystem_spawn_tree_reads_are_scope_checked() {
         ThreadId::new("thread-fs-scope-shadow").unwrap(),
     );
     snapshot.runs.insert(0, shadow_parent);
-    let mut entry = versioned.entry;
-    entry.body = serde_json::to_vec_pretty(&snapshot).unwrap();
-    backend
-        .put(
-            &snapshot_virtual_path(),
-            entry,
-            CasExpectation::Version(versioned.version),
-        )
-        .await
-        .unwrap();
 
-    let reopened = FilesystemTurnStateStore::new(scoped);
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    FilesystemTurnStateBlockPersistence::new(Arc::clone(&scoped))
+        .persist(&snapshot)
+        .await;
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
     assert_eq!(
         reopened
             .children_of(&parent_scope, parent)
@@ -4207,7 +3298,7 @@ async fn filesystem_turn_state_store_persists_product_context_through_snapshot_r
     // section renders the correct origin after a restart.
     let backend = Arc::new(engine_filesystem());
     let scoped = scoped_turns_fs(Arc::clone(&backend));
-    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
     let resolver = InMemoryRunProfileResolver::default();
 
     // Submit with a non-None product context.
@@ -4228,7 +3319,7 @@ async fn filesystem_turn_state_store_persists_product_context_through_snapshot_r
     let run_id = accepted_run_id(&response);
 
     // Re-open the store — this forces a full deserialize from the snapshot.
-    let reopened = FilesystemTurnStateStore::new(scoped);
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
     let state = reopened
         .get_run_state(GetRunStateRequest {
             scope: request.scope.clone(),
@@ -4257,7 +3348,7 @@ async fn filesystem_turn_state_store_persists_product_context_through_snapshot_r
         .unwrap();
     let run_id_none = accepted_run_id(&response_none);
 
-    let reopened2 = FilesystemTurnStateStore::new(scoped_turns_fs(Arc::clone(&backend)));
+    let reopened2 = FilesystemTurnStateRowStore::new(scoped_turns_fs(Arc::clone(&backend)));
     let state_none = reopened2
         .get_run_state(GetRunStateRequest {
             scope: request_none.scope,
@@ -4268,5 +3359,286 @@ async fn filesystem_turn_state_store_persists_product_context_through_snapshot_r
     assert!(
         state_none.product_context.is_none(),
         "None product_context must remain None after snapshot round-trip"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Durable turn-event indexed-query read path (#6382 follow-up).
+//
+// `read_turn_events_after` serves a scoped `cursor > after` range via the
+// backend `query` over an `Entry::indexed` projection, instead of listing the
+// whole events collection and reading every cross-thread row after the cursor.
+// These tests pin the three behaviors that path introduces: scope pruning,
+// query-only visibility (an unprojected row is invisible), and the one-time
+// backfill that re-projects pre-upgrade rows so historical events survive.
+// ---------------------------------------------------------------------------
+
+/// A bare (unwrapped) `TurnLifecycleEvent` row body — the `StoredRow::Raw`
+/// shape an event row persisted before the indexed-projection change would
+/// have on disk (no `journal_seq` wrapper, no `indexed` projection).
+fn raw_submitted_event(scope: &TurnScope, cursor: u64, run_id: TurnRunId) -> TurnLifecycleEvent {
+    TurnLifecycleEvent {
+        cursor: EventCursor(cursor),
+        scope: scope.clone(),
+        occurred_at: None,
+        owner_user_id: None,
+        run_id,
+        status: TurnStatus::Queued,
+        kind: TurnEventKind::Submitted,
+        blocked_gate: None,
+        sanitized_reason: None,
+        retryable: None,
+        detail: None,
+    }
+}
+
+/// Write a pre-upgrade event row (bare body, no `indexed` projection) at the
+/// exact scoped row path the store reads, through the same scoped filesystem.
+async fn write_unprojected_event_row(
+    scoped: &ScopedFilesystem<CompositeRootFilesystem>,
+    event: &TurnLifecycleEvent,
+) {
+    let path =
+        ScopedPath::new(format!("/turns/rows/v1/events/{:020}.json", event.cursor.0)).unwrap();
+    let entry =
+        Entry::bytes(serde_json::to_vec(event).unwrap()).with_content_type(ContentType::json());
+    scoped
+        .put(
+            &ResourceScope::system(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("write unprojected event row");
+}
+
+/// Pre-mark the durable event-index backfill complete so the store does NOT
+/// re-project on read.
+async fn mark_events_index_backfilled(scoped: &ScopedFilesystem<CompositeRootFilesystem>) {
+    let path = ScopedPath::new("/turns/rows/v1/meta/events-index.json").unwrap();
+    let entry =
+        Entry::bytes(br#"{"backfilled":true}"#.to_vec()).with_content_type(ContentType::json());
+    scoped
+        .put(&ResourceScope::system(), &path, entry, CasExpectation::Any)
+        .await
+        .expect("write backfill marker");
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_events_query_isolates_scopes_across_threads() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let store = FilesystemTurnStateRowStore::new(scoped);
+    let resolver = InMemoryRunProfileResolver::default();
+
+    let scope_a = turn_scope("thread-events-a");
+    let scope_b = turn_scope("thread-events-b");
+    let run_a = accepted_run_id(
+        &store
+            .submit_turn(
+                submit_request_for(scope_a.clone(), "idem-events-a"),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+            .unwrap(),
+    );
+    let run_b = accepted_run_id(
+        &store
+            .submit_turn(
+                submit_request_for(scope_b.clone(), "idem-events-b"),
+                &AllowAllTurnAdmissionPolicy,
+                &resolver,
+            )
+            .await
+            .unwrap(),
+    );
+
+    let page_a = retry_read_turn_events(&store, &scope_a).await;
+    assert!(
+        page_a.entries.iter().all(|event| event.scope == scope_a),
+        "the scoped indexed query must return only the requested scope's events"
+    );
+    assert!(
+        page_a
+            .entries
+            .iter()
+            .any(|event| event.run_id == run_a && event.kind == TurnEventKind::Submitted),
+        "thread-a's own Submitted event must be returned"
+    );
+    assert!(
+        !page_a.entries.iter().any(|event| event.run_id == run_b),
+        "thread-b's events must not leak into thread-a's timeline"
+    );
+
+    // The cursor range is exclusive-after: replaying past the newest cursor
+    // yields an empty page rather than re-serving the same events.
+    let newest = page_a
+        .entries
+        .iter()
+        .map(|event| event.cursor)
+        .max()
+        .expect("thread-a has at least one event");
+    let after_newest = store
+        .read_turn_events_after(&scope_a, None, Some(newest), 100)
+        .await
+        .unwrap();
+    assert!(
+        after_newest.entries.is_empty(),
+        "reading after the newest cursor must return no further events"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_events_query_hides_rows_missing_index_projection() {
+    // A pre-upgrade event row carries no `indexed` projection. With the backfill
+    // marker pre-set (so no re-projection runs), the indexed query must NOT
+    // surface it — this is what proves the read path is the indexed query and
+    // not the legacy directory scan (which ignores `indexed` and would find it).
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let scope = turn_scope("thread-events-unprojected");
+    write_unprojected_event_row(&scoped, &raw_submitted_event(&scope, 1, TurnRunId::new())).await;
+    mark_events_index_backfilled(&scoped).await;
+
+    let store = FilesystemTurnStateRowStore::new(scoped);
+    let page = store
+        .read_turn_events_after(&scope, None, None, 100)
+        .await
+        .unwrap();
+    assert!(
+        page.entries.is_empty(),
+        "the indexed query must not surface an event row that carries no scope_key projection"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_events_backfill_reprojects_preexisting_rows() {
+    // Same pre-upgrade row, but WITHOUT the backfill marker: first read must
+    // re-project it so the indexed query surfaces the historical event, and the
+    // projection must survive a reopen.
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let scope = turn_scope("thread-events-backfill");
+    let run_id = TurnRunId::new();
+    write_unprojected_event_row(&scoped, &raw_submitted_event(&scope, 1, run_id)).await;
+
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let page = store
+        .read_turn_events_after(&scope, None, None, 100)
+        .await
+        .unwrap();
+    assert!(
+        page.entries
+            .iter()
+            .any(|event| event.run_id == run_id && event.cursor == EventCursor(1)),
+        "backfill must re-project a pre-upgrade event row so the indexed query surfaces it"
+    );
+
+    let reopened = FilesystemTurnStateRowStore::new(scoped);
+    let reopened_page = reopened
+        .read_turn_events_after(&scope, None, None, 100)
+        .await
+        .unwrap();
+    assert!(
+        reopened_page
+            .entries
+            .iter()
+            .any(|event| event.run_id == run_id),
+        "the durable re-projection must persist across a row-store reopen"
+    );
+}
+
+/// Write a pre-upgrade **tombstone** event row (materialized shape with a null
+/// `value` and no `indexed` projection) — the on-disk residue of a pruned event
+/// that the one-time backfill must read, recognize as a tombstone, and skip
+/// (never re-project, never surface) without failing or stalling the migration.
+async fn write_events_tombstone_row(
+    scoped: &ScopedFilesystem<CompositeRootFilesystem>,
+    cursor: u64,
+) {
+    let path = ScopedPath::new(format!("/turns/rows/v1/events/{cursor:020}.json")).unwrap();
+    let entry = Entry::bytes(br#"{"journal_seq":1,"value":null}"#.to_vec())
+        .with_content_type(ContentType::json());
+    scoped
+        .put(
+            &ResourceScope::system(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .expect("write tombstone event row");
+}
+
+#[tokio::test]
+async fn filesystem_turn_state_events_backfill_skips_tombstones_and_reprojects_live_rows() {
+    // Regression for the durable-read backfill over a tombstone-inclusive events
+    // collection (#6390): the events collection retains a durable tombstone for
+    // every pruned event, so the one-time backfill scans a set NOT bounded by
+    // the live-event count. It must re-project every live pre-upgrade row (now
+    // at bounded concurrency, not serially), skip tombstones without surfacing
+    // or failing on them, and still write the completion marker so a reopen does
+    // not repeat the work.
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(Arc::clone(&backend));
+    let scope = turn_scope("thread-events-backfill-tombstones");
+    let other = turn_scope("thread-events-backfill-other");
+
+    // Live pre-upgrade rows for the target scope, interleaved (by cursor) with
+    // tombstones and another scope's rows across the shared cursor space.
+    let mut live_run_ids = Vec::new();
+    for cursor in 1..=20u64 {
+        match cursor % 4 {
+            0 => write_events_tombstone_row(&scoped, cursor).await,
+            1 => {
+                let run_id = TurnRunId::new();
+                live_run_ids.push(run_id);
+                write_unprojected_event_row(&scoped, &raw_submitted_event(&scope, cursor, run_id))
+                    .await;
+            }
+            _ => {
+                write_unprojected_event_row(
+                    &scoped,
+                    &raw_submitted_event(&other, cursor, TurnRunId::new()),
+                )
+                .await;
+            }
+        }
+    }
+
+    let store = FilesystemTurnStateRowStore::new(Arc::clone(&scoped));
+    let page = store
+        .read_turn_events_after(&scope, None, None, 100)
+        .await
+        .unwrap();
+
+    for run_id in &live_run_ids {
+        assert!(
+            page.entries.iter().any(|event| event.run_id == *run_id),
+            "backfill must re-project every live pre-upgrade row for the target scope"
+        );
+    }
+    assert!(
+        page.entries.iter().all(|event| event.scope == scope),
+        "tombstones and other scopes' rows must never surface in the scoped query"
+    );
+
+    // The completion marker is written even over a tombstone-heavy collection,
+    // so a reopen serves from the index without re-running the backfill scan.
+    let marker = scoped
+        .get(
+            &ResourceScope::system(),
+            &ScopedPath::new("/turns/rows/v1/meta/events-index.json").unwrap(),
+        )
+        .await
+        .unwrap()
+        .expect("backfill completion marker present");
+    let marker: serde_json::Value = serde_json::from_slice(&marker.entry.body).unwrap();
+    assert_eq!(
+        marker.get("backfilled").and_then(|value| value.as_bool()),
+        Some(true),
+        "backfill must record completion even when the events collection is tombstone-heavy"
     );
 }

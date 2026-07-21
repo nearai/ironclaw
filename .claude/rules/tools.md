@@ -9,9 +9,6 @@ paths:
   - "crates/ironclaw_mcp/**"
   - "crates/ironclaw_wasm/**"
   - "tools-src/**"
-  - "src/tools/**"
-  - "src/channels/**"
-  - "src/cli/**"
 ---
 # Reborn capability architecture
 

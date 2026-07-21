@@ -14,8 +14,8 @@ use support::*;
 async fn capability_host_blocks_github_comment_issue_before_dispatch() {
     let fixture = blocked_github_comment_fixture().await;
 
-    assert_eq!(fixture.dispatcher.dispatch_count(), 0);
-    assert!(!fixture.dispatcher.has_request());
+    assert_eq!(fixture.dispatcher.call_count(), 0);
+    assert!(fixture.dispatcher.call_count() == 0);
     let run = fixture
         .run_state
         .get(&fixture.scope, fixture.invocation_id)
@@ -49,12 +49,21 @@ async fn capability_host_resumes_approved_github_comment_issue_and_dispatches_on
     let fixture = approved_github_comment_fixture().await;
     let obligation_handler = AllowAllObligationHandler;
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host =
-        CapabilityHost::new(&fixture.registry, &fixture.dispatcher, &resume_authorizer)
-            .with_run_state(&fixture.run_state)
-            .with_approval_requests(&fixture.approval_requests)
-            .with_capability_leases(&fixture.leases)
-            .with_obligation_handler(&obligation_handler);
+    // The kernel computes trust in-fold (§5.3.2/§9); inject a trust policy whose
+    // authority ceiling carries the github capability's declared effects so the
+    // trust-aware authorizer allows the resume (previously a caller-stamped
+    // `github_comment_trust_decision()` supplied these effects).
+    let trust_policy = FixedTrustPolicy::with_effects(github_comment_effects());
+    let resume_host = capability_host_with_trust_policy(
+        &fixture.registry,
+        &fixture.dispatcher,
+        &resume_authorizer,
+        &trust_policy,
+    )
+    .with_run_state(&fixture.run_state)
+    .with_approval_requests(&fixture.approval_requests)
+    .with_capability_leases(&fixture.leases)
+    .with_obligation_handler(&obligation_handler);
 
     let result = resume_host
         .resume_json(CapabilityResumeRequest {
@@ -63,14 +72,13 @@ async fn capability_host_resumes_approved_github_comment_issue_and_dispatches_on
             capability_id: github_comment_capability_id(),
             estimate: fixture.estimate.clone(),
             input: fixture.input.clone(),
-            trust_decision: github_comment_trust_decision(),
         })
         .await
         .unwrap();
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
-    assert_eq!(fixture.dispatcher.dispatch_count(), 1);
-    let request = fixture.dispatcher.take_request();
+    assert_eq!(fixture.dispatcher.call_count(), 1);
+    let request = fixture.dispatcher.last_request().unwrap();
     assert_eq!(request.capability_id, github_comment_capability_id());
     assert_eq!(request.input, fixture.input);
     let run = fixture
@@ -96,12 +104,11 @@ async fn capability_host_rejects_mutated_github_comment_issue_replay_before_disp
     let fixture = approved_github_comment_fixture().await;
     let obligation_handler = AllowAllObligationHandler;
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host =
-        CapabilityHost::new(&fixture.registry, &fixture.dispatcher, &resume_authorizer)
-            .with_run_state(&fixture.run_state)
-            .with_approval_requests(&fixture.approval_requests)
-            .with_capability_leases(&fixture.leases)
-            .with_obligation_handler(&obligation_handler);
+    let resume_host = capability_host(&fixture.registry, &fixture.dispatcher, &resume_authorizer)
+        .with_run_state(&fixture.run_state)
+        .with_approval_requests(&fixture.approval_requests)
+        .with_capability_leases(&fixture.leases)
+        .with_obligation_handler(&obligation_handler);
 
     let err = resume_host
         .resume_json(CapabilityResumeRequest {
@@ -115,7 +122,6 @@ async fn capability_host_rejects_mutated_github_comment_issue_replay_before_disp
                 "issue_number": 3806,
                 "body": "mutated approved comment"
             }),
-            trust_decision: github_comment_trust_decision(),
         })
         .await
         .unwrap_err();
@@ -124,8 +130,8 @@ async fn capability_host_rejects_mutated_github_comment_issue_replay_before_disp
         err,
         CapabilityInvocationError::ApprovalFingerprintMismatch { .. }
     ));
-    assert_eq!(fixture.dispatcher.dispatch_count(), 0);
-    assert!(!fixture.dispatcher.has_request());
+    assert_eq!(fixture.dispatcher.call_count(), 0);
+    assert!(fixture.dispatcher.call_count() == 0);
     let active = fixture
         .leases
         .get(
@@ -139,7 +145,7 @@ async fn capability_host_rejects_mutated_github_comment_issue_replay_before_disp
 
 struct GitHubCommentApprovalFixture {
     registry: ironclaw_extensions::ExtensionRegistry,
-    dispatcher: RecordingDispatcher,
+    dispatcher: TestDispatcher,
     run_state: ironclaw_run_state::FilesystemRunStateStore<ironclaw_filesystem::InMemoryBackend>,
     approval_requests:
         ironclaw_run_state::FilesystemApprovalRequestStore<ironclaw_filesystem::InMemoryBackend>,
@@ -155,11 +161,11 @@ struct GitHubCommentApprovalFixture {
 
 async fn blocked_github_comment_fixture() -> GitHubCommentApprovalFixture {
     let registry = registry_with_github_comment_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -179,7 +185,6 @@ async fn blocked_github_comment_fixture() -> GitHubCommentApprovalFixture {
             capability_id: github_comment_capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: github_comment_trust_decision(),
         })
         .await
         .unwrap_err();
@@ -235,10 +240,6 @@ async fn approved_github_comment_fixture() -> GitHubCommentApprovalFixture {
         .unwrap();
     fixture.lease_id = Some(lease.grant.id);
     fixture
-}
-
-fn github_comment_trust_decision() -> ironclaw_trust::TrustDecision {
-    trust_decision_with_effects(github_comment_effects())
 }
 
 fn github_comment_effects() -> Vec<EffectKind> {

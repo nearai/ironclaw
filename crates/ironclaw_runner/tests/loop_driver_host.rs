@@ -24,11 +24,12 @@ use ironclaw_hooks::{
     sink::{ObserverHook, ObserverSink},
 };
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
-    CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-    PackageId, PermissionMode, Principal, ProcessId, ProjectId, ResourceEstimate, ResourceUsage,
-    RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
+    AgentId, ApprovalRequestId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
+    CapabilityId, CapabilitySet, DenyReason, EffectKind, ExecutionContext, ExtensionId,
+    FailureKind, GrantConstraints, HostPath, HostPortCatalog, MountAlias, MountGrant,
+    MountPermissions, MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId,
+    ProjectId, Resolution, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, Suspension,
+    TenantId, ThreadId, ToolVerdict, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -106,14 +107,15 @@ use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CancelRunRequest, CancelRunResponse,
-    CheckpointStateStore, DefaultTurnCoordinator, EventCursor, GetCheckpointStateRequest,
-    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver,
-    InMemoryTurnEventSink, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopBlocked,
-    LoopBlockedKind, LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind,
-    LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
+    CheckpointStateStore, DefaultTurnCoordinator, EventCursor, FilesystemTurnStateRowStore,
+    GetCheckpointStateRequest, GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey,
+    InMemoryRunProfileResolver, InMemoryTurnEventSink, LoopBlocked, LoopBlockedKind,
+    LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
+    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
     PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
     RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
@@ -121,8 +123,7 @@ use ironclaw_turns::{
     TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        BatchPolicyKind, CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
         CapabilitySurfaceVersion, CommunicationContextFetch, CommunicationContextProvider,
         CommunicationRuntimeContext, CompactionInitiator, ConnectedChannelSummary,
         ConnectedChannelsState, DeliveryTargetState, FinalizeAssistantMessage,
@@ -160,7 +161,9 @@ fn driver_requirements_for(
     )])
 }
 
-fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStateStore> {
+fn turn_state_store_dyn(
+    store: &Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
+) -> Arc<dyn TurnStateStore> {
     Arc::clone(store) as Arc<dyn TurnStateStore>
 }
 
@@ -474,7 +477,12 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
         .gateway
         .set_response(Err(HostManagedModelError::safe(
             HostManagedModelErrorKind::PolicyDenied,
-            "RAW_PROVIDER_SECRET invalid api key sk-provider-secret /host/path tool_input",
+            concat!(
+                "RAW_PROVIDER_SECRET invalid api key sk-provider-secret \
+             ghp",
+                "_012345678901234567890123456789012345",
+                " /host/path tool_input"
+            ),
         )));
     let host = fixture.build_host().await;
     let prompt_bundle = host
@@ -501,6 +509,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
         .await
         .unwrap_err();
 
+    // The card summary still degrades to the fixed category sentence.
     assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
     assert_eq!(error.safe_summary, "model profile is not permitted");
     let wire = format!(
@@ -509,16 +518,33 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
         error,
         serde_json::to_string(&fixture.milestones()).unwrap()
     );
+    // Phase 2 (item 4): the rejected provider summary now rides the
+    // model-visible `detail` channel through the hardened scrubber. Secret
+    // VALUES, credential tokens, sentinel markers, and raw prompt text must
+    // NEVER appear anywhere on the error/milestone wire.
     for forbidden in [
         "RAW_PROVIDER_SECRET",
         "RAW_PROMPT_TEXT_SENTINEL",
-        "invalid api key",
         "sk-provider-secret",
-        "/host/path",
-        "tool_input",
+        concat!("ghp", "_012345678901234567890123456789012345", ""),
     ] {
         assert!(!wire.contains(forbidden), "model error leaked {forbidden}");
     }
+    // The descriptive cause (path, category words) DOES survive on the
+    // model-visible detail so the failure explainer can describe the fault —
+    // this is stripped only at the public projection boundary
+    // (`SanitizedFailure::public_projection`), not here.
+    let detail = error
+        .detail
+        .expect("rejected provider cause should ride detail");
+    assert!(
+        detail.contains("/host/path"),
+        "path cause must survive: {detail}"
+    );
+    assert!(
+        detail.contains("tool_input"),
+        "descriptive cause must survive: {detail}"
+    );
 }
 
 #[tokio::test]
@@ -1734,7 +1760,8 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
         "hello after turn store restart",
     )
     .await;
-    let original_turn_store = InMemoryTurnStateStore::default();
+    let scoped = ironclaw_turns::test_support::in_memory_turns_filesystem();
+    let original_turn_store = FilesystemTurnStateRowStore::new(scoped.clone());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -1748,16 +1775,9 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
         "idem-runner-restart-e2e",
     )
     .await;
-    let snapshot = original_turn_store.persistence_snapshot();
     drop(original_turn_store);
 
-    let reopened_turn_store = Arc::new(
-        InMemoryTurnStateStore::from_persistence_snapshot(
-            snapshot,
-            InMemoryTurnStateStoreLimits::default(),
-        )
-        .unwrap(),
-    );
+    let reopened_turn_store = Arc::new(FilesystemTurnStateRowStore::new(scoped.clone()));
     let mut registry = DriverRegistry::new();
     registry
         .register_driver(
@@ -1772,6 +1792,7 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(reopened_turn_store.clone()))
             as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         reopened_turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -1845,7 +1866,7 @@ async fn turn_runner_worker_completes_queued_run_after_turn_store_reopen() {
 async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
     let fixture =
         HostFixture::new_unsubmitted("thread-runner-operator-log", "hello operator log").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -1869,6 +1890,7 @@ async fn turn_runner_worker_emits_thread_run_correlated_operator_log() {
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
             as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2082,6 +2104,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
         applier,
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2163,7 +2186,7 @@ async fn build_libsql_thread_service(
     ironclaw_threads::FilesystemSessionThreadService::new(scoped)
 }
 
-/// Construct a [`FilesystemTurnStateStore`] backed by [`LibSqlRootFilesystem`]
+/// Construct a [`FilesystemTurnStateRowStore`] backed by [`LibSqlRootFilesystem`]
 /// over the supplied libSQL database. The on-disk shape is the same single
 /// `/turns/state.json` snapshot the production composition uses; the libSQL
 /// backend just provides durability for the underlying filesystem record.
@@ -2173,7 +2196,7 @@ async fn build_libsql_thread_service(
 #[cfg(feature = "libsql-restart-tests")]
 async fn libsql_filesystem_turn_store(
     db: Arc<libsql::Database>,
-) -> ironclaw_turns::FilesystemTurnStateStore<ironclaw_filesystem::LibSqlRootFilesystem> {
+) -> ironclaw_turns::FilesystemTurnStateRowStore<ironclaw_filesystem::LibSqlRootFilesystem> {
     use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
     let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
@@ -2186,13 +2209,13 @@ async fn libsql_filesystem_turn_store(
     )])
     .unwrap();
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(filesystem, view));
-    ironclaw_turns::FilesystemTurnStateStore::new(scoped)
+    ironclaw_turns::FilesystemTurnStateRowStore::new(scoped)
 }
 
 #[tokio::test]
 async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_after_missed_wake() {
     let fixture = HostFixture::new_unsubmitted("thread-runner-e2e", "hello full runner").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2217,6 +2240,7 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
             as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2294,7 +2318,7 @@ async fn turn_runner_worker_drives_full_text_only_model_transcript_completion_af
 async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full() {
     let fixture =
         HostFixture::new_unsubmitted("thread-full-reborn-disk-full", "hello disk full").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
     let run_id = queue_fixture_turn(
         &fixture,
@@ -2336,6 +2360,7 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2366,6 +2391,128 @@ async fn turn_runner_worker_full_reborn_fails_when_checkpoint_state_disk_is_full
 }
 
 #[tokio::test]
+async fn turn_runner_worker_full_reborn_retry_recovers_after_transient_checkpoint_state_outage() {
+    let fixture = HostFixture::new_unsubmitted(
+        "thread-full-reborn-checkpoint-transient",
+        "hello transient checkpoint outage",
+    )
+    .await;
+    let turn_store = Arc::new(in_memory_turn_state_store());
+    let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
+    let failed_run_id = queue_fixture_turn(
+        &fixture,
+        turn_store.as_ref(),
+        &resolver,
+        "idem-full-reborn-checkpoint-transient",
+    )
+    .await;
+    let driver = planned_driver_for_full_reborn_test();
+    let descriptor = driver.descriptor();
+    let mut registry = DriverRegistry::new();
+    registry
+        .register_driver(
+            driver,
+            planned_requirements_without_capabilities(),
+            DriverKind::Reference,
+        )
+        .unwrap();
+    let checkpoint_state_store = Arc::new(NthPutUnavailableCheckpointStateStore::new(
+        in_memory_checkpoint_state_store(),
+        1,
+    ));
+    let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
+    let factory = RebornLoopDriverHostFactory::new(
+        fixture.thread_service.clone(),
+        fixture.thread_scope.clone(),
+        fixture.gateway.clone(),
+        checkpoint_state_store.clone(),
+        turn_store.clone(),
+        loop_checkpoint_store,
+        fixture.milestone_sink.clone(),
+        TextOnlyLoopHostConfig {
+            max_messages: 8,
+            require_model_route_snapshot: false,
+        },
+        InstructionSafetyContext::local_development_noop(),
+    )
+    .with_driver_requirements(driver_requirements_for(
+        &descriptor,
+        planned_requirements_without_capabilities(),
+    ));
+    let executor = Arc::new(RebornTurnRunExecutor::new(
+        loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
+        Arc::new(registry),
+        Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
+    ));
+    let scheduler_handle = TurnRunScheduler::new(
+        turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
+        executor,
+        full_reborn_chaos_scheduler_config(),
+    )
+    .start();
+
+    let failed = wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        failed_run_id,
+        TurnStatus::Failed,
+        "full reborn run should record transient checkpoint outage as failed",
+    )
+    .await;
+    assert_eq!(
+        failed.failure.expect("failure").category(),
+        "host_stage_unavailable_checkpoint"
+    );
+    assert_eq!(checkpoint_state_store.put_attempts(), 1);
+    assert!(
+        fixture.gateway.requests().is_empty(),
+        "first checkpoint failure should happen before the model provider is called"
+    );
+
+    let retry = turn_store
+        .retry_turn(ironclaw_turns::RetryTurnRequest {
+            scope: fixture.context.scope.clone(),
+            actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
+            run_id: failed_run_id,
+            source_binding_ref: SourceBindingRef::new("source-web-retry").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-retry").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-full-reborn-checkpoint-transient-retry")
+                .unwrap(),
+        })
+        .await
+        .expect("retry failed run");
+    assert_eq!(retry.status, TurnStatus::Queued);
+
+    let completed = wait_for_run_status(
+        turn_store.as_ref(),
+        &fixture.context.scope,
+        retry.run_id,
+        TurnStatus::Completed,
+        "retry should complete after transient checkpoint outage clears",
+    )
+    .await;
+    scheduler_handle.shutdown().await;
+
+    assert!(completed.failure.is_none());
+    assert_eq!(checkpoint_state_store.put_attempts(), 3);
+    assert_eq!(fixture.gateway.requests().len(), 1);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(history.messages.iter().any(|message| {
+        message.kind == MessageKind::Assistant
+            && message.status == MessageStatus::Finalized
+            && message.content.as_deref() == Some("model says hi")
+    }));
+}
+
+#[tokio::test]
 async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_offline() {
     let fixture =
         HostFixture::new_unsubmitted("thread-full-reborn-model-offline", "hello model outage")
@@ -2374,7 +2521,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
         HostManagedModelErrorKind::Unavailable,
         "connection refused at https://api.example.test with sk-provider-secret /host/path",
     );
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
     let run_id = queue_fixture_turn(
         &fixture,
@@ -2403,6 +2550,7 @@ async fn turn_runner_worker_full_reborn_fails_cleanly_when_model_provider_is_off
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2453,7 +2601,7 @@ async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_
     fixture
         .gateway
         .set_response_delay(std::time::Duration::from_millis(150));
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let transitions = Arc::new(
         SlowHeartbeatTransitionPort::new(turn_store.clone())
             .with_heartbeat_delay(std::time::Duration::from_millis(50)),
@@ -2486,6 +2634,7 @@ async fn turn_runner_worker_full_reborn_completes_while_postgres_heartbeats_are_
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         transitions.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2530,7 +2679,7 @@ async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
     fixture
         .gateway
         .respond_with_capability_calls_then_reply("model recovered after tool outage");
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = default_planned_run_profile_resolver().expect("planned profile resolver");
     let run_id = queue_fixture_turn(
         &fixture,
@@ -2579,6 +2728,7 @@ async fn turn_runner_worker_full_reborn_continues_after_tool_network_outage() {
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(host_factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2635,7 +2785,7 @@ async fn turn_runner_worker_drives_script_capability_through_real_host_runtime()
         "hello script capability runner",
     )
     .await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2702,6 +2852,7 @@ async fn turn_runner_worker_drives_script_capability_through_real_host_runtime()
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2786,7 +2937,7 @@ async fn turn_runner_rejects_driver_fabricated_approval_block_without_durable_ga
         "hello approval fail closed",
     )
     .await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2815,6 +2966,7 @@ async fn turn_runner_rejects_driver_fabricated_approval_block_without_durable_ga
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
             as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2864,7 +3016,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
     let fixture =
         HostFixture::new_unsubmitted("thread-runner-approval-resume-e2e", "hello approval resume")
             .await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -2896,6 +3048,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
         Arc::new(registry),
         Arc::new(fixture.factory_with_loop_checkpoint_store(turn_store.clone()))
             as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -2939,14 +3092,21 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
         .unwrap();
     assert_eq!(resume.run_id, run_id);
     assert_eq!(resume.status, TurnStatus::Queued);
-    assert_eq!(
+    // Assert the resume emitted a Resumed lifecycle event (gate resolved) by
+    // PRESENCE, not as the last event: the scheduler started above is polling
+    // (10ms) and correctly re-claims the resumed→Queued run, appending a
+    // RunnerClaimed event. The in-memory engine's instant timing let this check
+    // win that race; the row store's realistic timing does not, so `.last()`
+    // observes RunnerClaimed. The resume itself is verified by
+    // `resume.status == Queued` above.
+    assert!(
         turn_store
             .events()
-            .last()
-            .expect("resume should emit lifecycle event")
-            .kind,
-        ironclaw_turns::TurnEventKind::Resumed,
-        "coordinator resume must resolve the matching gate before the run can be queued"
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == ironclaw_turns::TurnEventKind::Resumed),
+        "coordinator resume must emit a Resumed lifecycle event (gate resolved)"
     );
 
     let completed_state = wait_for_run_status(
@@ -3107,7 +3267,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
 #[tokio::test]
 async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope() {
     let fixture = HostFixture::new_unsubmitted("thread-runner-host-edge", "hello edge").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let resolver = InMemoryRunProfileResolver::default();
     let resolved = resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
@@ -3149,6 +3309,7 @@ async fn turn_runner_worker_fails_when_real_host_factory_rejects_claimed_scope()
         loop_exit_applier_for_fixture(&fixture, turn_store.clone()),
         Arc::new(registry),
         Arc::new(rejecting_factory) as Arc<dyn HostFactory>,
+        None,
     ));
     let scheduler_handle = TurnRunScheduler::new(
         turn_store.clone() as Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort>,
@@ -3308,10 +3469,11 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): surface_profile_denied collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "surface_profile_denied")
     assert!(matches!(
         outcome,
-        CapabilityOutcome::Denied(denied)
-            if denied.reason_kind.as_str() == "surface_profile_denied"
+        Resolution::Denied(denied)
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -3517,7 +3679,7 @@ async fn profiled_capability_surface_resolver_errors_are_sanitized() {
 #[tokio::test]
 async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_host_factory() {
     let fixture = HostFixture::new_unsubmitted("thread-runtime-planned-default", "hello").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let allowed_id = CapabilityId::new("demo.allowed").unwrap();
     let denied_id = CapabilityId::new("demo.denied").unwrap();
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
@@ -3550,6 +3712,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     let event_sink = Arc::new(InMemoryTurnEventSink::default());
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
@@ -3589,6 +3752,15 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         scheduler_wake_wiring: None,
     })
     .unwrap();
+
+    // This test drives the run MANUALLY (submit -> assert sink -> claim_next_run
+    // -> host_factory) to exercise composition wiring; it does not exercise the
+    // scheduler. Stop the auto-started scheduler up front so it cannot race the
+    // manual claim (it claims a submitted run in the background). On the
+    // in-memory engine the manual claim won that race; the row store's realistic
+    // timing lets the scheduler win, stealing the run and adding a RunnerClaimed
+    // event.
+    composition.scheduler_handle.shutdown().await;
 
     let SubmitTurnResponse::Accepted { run_id, status, .. } = composition
         .coordinator
@@ -3653,10 +3825,11 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         })
         .await
         .unwrap();
+    // Flip consequence (§5.2.9, confirmed): surface_profile_denied collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "surface_profile_denied")
     assert!(matches!(
         outcome,
-        CapabilityOutcome::Denied(denied)
-            if denied.reason_kind.as_str() == "surface_profile_denied"
+        Resolution::Denied(denied)
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -3683,7 +3856,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     let wiring = SchedulerWakeWiring::channel();
 
     let fixture = HostFixture::new_unsubmitted("thread-preminted-wake", "hello preminted").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let allowed_id = CapabilityId::new("demo.preminted").unwrap();
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor(allowed_id.as_str()),
@@ -3716,6 +3889,7 @@ async fn pre_minted_scheduler_wake_wiring_drives_scheduler_on_coordinator_submit
     // delivered through the pre-minted channel can complete the run in time.
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
@@ -3861,7 +4035,7 @@ async fn build_runtime_host_with_optional_hooks(
     CapabilitySurfaceVersion,
 ) {
     let fixture = HostFixture::new_unsubmitted(thread_label, "hello").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor(allowed_id.as_str()),
     ])));
@@ -3890,6 +4064,7 @@ async fn build_runtime_host_with_optional_hooks(
     ));
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone(),
         thread_scope: fixture.thread_scope.clone(),
@@ -4052,7 +4227,7 @@ async fn hooks_flag_off_capability_invocation_is_unaffected() {
         .await
         .unwrap();
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "flag OFF: allowed capability must complete unaffected, got {outcome:?}"
     );
     assert_eq!(
@@ -4096,7 +4271,7 @@ async fn hooks_flag_on_first_party_only_does_not_change_outcome() {
         .await
         .unwrap();
     assert!(
-        matches!(outcome, CapabilityOutcome::Completed(_)),
+        matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()),
         "first-party no-op observer must not change the outcome, got {outcome:?}"
     );
     assert_eq!(runtime.invocations().len(), 1, "inner port must be reached");
@@ -4133,7 +4308,7 @@ async fn hooks_flag_on_extension_deny_hook_denies_through_composed_runtime() {
         .await
         .unwrap();
     assert!(
-        matches!(outcome, CapabilityOutcome::Denied(_)),
+        matches!(outcome, Resolution::Denied(_)),
         "extension deny hook must deny through the composed runtime, got {outcome:?}"
     );
     assert!(
@@ -4170,7 +4345,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
         .await
         .unwrap();
     assert!(
-        matches!(outcome_a, CapabilityOutcome::Denied(_)),
+        matches!(outcome_a, Resolution::Denied(_)),
         "tenant A's deny hook must fire"
     );
     assert!(runtime_a.invocations().is_empty());
@@ -4200,7 +4375,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
         .await
         .unwrap();
     assert!(
-        matches!(outcome_b, CapabilityOutcome::Completed(_)),
+        matches!(outcome_b, Resolution::Done(ref o) if o.verdict.is_success()),
         "tenant B has no hooks; tenant A's deny must not leak across runtimes, got {outcome_b:?}"
     );
     assert_eq!(runtime_b.invocations().len(), 1);
@@ -4215,7 +4390,7 @@ async fn hooks_are_isolated_per_tenant_runtime() {
 #[tokio::test]
 async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
     let fixture = HostFixture::new_unsubmitted("thread-product-live-ready", "hello").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor("demo.allowed"),
     ])));
@@ -4245,6 +4420,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
     );
     let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
@@ -4344,7 +4520,7 @@ async fn product_live_parts_for_gate_test(
     thread_label: &'static str,
 ) -> DefaultPlannedRuntimeParts<RecordingGateway> {
     let fixture = HostFixture::new_unsubmitted(thread_label, "hello").await;
-    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let turn_store = Arc::new(in_memory_turn_state_store());
     let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
         capability_descriptor("demo.allowed"),
     ])));
@@ -4373,6 +4549,7 @@ async fn product_live_parts_for_gate_test(
     );
     DefaultPlannedRuntimeParts {
         attachment_read_port: None,
+        gate_record_store: None,
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
         thread_scope: fixture.thread_scope.clone(),
@@ -4765,7 +4942,8 @@ async fn text_only_host_factory_fails_fast_when_model_route_snapshot_required_wi
 #[tokio::test]
 async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store() {
     let fixture = HostFixture::new("thread-host-turn-state-e2e", "hello durable host").await;
-    let turn_state_store = Arc::new(InMemoryTurnStateStore::default());
+    let scoped = ironclaw_turns::test_support::in_memory_turns_filesystem();
+    let turn_state_store = Arc::new(FilesystemTurnStateRowStore::new(scoped.clone()));
     let host = fixture
         .factory_with_loop_checkpoint_store(turn_state_store.clone())
         .build_text_only_host(RebornLoopDriverHostRequest {
@@ -4831,13 +5009,13 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
         .await
         .unwrap();
 
-    let snapshot = turn_state_store.persistence_snapshot();
+    let snapshot = turn_state_store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.loop_checkpoints.len(), 1);
-    let reopened = InMemoryTurnStateStore::from_persistence_snapshot(
-        snapshot,
-        InMemoryTurnStateStoreLimits::default(),
-    )
-    .unwrap();
+    // `BeforeBlock` is a non-critical checkpoint kind (only `BeforeSideEffect`
+    // is a durability barrier) — drain before reopening so its journal append
+    // has landed.
+    turn_state_store.drain().await.expect("drain checkpoint");
+    let reopened = FilesystemTurnStateRowStore::new(scoped.clone());
     let checkpoint_record = reopened
         .get_loop_checkpoint(GetLoopCheckpointRequest {
             scope: fixture.context.scope.clone(),
@@ -5774,7 +5952,7 @@ async fn text_only_host_stage_checkpoint_payload_returns_ref_usable_by_checkpoin
     let state_ref = host_dyn
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeSideEffect,
-            schema_id: fixture.context.checkpoint_schema_id.as_str().to_string(),
+            schema_id: fixture.context.checkpoint_schema_id.clone(),
             payload: b"durable resume bytes".to_vec(),
         })
         .await
@@ -5863,7 +6041,8 @@ async fn text_only_host_stage_checkpoint_payload_rejects_foreign_schema_id() {
     let error = host_dyn
         .stage_checkpoint_payload(StageCheckpointPayloadRequest {
             kind: LoopCheckpointKind::BeforeModel,
-            schema_id: "some_other_schema_v1".to_string(),
+            schema_id: ironclaw_turns::run_profile::CheckpointSchemaId::new("some_other_schema_v1")
+                .expect("valid"),
             payload: b"payload bytes".to_vec(),
         })
         .await
@@ -5929,9 +6108,10 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): EmptySurface collapsed to PolicyDenied (was CapabilityDeniedReasonKind::EmptySurface)
     assert!(matches!(
-        outcome.outcomes.as_slice(),
-        [CapabilityOutcome::Denied(denied)] if denied.reason_kind == CapabilityDeniedReasonKind::EmptySurface
+        outcome.resolutions.as_slice(),
+        [Resolution::Denied(denied)] if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
 }
 
@@ -6056,11 +6236,19 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
         .await
         .unwrap();
 
-    let CapabilityOutcome::Completed(message) = outcome else {
+    let Resolution::Done(message) = outcome else {
         panic!("expected completed capability outcome");
     };
-    assert!(message.result_ref.as_str().starts_with("result:"));
-    assert_eq!(message.safe_summary, "capability completed");
+    assert!(
+        message
+            .refs
+            .origin
+            .as_ref()
+            .expect("preserved loop result ref")
+            .as_str()
+            .starts_with("result:")
+    );
+    assert_eq!(message.summary.as_str(), "capability completed");
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 1);
     assert_eq!(invocations[0].capability_id, capability_id);
@@ -6122,10 +6310,11 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): surface_profile_denied collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "surface_profile_denied")
     assert!(matches!(
         outcome,
-        CapabilityOutcome::Denied(denied)
-            if denied.reason_kind.as_str() == "surface_profile_denied"
+        Resolution::Denied(denied)
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -6199,11 +6388,12 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): surface_profile_denied collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "surface_profile_denied")
     assert!(
         matches!(
             &outcome,
-            CapabilityOutcome::Denied(denied)
-                if denied.reason_kind.as_str() == "surface_profile_denied"
+            Resolution::Denied(denied)
+                if denied.reason_kind == Some(DenyReason::PolicyDenied)
         ),
         "expected surface_profile_denied, got {outcome:?}"
     );
@@ -6273,7 +6463,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
             })
             .await
             .unwrap();
-        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
     }
 
     let invocations = runtime.invocations();
@@ -6364,9 +6554,10 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): outside_visible_surface collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "outside_visible_surface")
     assert!(matches!(
         denied,
-        CapabilityOutcome::Denied(denied) if denied.reason_kind.as_str() == "outside_visible_surface"
+        Resolution::Denied(denied) if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
     assert!(runtime.invocations().is_empty());
 
@@ -6438,10 +6629,11 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
         .await
         .unwrap();
 
-    let CapabilityOutcome::Failed(failure) = outcome else {
+    let Resolution::Done(o) = outcome else {
         panic!("expected failed capability outcome");
     };
-    assert_eq!(failure.safe_summary, "capability invocation failed");
+    assert!(matches!(o.verdict, ToolVerdict::RecoverableFailure { .. }));
+    assert_eq!(o.summary.as_str(), "capability invocation failed");
 }
 
 #[tokio::test]
@@ -6547,35 +6739,33 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
         );
     }
 
+    // Flip consequence (§5.2.9, confirmed): approval/auth/resource/process safe_summary now lives on the side
+    // GateRecord / host process record, not the returned channel; dropped the four
+    // `safe_summary == ...` sub-assertions. Gate/process identity is asserted via the
+    // preserved originating loop ref on the waypoint `origin`.
     assert!(matches!(
         &outcomes[0],
-        CapabilityOutcome::ApprovalRequired { gate_ref, safe_summary, .. }
-            if gate_ref.as_str().starts_with("gate:approval-")
-                && safe_summary == "capability requires approval"
+        Resolution::Blocked(Blocked::Approval(w))
+            if w.origin.as_ref().is_some_and(|origin| origin.as_str().starts_with("gate:approval-"))
     ));
     assert!(matches!(
         &outcomes[1],
-        CapabilityOutcome::AuthRequired {
-            gate_ref,
-            safe_summary,
-            ..
-        }
-            if gate_ref.as_str().starts_with("gate:auth-")
-                && safe_summary == "capability requires authentication"
+        Resolution::Blocked(Blocked::Auth(w))
+            if w.origin.as_ref().is_some_and(|origin| origin.as_str().starts_with("gate:auth-"))
     ));
     assert!(matches!(
         &outcomes[2],
-        CapabilityOutcome::ResourceBlocked { gate_ref, safe_summary }
-            if gate_ref.as_str().starts_with("gate:resource-")
-                && safe_summary == "capability is blocked by resource limits"
+        Resolution::Blocked(Blocked::Resource(w))
+            if w.origin.as_ref().is_some_and(|origin| origin.as_str().starts_with("gate:resource-"))
     ));
     assert!(matches!(
         &outcomes[3],
-        CapabilityOutcome::SpawnedProcess(process)
-            if process.process_ref.as_str().starts_with("process:")
-                && process.safe_summary == "capability spawned background work"
+        Resolution::Suspended(Suspension::Process(w))
+            if w.origin.as_ref().is_some_and(|origin| origin.as_str().starts_with("process:"))
     ));
-    assert!(outcomes.iter().all(CapabilityOutcome::is_suspension));
+    // Flip consequence (§5.2.9, confirmed): Blocked gates are NOT host suspensions; the batch-park predicate is
+    // `Resolution::parks` (gates + process all park), replacing `CapabilityOutcome::is_suspension`.
+    assert!(outcomes.iter().all(Resolution::parks));
     assert_eq!(runtime.invocations().len(), 4);
 }
 
@@ -6632,18 +6822,15 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
         .await
         .unwrap();
 
-    let CapabilityOutcome::Failed(failure) = outcome else {
+    let Resolution::Done(o) = outcome else {
         panic!("expected failed capability outcome");
     };
     assert_eq!(
-        failure.error_kind,
-        CapabilityFailureKind::Unknown(
-            ironclaw_turns::run_profile::CapabilityFailureKindValue::new("streaming")
-                .expect("valid failure kind")
-        )
+        o.verdict.error_kind(),
+        Some(&FailureKind::unknown("streaming").expect("valid failure kind"))
     );
     assert_eq!(
-        failure.safe_summary,
+        o.summary.as_str(),
         "streaming outcomes are not supported by this loop port"
     );
 }
@@ -6717,9 +6904,9 @@ async fn text_only_host_preserves_invalid_request_and_returns_unavailable_as_fai
     assert_eq!(invalid.safe_summary, "capability input schema invalid");
     assert!(matches!(
         unavailable,
-        CapabilityOutcome::Failed(failure)
-            if failure.error_kind == CapabilityFailureKind::Unavailable
-                && failure.safe_summary == "resource governor temporarily unavailable"
+        Resolution::Done(ref o)
+            if o.verdict.error_kind() == Some(&FailureKind::Unavailable)
+                && o.summary.as_str() == "resource governor temporarily unavailable"
     ));
 }
 
@@ -6802,10 +6989,10 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
         .unwrap();
 
     assert!(batch.stopped_on_suspension);
-    assert_eq!(batch.outcomes.len(), 1);
+    assert_eq!(batch.resolutions.len(), 1);
     assert!(matches!(
-        batch.outcomes.as_slice(),
-        [CapabilityOutcome::ApprovalRequired { .. }]
+        batch.resolutions.as_slice(),
+        [Resolution::Blocked(Blocked::Approval(_))]
     ));
     assert_eq!(runtime.invocations().len(), 1);
 }
@@ -6859,11 +7046,12 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
     let first = host.invoke_capability(invocation.clone()).await.unwrap();
     let second = host.invoke_capability(invocation).await.unwrap();
 
-    assert!(matches!(first, CapabilityOutcome::Failed(_)));
+    assert!(
+        matches!(first, Resolution::Done(ref o) if matches!(o.verdict, ToolVerdict::RecoverableFailure { .. }))
+    );
     assert_eq!(first, second);
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 1);
-    assert!(invocations[0].idempotency_key.is_some());
     assert!(io.results().is_empty());
 }
 
@@ -6989,7 +7177,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
 
     let first = first.unwrap();
     let second = second.unwrap();
-    assert!(matches!(first, CapabilityOutcome::Completed(_)));
+    assert!(matches!(first, Resolution::Done(ref o) if o.verdict.is_success()));
     assert_eq!(first, second);
     assert_eq!(runtime.invocations().len(), 1);
 }
@@ -7065,7 +7253,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
             })
             .await
             .unwrap();
-        assert!(matches!(outcome, CapabilityOutcome::Completed(_)));
+        assert!(matches!(outcome, Resolution::Done(ref o) if o.verdict.is_success()));
     }
     let retried = host
         .invoke_capability(CapabilityInvocation {
@@ -7079,7 +7267,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
         .await
         .unwrap();
 
-    assert!(matches!(retried, CapabilityOutcome::Completed(_)));
+    assert!(matches!(retried, Resolution::Done(ref o) if o.verdict.is_success()));
     assert_eq!(runtime.invocations().len(), invocation_count + 1);
 }
 
@@ -7188,10 +7376,9 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
     let second = host.invoke_capability(invocation).await.unwrap();
 
     assert_eq!(first.kind, AgentLoopHostErrorKind::Unavailable);
-    assert!(matches!(second, CapabilityOutcome::Completed(_)));
+    assert!(matches!(second, Resolution::Done(ref o) if o.verdict.is_success()));
     let invocations = runtime.invocations();
     assert_eq!(invocations.len(), 1);
-    assert!(invocations[0].idempotency_key.is_some());
     assert_eq!(
         io.results(),
         vec![(capability_id, json!({"write": "fails"}))]
@@ -7353,9 +7540,10 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): EmptySurface collapsed to PolicyDenied (was CapabilityDeniedReasonKind::EmptySurface)
     assert!(matches!(
-        outcome.outcomes.as_slice(),
-        [CapabilityOutcome::Denied(denied)] if denied.reason_kind == CapabilityDeniedReasonKind::EmptySurface
+        outcome.resolutions.as_slice(),
+        [Resolution::Denied(denied)] if denied.reason_kind == Some(DenyReason::PolicyDenied)
     ));
 
     let stale = host
@@ -7441,11 +7629,19 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
         .await
         .unwrap();
 
-    let CapabilityOutcome::Completed(completed) = outcome else {
+    let Resolution::Done(completed) = outcome else {
         panic!("expected completed script capability through host runtime");
     };
-    assert!(completed.result_ref.as_str().starts_with("result:"));
-    assert_eq!(completed.safe_summary, "capability completed");
+    assert!(
+        completed
+            .refs
+            .origin
+            .as_ref()
+            .expect("preserved loop result ref")
+            .as_str()
+            .starts_with("result:")
+    );
+    assert_eq!(completed.summary.as_str(), "capability completed");
     assert_eq!(io.results(), vec![(e2e_script_capability_id(), input)]);
     assert!(fixture.milestone_names().contains(&"capability_invoked"));
 }
@@ -7496,11 +7692,13 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
         .await
         .unwrap();
 
+    // Flip consequence (§5.2.9, confirmed): missing_provider_trust collapsed to PolicyDenied (was CapabilityDeniedReasonKind Unknown "missing_provider_trust")
     assert!(matches!(
         denied,
-        CapabilityOutcome::Denied(denied)
-            if denied.reason_kind.as_str() == "missing_provider_trust"
-                && denied.safe_summary == "capability provider trust is unavailable"
+        Resolution::Denied(denied)
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
+                && denied.summary.as_ref().map(|summary| summary.as_str())
+                    == Some("capability provider trust is unavailable")
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -7564,7 +7762,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
     io.put_input(input_ref, json!({"message": "now staged"}));
     let retried = host.invoke_capability(invocation).await.unwrap();
 
-    assert!(matches!(retried, CapabilityOutcome::Completed(_)));
+    assert!(matches!(retried, Resolution::Done(ref o) if o.verdict.is_success()));
     assert_eq!(runtime.invocations().len(), 1);
     assert_eq!(
         io.results(),
@@ -8435,7 +8633,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             })
             .await
             .map_err(driver_host_error)?;
-        let CapabilityOutcome::Completed(completed) = capability else {
+        let Resolution::Done(completed) = capability else {
             return Err(AgentLoopDriverError::Failed {
                 reason_kind: "script_capability_did_not_complete".to_string(),
                 detail: None,
@@ -8474,7 +8672,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
             .await
             .map_err(driver_host_error)?;
 
-        let _result_ref = completed.result_ref;
+        let _result_ref = completed.refs.origin;
         Ok(LoopExit::Completed(LoopCompleted {
             completion_kind: LoopCompletionKind::FinalReply,
             reply_message_refs: vec![reply_ref],
@@ -8638,7 +8836,7 @@ fn driver_host_error(
 
 fn loop_exit_applier_for_fixture(
     fixture: &HostFixture,
-    turn_store: Arc<InMemoryTurnStateStore>,
+    turn_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
 ) -> Arc<LoopExitApplier> {
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let evidence = Arc::new(
@@ -8731,7 +8929,7 @@ impl TurnStateStore for StaticTurnStateStore {
 
 async fn queue_fixture_turn(
     fixture: &HostFixture,
-    turn_store: &InMemoryTurnStateStore,
+    turn_store: &FilesystemTurnStateRowStore<InMemoryBackend>,
     resolver: &dyn RunProfileResolver,
     idempotency_key: &str,
 ) -> TurnRunId {
@@ -8787,7 +8985,7 @@ struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
     turn_state_store: Arc<StaticTurnStateStore>,
-    loop_checkpoint_store: Arc<InMemoryTurnStateStore>,
+    loop_checkpoint_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     gateway: Arc<RecordingGateway>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     thread_scope: ThreadScope,
@@ -8813,7 +9011,7 @@ impl HostFixture {
     ) -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let checkpoint_state_store = in_memory_checkpoint_state_store();
-        let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
+        let loop_checkpoint_store = Arc::new(in_memory_turn_state_store());
         let gateway = Arc::new(RecordingGateway::reply("model says hi"));
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let tenant_id = TenantId::new("tenant-text-host").unwrap();
@@ -9165,15 +9363,58 @@ impl CheckpointStateStore for DiskFullCheckpointStateStore {
     }
 }
 
+struct NthPutUnavailableCheckpointStateStore {
+    inner: Arc<dyn CheckpointStateStore>,
+    fail_on_put_attempt: usize,
+    put_attempts: AtomicUsize,
+}
+
+impl NthPutUnavailableCheckpointStateStore {
+    fn new(inner: Arc<dyn CheckpointStateStore>, fail_on_put_attempt: usize) -> Self {
+        Self {
+            inner,
+            fail_on_put_attempt,
+            put_attempts: AtomicUsize::new(0),
+        }
+    }
+
+    fn put_attempts(&self) -> usize {
+        self.put_attempts.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CheckpointStateStore for NthPutUnavailableCheckpointStateStore {
+    async fn put_checkpoint_state(
+        &self,
+        request: PutCheckpointStateRequest,
+    ) -> Result<ironclaw_turns::CheckpointStateRecord, TurnError> {
+        let attempt = self.put_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt == self.fail_on_put_attempt {
+            return Err(TurnError::Unavailable {
+                reason: "transient checkpoint state outage".to_string(),
+            });
+        }
+        self.inner.put_checkpoint_state(request).await
+    }
+
+    async fn get_checkpoint_state(
+        &self,
+        request: GetCheckpointStateRequest,
+    ) -> Result<Option<ironclaw_turns::CheckpointStateRecord>, TurnError> {
+        self.inner.get_checkpoint_state(request).await
+    }
+}
+
 struct SlowHeartbeatTransitionPort {
-    store: Arc<InMemoryTurnStateStore>,
+    store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     heartbeat_delay: std::time::Duration,
     heartbeat_attempts: AtomicUsize,
     notify_heartbeat_attempt: Notify,
 }
 
 impl SlowHeartbeatTransitionPort {
-    fn new(store: Arc<InMemoryTurnStateStore>) -> Self {
+    fn new(store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>) -> Self {
         Self {
             store,
             heartbeat_delay: std::time::Duration::ZERO,

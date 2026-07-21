@@ -39,11 +39,14 @@ pub mod capability;
 pub mod capability_profile;
 pub mod decision;
 pub mod dispatch;
+#[cfg(feature = "test-support")]
+pub mod dispatch_test_support;
 mod dotted_id;
 pub mod error;
 pub mod failure;
 pub mod gate_record;
 pub mod host_port;
+pub mod host_remediation;
 pub mod http;
 pub mod ids;
 pub mod ingress;
@@ -60,6 +63,9 @@ pub mod safe_summary;
 pub mod scope;
 pub mod trust;
 
+mod credential_redaction;
+pub mod model_result_preview;
+
 // Flat re-exports are intentional: downstream Reborn service crates consume
 // `ironclaw_host_api` as a contract prelude, while module docs remain the
 // authoritative grouping for each vocabulary family.
@@ -75,11 +81,13 @@ pub use error::*;
 pub use failure::*;
 pub use gate_record::*;
 pub use host_port::*;
+pub use host_remediation::*;
 pub use http::*;
 pub use ids::*;
 pub use ingress::*;
 pub use invocation::*;
 pub use lane::*;
+pub use model_result_preview::*;
 pub use mount::*;
 pub use path::*;
 pub use resolution::*;

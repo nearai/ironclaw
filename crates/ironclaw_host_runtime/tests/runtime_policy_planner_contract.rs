@@ -26,10 +26,10 @@ use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, RuntimeKind,
     TrustClass,
 };
-use ironclaw_host_runtime::{
-    PlannerError, SHELL_CAPABILITY_ID, builtin_first_party_package, plan_capability,
+use ironclaw_host_runtime::{SHELL_CAPABILITY_ID, builtin_first_party_package};
+use ironclaw_runtime_policy::{
+    OrgPolicyConstraints, PlannerError, ResolveRequest, plan_capability, resolve,
 };
-use ironclaw_runtime_policy::{OrgPolicyConstraints, ResolveRequest, resolve};
 
 fn descriptor_with_runtime(
     id: &str,

@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, DispatchInputIssueCode, MissionId, ProjectId, ProviderToolName,
-    ResourceScope, TenantId, ThreadId, UserId,
+    AgentId, CapabilityId, DenyReason, DispatchInputIssueCode, MissionId, ProjectId,
+    ProviderToolName, Resolution, ResolutionBatch, ResourceScope, TenantId, ThreadId, UserId,
 };
 use ironclaw_loop_host::{
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
@@ -43,9 +43,8 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
         AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind, CapabilityInputIssue,
-        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        CapabilityDeniedReasonKind, CapabilityInputIssue, CapabilityInputRef, CapabilityInvocation,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
         LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -55,9 +54,9 @@ use ironclaw_turns::{
         LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
         LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust,
         ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
-        ProviderToolCallReference, ProviderToolDefinition, SkillVisibility, ToolObservationDetail,
-        ToolObservationStatus, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition, SkillTrustLevel,
+        SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
 use tracing_test::traced_test;
@@ -2022,7 +2021,7 @@ async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_paylo
             if skill_context.as_slice() == [PromptSkillContextMetadata {
                 ordinal: 0,
                 source_name: "alpha".to_string(),
-                trust_level: "installed".to_string(),
+                trust_level: SkillTrustLevel::Installed,
             }]
     ));
     let wire = serde_json::to_string(&recorded).unwrap();
@@ -2086,12 +2085,12 @@ async fn prompt_port_records_multiple_active_skill_metadata_in_prompt_order() {
             PromptSkillContextMetadata {
                 ordinal: 0,
                 source_name: "alpha".to_string(),
-                trust_level: "installed".to_string(),
+                trust_level: SkillTrustLevel::Installed,
             },
             PromptSkillContextMetadata {
                 ordinal: 1,
                 source_name: "bravo".to_string(),
-                trust_level: "trusted".to_string(),
+                trust_level: SkillTrustLevel::Trusted,
             },
         ]
     );
@@ -2375,17 +2374,19 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
             result_ref: result_ref.clone(),
             safe_summary: "tool completed".to_string(),
             provider_call: Some(ProviderToolCallReference {
-                provider_id: "test-provider".to_string(),
-                provider_model_id: "test-model".to_string(),
-                provider_turn_id: "turn_1".to_string(),
-                provider_call_id: "call_1".to_string(),
-                provider_tool_name: ProviderToolName::new("demo__echo")
-                    .expect("provider tool name"),
+                replay: ProviderToolCallReplay {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    provider_turn_id: "turn_1".to_string(),
+                    provider_call_id: "call_1".to_string(),
+                    provider_tool_name: ProviderToolName::new("demo__echo")
+                        .expect("provider tool name"),
+                    arguments: serde_json::json!({"message":"hello"}),
+                    response_reasoning: Some("provider reasoning".to_string()),
+                    reasoning: Some("provider reasoning".to_string()),
+                    signature: Some("sig-1".to_string()),
+                },
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
-                arguments: serde_json::json!({"message":"hello"}),
-                response_reasoning: Some("provider reasoning".to_string()),
-                reasoning: Some("provider reasoning".to_string()),
-                signature: Some("sig-1".to_string()),
             }),
             model_observation: None,
         })
@@ -2717,7 +2718,7 @@ async fn transcript_port_persists_result_reference_item_count() {
 }
 
 #[tokio::test]
-async fn transcript_port_rejects_unsafe_tool_result_summary() {
+async fn transcript_port_degrades_unsafe_tool_result_summary_without_borking() {
     let fixture = ThreadFixture::new().await;
     let adapter = ThreadBackedLoopTranscriptPort::new(
         Arc::clone(&fixture.thread_service),
@@ -2725,7 +2726,11 @@ async fn transcript_port_rejects_unsafe_tool_result_summary() {
         fixture.run_context.clone(),
     );
 
-    let error = adapter
+    // A summary that trips the strict validator (credential marker here; a
+    // path delimiter behaves the same) must NOT end the run: the result
+    // reference is still written with a fixed redaction marker as its label,
+    // and the raw rejected text never reaches the transcript.
+    adapter
         .append_capability_result_ref(AppendCapabilityResultRef {
             result_ref: LoopResultRef::new("result:unsafe-tool").unwrap(),
             safe_summary: "raw tool input includes secret".to_string(),
@@ -2733,9 +2738,8 @@ async fn transcript_port_rejects_unsafe_tool_result_summary() {
             model_observation: None,
         })
         .await
-        .unwrap_err();
+        .expect("unsafe summary must degrade to a fixed label, not end the run");
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     let history = fixture
         .thread_service
         .list_thread_history(ThreadHistoryRequest {
@@ -2744,11 +2748,19 @@ async fn transcript_port_rejects_unsafe_tool_result_summary() {
         })
         .await
         .unwrap();
+    let reference = history
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::ToolResultReference)
+        .expect("result reference must be written despite the unsafe summary");
+    let wire = serde_json::to_string(&reference).unwrap();
     assert!(
-        !history
-            .messages
-            .iter()
-            .any(|message| message.kind == MessageKind::ToolResultReference)
+        !wire.contains("raw tool input includes secret"),
+        "raw rejected summary must not reach the transcript: {wire}"
+    );
+    assert!(
+        wire.contains("the tool result summary was redacted"),
+        "degraded label must be the fixed redaction marker: {wire}"
     );
 }
 
@@ -3041,10 +3053,17 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
         .await
         .unwrap();
 
+    // The loop-side `EmptySurface` reason has no host_api `DenyReason` tag, so the
+    // §5.3 collapse buckets it into `PolicyDenied`; the empty-surface specificity
+    // survives on the denial summary instead of the typed reason.
     assert!(matches!(
-        outcome.outcomes.as_slice(),
-        [CapabilityOutcome::Denied(denied)]
-            if denied.reason_kind == CapabilityDeniedReasonKind::EmptySurface
+        outcome.resolutions.as_slice(),
+        [Resolution::Denied(denied)]
+            if denied.reason_kind == Some(DenyReason::PolicyDenied)
+                && denied
+                    .summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.as_str().contains("capabilities"))
     ));
 }
 
@@ -3848,9 +3867,12 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
 #[tokio::test]
 async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() {
     let fixture = ThreadFixture::new().await;
-    let gateway = Arc::new(RecordingGateway::deny_with_safe_summary(
-        "RAW_PROVIDER_SECRET invalid api key sk-provider-secret /host/path tool_input",
-    ));
+    let gateway = Arc::new(RecordingGateway::deny_with_safe_summary(concat!(
+        "RAW_PROVIDER_SECRET invalid api key sk-provider-secret \
+         ghp",
+        "_012345678901234567890123456789012345",
+        " /host/path tool_input"
+    )));
     let port = ThreadBackedLoopModelPort::new(
         Arc::clone(&fixture.thread_service),
         fixture.thread_scope.clone(),
@@ -3872,18 +3894,34 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
         .await
         .unwrap_err();
 
+    // The card summary still degrades to the fixed category sentence.
     assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
     assert_eq!(error.safe_summary, "model profile is not permitted");
     let wire = format!("{}{:?}", serde_json::to_string(&error).unwrap(), error);
+    // Phase 2 (item 4): the rejected provider summary now rides the
+    // model-visible `detail` channel through the hardened scrubber. Secret
+    // VALUES, credential tokens, and sentinel markers must NEVER appear.
     for forbidden in [
         "RAW_PROVIDER_SECRET",
-        "invalid api key",
         "sk-provider-secret",
-        "/host/path",
-        "tool_input",
+        concat!("ghp", "_012345678901234567890123456789012345", ""),
     ] {
         assert!(!wire.contains(forbidden), "model error leaked {forbidden}");
     }
+    // The descriptive cause DOES survive on the model-visible detail so the
+    // failure explainer can describe the fault (stripped only at the public
+    // projection boundary).
+    let detail = error
+        .detail
+        .expect("rejected provider cause should ride detail");
+    assert!(
+        detail.contains("/host/path"),
+        "path cause must survive: {detail}"
+    );
+    assert!(
+        detail.contains("tool_input"),
+        "descriptive cause must survive: {detail}"
+    );
 }
 
 #[tokio::test]
@@ -4927,28 +4965,31 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
     async fn invoke_capability(
         &self,
         _request: CapabilityInvocation,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        Ok(CapabilityOutcome::Denied(CapabilityDenied {
-            reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-            safe_summary: "test capability port does not execute tools".to_string(),
-        }))
+    ) -> Result<Resolution, AgentLoopHostError> {
+        Ok(resolution::denied(
+            CapabilityDeniedReasonKind::EmptySurface,
+            "test capability port does not execute tools".to_string(),
+        )
+        .resolution)
     }
 
     async fn invoke_capability_batch(
         &self,
         request: CapabilityBatchInvocation,
-    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        Ok(CapabilityBatchOutcome {
-            outcomes: request
-                .invocations
-                .into_iter()
-                .map(|_| {
-                    CapabilityOutcome::Denied(CapabilityDenied {
-                        reason_kind: CapabilityDeniedReasonKind::EmptySurface,
-                        safe_summary: "test capability port does not execute tools".to_string(),
-                    })
-                })
-                .collect(),
+    ) -> Result<ResolutionBatch, AgentLoopHostError> {
+        let resolutions = request
+            .invocations
+            .into_iter()
+            .map(|_| {
+                resolution::denied(
+                    CapabilityDeniedReasonKind::EmptySurface,
+                    "test capability port does not execute tools".to_string(),
+                )
+                .resolution
+            })
+            .collect();
+        Ok(ResolutionBatch {
+            resolutions,
             stopped_on_suspension: false,
         })
     }

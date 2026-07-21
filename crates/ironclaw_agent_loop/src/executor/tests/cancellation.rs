@@ -1,11 +1,11 @@
 use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AgentLoopHostError, AgentLoopHostErrorKind,
-    CanonicalAgentLoopExecutor, CapabilityFailureKind, CapabilityOutcome, CapabilityResultMessage,
-    CheckpointKind, HostStage, LoopCancelReasonKind, LoopCancelledReasonKind, LoopCheckpointKind,
-    LoopExecutionState, LoopExit, LoopGateRef, LoopInput, LoopInputAckToken, LoopInputBatch,
-    LoopInputCursor, LoopInterruptKind, LoopResultRef, LoopRunInfoPort, LoopSafeSummary, MockHost,
-    calls_response, family_with_drain, final_staged_state, input_ack, input_cursor, message_ref,
-    reply_response, surface_version,
+    CanonicalAgentLoopExecutor, CapabilityFailureKind, CheckpointKind, HostStage,
+    LoopCancelReasonKind, LoopCancelledReasonKind, LoopCheckpointKind, LoopExecutionState,
+    LoopExit, LoopGateRef, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+    LoopInterruptKind, LoopResultRef, LoopRunInfoPort, LoopSafeSummary, MockHost, calls_response,
+    family_with_drain, final_staged_state, input_ack, input_cursor, message_ref, reply_response,
+    resolution, surface_version,
 };
 
 #[tokio::test]
@@ -539,13 +539,11 @@ async fn cancellation_after_retry_prompt_rebuild_skips_second_model_call() {
 #[tokio::test]
 async fn capability_cancelled_returns_cancelled_exit_without_retry() {
     let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
-        ironclaw_turns::run_profile::CapabilityBatchOutcome {
-            outcomes: vec![CapabilityOutcome::Failed(
-                ironclaw_turns::run_profile::CapabilityFailure {
-                    error_kind: CapabilityFailureKind::Cancelled,
-                    safe_summary: "capability cancelled".to_string(),
-                    detail: None,
-                },
+        ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![resolution::failed(
+                CapabilityFailureKind::Cancelled,
+                "capability cancelled".to_string(),
+                None,
             )],
             stopped_on_suspension: false,
         },
@@ -670,16 +668,16 @@ async fn cancellation_after_before_side_effect_checkpoint_skips_capability_call(
 async fn cancellation_after_capability_batch_preserves_completed_result() {
     let result_ref = LoopResultRef::new("result:late-cancel").expect("valid");
     let host = MockHost::new(vec![calls_response()])
-        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
-            outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
-                result_ref: result_ref.clone(),
-                safe_summary: "completed before cancellation".to_string(),
-                progress: ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
-                terminate_hint: true,
-                byte_len: 0,
-                output_digest: None,
-                model_observation: None,
-            })],
+        .with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![resolution::completed(
+                result_ref.clone(),
+                "completed before cancellation".to_string(),
+                ironclaw_turns::run_profile::CapabilityProgress::MadeProgress,
+                true,
+                0,
+                None,
+                None,
+            )],
             stopped_on_suspension: false,
         }])
         .cancel_after_batch_invocation();
@@ -717,11 +715,12 @@ async fn cancellation_checkpoint_failure_still_cancels_for_permissive_profile() 
 
 #[tokio::test]
 async fn cancellation_checkpoint_payload_unavailable_propagates_for_permissive_profile() {
+    let raw_summary = "checkpoint store failed at /tmp/{state}";
     let host = MockHost::new(vec![reply_response()])
         .with_require_final_checkpoint(false)
-        .fail_checkpoint_payload(
+        .fail_checkpoint_payload_with_error(
             LoopCheckpointKind::Final,
-            AgentLoopHostErrorKind::Unavailable,
+            AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, raw_summary),
         );
     host.request_cancellation(LoopCancelReasonKind::UserRequested);
     let executor = CanonicalAgentLoopExecutor;
@@ -732,15 +731,18 @@ async fn cancellation_checkpoint_payload_unavailable_propagates_for_permissive_p
         .await
         .expect_err("expected checkpoint staging unavailability to propagate");
 
+    // Phase 1: the raw summary contains `/` and `{` and fails strict
+    // validation, so the card summary degrades to a canned fallback while the
+    // real cause survives (secret-scrubbed) on the detail channel.
     assert_eq!(
         err,
         AgentLoopExecutorError::HostUnavailableWithDiagnostics {
             stage: HostStage::Checkpoint,
             kind: AgentLoopHostErrorKind::Unavailable,
-            safe_summary: LoopSafeSummary::new("scripted checkpoint payload failure").unwrap(),
+            safe_summary: LoopSafeSummary::model_gateway_failed(),
             reason_kind: None,
             diagnostic_ref: None,
-            detail: None,
+            detail: Some(raw_summary.to_string()),
         }
     );
     assert!(host.checkpoint_kinds().is_empty());

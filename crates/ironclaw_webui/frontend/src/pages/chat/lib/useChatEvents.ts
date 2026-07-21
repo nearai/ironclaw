@@ -78,15 +78,7 @@ export function useChatEvents({
   // Used to reject stale terminal statuses after a locally resolved gate
   // resumes a newer active run.
   const latestRunIdRef = React.useRef(null);
-  // A final reply is completion evidence for its run. Keep the id until a
-  // different run starts so a trailing retryable replay error cannot turn an
-  // already delivered response into a visible failure.
-  const completedReplyRunIdRef = React.useRef(null);
   const promptRunIdRef = React.useRef(null);
-
-  React.useEffect(() => {
-    completedReplyRunIdRef.current = null;
-  }, [threadId]);
 
   return React.useCallback(
     (envelope) => {
@@ -96,12 +88,7 @@ export function useChatEvents({
       switch (type) {
         case "accepted": {
           const ack = frame.ack || {};
-          if (ack.run_id) {
-            latestRunIdRef.current = ack.run_id;
-            if (completedReplyRunIdRef.current !== ack.run_id) {
-              completedReplyRunIdRef.current = null;
-            }
-          }
+          if (ack.run_id) latestRunIdRef.current = ack.run_id;
           noteConnectionInterruptedRunId(ack.run_id);
           setActiveRun?.({
             runId: ack.run_id || null,
@@ -117,9 +104,6 @@ export function useChatEvents({
           const progress = frame.progress || {};
           if (progress.turn_run_id) {
             latestRunIdRef.current = progress.turn_run_id;
-            if (completedReplyRunIdRef.current !== progress.turn_run_id) {
-              completedReplyRunIdRef.current = null;
-            }
             noteConnectionInterruptedRunId(progress.turn_run_id);
             setActiveRun?.((current) =>
               current && current.runId === progress.turn_run_id
@@ -205,7 +189,6 @@ export function useChatEvents({
           const turnRunId = reply.turn_run_id || null;
           if (turnRunId && latestRunIdRef) {
             latestRunIdRef.current = turnRunId;
-            completedReplyRunIdRef.current = turnRunId;
           }
           const replyMessage = {
             id: `reply-${turnRunId || Date.now()}`,
@@ -253,31 +236,26 @@ export function useChatEvents({
         }
 
         case "error": {
-          const errorRunId =
-            frame.run_id ||
-            frame.run_state?.run_id ||
-            activeRunRef?.current?.runId ||
-            latestRunIdRef.current ||
-            null;
-          if (
-            frame.retryable === true &&
-            completedReplyRunIdRef.current &&
-            (!errorRunId || errorRunId === completedReplyRunIdRef.current)
-          ) {
-            return;
-          }
+          // Retryable stream errors are transport interruptions, not terminal
+          // run outcomes. The EventSource hook reconnects with the last
+          // delivered cursor, so preserve the active run and any partial
+          // assistant text while that recovery happens. Clearing local state
+          // here would make a healthy run appear to stop midway even though
+          // the backend continues executing it.
+          if (frame.retryable === true) return;
+
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
           onStreamError({
             error: frame.error,
             kind: frame.kind,
-            retryable: frame.retryable === true,
+            retryable: false,
           });
           appendStreamFailureMessage(setMessages, {
             error: frame.error,
             kind: frame.kind,
-            retryable: frame.retryable === true,
+            retryable: false,
           });
           return;
         }

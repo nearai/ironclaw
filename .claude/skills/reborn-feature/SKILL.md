@@ -83,7 +83,7 @@ For a feature with N endpoints, expect to touch (in dependency order):
 |---|---|---|
 | Port | `ironclaw_product_workflow` | trait + DTOs + error type in `reborn_services/<feature>.rs`; re-export in `reborn_services.rs` + `lib.rs` |
 | Facade | `ironclaw_product_workflow` | `Option<Arc<dyn Port>>` field + `with_*` builder + N `RebornServicesApi` methods (give them **default "unavailable" bodies** so existing fakes/tests compile untouched) + an error mapper (port error → `RebornServicesError`, whose ctors are `pub(super)`) |
-| Impl | `ironclaw_reborn_composition` | the adapter (`mod <feature>.rs`, gated on the right feature, e.g. `root-llm-provider`); register in `lib.rs` |
+| Impl | `ironclaw_reborn_composition` | the adapter (`mod <feature>.rs`, gated on the right Cargo feature if the dependency it needs is optional, e.g. `libsql`); register in `lib.rs` |
 | HTTP | `ironclaw_webui` | route constants + pattern + `*_descriptor()` (use `read_policy`/`mutation_policy`) + add to `webui_v2_routes()`; thin handler over `state.services()`; mount in `router.rs`; **update `tests/webui_v2_descriptors_contract.rs`** (it locks the table) |
 | Wiring | `ironclaw_reborn_composition` + `ironclaw_reborn_cli` | thread inputs through `RebornRuntimeInput`/`RebornRuntime`; attach in `build_webui_services`; pass from `serve.rs` |
 | Frontend | `ironclaw_webui_v2_static` | call endpoints via `apiFetch` in `static/js/pages/*/lib/*-api.js`; consume in hooks. No build step — `node --check <file>.js` to syntax-check |
@@ -118,8 +118,8 @@ they trade with eyes open.
 ```bash
 cargo build -p ironclaw_product_workflow --all-features
 cargo build -p ironclaw_webui
-cargo build -p ironclaw_reborn_composition --features "root-llm-provider webui-v2-beta libsql"
-cargo build -p ironclaw_reborn_cli          # compiles the full serve graph
+cargo build -p ironclaw_reborn_composition --features libsql
+cargo build -p ironclaw                     # compiles the full serve graph
 cargo clippy -p <crate> ... --tests          # gate per crate, not at the end
 node --check path/to/changed.js              # frontend syntax (no build step)
 ```

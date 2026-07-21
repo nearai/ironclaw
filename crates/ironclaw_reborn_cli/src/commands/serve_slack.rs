@@ -1,12 +1,9 @@
-#[cfg(feature = "slack-v2-host-beta")]
 use std::path::Path;
 
-#[cfg(feature = "slack-v2-host-beta")]
 use ironclaw_reborn_composition::SlackHostBetaRuntimeConfig;
 
 const SLACK_ENABLED_ENV: &str = "IRONCLAW_REBORN_SLACK_ENABLED";
 
-#[cfg(feature = "slack-v2-host-beta")]
 pub(crate) fn resolve_slack_config_for_serve(
     section: Option<&ironclaw_reborn_config::SlackSection>,
     tenant_id: &ironclaw_reborn_composition::host_api::TenantId,
@@ -41,7 +38,6 @@ fn slack_enabled(section: Option<&ironclaw_reborn_config::SlackSection>) -> anyh
     }
 }
 
-#[cfg(feature = "slack-v2-host-beta")]
 fn reject_legacy_slack_setup_fields(
     section: &ironclaw_reborn_config::SlackSection,
     config_path: &Path,
@@ -78,31 +74,10 @@ fn reject_legacy_slack_setup_fields(
     Ok(())
 }
 
-#[cfg(not(feature = "slack-v2-host-beta"))]
-pub(crate) fn resolve_slack_config_for_serve(
-    section: Option<&ironclaw_reborn_config::SlackSection>,
-    _tenant_id: &ironclaw_reborn_composition::host_api::TenantId,
-    _default_agent_id: &ironclaw_reborn_composition::host_api::AgentId,
-    _default_project_id: Option<&ironclaw_reborn_composition::host_api::ProjectId>,
-    _default_user_id: &ironclaw_reborn_composition::host_api::UserId,
-    _config_path: &std::path::Path,
-) -> anyhow::Result<Option<()>> {
-    // Fail loud instead of silently starting without Slack: an operator who
-    // explicitly enabled Slack must learn the binary lacks the feature.
-    if slack_enabled(section)? {
-        anyhow::bail!(
-            "Slack enablement ([slack].enabled = true or {SLACK_ENABLED_ENV}=true) requires \
-             an ironclaw binary built with the `slack-v2-host-beta` Cargo feature"
-        );
-    }
-    Ok(None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_host_beta_runtime_config_uses_webui_scope_when_enabled() {
         let project_id = project_id("project");
@@ -129,7 +104,6 @@ mod tests {
         assert!(resolved.legacy_setup.is_none());
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_host_beta_runtime_config_is_absent_without_section() {
         let project_id = project_id("project");
@@ -164,48 +138,6 @@ mod tests {
         assert!(crate::commands::parse_channel_enabled_bool("test_field", "maybe").is_err());
     }
 
-    #[cfg(not(feature = "slack-v2-host-beta"))]
-    #[test]
-    fn slack_config_rejects_enabled_section_without_feature() {
-        let section = ironclaw_reborn_config::SlackSection::default().set_enabled(true);
-
-        let err = resolve_slack_config_for_serve(
-            Some(&section),
-            &ironclaw_reborn_composition::host_api::TenantId::new("tenant").expect("valid tenant"),
-            &ironclaw_reborn_composition::host_api::AgentId::new("agent").expect("valid agent"),
-            None,
-            &ironclaw_reborn_composition::host_api::UserId::new("web-user").expect("valid user"),
-            std::path::Path::new("/tmp/reborn-config.toml"),
-        )
-        .expect_err("explicitly enabled Slack must fail loud without the feature");
-
-        assert!(
-            err.to_string()
-                .contains("requires an ironclaw binary built with")
-        );
-    }
-
-    #[cfg(not(feature = "slack-v2-host-beta"))]
-    #[test]
-    fn slack_config_is_noop_without_feature_when_disabled_or_unset() {
-        let disabled = ironclaw_reborn_config::SlackSection::default().set_enabled(false);
-        for section in [None, Some(&disabled)] {
-            let resolved = resolve_slack_config_for_serve(
-                section,
-                &ironclaw_reborn_composition::host_api::TenantId::new("tenant")
-                    .expect("valid tenant"),
-                &ironclaw_reborn_composition::host_api::AgentId::new("agent").expect("valid agent"),
-                None,
-                &ironclaw_reborn_composition::host_api::UserId::new("web-user")
-                    .expect("valid user"),
-                std::path::Path::new("/tmp/reborn-config.toml"),
-            )
-            .expect("disabled or unset Slack resolves without the feature");
-            assert!(resolved.is_none());
-        }
-    }
-
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_host_beta_runtime_config_rejects_legacy_static_user_binding() {
         let section = ironclaw_reborn_config::SlackSection::default()
@@ -228,7 +160,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     #[test]
     fn slack_host_beta_runtime_config_rejects_legacy_channel_routes() {
         let section = ironclaw_reborn_config::SlackSection::default()
@@ -254,22 +185,18 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     fn tenant_id(raw: &str) -> ironclaw_reborn_composition::host_api::TenantId {
         ironclaw_reborn_composition::host_api::TenantId::new(raw).expect("valid tenant")
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     fn agent_id(raw: &str) -> ironclaw_reborn_composition::host_api::AgentId {
         ironclaw_reborn_composition::host_api::AgentId::new(raw).expect("valid agent")
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     fn project_id(raw: &str) -> ironclaw_reborn_composition::host_api::ProjectId {
         ironclaw_reborn_composition::host_api::ProjectId::new(raw).expect("valid project")
     }
 
-    #[cfg(feature = "slack-v2-host-beta")]
     fn user_id(raw: &str) -> ironclaw_reborn_composition::host_api::UserId {
         ironclaw_reborn_composition::host_api::UserId::new(raw).expect("valid user")
     }

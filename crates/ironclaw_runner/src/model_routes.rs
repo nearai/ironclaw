@@ -111,7 +111,6 @@ impl ActiveModelRouteSettings {
         &self.model_id
     }
 
-    #[cfg(feature = "root-llm-provider")]
     pub fn from_llm_config(config: &ironclaw_llm::LlmConfig) -> Result<Self, ModelRouteError> {
         Self::new(config.active_provider_id(), config.active_model_name())
     }
@@ -263,8 +262,8 @@ impl ResolvedModelRouteSnapshot {
         self.source
     }
 
-    pub fn to_loop_model_route_snapshot(&self) -> LoopModelRouteSnapshot {
-        LoopModelRouteSnapshot::new(
+    pub fn to_loop_model_route_snapshot(&self) -> Result<LoopModelRouteSnapshot, String> {
+        LoopModelRouteSnapshot::try_new(
             self.provider_key.route().provider_id(),
             self.provider_key.route().model_id(),
             self.provider_key.config_version(),

@@ -8,7 +8,6 @@ publish = false
 layer = "runtimes"
 
 [features]
-default = []
 # In-memory-backed process store constructors for this crate's own tests and
 # downstream tiers. The stores are the production `FilesystemProcess*Store<InMemoryBackend>`;
 # the helpers just wire the in-memory backend seam (arch-simplification §4.3).
@@ -28,6 +27,8 @@ tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
+# FaultInjecting decorator: test store fault paths through the real store
+ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "time"] }

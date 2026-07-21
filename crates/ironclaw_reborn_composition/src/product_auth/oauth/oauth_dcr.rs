@@ -219,7 +219,7 @@ impl OAuthDcrProvider {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta extension OAuth route through RebornProductAuthServices"
+        reason = "used by the WebUI v2 extension OAuth route through RebornProductAuthServices"
     )]
     pub(crate) async fn start_setup_flow(
         &self,
@@ -313,7 +313,7 @@ impl OAuthDcrProvider {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta OAuth callback route through RebornProductAuthServices"
+        reason = "used by the WebUI v2 OAuth callback route through RebornProductAuthServices"
     )]
     pub(crate) async fn pkce_verifier_for_flow(
         &self,
@@ -910,7 +910,7 @@ impl OAuthDcrProviderRegistry {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta OAuth callback route through RebornProductAuthServices"
+        reason = "used by the WebUI v2 OAuth callback route through RebornProductAuthServices"
     )]
     pub(crate) async fn pkce_verifier_for_flow(
         &self,
@@ -926,7 +926,7 @@ impl OAuthDcrProviderRegistry {
 
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta extension OAuth route through RebornProductAuthServices"
+        reason = "used by the WebUI v2 extension OAuth route through RebornProductAuthServices"
     )]
     pub(crate) async fn start_setup_flow(
         &self,
@@ -959,7 +959,7 @@ enum DcrFlowContext<'a> {
     },
     #[allow(
         dead_code,
-        reason = "used by the webui-v2-beta extension OAuth route through RebornProductAuthServices"
+        reason = "used by the WebUI v2 extension OAuth route through RebornProductAuthServices"
     )]
     Setup {
         account_label: &'a CredentialAccountLabel,
@@ -1064,7 +1064,6 @@ impl DcrOAuthCallbackState {
     }
 }
 
-#[cfg(any(test, feature = "webui-v2-beta"))]
 impl DcrOAuthCallbackState {
     pub(crate) fn has_prefix(raw: &str) -> bool {
         raw.starts_with(Self::PREFIX)
@@ -1155,8 +1154,8 @@ fn challenge_view_from_flow(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[tokio::test]
     async fn dcr_provider_creates_blocked_gate_flow_and_stores_pkce_material() {
@@ -1409,9 +1408,56 @@ mod tests {
         );
     }
 
+    /// The real `FilesystemSecretStore` over a [`FaultInjecting`] backend armed
+    /// to fail the 2nd secret write. Replaces the former whole-trait
+    /// `SecondPutFailingSecretStore` fake: the store now runs its genuine
+    /// encryption, CAS write, and `FilesystemError -> SecretStoreError` mapping
+    /// under the injected backend fault, so these tests exercise the production
+    /// store path instead of a hand-rolled stand-in that reimplemented the trait.
+    /// Returns the store (passed to the provider as `Arc<dyn SecretStore>`) plus
+    /// the fault handle for asserting the backend traffic the store produced.
+    fn secret_store_failing_second_write() -> (
+        Arc<ironclaw_secrets::FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
+        Arc<FaultInjecting<InMemoryBackend>>,
+    ) {
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new()).with_fault(
+                Fault::on(FilesystemOperation::WriteFile)
+                    .path("secrets")
+                    .nth(2)
+                    .backend("injected second put failure"),
+            ),
+        );
+        let store = Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral_over(
+            backend.clone(),
+        ));
+        (store, backend)
+    }
+
+    /// Sorted string paths of `recorded_paths`, for order-independent set
+    /// comparison at the backend seam.
+    fn sorted_paths(paths: Vec<ironclaw_host_api::VirtualPath>) -> Vec<String> {
+        let mut out: Vec<String> = paths.iter().map(|p| p.as_str().to_string()).collect();
+        out.sort();
+        out
+    }
+
+    /// Assert the store wrote two secrets and its rollback deleted exactly those
+    /// two backend paths — the real-seam equivalent of the old fake's
+    /// `deleted_handles == put_handles`.
+    fn assert_two_secrets_written_and_rolled_back(backend: &FaultInjecting<InMemoryBackend>) {
+        let writes = sorted_paths(backend.recorded_paths(FilesystemOperation::WriteFile));
+        let deletes = sorted_paths(backend.recorded_paths(FilesystemOperation::Delete));
+        assert_eq!(writes.len(), 2, "PKCE and client material writes attempted");
+        assert_eq!(
+            deletes, writes,
+            "rollback must delete exactly the written secret paths"
+        );
+    }
+
     #[tokio::test]
     async fn store_flow_material_cleanup_runs_when_client_material_write_fails() {
-        let secret_store = Arc::new(SecondPutFailingSecretStore::new());
+        let (secret_store, backend) = secret_store_failing_second_write();
         let provider = OAuthDcrProvider::new(
             test_config(),
             Arc::new(DcrSetupEgress),
@@ -1440,28 +1486,22 @@ mod tests {
             .await
             .expect_err("second secret write fails");
 
+        // The real store mapped the injected `FilesystemError::Backend` through
+        // its `FilesystemError -> SecretStoreError::StoreUnavailable` path (which
+        // the old whole-trait fake short-circuited), and the provider surfaced it
+        // as `BackendUnavailable`.
         assert_eq!(
             error.code(),
             ironclaw_auth::AuthErrorCode::BackendUnavailable
         );
-        let put_handles = secret_store.put_handles();
-        assert_eq!(
-            put_handles.len(),
-            2,
-            "PKCE and client material put attempted"
-        );
-        let deleted_handles = secret_store.deleted_handles();
-        assert_eq!(
-            deleted_handles, put_handles,
-            "rollback must delete both flow-scoped handles"
-        );
+        assert_two_secrets_written_and_rolled_back(&backend);
         assert!(
             secret_store
-                .metadata(&sample_auth_scope().resource, &put_handles[0])
+                .metadata_for_scope(&sample_auth_scope().resource)
                 .await
                 .unwrap()
-                .is_none(),
-            "PKCE material written before client failure must be removed"
+                .is_empty(),
+            "no secret material may survive the rolled-back flow"
         );
         assert!(
             flow_source
@@ -1487,7 +1527,7 @@ mod tests {
     #[tokio::test]
     async fn dcr_provider_setup_flow_cleans_up_material_and_cancels_flow_when_client_material_write_fails()
      {
-        let secret_store = Arc::new(SecondPutFailingSecretStore::new());
+        let (secret_store, backend) = secret_store_failing_second_write();
         let provider = OAuthDcrProvider::new(
             test_config(),
             Arc::new(DcrSetupEgress),
@@ -1511,17 +1551,7 @@ mod tests {
             error.code(),
             ironclaw_auth::AuthErrorCode::BackendUnavailable
         );
-        let put_handles = secret_store.put_handles();
-        assert_eq!(
-            put_handles.len(),
-            2,
-            "PKCE and client material put attempted"
-        );
-        let deleted_handles = secret_store.deleted_handles();
-        assert_eq!(
-            deleted_handles, put_handles,
-            "rollback must delete both setup flow handles"
-        );
+        assert_two_secrets_written_and_rolled_back(&backend);
         let flows = auth.flows_for_owner(sample_flow_owner()).await.unwrap();
         assert_eq!(flows.len(), 1, "rollback should leave one terminal flow");
         assert_eq!(
@@ -1531,11 +1561,11 @@ mod tests {
         );
         assert!(
             secret_store
-                .metadata(&scope.resource, &put_handles[0])
+                .metadata_for_scope(&scope.resource)
                 .await
                 .unwrap()
-                .is_none(),
-            "PKCE material written before client failure must be removed"
+                .is_empty(),
+            "no secret material may survive the rolled-back setup flow"
         );
     }
 
@@ -1818,122 +1848,6 @@ mod tests {
                 saved_body: None,
                 redaction_applied: false,
             })
-        }
-    }
-
-    #[derive(Debug)]
-    struct SecondPutFailingSecretStore {
-        inner: ironclaw_secrets::FilesystemSecretStore<ironclaw_filesystem::InMemoryBackend>,
-        put_count: AtomicUsize,
-        put_handles: Mutex<Vec<SecretHandle>>,
-        deleted_handles: Mutex<Vec<SecretHandle>>,
-    }
-
-    impl SecondPutFailingSecretStore {
-        fn new() -> Self {
-            Self {
-                inner: ironclaw_secrets::FilesystemSecretStore::ephemeral(),
-                put_count: AtomicUsize::new(0),
-                put_handles: Mutex::new(Vec::new()),
-                deleted_handles: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn put_handles(&self) -> Vec<SecretHandle> {
-            self.put_handles
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        }
-
-        fn deleted_handles(&self) -> Vec<SecretHandle> {
-            self.deleted_handles
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        }
-    }
-
-    #[async_trait]
-    impl SecretStore for SecondPutFailingSecretStore {
-        async fn put(
-            &self,
-            scope: ResourceScope,
-            handle: SecretHandle,
-            material: SecretMaterial,
-            expires_at: Option<ironclaw_host_api::Timestamp>,
-        ) -> Result<ironclaw_secrets::SecretMetadata, ironclaw_secrets::SecretStoreError> {
-            self.put_handles
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(handle.clone());
-            if self.put_count.fetch_add(1, Ordering::SeqCst) == 1 {
-                return Err(ironclaw_secrets::SecretStoreError::StoreUnavailable {
-                    reason: "injected second put failure".to_string(),
-                });
-            }
-            self.inner.put(scope, handle, material, expires_at).await
-        }
-
-        async fn metadata(
-            &self,
-            scope: &ResourceScope,
-            handle: &SecretHandle,
-        ) -> Result<Option<ironclaw_secrets::SecretMetadata>, ironclaw_secrets::SecretStoreError>
-        {
-            self.inner.metadata(scope, handle).await
-        }
-
-        async fn metadata_for_scope(
-            &self,
-            scope: &ResourceScope,
-        ) -> Result<Vec<ironclaw_secrets::SecretMetadata>, ironclaw_secrets::SecretStoreError>
-        {
-            self.inner.metadata_for_scope(scope).await
-        }
-
-        async fn delete(
-            &self,
-            scope: &ResourceScope,
-            handle: &SecretHandle,
-        ) -> Result<bool, ironclaw_secrets::SecretStoreError> {
-            self.deleted_handles
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(handle.clone());
-            self.inner.delete(scope, handle).await
-        }
-
-        async fn lease_once(
-            &self,
-            scope: &ResourceScope,
-            handle: &SecretHandle,
-        ) -> Result<ironclaw_secrets::SecretLease, ironclaw_secrets::SecretStoreError> {
-            self.inner.lease_once(scope, handle).await
-        }
-
-        async fn consume(
-            &self,
-            scope: &ResourceScope,
-            lease_id: ironclaw_secrets::SecretLeaseId,
-        ) -> Result<SecretMaterial, ironclaw_secrets::SecretStoreError> {
-            self.inner.consume(scope, lease_id).await
-        }
-
-        async fn revoke(
-            &self,
-            scope: &ResourceScope,
-            lease_id: ironclaw_secrets::SecretLeaseId,
-        ) -> Result<ironclaw_secrets::SecretLease, ironclaw_secrets::SecretStoreError> {
-            self.inner.revoke(scope, lease_id).await
-        }
-
-        async fn leases_for_scope(
-            &self,
-            scope: &ResourceScope,
-        ) -> Result<Vec<ironclaw_secrets::SecretLease>, ironclaw_secrets::SecretStoreError>
-        {
-            self.inner.leases_for_scope(scope).await
         }
     }
 

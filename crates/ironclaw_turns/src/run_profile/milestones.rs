@@ -15,7 +15,7 @@ use super::host::{
     LoopPromptBundleRef, LoopRunContext, LoopSafeSummary, PromptMode,
 };
 use super::refs::{LoopDriverId, ModelProfileId};
-use super::{CompactionInitiator, SystemInferenceTaskId};
+use super::{CompactionInitiator, SkillTrustLevel, SystemInferenceTaskId};
 use crate::{LoopCompletionKind, LoopFailureKind};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,7 +51,7 @@ impl LoopHostMilestone {
 pub struct PromptSkillContextMetadata {
     pub ordinal: usize,
     pub source_name: String,
-    pub trust_level: String,
+    pub trust_level: SkillTrustLevel,
 }
 
 /// Public wire shape for host-loop milestones.
@@ -524,9 +524,8 @@ where
         provider: Option<ExtensionId>,
         runtime: Option<RuntimeKind>,
         reason_kind: CapabilityFailureKind,
-        safe_summary: Option<String>,
+        safe_summary: Option<LoopSafeSummary>,
     ) -> Result<(), AgentLoopHostError> {
-        let safe_summary = safe_summary.map(LoopSafeSummary::capability_failure_summary);
         self.publish(LoopHostMilestoneKind::CapabilityFailed {
             activity_id,
             capability_id,
@@ -979,5 +978,37 @@ mod hook_milestone_schema_snapshots {
   }
 }"#;
         assert_eq!(pretty(&value), EXPECTED);
+    }
+}
+
+#[cfg(test)]
+mod prompt_skill_context_metadata_wire {
+    //! `PromptSkillContextMetadata.trust_level` was a `String` before it was
+    //! typed as `SkillTrustLevel`. The enum's snake_case serde produces the same
+    //! `"installed"`/`"trusted"` tokens, so historical milestone JSON still
+    //! deserializes and the round-trip is byte-stable.
+    use super::{PromptSkillContextMetadata, SkillTrustLevel};
+
+    #[test]
+    fn historical_string_trust_level_deserializes_and_round_trips() {
+        for (json, expected) in [
+            (
+                r#"{"ordinal":0,"source_name":"github","trust_level":"trusted"}"#,
+                SkillTrustLevel::Trusted,
+            ),
+            (
+                r#"{"ordinal":3,"source_name":"memory","trust_level":"installed"}"#,
+                SkillTrustLevel::Installed,
+            ),
+        ] {
+            let parsed: PromptSkillContextMetadata =
+                serde_json::from_str(json).expect("historical milestone JSON must still parse");
+            assert_eq!(parsed.trust_level, expected);
+            assert_eq!(
+                serde_json::to_string(&parsed).expect("serialize"),
+                json,
+                "trust_level must serialize back to the same wire token"
+            );
+        }
     }
 }

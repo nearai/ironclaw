@@ -3,7 +3,7 @@
 The **WebUI host stack** for Reborn WebChat v2: route surface + SPA bundle +
 gateway assembly/middleware + listener/serve loop + host authentication, all in
 one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
-`ironclaw-reborn` binary (`crates/ironclaw_reborn_cli`).
+`ironclaw` binary (`crates/ironclaw_reborn_cli`).
 
 ## Start here
 
@@ -15,8 +15,8 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
   - `src/webui_v2/descriptors.rs` + `tests/webui_v2_descriptors_contract.rs` — the route contract.
   - `src/webui_v2/handlers.rs` + `tests/webui_v2_handlers_contract.rs` — handler dispatch.
   - `src/webui_serve.rs` — the `webui_v2_app` gateway assembly + middleware order.
-  - `Cargo.toml` — feature gates (`slack-v2-host-beta`, `openai-compat-beta`,
-    `dev-in-memory-session`) and the (deliberately narrow) dependency shape.
+  - `Cargo.toml` — the `test-support` feature gate and the
+    (deliberately narrow) dependency shape.
 
 ## What this crate owns (composed subsystems)
 
@@ -32,7 +32,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
    config)` composes the full `axum::Router` and layers the fixed middleware
    stack — ws-origin → body limit → bearer auth → rate limit → handler — plus the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   feature-gated Slack / OpenAI-compat mounts.
+   Slack / OpenAI-compat mounts.
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs`):
    `serve_webui_v2` (listener bind + `axum::serve` + graceful shutdown), the
@@ -61,8 +61,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 `ironclaw_reborn_composition` (the composed `RebornWebuiBundle` + product-auth
 mount builders + `WebuiAuthenticator` trait + mount vocabulary),
 `ironclaw_product_workflow` (`RebornServicesApi` + wire DTOs), `ironclaw_host_api`
-(identity newtypes), and — under `openai-compat-beta` only —
-`ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
+(identity newtypes), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
 `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
 
 Any other workspace-crate edge requires an `ironclaw_architecture` boundary-test

@@ -103,7 +103,7 @@ def cargo_build() -> None:
             "cargo",
             "build",
             "-p",
-            "ironclaw",
+            "ironclaw_legacy",
             "--bin",
             "ironclaw-legacy",
             "--no-default-features",

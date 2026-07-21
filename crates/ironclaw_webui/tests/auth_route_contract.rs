@@ -27,7 +27,7 @@
 //! Supports the authentication slice of the #3615 WebUI security parity
 //! audit.
 
-#![cfg(feature = "dev-in-memory-session")]
+#![cfg(feature = "test-support")]
 
 use std::sync::Arc;
 

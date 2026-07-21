@@ -7,38 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0-rc.1] - 2026-07-20
+
+First release candidate of the rearchitected IronClaw, internally called
+**Reborn**. This is not an increment on the 0.29.x line — it is a ground-up
+rebuild of the agent runtime, storage, extension host, and web UI.
+
+**The `ironclaw` binary is now the Reborn CLI.** The v1 monolith now builds as
+the `ironclaw-legacy` binary and is no longer published; 1.0.0-rc.1 publishes
+the Reborn `ironclaw` binary only.
+
+### This is not an in-place upgrade from 0.29.x
+
+There is no migration for v1 config, databases, settings, or secrets, and
+installing 1.0.0-rc.1 does not touch your existing v1 data. Treat it as a
+fresh install: point `IRONCLAW_REBORN_HOME` at a new directory, run
+`ironclaw onboard`, and reconnect your providers and channels. Do not point
+it at a v1 data directory.
+
+### What ships
+
+- **Platforms.** Seven targets — macOS (Apple Silicon, Intel), Linux
+  (`x86_64`/`aarch64`, gnu and static musl), and Windows (`x86_64`), with shell,
+  PowerShell, and MSI installers.
+- **Guided setup.** `ironclaw onboard` provisions the config, the encrypted
+  credential store, an LLM provider (interactive key entry with a live probe),
+  a WebUI login token, and — on macOS and Linux — the background service. The
+  credential store's master key is provisioned in the OS keychain when one is
+  available, falling back to a locally cached key file otherwise.
+- **Model providers.** 26 providers in the built-in catalog, including NEAR AI,
+  OpenAI, Anthropic, Gemini, Bedrock, Ollama, OpenRouter, Groq, DeepSeek, and
+  any OpenAI-compatible endpoint. Manage routes with `ironclaw models`.
+- **Web UI.** `ironclaw serve` starts the WebChat v2 interface with the frontend
+  embedded in the binary — no separate asset deploy. Chat, extensions,
+  automations, settings, and admin surfaces are served from root-level routes.
+- **Extensions.** Twelve first-party extensions ship embedded and install
+  without a network fetch: GitHub, Gmail, Google Calendar, Docs, Drive, Sheets,
+  Slides, Notion, NEAR AI MCP, Slack, Telegram, and web access. Manage them with
+  `ironclaw extension` or the WebUI registry.
+- **Channels.** Slack and Telegram, both configured from the WebUI; Slack
+  connects per user through OAuth, Telegram through a per-user pairing code.
+- **Runtime.** Skills, scheduled and triggered automations, subagents, workspace
+  memory, and trace capture.
+- **Storage.** File-backed libSQL by default, so a stock install needs no
+  external database; PostgreSQL is opt-in via `[storage]`.
+- **Service management.** `ironclaw service install|start|stop|restart|status|uninstall`
+  runs the binary as a launchd user agent (macOS) or systemd user unit (Linux).
+
+### Known limitations
+
+- `ironclaw channels list`, `hooks list`, and `logs` appear in `--help` but
+  return an explicit "not implemented yet" error.
+- `mcp`, `memory`, `pairing`, `import`, and `login` subcommands from v1 have no
+  Reborn equivalent; MCP servers and memory are reached through extensions and
+  the WebUI instead.
+- `onboard --import-history` parses but does nothing.
+- `skills` is list-only from the CLI.
+- `extension` and `skills` work out of the box: `ironclaw onboard` defaults to
+  the `local-dev` profile, where both are fully supported (as under
+  `local-dev-yolo`, `hosted-single-tenant`, and `hosted-single-tenant-volume`).
+  Only operators who explicitly choose `production` or `migration-dry-run`
+  hit a clear error instead.
+
+Please report problems at https://github.com/nearai/ironclaw/issues — include
+`ironclaw status --json` output.
+
+The itemized changes since 0.29.1 follow.
+
 ### Added
 
 - *(reborn)* automations and `trigger_list` now surface why a scheduled trigger is currently held (approval/auth/in-progress) and how many scheduled occurrences elapsed while held ([#5886](https://github.com/nearai/ironclaw/issues/5886)).
-- *(reborn)* `ironclaw-reborn service install`/`start`/`stop`/`restart`/`status`/`uninstall` manage the standalone Reborn binary as an OS-native service (launchd user agent on macOS, systemd user unit on Linux), with a webui-token-file fallback for `serve` and atomic install with rollback on failure.
+- *(reborn)* `ironclaw service install`/`start`/`stop`/`restart`/`status`/`uninstall` manage the standalone Reborn binary as an OS-native service (launchd user agent on macOS, systemd user unit on Linux), with a webui-token-file fallback for `serve` and atomic install with rollback on failure.
 
 ### Fixed
 
+- *(reborn)* route Rig-backed model calls through provider streaming for WebUI v2 runs, cover delayed/broken/cancelled/transient mock LLM behavior in served E2E tests, and verify failed runs can retry after a transient checkpoint-state outage, including failures before the first checkpoint.
+- *(reborn)* activating an extension whose OAuth provider was never configured on the instance now fails immediately with the exact `ironclaw config set` commands and restart step, instead of parking an unresolvable auth gate ([#6335](https://github.com/nearai/ironclaw/issues/6335)).
+- *(reborn)* host-authored remediation text reaches the model intact again instead of degrading to "capability summary unavailable" ([#6335](https://github.com/nearai/ironclaw/issues/6335)).
+- *(webui-v2)* report settings imports with no supported entries as failures instead of showing a false success message ([#6179](https://github.com/nearai/ironclaw/issues/6179)).
 - *(filesystem)* make libSQL descendant listings seek through the path index instead of scanning the full root-filesystem table, preventing extension-readiness fan-out from stalling unrelated WebUI requests.
 - *(webui-v2)* expose per-user secret provisioning in Admin user details with write-only values, handle-only listings, and confirmed deletion ([#6118](https://github.com/nearai/ironclaw/issues/6118)).
 - *(webui-v2)* render the Extensions Registry as soon as catalog data arrives instead of holding the skeleton screen for slower installed-extension enrichment ([#6052](https://github.com/nearai/ironclaw/issues/6052)).
 - *(webui-v2)* submit the latest composer value when Enter follows input before React rerenders, avoiding intermittently dropped follow-up messages ([#6044](https://github.com/nearai/ironclaw/issues/6044)).
 - *(reborn)* recover the filesystem resource governor after transient libSQL writer contention without bypassing durable accounting, reject stale authority writes during recovery, and distinguish accounting outages from provider budget failures.
-- *(reborn)* `builtin.result_read` input errors now carry a structured, model-visible `CapabilityInputIssue` (field path, issue code, expected/received) with model-controlled echoes secret-redacted, and truncated previews of top-level JSON-array results report the array's `item_count` — persisted end-to-end through the observation validator ([#6059](https://github.com/nearai/ironclaw/pull/6059)).
+- *(reborn)* `builtin.result_read` input errors now carry structured, model-visible input-error detail (field path, issue code, expected/received) with model-controlled echoes secret-redacted, and truncated previews of top-level JSON-array results report the array's `item_count` — persisted end-to-end through the observation validator ([#6059](https://github.com/nearai/ironclaw/pull/6059)).
 - *(reborn)* ride out transient model-provider outages with cancellation-aware availability retries, fail fast when no provider is configured, and preserve actionable shell/coding failure reasons for the model ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(slack)* resolve known DM conversation IDs through an exact Slack lookup before encoding mentions, avoiding wrong-target posts when conversation lists are long or display names are ambiguous.
 - *(reborn)* add an explicit tenant extension-ownership migration that assigns every installed extension to every existing user, and clean up the departing user's external connection and personal credentials without tearing down the package for remaining users.
-- *(reborn)* make extension-scoped OAuth and explicit extension removal restart-safe and fenced: malformed callbacks now terminalize durable flows, status reads are observational with an explicit reconciliation command, multi-credential activation waits without revoking completed credentials, Slack cleanup fences ingress before fallible identity deletion, and uninstall cleanup obligations survive catalog/package loss.
+- *(reborn)* make extension-scoped OAuth and explicit extension removal restart-safe and fenced: malformed callbacks now terminate durable flows, status reads are observational with an explicit reconciliation command, multi-credential activation waits without revoking completed credentials, Slack cleanup fences ingress before fallible identity deletion, and uninstall cleanup obligations survive catalog/package loss.
 - *(reborn)* allow `builtin.time` parse, convert, format, and diff operations to consume JSON numbers or numeric strings containing Unix seconds, integral Unix milliseconds, and fractional Slack timestamps in addition to ISO 8601 strings.
 
 ### Changed
 
-- *(reborn)* move product-neutral channel delivery into `ironclaw_channel_delivery` and make the Telegram host own its concrete state, setup-revision workflow, and trigger-delivery behavior while composition remains mount/registration-only ([#6159](https://github.com/nearai/ironclaw/pull/6159)).
+- *(reborn)* move product-neutral channel delivery into its own crate and make the Telegram host own its concrete state, setup-revision workflow, and trigger-delivery behavior while composition remains mount/registration-only ([#6159](https://github.com/nearai/ironclaw/pull/6159)).
 - *(webui-v2)* serve the Reborn WebUI from root-level browser routes, with temporary `/v2` compatibility redirects that preserve deep links and login query parameters; `/api/webchat/v2/*` remains unchanged ([#6142](https://github.com/nearai/ironclaw/issues/6142)).
 - *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
 - *(reborn-cli)* document the standalone `config init` atomic-write dependency on `tempfile` and call out the default runner cadence change to 5s heartbeats / 200ms polling (down from 10s / 2s).
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
 - *(channels)* v1 Slack DM policy now defaults to `allowlist` (previously `pairing`); existing installs still configured with `dm_policy=pairing` fall through to `allowlist` as Slack relay pairing is retired ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
-- *(reborn-cli)* **Breaking:** `ironclaw-reborn serve` now rejects the legacy `[slack]` config fields (`installation_id`, `team_id`, `api_app_id`, `slack_user_id`, `user_id`, `shared_subject_user_id`, `signing_secret_env`, `bot_token_env`, `channel_routes`). Slack bot credentials and routing are configured from the WebUI channel setup page; per-user identity comes only from Slack OAuth. `[slack].enabled` / `IRONCLAW_REBORN_SLACK_ENABLED` still gate whether the channel mounts ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
+- *(reborn-cli)* **Breaking:** `ironclaw serve` now rejects the legacy `[slack]` config fields (`installation_id`, `team_id`, `api_app_id`, `slack_user_id`, `user_id`, `shared_subject_user_id`, `signing_secret_env`, `bot_token_env`, `channel_routes`). Slack bot credentials and routing are configured from the WebUI channel setup page; per-user identity comes only from Slack OAuth. `[slack].enabled` / `IRONCLAW_REBORN_SLACK_ENABLED` still gate whether the channel mounts ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
 
 ### CI / Release
 
-- *(release)* compile the canonical Reborn `ironclaw` binary across the seven supported OS/CPU targets as a tag-driven release preflight ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
+- *(release)* publish the canonical Reborn `ironclaw` package from `ironclaw-v*` tags with cargo-dist across seven OS/CPU targets, including archives, checksums, shell and PowerShell installers, and MSI, while excluding legacy v1, WASM, Docker, npm publishing, and the old registry-update/announcement path ([#6160](https://github.com/nearai/ironclaw/issues/6160)).
 
 ### Removed
 

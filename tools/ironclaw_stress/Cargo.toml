@@ -13,20 +13,10 @@ publish = false
 [package.metadata.ironclaw]
 layer = "app"
 
-[features]
-default = ["libsql", "postgres"]
-libsql = ["dep:libsql", "ironclaw_filesystem/libsql"]
-postgres = [
-    "dep:deadpool-postgres",
-    "dep:tokio-postgres",
-    "ironclaw_filesystem/postgres",
-    "ironclaw_resources/postgres",
-]
-
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-deadpool-postgres = { version = "0.14", optional = true }
+deadpool-postgres = "0.14"
 ironclaw_filesystem = { path = "../../crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../../crates/ironclaw_host_api", version = "0.1.0" }
 ironclaw_llm = { path = "../../crates/ironclaw_llm", version = "0.1.0", features = ["registry-provider-factory"] }
@@ -34,7 +24,7 @@ ironclaw_resources = { path = "../../crates/ironclaw_resources", version = "0.1.
 ironclaw_secrets = { path = "../../crates/ironclaw_secrets", version = "0.1.0" }
 ironclaw_threads = { path = "../../crates/ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../../crates/ironclaw_turns", version = "0.1.0" }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"
@@ -42,7 +32,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
-tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]

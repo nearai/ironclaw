@@ -510,7 +510,7 @@ const _: fn(&CredentialCacheEntry) = |entry| {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::{
         InvocationId, NetworkMethod, NetworkPolicy, ResourceScope, RuntimeKind, TenantId,
         Timestamp, UserId,
@@ -518,6 +518,7 @@ mod tests {
     use ironclaw_secrets::{
         FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMetadata, SecretStoreError,
     };
+    use std::sync::Arc;
 
     fn sample_scope() -> ResourceScope {
         ResourceScope {
@@ -564,8 +565,15 @@ mod tests {
         }
     }
 
+    /// Exhaustive table of the pure `SecretStoreError -> sanitized reason`
+    /// mapping. These lease-lifecycle / misconfiguration variants are produced
+    /// by the secret store's OWN lease logic, not by a filesystem backend
+    /// fault, so they cannot be reproduced through `FaultInjecting` (which can
+    /// only ever surface as `StoreUnavailable` via `fs_to_secret_store_error`).
+    /// Testing the sanitizer directly is stronger than routing eight fake
+    /// stores through the caller and covers every branch.
     #[test]
-    fn lease_secret_maps_secret_store_errors_to_sanitized_reasons() {
+    fn sanitized_secret_error_maps_every_variant_to_stable_reason() {
         let scope = sample_scope();
         let handle = SecretHandle::new("api-token").unwrap();
         let lease_id = SecretLeaseId::new();
@@ -575,7 +583,7 @@ mod tests {
                     scope: Box::new(scope.clone()),
                     handle: handle.clone(),
                 },
-                "required credential is unavailable",
+                "credential is unavailable",
             ),
             (
                 SecretStoreError::UnknownLease {
@@ -611,18 +619,69 @@ mod tests {
             ),
         ];
 
-        let request = sample_request(scope.clone());
         for (store_error, expected_reason) in cases {
-            let store = FailingLeaseSecretStore {
-                scope: scope.clone(),
-                handle: handle.clone(),
-                error: store_error,
-            };
-            let error =
-                lease_secret_for_injection(&store, &request, &sample_injection(handle.clone()))
-                    .expect_err("failing secret store should reject lease resolution");
-            assert_eq!(credential_reason(&error), expected_reason);
+            assert_eq!(sanitized_secret_error(&store_error), expected_reason);
         }
+    }
+
+    /// Real `FilesystemSecretStore` over a [`FaultInjecting`] backend armed to
+    /// fail the lease write. Replaces the whole-trait `FailingLeaseSecretStore`
+    /// fake for the one error the real store genuinely surfaces from a backend
+    /// fault: `lease_once` reads the seeded secret, then its `write_lease`
+    /// `put` hits the injected `FilesystemError::Backend`, which the store maps
+    /// (`fs_to_secret_store_error`) to `SecretStoreError::StoreUnavailable`, and
+    /// `lease_secret_for_injection` sanitizes to "credential store unavailable".
+    #[test]
+    fn lease_secret_surfaces_backend_lease_write_fault_as_store_unavailable() {
+        let scope = sample_scope();
+        let handle = SecretHandle::new("api-token").unwrap();
+        let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+        let store = FilesystemSecretStore::ephemeral_over(backend.clone());
+        // Seed the secret so metadata()/lease read succeed; the fault fires on
+        // the lease write, not the reads.
+        block_on_test(store.put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("sk-test-secret"),
+            None,
+        ))
+        .unwrap();
+        backend.add_fault(
+            Fault::on(FilesystemOperation::WriteFile)
+                .path("secrets")
+                .backend("injected lease write failure"),
+        );
+
+        let request = sample_request(scope);
+        let error = lease_secret_for_injection(&store, &request, &sample_injection(handle))
+            .expect_err("lease write fault must surface as a credential error");
+
+        assert_eq!(credential_reason(&error), "credential store unavailable");
+        assert!(
+            backend.count(FilesystemOperation::WriteFile) >= 2,
+            "seed write plus the faulted lease write must both reach the backend"
+        );
+    }
+
+    /// A required credential that is genuinely absent must surface as
+    /// "required credential is unavailable" through the real store: `metadata`
+    /// returns `Ok(None)`, so the caller short-circuits via
+    /// `missing_runtime_credential` before ever reaching `lease_once`.
+    #[test]
+    fn lease_secret_missing_required_credential_reports_unavailable() {
+        let scope = sample_scope();
+        let handle = SecretHandle::new("absent-token").unwrap();
+        let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+        let store = FilesystemSecretStore::ephemeral_over(backend);
+
+        let request = sample_request(scope);
+        let error = lease_secret_for_injection(&store, &request, &sample_injection(handle))
+            .expect_err("absent required credential must error");
+
+        assert_eq!(
+            credential_reason(&error),
+            "required credential is unavailable"
+        );
     }
 
     #[test]
@@ -650,91 +709,6 @@ mod tests {
         match error {
             RuntimeHttpEgressError::Credential { reason } => reason,
             other => panic!("expected credential error, got {other:?}"),
-        }
-    }
-
-    struct FailingLeaseSecretStore {
-        scope: ResourceScope,
-        handle: SecretHandle,
-        error: SecretStoreError,
-    }
-
-    #[async_trait::async_trait]
-    impl SecretStore for FailingLeaseSecretStore {
-        async fn put(
-            &self,
-            scope: ResourceScope,
-            handle: SecretHandle,
-            _material: SecretMaterial,
-            _expires_at: Option<Timestamp>,
-        ) -> Result<SecretMetadata, SecretStoreError> {
-            Ok(SecretMetadata {
-                scope,
-                handle,
-                expires_at: None,
-            })
-        }
-
-        async fn metadata(
-            &self,
-            _scope: &ResourceScope,
-            _handle: &SecretHandle,
-        ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-            Ok(Some(SecretMetadata {
-                scope: self.scope.clone(),
-                handle: self.handle.clone(),
-                expires_at: None,
-            }))
-        }
-
-        async fn metadata_for_scope(
-            &self,
-            _scope: &ResourceScope,
-        ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-            Ok(vec![SecretMetadata {
-                scope: self.scope.clone(),
-                handle: self.handle.clone(),
-                expires_at: None,
-            }])
-        }
-
-        async fn delete(
-            &self,
-            _scope: &ResourceScope,
-            _handle: &SecretHandle,
-        ) -> Result<bool, SecretStoreError> {
-            Ok(false)
-        }
-
-        async fn lease_once(
-            &self,
-            _scope: &ResourceScope,
-            _handle: &SecretHandle,
-        ) -> Result<SecretLease, SecretStoreError> {
-            Err(self.error.clone())
-        }
-
-        async fn consume(
-            &self,
-            _scope: &ResourceScope,
-            _lease_id: SecretLeaseId,
-        ) -> Result<SecretMaterial, SecretStoreError> {
-            Err(self.error.clone())
-        }
-
-        async fn revoke(
-            &self,
-            _scope: &ResourceScope,
-            _lease_id: SecretLeaseId,
-        ) -> Result<SecretLease, SecretStoreError> {
-            Err(self.error.clone())
-        }
-
-        async fn leases_for_scope(
-            &self,
-            _scope: &ResourceScope,
-        ) -> Result<Vec<SecretLease>, SecretStoreError> {
-            Ok(Vec::new())
         }
     }
 

@@ -19,7 +19,7 @@ axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_channel_delivery = { path = "../ironclaw_channel_delivery" }
-ironclaw_channel_host = { path = "../ironclaw_channel_host", features = ["webhook-serve"] }
+ironclaw_channel_host = { path = "../ironclaw_channel_host"}
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
@@ -49,6 +49,7 @@ tracing = "0.1"
 http-body-util = "0.1"
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", features = ["test-support"] }  # FaultInjecting decorator: test store fault paths through the real store
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_processes = { path = "../ironclaw_processes", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }

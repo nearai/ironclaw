@@ -2,7 +2,7 @@ mod support;
 
 use support::legacy_capability_fixture_to_v2;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -14,6 +14,7 @@ use ironclaw_approvals::{
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityAuthResumeRequest,
@@ -29,7 +30,7 @@ use serde_json::json;
 #[tokio::test]
 async fn default_runtime_uses_persistent_policy_as_dispatch_authority() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -86,7 +87,7 @@ async fn default_runtime_uses_persistent_policy_as_dispatch_authority() {
         }
         other => panic!("expected Completed outcome, got {:?}", other),
     }
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
 }
 
 // Regression: an auth-resume (BlockedAuth → credential supplied → resume) for a
@@ -102,7 +103,7 @@ async fn default_runtime_uses_persistent_policy_as_dispatch_authority() {
 #[tokio::test]
 async fn default_runtime_uses_persistent_policy_as_auth_resume_authority() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -183,7 +184,7 @@ async fn default_runtime_uses_persistent_policy_as_auth_resume_authority() {
             other
         ),
     }
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
 
     let resumed = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(
@@ -196,7 +197,7 @@ async fn default_runtime_uses_persistent_policy_as_auth_resume_authority() {
 #[tokio::test]
 async fn default_runtime_uses_user_grantee_persistent_policy_as_dispatch_authority() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -253,13 +254,13 @@ async fn default_runtime_uses_user_grantee_persistent_policy_as_dispatch_authori
         }
         other => panic!("expected Completed outcome, got {:?}", other),
     }
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
 }
 
 #[tokio::test]
 async fn default_runtime_uses_threadless_filesystem_policy_after_thread_change() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -328,13 +329,13 @@ async fn default_runtime_uses_threadless_filesystem_policy_after_thread_change()
         }
         other => panic!("expected Completed outcome, got {:?}", other),
     }
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
 }
 
 #[tokio::test]
 async fn default_runtime_does_not_replay_tenant_grantee_persistent_policy() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -391,13 +392,13 @@ async fn default_runtime_does_not_replay_tenant_grantee_persistent_policy() {
         }
         other => panic!("expected authorization failure, got {:?}", other),
     }
-    assert!(!dispatcher.has_request());
+    assert_eq!(dispatcher.call_count(), 0);
 }
 
 #[tokio::test]
 async fn default_runtime_skips_unusable_persistent_policy_for_later_match() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -474,13 +475,13 @@ async fn default_runtime_skips_unusable_persistent_policy_for_later_match() {
         }
         other => panic!("expected Completed outcome, got {:?}", other),
     }
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
 }
 
 #[tokio::test]
 async fn default_runtime_falls_back_when_persistent_policy_lookup_fails() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -517,13 +518,13 @@ async fn default_runtime_falls_back_when_persistent_policy_lookup_fails() {
         }
         other => panic!("expected authorization failure, got {:?}", other),
     }
-    assert!(!dispatcher.has_request());
+    assert_eq!(dispatcher.call_count(), 0);
 }
 
 #[tokio::test]
 async fn default_runtime_reuses_persistent_policy_for_manifest_ask() {
     let registry = Arc::new(registry_with_echo_capability_permission("ask"));
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -580,13 +581,13 @@ async fn default_runtime_reuses_persistent_policy_for_manifest_ask() {
         }
         other => panic!("expected Completed outcome, got {:?}", other),
     }
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
 }
 
 #[tokio::test]
 async fn default_runtime_skips_expired_persistent_policy() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -643,7 +644,7 @@ async fn default_runtime_skips_expired_persistent_policy() {
         }
         other => panic!("expected authorization failure, got {:?}", other),
     }
-    assert!(!dispatcher.has_request());
+    assert_eq!(dispatcher.call_count(), 0);
 }
 
 #[tokio::test]
@@ -652,7 +653,7 @@ async fn default_runtime_uses_persistent_policy_for_no_project_no_thread_scope()
     // (tenant, user, agent) persistent approval scope: the lookup proceeds and a
     // seeded "always allow" policy authorizes dispatch without a gate.
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -714,13 +715,13 @@ async fn default_runtime_uses_persistent_policy_for_no_project_no_thread_scope()
         }
         other => panic!("expected Completed outcome, got {:?}", other),
     }
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
 }
 
 #[tokio::test]
 async fn default_runtime_uses_persistent_policy_as_spawn_capability_authority() {
     let registry = Arc::new(registry_with_echo_capability());
-    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests = Arc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -791,45 +792,21 @@ fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRu
     .unwrap()
 }
 
-#[derive(Default)]
-struct RecordingDispatcher {
-    request: Mutex<Option<CapabilityDispatchRequest>>,
-}
-
-impl RecordingDispatcher {
-    fn has_request(&self) -> bool {
-        self.request
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_some()
-    }
-}
-
-#[async_trait]
-impl CapabilityDispatcher for RecordingDispatcher {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        *self
-            .request
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
-        Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
-            provider: extension_id(),
-            runtime: RuntimeKind::Wasm,
-            output: json!({"ok": true}),
-            display_preview: None,
-            usage: ResourceUsage::default(),
-            receipt: ResourceReceipt {
-                id: ResourceReservationId::new(),
-                scope: request.scope,
-                status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
-                actual: Some(ResourceUsage::default()),
-            },
-        })
+fn dispatch_result() -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id: capability_id(),
+        provider: extension_id(),
+        runtime: RuntimeKind::Wasm,
+        output: json!({"ok": true}),
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: ResourceScope::system(),
+            status: ReservationStatus::Reconciled,
+            estimate: ResourceEstimate::default(),
+            actual: Some(ResourceUsage::default()),
+        },
     }
 }
 

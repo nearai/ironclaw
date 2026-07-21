@@ -75,7 +75,6 @@ impl NearAiLoginStateStore {
         state
     }
 
-    #[cfg(any(test, feature = "webui-v2-beta"))]
     #[allow(dead_code)]
     pub(crate) async fn consume(&self, state: &str) -> bool {
         let mut states = self.states.lock().await;
@@ -980,7 +979,6 @@ pub(crate) const NEARAI_LOGIN_PREFIX: &str = "/api/webchat/v2/llm/nearai";
 /// The public callback path NEAR AI redirects to (token in the query). The
 /// `{state}` segment must match an authenticated start request before the
 /// callback can write the operator-wide session.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) const NEARAI_LOGIN_CALLBACK_PATH: &str =
     "/api/webchat/v2/llm/nearai/{state}/auth/callback";
 
@@ -1016,7 +1014,6 @@ fn sanitize_origin(raw: &str) -> Option<String> {
 /// Apply a completed NEAR AI login: store the session token on the live
 /// session, make NEAR AI the active provider, and hot-swap the running
 /// provider. Shared by the public callback route. Errors are log-only strings.
-#[cfg(feature = "webui-v2-beta")]
 pub(crate) async fn apply_nearai_login(
     session: &ironclaw_llm::SessionManager,
     boot: &RebornBootConfig,
@@ -1333,17 +1330,12 @@ fn map_admin_error(error: crate::RebornProviderAdminError) -> LlmConfigServiceEr
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use super::*;
-    use ironclaw_filesystem::InMemoryBackend;
-    use ironclaw_host_api::{AgentId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId};
+    use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
     use ironclaw_llm::NEARAI_CLOUD_DEFAULT_BASE_URL;
     use ironclaw_reborn_config::{RebornHome, RebornProfile};
-    use ironclaw_secrets::{
-        FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
-        SecretStore, SecretStoreError,
-    };
+    use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial};
 
     fn boot_for_home(reborn_home: &std::path::Path) -> RebornBootConfig {
         let home = RebornHome::resolve_from_env_parts(
@@ -1359,256 +1351,63 @@ mod tests {
         LlmKeyStore::new(Arc::new(FilesystemSecretStore::ephemeral()))
     }
 
-    struct CountingMetadataSecretStore {
-        inner: FilesystemSecretStore<InMemoryBackend>,
-        metadata_calls: Arc<AtomicUsize>,
-        metadata_for_scope_calls: Arc<AtomicUsize>,
+    /// The real `FilesystemSecretStore` over a plain recording [`FaultInjecting`]
+    /// backend, plus the fault handle. Replaces the former whole-trait
+    /// `CountingMetadataSecretStore` observer fake: the store now runs its
+    /// genuine `metadata`/`metadata_for_scope` path and tests count the backend
+    /// ops it produced (`ReadFile` for a per-handle `metadata`, `Query` for the
+    /// batched `metadata_for_scope`) instead of a bespoke `AtomicUsize` inside a
+    /// fake.
+    fn recording_secret_store() -> (
+        Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>>,
+        Arc<FaultInjecting<InMemoryBackend>>,
+    ) {
+        let backend = Arc::new(FaultInjecting::new(InMemoryBackend::new()));
+        let store = Arc::new(FilesystemSecretStore::ephemeral_over(backend.clone()));
+        (store, backend)
     }
 
-    impl CountingMetadataSecretStore {
-        fn new() -> Self {
-            Self {
-                inner: FilesystemSecretStore::ephemeral(),
-                metadata_calls: Arc::new(AtomicUsize::new(0)),
-                metadata_for_scope_calls: Arc::new(AtomicUsize::new(0)),
-            }
-        }
+    /// The real store over a [`FaultInjecting`] backend armed to fail the secret
+    /// metadata read paths. Replaces the former `MetadataUnavailableSecretStore`
+    /// fake: `metadata_for_scope` maps its backing `Query`, and `metadata` its
+    /// `ReadFile`, so injecting `FaultKind::Backend` on both makes the store's
+    /// real `FilesystemError::Backend -> SecretStoreError::StoreUnavailable`
+    /// mapping fire (a `NotFound` fault would instead surface as `Ok(empty)` /
+    /// `Ok(None)` and never error).
+    fn metadata_unavailable_secret_store()
+    -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>> {
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new())
+                .with_fault(
+                    Fault::on(FilesystemOperation::Query)
+                        .path("secrets")
+                        .backend("metadata index unavailable"),
+                )
+                .with_fault(
+                    Fault::on(FilesystemOperation::ReadFile)
+                        .path("secrets")
+                        .backend("metadata index unavailable"),
+                ),
+        );
+        Arc::new(FilesystemSecretStore::ephemeral_over(backend))
     }
 
-    #[async_trait]
-    impl SecretStore for CountingMetadataSecretStore {
-        async fn put(
-            &self,
-            scope: ResourceScope,
-            handle: SecretHandle,
-            material: SecretMaterial,
-            expires_at: Option<ironclaw_host_api::Timestamp>,
-        ) -> Result<SecretMetadata, SecretStoreError> {
-            self.inner.put(scope, handle, material, expires_at).await
-        }
-
-        async fn metadata(
-            &self,
-            scope: &ResourceScope,
-            handle: &SecretHandle,
-        ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-            self.metadata_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.metadata(scope, handle).await
-        }
-
-        async fn metadata_for_scope(
-            &self,
-            scope: &ResourceScope,
-        ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-            self.metadata_for_scope_calls.fetch_add(1, Ordering::SeqCst);
-            self.inner.metadata_for_scope(scope).await
-        }
-
-        async fn delete(
-            &self,
-            scope: &ResourceScope,
-            handle: &SecretHandle,
-        ) -> Result<bool, SecretStoreError> {
-            self.inner.delete(scope, handle).await
-        }
-
-        async fn lease_once(
-            &self,
-            scope: &ResourceScope,
-            handle: &SecretHandle,
-        ) -> Result<SecretLease, SecretStoreError> {
-            self.inner.lease_once(scope, handle).await
-        }
-
-        async fn consume(
-            &self,
-            scope: &ResourceScope,
-            lease_id: SecretLeaseId,
-        ) -> Result<SecretMaterial, SecretStoreError> {
-            self.inner.consume(scope, lease_id).await
-        }
-
-        async fn revoke(
-            &self,
-            scope: &ResourceScope,
-            lease_id: SecretLeaseId,
-        ) -> Result<SecretLease, SecretStoreError> {
-            self.inner.revoke(scope, lease_id).await
-        }
-
-        async fn leases_for_scope(
-            &self,
-            scope: &ResourceScope,
-        ) -> Result<Vec<SecretLease>, SecretStoreError> {
-            self.inner.leases_for_scope(scope).await
-        }
-    }
-
-    struct MetadataUnavailableSecretStore {
-        inner: FilesystemSecretStore<InMemoryBackend>,
-    }
-
-    impl MetadataUnavailableSecretStore {
-        fn new() -> Self {
-            Self {
-                inner: FilesystemSecretStore::ephemeral(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl SecretStore for MetadataUnavailableSecretStore {
-        async fn put(
-            &self,
-            scope: ResourceScope,
-            handle: SecretHandle,
-            material: SecretMaterial,
-            expires_at: Option<ironclaw_host_api::Timestamp>,
-        ) -> Result<SecretMetadata, SecretStoreError> {
-            self.inner.put(scope, handle, material, expires_at).await
-        }
-
-        async fn metadata(
-            &self,
-            _scope: &ResourceScope,
-            _handle: &SecretHandle,
-        ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-            Err(SecretStoreError::StoreUnavailable {
-                reason: "metadata index unavailable".to_string(),
-            })
-        }
-
-        async fn metadata_for_scope(
-            &self,
-            _scope: &ResourceScope,
-        ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-            Err(SecretStoreError::StoreUnavailable {
-                reason: "metadata index unavailable".to_string(),
-            })
-        }
-
-        async fn delete(
-            &self,
-            scope: &ResourceScope,
-            handle: &SecretHandle,
-        ) -> Result<bool, SecretStoreError> {
-            self.inner.delete(scope, handle).await
-        }
-
-        async fn lease_once(
-            &self,
-            scope: &ResourceScope,
-            handle: &SecretHandle,
-        ) -> Result<SecretLease, SecretStoreError> {
-            self.inner.lease_once(scope, handle).await
-        }
-
-        async fn consume(
-            &self,
-            scope: &ResourceScope,
-            lease_id: SecretLeaseId,
-        ) -> Result<SecretMaterial, SecretStoreError> {
-            self.inner.consume(scope, lease_id).await
-        }
-
-        async fn revoke(
-            &self,
-            scope: &ResourceScope,
-            lease_id: SecretLeaseId,
-        ) -> Result<SecretLease, SecretStoreError> {
-            self.inner.revoke(scope, lease_id).await
-        }
-
-        async fn leases_for_scope(
-            &self,
-            scope: &ResourceScope,
-        ) -> Result<Vec<SecretLease>, SecretStoreError> {
-            self.inner.leases_for_scope(scope).await
-        }
-    }
-
-    /// SecretStore whose `delete` always fails; every other operation delegates
-    /// to an in-memory store. Used to prove provider deletion fails closed when
-    /// the stored key cannot be removed.
-    struct DeleteUnavailableSecretStore {
-        inner: FilesystemSecretStore<InMemoryBackend>,
-    }
-
-    impl DeleteUnavailableSecretStore {
-        fn new() -> Self {
-            Self {
-                inner: FilesystemSecretStore::ephemeral(),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl SecretStore for DeleteUnavailableSecretStore {
-        async fn put(
-            &self,
-            scope: ResourceScope,
-            handle: SecretHandle,
-            material: SecretMaterial,
-            expires_at: Option<ironclaw_host_api::Timestamp>,
-        ) -> Result<SecretMetadata, SecretStoreError> {
-            self.inner.put(scope, handle, material, expires_at).await
-        }
-
-        async fn metadata(
-            &self,
-            scope: &ResourceScope,
-            handle: &SecretHandle,
-        ) -> Result<Option<SecretMetadata>, SecretStoreError> {
-            self.inner.metadata(scope, handle).await
-        }
-
-        async fn metadata_for_scope(
-            &self,
-            scope: &ResourceScope,
-        ) -> Result<Vec<SecretMetadata>, SecretStoreError> {
-            self.inner.metadata_for_scope(scope).await
-        }
-
-        async fn delete(
-            &self,
-            _scope: &ResourceScope,
-            _handle: &SecretHandle,
-        ) -> Result<bool, SecretStoreError> {
-            Err(SecretStoreError::StoreUnavailable {
-                reason: "secret delete unavailable".to_string(),
-            })
-        }
-
-        async fn lease_once(
-            &self,
-            scope: &ResourceScope,
-            handle: &SecretHandle,
-        ) -> Result<SecretLease, SecretStoreError> {
-            self.inner.lease_once(scope, handle).await
-        }
-
-        async fn consume(
-            &self,
-            scope: &ResourceScope,
-            lease_id: SecretLeaseId,
-        ) -> Result<SecretMaterial, SecretStoreError> {
-            self.inner.consume(scope, lease_id).await
-        }
-
-        async fn revoke(
-            &self,
-            scope: &ResourceScope,
-            lease_id: SecretLeaseId,
-        ) -> Result<SecretLease, SecretStoreError> {
-            self.inner.revoke(scope, lease_id).await
-        }
-
-        async fn leases_for_scope(
-            &self,
-            scope: &ResourceScope,
-        ) -> Result<Vec<SecretLease>, SecretStoreError> {
-            self.inner.leases_for_scope(scope).await
-        }
+    /// The real store over a [`FaultInjecting`] backend armed to fail every
+    /// secret `delete`. Replaces the former `DeleteUnavailableSecretStore` fake
+    /// (prove provider deletion fails closed when the stored key cannot be
+    /// removed): the injected backend fault flows through the store's real
+    /// `delete` -> `FilesystemError::Backend -> SecretStoreError::StoreUnavailable`
+    /// mapping.
+    fn delete_unavailable_secret_store()
+    -> Arc<FilesystemSecretStore<FaultInjecting<InMemoryBackend>>> {
+        let backend = Arc::new(
+            FaultInjecting::new(InMemoryBackend::new()).with_fault(
+                Fault::on(FilesystemOperation::Delete)
+                    .path("secrets")
+                    .backend("secret delete unavailable"),
+            ),
+        );
+        Arc::new(FilesystemSecretStore::ephemeral_over(backend))
     }
 
     fn caller() -> WebUiAuthenticatedCaller {
@@ -1733,7 +1532,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn nearai_login_state_is_single_use() {
         let store = NearAiLoginStateStore::new();
@@ -1910,7 +1708,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "webui-v2-beta")]
     #[tokio::test]
     async fn nearai_login_state_store_evicts_oldest_at_capacity() {
         // Unexpired states within the 15-min TTL must still be bounded, or a
@@ -2148,7 +1945,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
-        let keys = LlmKeyStore::new(Arc::new(DeleteUnavailableSecretStore::new()));
+        let keys = LlmKeyStore::new(delete_unavailable_secret_store());
         let service = RebornLlmConfigService::new(boot.clone(), keys.clone());
 
         service
@@ -2189,9 +1986,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
-        let store = Arc::new(CountingMetadataSecretStore::new());
-        let metadata_calls = Arc::clone(&store.metadata_calls);
-        let metadata_for_scope_calls = Arc::clone(&store.metadata_for_scope_calls);
+        let (store, backend) = recording_secret_store();
         let service = RebornLlmConfigService::new(boot, LlmKeyStore::new(store));
 
         let snapshot = service.snapshot(caller()).await.expect("snapshot");
@@ -2200,13 +1995,15 @@ mod tests {
             !snapshot.providers.is_empty(),
             "snapshot should include registry providers"
         );
+        // `metadata_for_scope` (the batched stored-key listing) is backed by one
+        // `Query` op; a per-handle `metadata` probe would be a `ReadFile`.
         assert_eq!(
-            metadata_for_scope_calls.load(Ordering::SeqCst),
+            backend.count(FilesystemOperation::Query),
             1,
             "snapshot must list stored key metadata once"
         );
         assert_eq!(
-            metadata_calls.load(Ordering::SeqCst),
+            backend.count(FilesystemOperation::ReadFile),
             0,
             "snapshot must not probe stored keys one provider at a time"
         );
@@ -2412,7 +2209,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let reborn_home = temp.path().join("reborn-home");
         let boot = boot_for_home(&reborn_home);
-        let keys = LlmKeyStore::new(Arc::new(MetadataUnavailableSecretStore::new()));
+        let keys = LlmKeyStore::new(metadata_unavailable_secret_store());
         let service = RebornLlmConfigService::new(boot, keys);
 
         let error = service
