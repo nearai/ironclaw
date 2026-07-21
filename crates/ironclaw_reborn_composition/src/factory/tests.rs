@@ -511,6 +511,10 @@ async fn local_dev_services_include_repl_runtime_substrate() {
     assert!(services.turn_coordinator.is_some());
     assert!(services.product_auth.is_some());
     assert!(services.local_runtime.is_some());
+    assert!(matches!(
+        services.runtime_store_graph(),
+        Some(RebornRuntimeStoreGraph::Local(_))
+    ));
     assert!(
         services
             .local_runtime
@@ -1495,6 +1499,10 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         .production_runtime
         .as_ref()
         .expect("production runtime");
+    assert!(matches!(
+        services.runtime_store_graph(),
+        Some(RebornRuntimeStoreGraph::Production(_))
+    ));
     let graph = match production_runtime {
         RebornProductionRuntimeServices::LibSql(graph) => graph,
         RebornProductionRuntimeServices::Postgres(_) => {
@@ -2388,6 +2396,7 @@ fn disabled_services_do_not_include_repl_runtime_substrate() {
     assert!(services.turn_coordinator.is_none());
     assert!(services.product_auth.is_none());
     assert!(services.local_runtime.is_none());
+    assert!(services.runtime_store_graph().is_none());
     assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
 }
 

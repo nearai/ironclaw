@@ -34,9 +34,8 @@ use crate::readiness::{RebornReadinessDiagnostic, RebornReadinessState};
 /// Which runtime substrate a deployment assembles.
 ///
 /// Replaces the `requires_production_shape` / `uses_local_runtime_substrate`
-/// profile predicates as the value `build_reborn_services` and
-/// `build_reborn_runtime` dispatch on: a deployment selects a substrate, it
-/// does not *have a mode that implies one*.
+/// profile predicates as the value `build_reborn_services` dispatches on: a
+/// deployment selects a substrate, it does not *have a mode that implies one*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSubstrate {
     /// No runtime is assembled — the facades report disabled.
@@ -374,6 +373,12 @@ impl DeploymentConfig {
 
     pub fn storage_shape(&self) -> StorageShape {
         self.storage_shape
+    }
+
+    /// Whether this deployment must reuse scheduler wake wiring pre-minted by
+    /// the production-shaped services builder.
+    pub(crate) fn requires_pre_minted_scheduler_wake(&self) -> bool {
+        self.storage_shape == StorageShape::OperatorSupplied
     }
 
     pub(crate) fn uses_local_dev_storage_input(&self) -> bool {

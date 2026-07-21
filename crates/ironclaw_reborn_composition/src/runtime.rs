@@ -101,7 +101,7 @@ use ironclaw_turns::run_profile::UserProfileContext;
 use self::latency::{trace_runtime_latency_error, trace_runtime_latency_ok};
 use self::runtime_turn_scheduler::RuntimeTurnScheduler;
 use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capability_policy};
-use crate::deployment::{DeploymentConfig, RuntimeSubstrate, TrafficPolicy};
+use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::outbound_preferences::{
@@ -325,6 +325,26 @@ where
     }
 }
 
+fn runtime_store_parts(
+    graph: crate::factory::RebornRuntimeStoreGraph<'_>,
+) -> RuntimeStoreParts<'_> {
+    match graph {
+        crate::factory::RebornRuntimeStoreGraph::Local(local_runtime) => {
+            local_runtime_parts(local_runtime)
+        }
+        crate::factory::RebornRuntimeStoreGraph::Production(production_runtime) => {
+            match production_runtime {
+                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                    production_runtime_parts(graph)
+                }
+                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                    production_runtime_parts(graph)
+                }
+            }
+        }
+    }
+}
+
 /// Gate live-traffic startup on the deployment's [`TrafficPolicy`].
 ///
 /// §4.4: this used to be a seven-arm `match` on the composition profile, with
@@ -384,8 +404,7 @@ fn check_production_scheduler_wake_wiring(
     wiring: &Option<ironclaw_runner::runtime::SchedulerWakeWiring>,
 ) -> Result<(), RebornRuntimeError> {
     if wiring.is_none()
-        && DeploymentConfig::for_profile(profile, false).substrate()
-            == RuntimeSubstrate::ProductionShaped
+        && DeploymentConfig::for_profile(profile, false).requires_pre_minted_scheduler_wake()
     {
         return Err(RebornRuntimeError::InvalidArgument {
             reason: "production runtime missing scheduler wake wiring".to_string(),
@@ -3250,46 +3269,17 @@ pub async fn build_reborn_runtime(
         wiring
     };
 
-    let runtime_parts = match deployment.substrate() {
-        RuntimeSubstrate::Local => {
-            let local_runtime =
-                services
-                    .local_runtime
-                    .as_ref()
-                    .ok_or(RebornRuntimeError::InvalidArgument {
-                        reason: "local-dev RebornServices did not provide runtime substrate"
-                            .to_string(),
-                    })?;
-            local_runtime_parts(local_runtime)
-        }
-        RuntimeSubstrate::ProductionShaped => {
-            let production_runtime = services.production_runtime.as_ref().ok_or(
-                RebornRuntimeError::InvalidArgument {
-                    reason: "production RebornServices did not provide runtime substrate"
-                        .to_string(),
-                },
-            )?;
-            match production_runtime {
-                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                    production_runtime_parts(graph)
-                }
-                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                    production_runtime_parts(graph)
-                }
-            }
-        }
-        // `RuntimeSubstrate::None` never reaches here: the disabled
-        // deployment's traffic policy refuses live traffic before the services
-        // are built, and again at the cutover gate above.
-        RuntimeSubstrate::None => {
-            return Err(RebornRuntimeError::InvalidArgument {
-                reason: format!(
-                    "profile={} assembles no runtime substrate",
-                    deployment.profile()
-                ),
-            });
-        }
-    };
+    let runtime_graph = crate::factory::RebornRuntimeStoreGraph::from_parts(
+        services.local_runtime.as_ref(),
+        services.production_runtime.as_ref(),
+    )
+    .ok_or_else(|| RebornRuntimeError::InvalidArgument {
+        reason: format!(
+            "profile={} must assemble exactly one runtime store graph",
+            deployment.profile()
+        ),
+    })?;
+    let runtime_parts = runtime_store_parts(runtime_graph);
     let RuntimeStoreParts {
         local_runtime,
         turn_state_store,

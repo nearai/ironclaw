@@ -1026,6 +1026,30 @@ pub(crate) enum RebornProductionRuntimeServices {
     Postgres(Arc<RebornProductionRuntimeStoreGraph<PostgresRootFilesystem>>),
 }
 
+/// Runtime store graph selected by [`DeploymentConfig`](crate::deployment::DeploymentConfig).
+///
+/// Local-dev and production-shaped deployments still need different substrate
+/// handles, but callers that assemble runtime behavior consume this one graph
+/// reference instead of matching deployment modes or checking parallel service
+/// fields.
+pub(crate) enum RebornRuntimeStoreGraph<'a> {
+    Local(&'a Arc<RebornRuntimeSubstrate>),
+    Production(&'a RebornProductionRuntimeServices),
+}
+
+impl<'a> RebornRuntimeStoreGraph<'a> {
+    pub(crate) fn from_parts(
+        local_runtime: Option<&'a Arc<RebornRuntimeSubstrate>>,
+        production_runtime: Option<&'a RebornProductionRuntimeServices>,
+    ) -> Option<Self> {
+        match (local_runtime, production_runtime) {
+            (Some(local_runtime), None) => Some(Self::Local(local_runtime)),
+            (None, Some(production_runtime)) => Some(Self::Production(production_runtime)),
+            (None, None) | (Some(_), Some(_)) => None,
+        }
+    }
+}
+
 pub(crate) struct RebornProductionRuntimeStoreGraph<F>
 where
     F: RootFilesystem + 'static,
@@ -1151,6 +1175,13 @@ impl std::fmt::Debug for RebornServices {
 // arch-exempt: optional_arc, RebornServices fields are Optional because disabled()/local-dev paths don't wire all production services; proper factories always set them, plan #4469
 
 impl RebornServices {
+    pub(crate) fn runtime_store_graph(&self) -> Option<RebornRuntimeStoreGraph<'_>> {
+        RebornRuntimeStoreGraph::from_parts(
+            self.local_runtime.as_ref(),
+            self.production_runtime.as_ref(),
+        )
+    }
+
     pub fn disabled() -> Self {
         Self {
             host_runtime: None,

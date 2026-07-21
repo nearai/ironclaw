@@ -178,27 +178,22 @@ pub(crate) struct AutomationBacking {
     pub(crate) snapshot_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
 }
 
-/// Resolves the [`AutomationBacking`] pair for whichever runtime is wired:
-/// local-dev first, then production runtime as a fallback. Returns `None` when
-/// neither runtime is present.
+/// Resolves the [`AutomationBacking`] pair from the runtime store graph selected
+/// by the composition build. Returns `None` when no runtime graph is present.
 pub(crate) fn automation_backing(services: &crate::RebornServices) -> Option<AutomationBacking> {
-    let from_local = services
-        .local_runtime
-        .as_ref()
-        .map(|local_runtime| AutomationBacking {
+    match services.runtime_store_graph()? {
+        crate::factory::RebornRuntimeStoreGraph::Local(local_runtime) => Some(AutomationBacking {
             repository: Arc::clone(&local_runtime.trigger_repository),
             snapshot_source: Arc::clone(&local_runtime.turn_state)
                 as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
-        });
-    from_local.or_else(|| {
-        services
-            .production_runtime
-            .as_ref()
-            .map(|production_runtime| AutomationBacking {
+        }),
+        crate::factory::RebornRuntimeStoreGraph::Production(production_runtime) => {
+            Some(AutomationBacking {
                 repository: production_runtime.trigger_repository(),
                 snapshot_source: production_runtime.turn_run_snapshot_source(),
             })
-    })
+        }
+    }
 }
 
 /// Compose the WebUI-facing product facade from an already-built Reborn runtime.
