@@ -195,22 +195,15 @@ fn validate_loop_inline_message_body(value: String) -> Result<String, String> {
     .map_err(|error| error.safe_summary)
 }
 
-macro_rules! bounded_loop_ref {
-    ($name:ident, $label:literal, $prefix:literal, $max:expr) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
-        #[serde(transparent)]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, String> {
-                validate_prefixed_loop_ref($label, $prefix, $max, value.into()).map(Self)
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-        }
-
+/// Emit the `AsRef<str>` / `Display` / validated-`Deserialize` trait impls
+/// shared by every bounded loop-ref newtype. Requires the type to expose an
+/// inherent `new(impl Into<String>) -> Result<Self, String>` and `as_str()`.
+/// The validated `Deserialize` routes through `new` so wire values get the same
+/// bounds/charset check as explicit construction. Used both by
+/// [`bounded_loop_ref!`] and by the newtypes whose `new` needs a custom
+/// validator (so their trait surface stays identical rather than re-typed).
+macro_rules! impl_bounded_ref_traits {
+    ($name:ident) => {
         impl AsRef<str> for $name {
             fn as_ref(&self) -> &str {
                 self.as_str()
@@ -232,6 +225,26 @@ macro_rules! bounded_loop_ref {
                 Self::new(value).map_err(serde::de::Error::custom)
             }
         }
+    };
+}
+
+macro_rules! bounded_loop_ref {
+    ($name:ident, $label:literal, $prefix:literal, $max:expr) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, String> {
+                validate_prefixed_loop_ref($label, $prefix, $max, value.into()).map(Self)
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl_bounded_ref_traits!($name);
     };
 }
 
@@ -265,27 +278,7 @@ impl LoopCheckpointStateRef {
     }
 }
 
-impl AsRef<str> for LoopCheckpointStateRef {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::fmt::Display for LoopCheckpointStateRef {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for LoopCheckpointStateRef {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
+impl_bounded_ref_traits!(LoopCheckpointStateRef);
 
 impl LoopCheckpointStateRef {
     pub(crate) fn legacy_unknown() -> Self {
@@ -355,27 +348,7 @@ impl LoopPromptBundleRef {
     }
 }
 
-impl AsRef<str> for LoopPromptBundleRef {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::fmt::Display for LoopPromptBundleRef {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for LoopPromptBundleRef {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
+impl_bounded_ref_traits!(LoopPromptBundleRef);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -420,17 +393,7 @@ impl LoopSafeSummary {
     }
 }
 
-impl AsRef<str> for LoopSafeSummary {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::fmt::Display for LoopSafeSummary {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
+impl_bounded_ref_traits!(LoopSafeSummary);
 
 /// Validated body for host-approved inline prompt messages.
 ///
@@ -474,15 +437,8 @@ impl TryFrom<String> for LoopInlineMessageBody {
     }
 }
 
-impl<'de> Deserialize<'de> for LoopSafeSummary {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
+// `LoopSafeSummary`'s AsRef/Display/Deserialize come from
+// `impl_bounded_ref_traits!` at its definition above.
 
 fn origin_input_cursor_token() -> LoopInputCursorToken {
     LoopInputCursorToken("input-cursor:origin".to_string())
@@ -1030,27 +986,7 @@ impl CapabilitySurfaceVersion {
     }
 }
 
-impl AsRef<str> for CapabilitySurfaceVersion {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::fmt::Display for CapabilitySurfaceVersion {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for CapabilitySurfaceVersion {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
+impl_bounded_ref_traits!(CapabilitySurfaceVersion);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelCapabilityView {
@@ -1720,27 +1656,7 @@ impl CapabilityResumeToken {
     }
 }
 
-impl AsRef<str> for CapabilityResumeToken {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::fmt::Display for CapabilityResumeToken {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for CapabilityResumeToken {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Self::new(value).map_err(serde::de::Error::custom)
-    }
-}
+impl_bounded_ref_traits!(CapabilityResumeToken);
 
 /// Approval-gate resume identity carried by the loop.
 ///
