@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel, StatCard } from "../../../design-system/primitives";
+import { Panel, StatCard } from "@ironclaw/design-system";
 import { useUsage } from "../hooks/useAdminUsage";
 import {
   formatCost,

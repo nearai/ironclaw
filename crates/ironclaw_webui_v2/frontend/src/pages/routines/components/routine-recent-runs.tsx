@@ -1,4 +1,4 @@
-import { StatusPill } from "../../../design-system/primitives";
+import { StatusPill } from "@ironclaw/design-system";
 import { formatRoutineDate } from "../lib/routines-presenters";
 
 function runTone(status) {

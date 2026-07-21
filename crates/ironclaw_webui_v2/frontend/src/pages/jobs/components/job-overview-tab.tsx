@@ -1,4 +1,4 @@
-import { EmptyPanel, FlowList, Panel, StatusPill } from "../../../design-system/primitives";
+import { EmptyPanel, FlowList, Panel, StatusPill } from "@ironclaw/design-system";
 import { MarkdownRenderer } from "../../chat/components/markdown-renderer";
 import {
   formatDuration,

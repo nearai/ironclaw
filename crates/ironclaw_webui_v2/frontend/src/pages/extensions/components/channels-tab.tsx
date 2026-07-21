@@ -1,4 +1,4 @@
-import { StatusPill } from "../../../design-system/primitives";
+import { StatusPill } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { SlackAdminManagedSection } from "../../../components/slack-setup-panel";
 import { ExtensionCard, RegistryCard } from "./extension-card";

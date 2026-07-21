@@ -1,4 +1,4 @@
-import { Card } from "../../../design-system/card";
+import { Card } from "@ironclaw/design-system";
 import { NETWORKING_FIELDS } from "../lib/settings-schema";
 import { filterSettingsSections } from "../lib/settings-search";
 import { SettingsGroup } from "./settings-field";

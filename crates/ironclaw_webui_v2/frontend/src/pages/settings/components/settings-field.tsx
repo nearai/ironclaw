@@ -1,6 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Card } from "../../../design-system/card";
+import { Card } from "@ironclaw/design-system";
 
 function SavedIndicator({ visible }) {
   const t = useT();

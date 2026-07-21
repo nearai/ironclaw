@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import React from "react";
-import { Panel, StatusPill } from "../../../design-system/primitives";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Panel, StatusPill } from "@ironclaw/design-system";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import {
   fetchAttachmentBlob,

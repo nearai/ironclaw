@@ -7,8 +7,8 @@
  */
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { Input } from "../../../design-system/input";
+import { Button } from "@ironclaw/design-system";
+import { Input } from "@ironclaw/design-system";
 import { AuthGateShell } from "./auth-gate-shell";
 
 export function AuthTokenCard({ gate, onSubmit, onCancel }) {

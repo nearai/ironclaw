@@ -1,7 +1,7 @@
 import React from "react";
 import { MarkdownRenderer } from "./markdown-renderer";
 import { ToolActivity } from "./tool-activity";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import { toast } from "../../../lib/toast";
 import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";

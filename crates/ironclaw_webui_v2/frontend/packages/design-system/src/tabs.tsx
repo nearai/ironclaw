@@ -8,7 +8,7 @@
 import * as TabsPrimitive from "@radix-ui/react-tabs";
 import { motion } from "motion/react";
 import { useId } from "react";
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 import { MOTION_DURATION, MOTION_EASE_OUT, useReducedMotion } from "./motion";
 
 export type TabItem = {

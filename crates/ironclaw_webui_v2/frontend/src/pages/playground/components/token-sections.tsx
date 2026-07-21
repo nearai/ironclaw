@@ -15,7 +15,7 @@ import {
   TYPE_TOKENS,
   Z_TOKENS,
   readToken,
-} from "../../../design-system/tokens";
+} from "@ironclaw/design-system/tokens";
 
 /* ── Shared bits ───────────────────────────────────────────────────── */
 

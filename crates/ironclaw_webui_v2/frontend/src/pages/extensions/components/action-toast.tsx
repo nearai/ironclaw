@@ -1,5 +1,5 @@
 import React from "react";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 
 const toneCss = {

@@ -1,4 +1,4 @@
-import { EmptyPanel, Panel } from "../../../design-system/primitives";
+import { EmptyPanel, Panel } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { RoutineRow } from "./routine-row";
 

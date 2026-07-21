@@ -1,8 +1,8 @@
 import React from "react";
-import { Button } from "../../../design-system/button";
-import { Input } from "../../../design-system/input";
-import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
-import { SelectMenu } from "../../../design-system/select-menu";
+import { Button } from "@ironclaw/design-system";
+import { Input } from "@ironclaw/design-system";
+import { Modal, ModalBody, ModalFooter } from "@ironclaw/design-system";
+import { SelectMenu } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import {
   ADAPTER_OPTIONS,

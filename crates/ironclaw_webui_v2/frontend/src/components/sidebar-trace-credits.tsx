@@ -1,5 +1,5 @@
 import { Link } from "react-router";
-import { Icon } from "../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
 import { useTraceCredits } from "../pages/settings/hooks/useTraceCredits";
 

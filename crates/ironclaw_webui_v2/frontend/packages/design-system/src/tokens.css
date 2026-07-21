@@ -1,0 +1,328 @@
+/* ════════════════════════════════════════════════════════════════════
+   @ironclaw/design-system — tokens.css
+   Canonical `--v2-*` design tokens: color themes (light/dark via
+   [data-theme]), structural scales (radius, control density, spacing,
+   type, tracking, shadows, scrims, motion, z-index), plus the Tailwind
+   v4 `@theme` mapping (font stacks + the legacy iron / signal / copper
+   / mint color aliases onto the semantic tokens).
+
+   Consumers import this once, before component usage:
+     @import "@ironclaw/design-system/tokens.css";
+   Non-Tailwind consumers can import it too — the `@theme` at-rule is
+   Tailwind-only and is ignored elsewhere; every `--v2-*` custom
+   property still applies.
+
+   Provenance: backfilled from the `achal/nux` gateway restyle and the
+   chat-first onboarding prototype — see DESIGN_SYSTEM.md
+   ("Provenance & reconciliation") in crates/ironclaw_webui_v2.
+   ════════════════════════════════════════════════════════════════════ */
+
+@theme {
+  --font-sans: "Geist", "Inter", "SF Pro Display", "Helvetica Neue",
+    ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Newsreader", "Lyon Text", "Instrument Serif", georgia, serif;
+  --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace,
+    monospace;
+  --color-iron-950: var(--v2-canvas-strong);
+  --color-iron-900: var(--v2-surface);
+  --color-iron-800: var(--v2-surface-soft);
+  --color-iron-700: var(--v2-panel-border);
+  --color-iron-400: var(--v2-text-faint);
+  --color-iron-300: var(--v2-text-muted);
+  --color-iron-200: var(--v2-text);
+  --color-iron-100: var(--v2-text-strong);
+  --color-signal: var(--v2-accent-text);
+  --color-copper: var(--v2-warning-text);
+  /* mint is GREEN: legacy pages use it exclusively for success/
+     connected states (`success: "text-mint"`), so it maps to the
+     positive status token. It was previously mis-aliased to the
+     blue accent, which painted every success state blue. */
+  --color-mint: var(--v2-positive-text);
+}
+
+/* ── Light theme ─────────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+
+  /* Canvas / surfaces */
+  --v2-canvas:        #f5f5f7;
+  --v2-canvas-strong: #ffffff;
+  --v2-surface:       #ffffff;
+  --v2-surface-soft:  #f5f5f7;
+  --v2-surface-muted: #ebebed;
+
+  /* Card tokens — used by Card component */
+  --v2-card-bg:     #ffffff;
+  --v2-card-border: rgba(0, 0, 0, 0.08);
+  --v2-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+
+  /* Elevation scale for floating surfaces. Deliberately restrained
+     (Linear/Vercel-style): a hairline border does most of the separation
+     work and the shadow only lifts the surface slightly. Menus/popovers/
+     tooltips share --v2-shadow-menu; modal dialogs sit a step higher. */
+  --v2-shadow-menu:  0 4px 12px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --v2-shadow-modal: 0 16px 40px -8px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.06);
+
+  /* Panel border (nav items, dividers, form borders) */
+  --v2-panel-border: rgba(0, 0, 0, 0.08);
+
+  /* Rail (input bg in dark) */
+  --v2-rail:    #f5f5f7;
+  --v2-input-bg: #ffffff;
+
+  /* Code surface — a distinct role from input-bg: inline code and
+     code blocks sit on a grey wash even where inputs are white
+     (nux light --code-bg). */
+  --v2-code-bg: #f0f0f2;
+
+  /* Shadows — the nux LIGHT elevation scale is much softer than
+     dark's (reconciled with the onboarding demo, PR #5565). */
+  --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 2px 4px rgba(0, 0, 0, 0.04);
+  --v2-shadow-lg: 0 25px 50px -12px rgba(0, 0, 0, 0.1);
+
+  /* Glass (topbar / floating chrome) */
+  --v2-glass-bg:   rgba(255, 255, 255, 0.85);
+  --v2-glass-blur: blur(16px) saturate(180%);
+
+  /* Typography */
+  --v2-text:        #1a1a2e;
+  --v2-text-strong: #090909;
+  --v2-text-muted:  #555555;
+  --v2-text-faint:  #999999;
+  --v2-inverse:     #ffffff;
+  --v2-ink:         #090909;
+  --v2-chat-readable-max-width: 85%;
+
+  /* Controls */
+  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%23555555%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
+
+  /* Accent — IronClaw brand blue (nux light ramp) */
+  --v2-accent:       #2882c8;
+  --v2-accent-strong:#1f6ca8;
+  --v2-accent-soft:  rgba(40, 130, 200, 0.1);
+  --v2-accent-text:  #2882c8;
+
+  /* Semantic colours — nux light status set */
+  --v2-positive-soft: rgba(5, 150, 105, 0.1);
+  --v2-positive-text: #059669;
+  --v2-warning-soft:  rgba(217, 119, 6, 0.1);
+  --v2-warning-text:  #d97706;
+  --v2-danger-soft:   rgba(220, 38, 38, 0.1);
+  --v2-danger-text:   #dc2626;
+  --v2-info-soft:     rgba(37, 99, 235, 0.1);
+  --v2-info-text:     #2563eb;
+
+  background: var(--v2-canvas);
+}
+
+/* ── Dark theme ─────────────────────────────────────────────────── */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* nux zinc-dark field: #09090b page, #0f0f11 panels, #1b1b1f raised */
+  --v2-canvas:        var(--bg-canvas, #09090b);
+  --v2-canvas-strong: #060608;
+  --v2-surface:       var(--bg-surface, #0f0f11);
+  --v2-surface-soft:  var(--bg-surface-subtle, rgba(255, 255, 255, 0.04));
+  --v2-surface-muted: rgba(255, 255, 255, 0.07);
+
+  /* Card tokens in dark: a hairline border does the separation work and
+     the shadow stays minimal — dark surfaces read through contrast, not
+     large blurs. */
+  --v2-card-bg:     #1b1b1f;
+  --v2-card-border: rgba(255, 255, 255, 0.08);
+  --v2-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+
+  /* Elevation scale in dark: shadows barely register on a near-black
+     canvas, so floating surfaces lean on their border + lighter fill and
+     keep only a soft, tight shadow for depth. */
+  --v2-shadow-menu:  0 4px 16px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --v2-shadow-modal: 0 16px 48px -8px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+
+  --v2-panel-border: rgba(255, 255, 255, 0.1);
+
+  --v2-rail:     #0f0f11;
+  --v2-input-bg: #111113;
+
+  /* Code surface (nux dark --code-bg; coincides with input-bg in
+     dark, diverges in light — hence its own role). */
+  --v2-code-bg: #111113;
+
+  /* nux dark elevation scale */
+  --v2-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.15);
+  --v2-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.2);
+  --v2-shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.3);
+
+  --v2-text:        #e0e0e0;
+  --v2-text-strong: var(--text-primary, #fafafa);
+  --v2-text-muted:  var(--text-secondary, #a1a1aa);
+  --v2-text-faint:  var(--text-tertiary, #888888);
+  --v2-inverse:     var(--text-inverse, #111111);
+  --v2-ink:         var(--accent-primary, #4ca7e6);
+
+  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%23ffffff%27%20stroke-opacity%3D%270.55%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
+
+  --v2-accent:        var(--accent-primary,        #4ca7e6);
+  --v2-accent-strong: var(--accent-primary-strong, #2882c8);
+  --v2-accent-soft:   rgba(76, 167, 230, 0.15);
+  --v2-accent-text:   var(--text-brand,            #6bb8ec);
+
+  /* nux dark status set */
+  --v2-positive-soft: rgba(52, 211, 153, 0.15);
+  --v2-positive-text: var(--text-positive, #34d399);
+  --v2-warning-soft:  rgba(245, 166, 35, 0.15);
+  --v2-warning-text:  var(--accent-warning, #f5a623);
+  --v2-danger-soft:   rgba(230, 76, 76, 0.15);
+  --v2-danger-text:   var(--text-danger, #e64c4c);
+  --v2-info-soft:     rgba(96, 165, 250, 0.15);
+  --v2-info-text:     var(--accent-primary-soft, #60a5fa);
+
+  --v2-glass-bg:   rgba(9, 9, 11, 0.72);
+  --v2-glass-blur: blur(16px) saturate(180%);
+}
+
+/* ── Structural tokens (theme-independent) ───────────────────────── */
+/* Canonical non-color scales for the v2 design system. Derived from
+   what the design-system components (button.js / card.js / input.js /
+   modal.js / badge.js) already render — not aspirational values.
+   New UI must reference these instead of restating raw px/rem/z
+   numbers. Browse them live at /playground; rules and do/don't
+   guidance live in crates/ironclaw_webui_v2/DESIGN_SYSTEM.md. */
+:root {
+  /* Radii — nux scale (6/8/10/16/24). xs: inline chips; sm: compact
+     (sm) controls; md: default controls (buttons, inputs) + small
+     panels; lg: cards + large hero CTAs (the nux --radius-lg);
+     xl: large cards + composer; 2xl: modals, sheets (nux
+     --radius-xl); full: pills. */
+  --v2-radius-xs:   6px;
+  --v2-radius-sm:   8px;
+  --v2-radius-md:   10px;
+  --v2-radius-lg:   16px;
+  --v2-radius-xl:   20px;
+  --v2-radius-2xl:  24px;
+  --v2-radius-full: 9999px;
+
+  /* Control density — the compact (Linear-density) control scale.
+     Product-wide push: interactive controls (buttons, inputs,
+     selects) share these heights + horizontal paddings so rows of
+     mixed controls always align. Buttons set the precedent; new
+     controls must consume these instead of inventing heights. */
+  /* Absolute px, NOT rem: the app shrinks the root font to 15px on
+     large screens (html { font-size: 15px }), and control chrome
+     must not shrink with it. */
+  --v2-control-h-sm: 28px;  /* toolbars, table rows, chips */
+  --v2-control-h-md: 32px;  /* default controls */
+  --v2-control-h-lg: 36px;  /* prominent CTAs, hero forms */
+  --v2-control-px-sm: 10px;
+  --v2-control-px-md: 12px;
+  --v2-control-px-lg: 16px;
+
+  /* Text on accent/brand fills — white in BOTH themes. Never use the
+     `text-white` utility for this: the legacy Tailwind-alias compat
+     shim below remaps `.text-white` to --v2-text-strong (dark ink in
+     light mode), which is exactly the wrong color on a blue fill. */
+  --v2-on-accent: #ffffff;
+
+  /* Spacing — 4px base grid (matches the Tailwind scale the UI uses).
+     Named steps so agents can pick semantically: gap-hairline for
+     chip innards, gap-tight for icon+label rows, gap-control for
+     form stacks, gap-section between panels, pad-panel for card
+     insets. */
+  --v2-space-1: 0.25rem;   /* 4px  — hairline gaps inside chips */
+  --v2-space-2: 0.5rem;    /* 8px  — icon-to-label gaps */
+  --v2-space-3: 0.75rem;   /* 12px — control gaps, button rows */
+  --v2-space-4: 1rem;      /* 16px — form-field stacks */
+  --v2-space-5: 1.25rem;   /* 20px — card padding (mobile) */
+  --v2-space-6: 1.5rem;    /* 24px — section gaps */
+  --v2-space-7: 1.75rem;   /* 28px — card padding (desktop) */
+  --v2-space-8: 2rem;      /* 32px — page-level gutters */
+  --v2-space-10: 2.5rem;   /* 40px — hero / empty-state breathing room */
+
+  /* Typography scale — aligned to the nux gateway scale
+     (11/13/14/16/20/24/36) plus the 12px caption and 28px stat size
+     the v2 components already render.
+     label: tag/eyebrow labels; caption: hints + meta rows;
+     body-sm/body: default UI text (mobile/desktop); title: modal +
+     panel headings; heading: sub-page headings; display sizes:
+     stat values and page h1. */
+  --v2-font-size-label:      0.6875rem;  /* 11px  tags, badges, eyebrows */
+  --v2-font-size-caption:    0.75rem;    /* 12px  hints, meta, errors */
+  --v2-font-size-body-sm:    0.8125rem;  /* 13px  controls + body (mobile) */
+  --v2-font-size-body:       0.875rem;   /* 14px  controls + body (desktop) */
+  --v2-font-size-body-lg:    1rem;       /* 16px  descriptions, empty states */
+  --v2-font-size-title:      1.25rem;    /* 20px  modal/panel titles */
+  --v2-font-size-heading:    1.5rem;     /* 24px  section headings */
+  --v2-font-size-display-sm: 1.75rem;    /* 28px  stat values */
+  --v2-font-size-display:    2.25rem;    /* 36px  page h1 (desktop) */
+
+  /* Tag/label letterforms. The nux tag language sets small uppercase
+     labels in Geist Pixel Square with 0.08em tracking; mono-caps at
+     0.14em stays for data-ish eyebrow rows. */
+  --v2-font-pixel: "Geist Pixel Square", "Geist Mono", ui-monospace, monospace;
+  --v2-tracking-tag:  0.08em;   /* pixel-face tags/badges */
+  --v2-tracking-caps: 0.14em;   /* uppercase mono labels */
+  --v2-tracking-wide: 0.22em;   /* card eyebrow labels */
+  --v2-tracking-tight: -0.02em; /* headings (nux --heading-tracking) */
+  --v2-tracking-display: -0.04em; /* oversized display headings */
+
+  /* Shadows — --v2-shadow-sm/md/lg and the elevation scale
+     (--v2-card-shadow / --v2-shadow-menu / --v2-shadow-modal) are
+     THEMED (defined per theme above; the light scale is much softer).
+     Only the primary-button hover glow is theme-independent. */
+  --v2-shadow-accent-hover: 0 24px 24px -20px rgba(76, 167, 230, 0.55);
+
+  /* Scrims. `soft` sits behind side sheets / task panels (the demo's
+     task-sheet scrim); the heavier default sits behind modals. */
+  --v2-scrim:      rgba(0, 0, 0, 0.55);
+  --v2-scrim-soft: rgba(0, 0, 0, 0.3);
+
+  /* Motion — the nux restrained-motion system. Purposeful, quick,
+     and token-driven: pick a duration + easing pair below; never a
+     raw ms value or ad-hoc cubic-bezier. All motion is suppressed
+     under prefers-reduced-motion (see "Motion policy" below). */
+  --v2-duration-instant: 100ms;  /* hover fills, color shifts */
+  --v2-duration-exit:    120ms;  /* menu/overlay exits — quicker than entry */
+  --v2-duration-fast:    150ms;  /* borders, small transforms, press */
+  --v2-duration-menu:    180ms;  /* dropdown/popover entrances */
+  --v2-duration-base:    250ms;  /* panel/sheet/modal entrances */
+  --v2-duration-slow:    400ms;  /* large surface transitions */
+  --v2-ease-standard:     ease;
+  --v2-ease-in-out:       cubic-bezier(0.4, 0, 0.2, 1);
+  --v2-ease-out-expo:     cubic-bezier(0.16, 1, 0.3, 1);   /* entrances */
+  --v2-ease-spring:       cubic-bezier(0.34, 1.56, 0.64, 1); /* playful pops */
+  --v2-ease-spring-gentle: cubic-bezier(0.22, 1.2, 0.36, 1);
+
+  /* Ambient loop durations (loading/live indicators only) */
+  --v2-duration-spin:    0.8s;
+  --v2-duration-typing:  1.4s;
+  --v2-duration-breathe: 2s;
+
+  /* Action-button language (ironclaw.com / nux parity). PRIMARY is
+     the brand-blue radial gradient ramp with the signature hover
+     glow; SECONDARY is a translucent accent outline that fills solid
+     on hover. Components read these instead of restating the ramp. */
+  --v2-btn-primary-bg:
+    radial-gradient(ellipse 100% 100% at 50% 130%, #4ca7e6 0%, #2882c8 65%);
+  --v2-btn-primary-bg-hover:
+    radial-gradient(ellipse 200% 220% at 50% 110%, #5bbaf5 0%, #2882c8 60%);
+  --v2-btn-primary-border: rgba(76, 167, 230, 0.72);
+  --v2-btn-secondary-border: rgba(76, 167, 230, 0.6);
+  --v2-btn-secondary-bg: rgba(76, 167, 230, 0.05);
+
+  /* Z-index ladder — pick the semantic layer, never invent a number.
+     raised: in-page floats (scroll-to-bottom, input adornments)
+     sticky: pinned headers/banners inside a pane
+     overlay: scrims + off-canvas drawers
+     modal:   dialogs, command palette, keyboard-shortcut sheets
+     toast:   toast viewport (must beat modals) */
+  --v2-z-raised:  10;
+  --v2-z-sticky:  20;
+  --v2-z-overlay: 40;
+  --v2-z-modal:   50;
+  --v2-z-toast:   60;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}

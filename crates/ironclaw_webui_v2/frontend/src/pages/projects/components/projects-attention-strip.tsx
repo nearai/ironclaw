@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel, StatusPill } from "../../../design-system/primitives";
+import { Panel, StatusPill } from "@ironclaw/design-system";
 
 function attentionTone(item) {
   return item?.type === "failure" ? "danger" : "warning";

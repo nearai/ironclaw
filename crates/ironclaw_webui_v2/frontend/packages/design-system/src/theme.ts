@@ -1,5 +1,12 @@
 import React from "react";
 
+declare global {
+  interface Window {
+    /** Optional server-injected initial theme (set by the host shell before hydration). */
+    __IRONCLAW_INITIAL_THEME__?: "light" | "dark";
+  }
+}
+
 const THEME_STORAGE_KEY = "ironclaw:v2-theme";
 
 export type InterfaceTheme = "light" | "dark";

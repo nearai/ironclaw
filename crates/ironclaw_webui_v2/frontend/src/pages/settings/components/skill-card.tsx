@@ -1,7 +1,7 @@
-import { Badge } from "../../../design-system/badge";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
-import { Textarea } from "../../../design-system/input";
+import { Badge } from "@ironclaw/design-system";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { Textarea } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 

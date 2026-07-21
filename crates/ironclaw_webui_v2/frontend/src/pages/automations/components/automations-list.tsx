@@ -1,8 +1,8 @@
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { EmptyPanel, Panel, StatusPill } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
-import { cn } from "../../../utils/cn";
+import { cn } from "@ironclaw/design-system";
 import { AUTOMATION_FILTERS, filterAutomations } from "../lib/automations-presenters";
 import { AutomationDetailPanel } from "./automation-detail-panel";
 import { AutomationsEmptyState } from "./automations-empty-state";

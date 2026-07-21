@@ -3,7 +3,7 @@
  */
 import * as ScrollAreaPrimitive from "@radix-ui/react-scroll-area";
 import type { ComponentPropsWithoutRef } from "react";
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 
 export function ScrollArea({
   className = "",

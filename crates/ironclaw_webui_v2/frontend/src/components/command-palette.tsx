@@ -1,7 +1,7 @@
 import React from "react";
 import { useT } from "../lib/i18n";
 import { useNavigate } from "react-router";
-import { Icon } from "../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 
 /* ⌘K / Ctrl+K launcher: jump to a thread, start a new chat, navigate to a
    section, or toggle the theme. Pure frontend — drives existing routes and

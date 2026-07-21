@@ -1,7 +1,7 @@
 import React from "react";
 import { useI18n, useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button } from "@ironclaw/design-system";
+import { EmptyPanel, Panel, StatusPill } from "@ironclaw/design-system";
 import { fetchAttachmentBlob } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
 import { toast } from "../../../lib/toast";

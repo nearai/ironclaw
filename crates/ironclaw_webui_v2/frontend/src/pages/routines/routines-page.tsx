@@ -1,5 +1,5 @@
 import { useNavigate, useParams } from "react-router";
-import { Button } from "../../design-system/button";
+import { Button } from "@ironclaw/design-system";
 import React from "react";
 import { FeedbackBanner } from "../projects/components/feedback-banner";
 import { RoutineDetailPanel } from "./components/routine-detail-panel";

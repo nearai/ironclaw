@@ -20,6 +20,7 @@
     "all": "bash build.sh"
   },
   "dependencies": {
+    "@ironclaw/design-system": "workspace:*",
     "@radix-ui/react-avatar": "^1.2.2",
     "@radix-ui/react-checkbox": "^1.3.7",
     "@radix-ui/react-dialog": "^1.1.19",

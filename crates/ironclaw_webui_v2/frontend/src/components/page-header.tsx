@@ -1,9 +1,9 @@
 import { NavLink, useLocation } from "react-router";
 import React from "react";
 import { primaryRoutes, EXPANDABLE_SUB_ROUTES } from "../app/routes";
-import { Icon } from "../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
+import { cn } from "@ironclaw/design-system";
 import { TeeShield } from "./tee-shield";
 import { NotificationCenter } from "./notification-center";
 

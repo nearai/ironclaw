@@ -5,7 +5,7 @@
  * step must be completed elsewhere and offers a cancel action.
  */
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
+import { Button } from "@ironclaw/design-system";
 import { AuthGateShell } from "./auth-gate-shell";
 
 export function AuthGenericCard({ gate, onCancel }) {

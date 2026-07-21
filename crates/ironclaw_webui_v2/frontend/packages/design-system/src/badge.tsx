@@ -11,7 +11,7 @@
  *   size     "sm" (default) | "md"
  *   className string
  */
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 
 /* ── Tone maps ────────────────────────────────────────────────────────── */
 

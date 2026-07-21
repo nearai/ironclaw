@@ -3,7 +3,7 @@
  */
 import * as RadioGroupPrimitive from "@radix-ui/react-radio-group";
 import type { ComponentPropsWithoutRef } from "react";
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 
 export function RadioGroup({
   className = "",

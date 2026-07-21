@@ -2,8 +2,8 @@
 import { useNavigate, useOutletContext, useParams } from "react-router";
 import React from "react";
 import { useT } from "../../lib/i18n";
-import { Button } from "../../design-system/button";
-import { EmptyPanel } from "../../design-system/primitives";
+import { Button } from "@ironclaw/design-system";
+import { EmptyPanel } from "@ironclaw/design-system";
 import { useProjectsOverview } from "./hooks/useProjectsOverview";
 import { useProjectWorkspace } from "./hooks/useProjectWorkspace";
 import { useProjectInspector } from "./hooks/useProjectInspector";

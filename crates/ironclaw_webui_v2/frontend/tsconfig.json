@@ -13,5 +13,5 @@
     "target": "ES2022",
     "types": ["node", "react", "react-dom", "vite/client"]
   },
-  "include": ["scripts", "src", "vite.config.ts"]
+  "include": ["scripts", "src", "packages/design-system/src", "vite.config.ts"]
 }

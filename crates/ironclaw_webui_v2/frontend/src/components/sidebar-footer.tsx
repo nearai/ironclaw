@@ -1,7 +1,7 @@
-import { Icon } from "../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
+import { cn } from "@ironclaw/design-system";
 
 function profileName(profile) {
   return profile?.display_name || profile?.email || profile?.id || "IronClaw";

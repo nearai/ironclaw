@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { Card } from "../../../design-system/card";
+import { Card } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useTraceCredits } from "../hooks/useTraceCredits";
 import { useAccountTraces } from "../hooks/useAccountTraces";

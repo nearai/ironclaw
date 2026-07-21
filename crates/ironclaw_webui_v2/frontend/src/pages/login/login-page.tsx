@@ -1,11 +1,11 @@
 import { useForm } from "react-hook-form";
-import { Button } from "../../design-system/button";
-import { Card } from "../../design-system/card";
-import { Input, FormField } from "../../design-system/input";
-import { Icon } from "../../design-system/icons";
-import { useInterfaceTheme } from "../../design-system/theme";
+import { Button } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
+import { Input, FormField } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { useInterfaceTheme } from "@ironclaw/design-system";
 import { useT } from "../../lib/i18n";
-import { cn } from "../../utils/cn";
+import { cn } from "@ironclaw/design-system";
 import { OAuthProviderButtons } from "./components/oauth-provider-buttons";
 import { useOAuthProviders } from "./hooks/useOAuthProviders";
 

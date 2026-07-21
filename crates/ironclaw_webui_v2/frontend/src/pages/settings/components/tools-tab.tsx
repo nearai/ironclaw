@@ -1,7 +1,7 @@
-import { Icon } from "../../../design-system/icons";
-import { Badge } from "../../../design-system/badge";
-import { Card } from "../../../design-system/card";
-import { SelectMenu } from "../../../design-system/select-menu";
+import { Icon } from "@ironclaw/design-system";
+import { Badge } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
+import { SelectMenu } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { useTools } from "../hooks/useTools";
 import { matchesSearch } from "../lib/settings-search";

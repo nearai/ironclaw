@@ -1,6 +1,6 @@
-import { Button } from "../../../design-system/button";
-import { Card } from "../../../design-system/card";
-import { Icon } from "../../../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Card } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { SettingsSearchEmpty } from "./settings-search-empty";
 import { ProviderCard } from "./provider-card";

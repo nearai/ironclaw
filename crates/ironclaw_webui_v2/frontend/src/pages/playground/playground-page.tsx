@@ -10,8 +10,8 @@
  */
 import { useCallback, useState } from "react";
 import { useSearchParams } from "react-router";
-import { cn } from "../../utils/cn";
-import { Icon } from "../../design-system/icons";
+import { cn } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import {
   ColorsSection,
   MotionSection,

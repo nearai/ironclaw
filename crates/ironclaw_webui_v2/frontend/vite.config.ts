@@ -62,6 +62,7 @@ export default defineConfig({
     environment: "node",
     include: [
       "src/**/*.{test,spec}.{ts,tsx}",
+      "packages/design-system/src/**/*.{test,spec}.{ts,tsx}",
       "src/pages/extensions/hooks/useExtensions-oauth.test.mjs",
     ],
     setupFiles: ["src/test/vm-tsx-setup.ts"],

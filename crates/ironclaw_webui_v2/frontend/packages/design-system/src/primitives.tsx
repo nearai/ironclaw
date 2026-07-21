@@ -7,7 +7,7 @@
  * Re-exports: StatusPill (→ Badge), Panel (→ Card)
  * New exports: StatCard, FlowList, EmptyPanel, SectionHeader, SubLabel
  */
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 import { Card } from "./card";
 import { Badge } from "./badge";
 

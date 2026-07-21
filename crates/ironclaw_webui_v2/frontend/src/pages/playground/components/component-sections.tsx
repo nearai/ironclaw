@@ -6,11 +6,11 @@
  * drift from what pages ship.
  */
 import { useState } from "react";
-import { Avatar, AvatarFallback } from "../../../design-system/avatar";
-import { Badge } from "../../../design-system/badge";
-import { Button } from "../../../design-system/button";
-import { Card, CardBody, CardFooter, CardHeader, CardLabel } from "../../../design-system/card";
-import { Checkbox } from "../../../design-system/checkbox";
+import { Avatar, AvatarFallback } from "@ironclaw/design-system";
+import { Badge } from "@ironclaw/design-system";
+import { Button } from "@ironclaw/design-system";
+import { Card, CardBody, CardFooter, CardHeader, CardLabel } from "@ironclaw/design-system";
+import { Checkbox } from "@ironclaw/design-system";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,28 +18,28 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "../../../design-system/dropdown-menu";
-import { Icon } from "../../../design-system/icons";
-import { FormField, Input, Select, Textarea } from "../../../design-system/input";
-import { Modal, ModalBody, ModalFooter } from "../../../design-system/modal";
-import { Popover, PopoverContent, PopoverTrigger } from "../../../design-system/popover";
+} from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { FormField, Input, Select, Textarea } from "@ironclaw/design-system";
+import { Modal, ModalBody, ModalFooter } from "@ironclaw/design-system";
+import { Popover, PopoverContent, PopoverTrigger } from "@ironclaw/design-system";
 import {
   EmptyPanel,
   FlowList,
   SectionHeader,
   StatCard,
   SubLabel,
-} from "../../../design-system/primitives";
-import { RadioGroup, RadioGroupItem } from "../../../design-system/radio-group";
-import { ScrollArea } from "../../../design-system/scroll-area";
-import { SelectMenu } from "../../../design-system/select-menu";
-import { Separator } from "../../../design-system/separator";
-import { Skeleton } from "../../../design-system/skeleton";
-import { Slider } from "../../../design-system/slider";
-import { Switch } from "../../../design-system/switch";
-import { Tabs } from "../../../design-system/tabs";
-import { Tooltip, TooltipProvider } from "../../../design-system/tooltip";
-import { STATUS_CANON } from "../../../design-system/tokens";
+} from "@ironclaw/design-system";
+import { RadioGroup, RadioGroupItem } from "@ironclaw/design-system";
+import { ScrollArea } from "@ironclaw/design-system";
+import { SelectMenu } from "@ironclaw/design-system";
+import { Separator } from "@ironclaw/design-system";
+import { Skeleton } from "@ironclaw/design-system";
+import { Slider } from "@ironclaw/design-system";
+import { Switch } from "@ironclaw/design-system";
+import { Tabs } from "@ironclaw/design-system";
+import { Tooltip, TooltipProvider } from "@ironclaw/design-system";
+import { STATUS_CANON } from "@ironclaw/design-system/tokens";
 import { SectionTitle } from "./token-sections";
 
 /* ── Shared bits ───────────────────────────────────────────────────── */
@@ -69,7 +69,7 @@ const BUTTON_VARIANTS = ["primary", "outline", "secondary", "ghost", "danger"] a
 export function ButtonSection() {
   return (
     <div>
-      <ImportLine>import {"{ Button }"} from "../../design-system/button";</ImportLine>
+      <ImportLine>import {"{ Button }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>Variants</SectionTitle>
       <Row>
@@ -131,7 +131,7 @@ const BADGE_TONES = ["success", "warning", "danger", "info", "accent", "muted"];
 export function BadgeSection() {
   return (
     <div>
-      <ImportLine>import {"{ Badge }"} from "../../design-system/badge";</ImportLine>
+      <ImportLine>import {"{ Badge }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>Tones</SectionTitle>
       <Row>
@@ -190,7 +190,7 @@ const CARD_VARIANTS = ["default", "bordered", "flat", "subtle", "inset"];
 export function CardSection() {
   return (
     <div>
-      <ImportLine>import {"{ Card, CardHeader, CardBody, CardFooter, CardLabel }"} from "../../design-system/card";</ImportLine>
+      <ImportLine>import {"{ Card, CardHeader, CardBody, CardFooter, CardLabel }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>Variants</SectionTitle>
       <div className="grid gap-4 sm:grid-cols-2">
@@ -238,7 +238,7 @@ export function CardSection() {
 export function InputSection() {
   return (
     <div>
-      <ImportLine>import {"{ Input, Textarea, Select, Label, FormField }"} from "../../design-system/input";</ImportLine>
+      <ImportLine>import {"{ Input, Textarea, Select, Label, FormField }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>Input sizes + states</SectionTitle>
       <div className="flex max-w-md flex-col gap-4">
@@ -281,7 +281,7 @@ export function TabsSection() {
   const [toolbarTab, setToolbarTab] = useState("active");
   return (
     <div>
-      <ImportLine>import {"{ Tabs }"} from "../../design-system/tabs";</ImportLine>
+      <ImportLine>import {"{ Tabs }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>Underline tabs</SectionTitle>
       <Tabs
@@ -342,7 +342,7 @@ export function SelectMenuSection() {
   const [status, setStatus] = useState("ok");
   return (
     <div>
-      <ImportLine>import {"{ SelectMenu }"} from "../../design-system/select-menu";</ImportLine>
+      <ImportLine>import {"{ SelectMenu }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>With a prefix label</SectionTitle>
       <Row>
@@ -390,7 +390,7 @@ export function ModalSection() {
   const [open, setOpen] = useState(false);
   return (
     <div>
-      <ImportLine>import {"{ Modal, ModalBody, ModalFooter }"} from "../../design-system/modal";</ImportLine>
+      <ImportLine>import {"{ Modal, ModalBody, ModalFooter }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>Dialog</SectionTitle>
       <Button variant="secondary" onClick={() => setOpen(true)}>Open modal</Button>
@@ -428,7 +428,7 @@ const ICON_NAMES = [
 export function IconSection() {
   return (
     <div>
-      <ImportLine>import {"{ Icon }"} from "../../design-system/icons";</ImportLine>
+      <ImportLine>import {"{ Icon }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>Icon set — 24px grid, stroke 1.7</SectionTitle>
       <div className="grid grid-cols-4 gap-3 sm:grid-cols-6 lg:grid-cols-8">
@@ -451,7 +451,7 @@ export function IconSection() {
 export function PrimitivesSection() {
   return (
     <div>
-      <ImportLine>import {"{ StatCard, FlowList, EmptyPanel, SectionHeader, SubLabel }"} from "../../design-system/primitives";</ImportLine>
+      <ImportLine>import {"{ StatCard, FlowList, EmptyPanel, SectionHeader, SubLabel }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>SectionHeader (md+ only)</SectionTitle>
       <SectionHeader title="Automations" subtitle="Recurring work the agent runs for you." />
@@ -492,7 +492,7 @@ export function PrimitivesSection() {
 export function TooltipSection() {
   return (
     <div>
-      <ImportLine>import {"{ Tooltip, TooltipProvider }"} from "../../design-system/tooltip";</ImportLine>
+      <ImportLine>import {"{ Tooltip, TooltipProvider }"} from "@ironclaw/design-system";</ImportLine>
       <SectionTitle>Hover / focus tip</SectionTitle>
       <TooltipProvider>
         <Tooltip content="Open the agent settings">
@@ -510,10 +510,10 @@ export function CheckboxSwitchSection() {
   const [volume, setVolume] = useState([40]);
   return (
     <div>
-      <ImportLine>import {"{ Checkbox }"} from "../../design-system/checkbox";
-import {"{ Switch }"} from "../../design-system/switch";
-import {"{ RadioGroup, RadioGroupItem }"} from "../../design-system/radio-group";
-import {"{ Slider }"} from "../../design-system/slider";</ImportLine>
+      <ImportLine>import {"{ Checkbox }"} from "@ironclaw/design-system";
+import {"{ Switch }"} from "@ironclaw/design-system";
+import {"{ RadioGroup, RadioGroupItem }"} from "@ironclaw/design-system";
+import {"{ Slider }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>Checkbox + Switch</SectionTitle>
       <Row>
@@ -549,8 +549,8 @@ import {"{ Slider }"} from "../../design-system/slider";</ImportLine>
 export function DropdownPopoverSection() {
   return (
     <div>
-      <ImportLine>import {"{ DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem }"} from "../../design-system/dropdown-menu";
-import {"{ Popover, PopoverTrigger, PopoverContent }"} from "../../design-system/popover";</ImportLine>
+      <ImportLine>import {"{ DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem }"} from "@ironclaw/design-system";
+import {"{ Popover, PopoverTrigger, PopoverContent }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>DropdownMenu</SectionTitle>
       <DropdownMenu>
@@ -584,10 +584,10 @@ import {"{ Popover, PopoverTrigger, PopoverContent }"} from "../../design-system
 export function AvatarSkeletonSection() {
   return (
     <div>
-      <ImportLine>import {"{ Avatar, AvatarFallback }"} from "../../design-system/avatar";
-import {"{ Skeleton }"} from "../../design-system/skeleton";
-import {"{ Separator }"} from "../../design-system/separator";
-import {"{ ScrollArea }"} from "../../design-system/scroll-area";</ImportLine>
+      <ImportLine>import {"{ Avatar, AvatarFallback }"} from "@ironclaw/design-system";
+import {"{ Skeleton }"} from "@ironclaw/design-system";
+import {"{ Separator }"} from "@ironclaw/design-system";
+import {"{ ScrollArea }"} from "@ironclaw/design-system";</ImportLine>
 
       <SectionTitle>Avatar</SectionTitle>
       <Row>

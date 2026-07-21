@@ -19,7 +19,7 @@
  */
 import { cva, type VariantProps } from "class-variance-authority";
 import type { ComponentPropsWithoutRef, ElementType, ReactNode } from "react";
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 import { Spinner } from "./spinner";
 
 /* ── Gradient assets (Tailwind can't express these) ────────────────── */

@@ -12,7 +12,7 @@
 // stamp test hooks so the project-file usage keeps its selectors.
 
 import React from "react";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import { fetchAttachmentBlob, fetchAttachmentDataUrl } from "../../../lib/api";
 import { saveBlob } from "../../../lib/download";
 import { useT } from "../../../lib/i18n";

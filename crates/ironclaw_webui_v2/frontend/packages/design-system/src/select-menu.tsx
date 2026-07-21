@@ -7,7 +7,7 @@
  */
 import * as Select from "@radix-ui/react-select";
 import type { ReactNode } from "react";
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 import { Icon } from "./icons";
 
 const toneDotClasses = {

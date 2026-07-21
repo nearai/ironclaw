@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "../design-system/button";
+import { Button } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
 import { getSlackSetup, saveSlackSetup, slackSetupError } from "../lib/slack-setup-api";

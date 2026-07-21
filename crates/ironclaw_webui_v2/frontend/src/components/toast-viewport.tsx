@@ -5,7 +5,7 @@ import hotToast, {
   type Toast,
   type ToastType,
 } from "react-hot-toast";
-import { Icon } from "../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
 
 const INFO_TONE = "border-[var(--v2-panel-border)] text-[var(--v2-text)]";

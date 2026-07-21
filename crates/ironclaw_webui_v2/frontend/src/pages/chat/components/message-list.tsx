@@ -3,7 +3,7 @@ import { Link } from "react-router";
 import { useT } from "../../../lib/i18n";
 import { ActivityRun } from "./activity-run";
 import { MessageBubble } from "./message-bubble";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import { groupMessages } from "../lib/message-groups";
 
 export const BOTTOM_FOLLOW_THRESHOLD_PX = 100;

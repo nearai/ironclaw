@@ -1,4 +1,4 @@
-import { Card } from "../../../design-system/card";
+import { Card } from "@ironclaw/design-system";
 import { AVAILABLE_LANGUAGES, useI18n, useT } from "../../../lib/i18n";
 import { matchesSearch } from "../lib/settings-search";
 import { SettingsSearchEmpty } from "./settings-search-empty";

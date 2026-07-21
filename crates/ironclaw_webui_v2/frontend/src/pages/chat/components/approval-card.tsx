@@ -13,9 +13,9 @@
 import React from "react";
 import { Link } from "react-router";
 import { useT } from "../../../lib/i18n";
-import { Button } from "../../../design-system/button";
-import { Badge } from "../../../design-system/badge";
-import { Icon } from "../../../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Badge } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import { classifyRisk } from "../lib/approval-risk";
 
 const APPROVAL_PAYLOAD_PREVIEW_LIMIT = 480;

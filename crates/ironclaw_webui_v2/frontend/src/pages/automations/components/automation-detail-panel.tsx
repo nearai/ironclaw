@@ -1,11 +1,11 @@
 import React from "react";
-import { Button } from "../../../design-system/button";
-import { ConfirmDialog } from "../../../design-system/confirm-dialog";
-import { Icon } from "../../../design-system/icons";
-import { Input } from "../../../design-system/input";
-import { EmptyPanel, Panel, StatusPill } from "../../../design-system/primitives";
+import { Button } from "@ironclaw/design-system";
+import { ConfirmDialog } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { Input } from "@ironclaw/design-system";
+import { EmptyPanel, Panel, StatusPill } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
-import { cn } from "../../../utils/cn";
+import { cn } from "@ironclaw/design-system";
 import {
   RecentRunRow,
   recentRunKey,
@@ -18,14 +18,14 @@ const AUTOMATION_NAME_MAX_BYTES = 256;
 function MetaItem({ label, value, tone = "muted" }) {
   return (
     <div className="min-w-0 rounded-xl border border-[var(--v2-panel-border)] bg-[var(--v2-surface-soft)] p-3">
-      <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-iron-400">
+      <div className="font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--v2-text-faint)]">
         {label}
       </div>
       <div
         className={cn(
-          "mt-2 min-w-0 break-words text-sm text-iron-100",
+          "mt-2 min-w-0 break-words text-sm text-[var(--v2-text-strong)]",
           tone === "success" && "text-[var(--v2-positive-text)]",
-          tone === "danger" && "text-red-200",
+          tone === "danger" && "text-[var(--v2-danger-text)]",
           tone === "info" && "text-sky-200"
         )}
       >
@@ -178,7 +178,7 @@ export function AutomationDetailPanel({
                   <div className="flex min-w-0 items-center gap-2">
                     <h3
                       data-testid="automation-detail-title"
-                      className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight text-iron-100"
+                      className="min-w-0 flex-1 truncate text-xl font-semibold tracking-tight text-[var(--v2-text-strong)]"
                     >
                       {automation.display_name}
                     </h3>
@@ -199,13 +199,13 @@ export function AutomationDetailPanel({
                     )}
                   </div>
                 )}
-            <div className="mt-2 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-iron-400">
+            <div className="mt-2 truncate font-mono text-[11px] uppercase tracking-[0.12em] text-[var(--v2-text-faint)]">
               {automation.automation_id}
             </div>
             {automation.hold_meta_label && (
               <div
                 data-testid="automation-hold-meta"
-                className="mt-1 text-xs text-iron-300"
+                className="mt-1 text-xs text-[var(--v2-text-muted)]"
               >
                 {automation.hold_meta_label}
               </div>
@@ -263,7 +263,7 @@ export function AutomationDetailPanel({
 
         <div>
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <h4 className="text-sm font-semibold text-iron-100">
+            <h4 className="text-sm font-semibold text-[var(--v2-text-strong)]">
               {t("automations.detail.recentRuns")}
             </h4>
             <div className="flex flex-col items-end gap-1">
@@ -284,7 +284,7 @@ export function AutomationDetailPanel({
                 </div>
               )
             : (
-                <div className="rounded-xl border border-dashed border-[var(--v2-panel-border)] p-4 text-sm text-iron-300">
+                <div className="rounded-xl border border-dashed border-[var(--v2-panel-border)] p-4 text-sm text-[var(--v2-text-muted)]">
                   {t("automations.detail.noRuns")}
                 </div>
               )}

@@ -13,7 +13,7 @@
  *   Label       — <label> with consistent typography
  *   FormField   — Label + Input/children + optional error/hint
  */
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 
 /* ─── Shared base ─────────────────────────────────────────────────── */
 

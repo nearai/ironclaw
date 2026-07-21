@@ -3,7 +3,7 @@
  */
 import * as SliderPrimitive from "@radix-ui/react-slider";
 import type { ComponentPropsWithoutRef } from "react";
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 
 export function Slider({
   className = "",

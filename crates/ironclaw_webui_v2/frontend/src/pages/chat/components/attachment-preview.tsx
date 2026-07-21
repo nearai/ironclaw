@@ -14,8 +14,8 @@
 // the modal closes.
 
 import React from "react";
-import { Modal, ModalBody, ModalFooter, ModalHeader } from "../../../design-system/modal";
-import { Icon } from "../../../design-system/icons";
+import { Modal, ModalBody, ModalFooter, ModalHeader } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 import { fetchAttachmentBlob, blobToDataUrl } from "../../../lib/api";
 import { attachmentPreviewMode } from "../lib/attachments";

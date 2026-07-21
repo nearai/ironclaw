@@ -2,7 +2,7 @@
  * Skeleton — loading placeholder using IronClaw surface tokens.
  */
 import type { ComponentPropsWithoutRef } from "react";
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 
 export function Skeleton({
   className = "",

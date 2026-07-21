@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate } from "react-router";
 import React from "react";
+import { DesignSystemI18nProvider } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
 import { useAuthSession } from "./auth";
 import { defaultRoute } from "./routes";
@@ -100,8 +101,12 @@ function AdminRoute({ auth }) {
 
 export function App() {
   const auth = useAuthSession();
+  // Bridge the app's translator into the design-system package (its
+  // Modal/ConfirmDialog built-in strings default to English otherwise).
+  const t = useT();
 
   return (
+    <DesignSystemI18nProvider t={t}>
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={(<LoginPage auth={auth} />)} />
@@ -140,5 +145,6 @@ export function App() {
         <Route path="*" element={(<Navigate to={defaultRoute} replace />)} />
       </Routes>
     </BrowserRouter>
+    </DesignSystemI18nProvider>
   );
 }

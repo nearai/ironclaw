@@ -6,6 +6,9 @@
  */
 
 export { Avatar, AvatarFallback, AvatarImage } from "./avatar";
+export { cn } from "./cn";
+export { DesignSystemI18nProvider, useDesignSystemT } from "./i18n";
+export type { DesignSystemTranslate } from "./i18n";
 export { Badge, StatusPill } from "./badge";
 export { Button } from "./button";
 export { Card, CardBody, CardFooter, CardHeader, CardLabel } from "./card";
@@ -56,4 +59,16 @@ export { Tabs } from "./tabs";
 export type { TabItem } from "./tabs";
 export { useInterfaceTheme } from "./theme";
 export type { InterfaceTheme } from "./theme";
+export {
+  COLOR_TOKENS,
+  CONTROL_TOKENS,
+  MOTION_TOKENS,
+  RADIUS_TOKENS,
+  SHADOW_TOKENS,
+  SPACE_TOKENS,
+  STATUS_CANON,
+  TYPE_TOKENS,
+  Z_TOKENS,
+  readToken,
+} from "./tokens";
 export { Tooltip, TooltipProvider } from "./tooltip";

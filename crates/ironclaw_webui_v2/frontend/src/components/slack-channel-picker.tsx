@@ -1,8 +1,8 @@
 // @ts-nocheck
 import React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Button } from "../design-system/button";
-import { SelectMenu } from "../design-system/select-menu";
+import { Button } from "@ironclaw/design-system";
+import { SelectMenu } from "@ironclaw/design-system";
 import { useT } from "../lib/i18n";
 import {
   listSlackAllowedChannels,

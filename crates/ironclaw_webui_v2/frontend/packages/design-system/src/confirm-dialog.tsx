@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useT } from "../lib/i18n";
+import { useDesignSystemT } from "./i18n";
 import { Button } from "./button";
 import { Modal, ModalBody, ModalFooter } from "./modal";
 
@@ -24,7 +24,7 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  const t = useT();
+  const t = useDesignSystemT();
   const resolvedCancelLabel = cancelLabel || t("common.cancel");
   const handleCancel = () => {
     if (!isConfirming) onCancel();

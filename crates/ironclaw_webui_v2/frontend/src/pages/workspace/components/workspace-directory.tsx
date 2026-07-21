@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Panel } from "../../../design-system/primitives";
+import { Panel } from "@ironclaw/design-system";
 import { areaDisplayName, sortEntries } from "../lib/workspace-presenters";
 import { WorkspaceBreadcrumb } from "./workspace-breadcrumb";
 

@@ -3,7 +3,7 @@
  */
 import * as SeparatorPrimitive from "@radix-ui/react-separator";
 import type { ComponentPropsWithoutRef } from "react";
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 
 export function Separator({
   className = "",

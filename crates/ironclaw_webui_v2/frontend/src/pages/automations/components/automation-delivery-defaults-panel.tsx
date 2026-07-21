@@ -1,9 +1,9 @@
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
-import { Badge, Panel } from "../../../design-system/primitives";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
+import { Badge, Panel } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { cn } from "../../../utils/cn";
+import { cn } from "@ironclaw/design-system";
 
 /**
  * Resolve a Badge tone for a delivery target option.

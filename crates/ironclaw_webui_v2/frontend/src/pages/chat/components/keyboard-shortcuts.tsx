@@ -1,5 +1,5 @@
 import { useT } from "../../../lib/i18n";
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 
 const SHORTCUTS = [
   { keys: ["Enter"], descKey: "shortcuts.send" },

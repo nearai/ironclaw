@@ -3,7 +3,7 @@
  */
 import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import type { ReactNode } from "react";
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 
 type TooltipProps = {
   content: ReactNode;

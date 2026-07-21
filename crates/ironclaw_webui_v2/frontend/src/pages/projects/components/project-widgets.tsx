@@ -1,6 +1,6 @@
 import React from "react";
 import { useT } from "../../../lib/i18n";
-import { Panel } from "../../../design-system/primitives";
+import { Panel } from "@ironclaw/design-system";
 
 declare global {
   interface Window {

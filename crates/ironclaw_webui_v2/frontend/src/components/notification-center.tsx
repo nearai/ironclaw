@@ -1,10 +1,10 @@
 import { useNavigate } from "react-router";
 import { createPortal } from "react-dom";
-import { Button } from "../design-system/button";
-import { Icon } from "../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
+import { cn } from "@ironclaw/design-system";
 
 function NotificationRow({ message, unread, onOpen }) {
   const t = useT();

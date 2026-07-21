@@ -19,7 +19,7 @@
  *   <CardFooter>   — bottom section, optional top divider
  *   <CardLabel>    — mono-caps eyebrow label
  */
-import { cn } from "../utils/cn";
+import { cn } from "./cn";
 
 /* ─── Variant ─────────────────────────────────────────────────────── */
 // --v2-card-bg     : solid panel surface

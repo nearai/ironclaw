@@ -12,8 +12,8 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { AnimatePresence, motion } from "motion/react";
 import type { ReactNode } from "react";
-import { useT } from "../lib/i18n";
-import { cn } from "../utils/cn";
+import { useDesignSystemT } from "./i18n";
+import { cn } from "./cn";
 import { Icon } from "./icons";
 import { MOTION_DURATION, MOTION_EASE_OUT, useReducedMotion } from "./motion";
 
@@ -151,7 +151,7 @@ export function ModalHeader({
   className = "",
   closeLabel,
 }: ModalHeaderProps) {
-  const t = useT();
+  const t = useDesignSystemT();
   const effectiveCloseLabel = closeLabel || t("common.close");
   return (
     <div

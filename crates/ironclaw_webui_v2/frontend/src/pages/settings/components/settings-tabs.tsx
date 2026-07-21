@@ -1,4 +1,4 @@
-import { Icon } from "../../../design-system/icons";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { SETTINGS_TABS } from "../lib/settings-schema";

@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Button } from "../../../design-system/button";
-import { Icon } from "../../../design-system/icons";
+import { Button } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import {

@@ -1,6 +1,6 @@
 import { Navigate, useParams } from "react-router";
 import React from "react";
-import { ConfirmDialog } from "../../design-system/confirm-dialog";
+import { ConfirmDialog } from "@ironclaw/design-system";
 import { useT } from "../../lib/i18n";
 import { ActionToast } from "./components/action-toast";
 import { ChannelsTab } from "./components/channels-tab";

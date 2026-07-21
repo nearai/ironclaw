@@ -1,5 +1,5 @@
-import { Icon } from "../../../design-system/icons";
-import { Button } from "../../../design-system/button";
+import { Icon } from "@ironclaw/design-system";
+import { Button } from "@ironclaw/design-system";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { authScope } from "../../../lib/auth-scope";

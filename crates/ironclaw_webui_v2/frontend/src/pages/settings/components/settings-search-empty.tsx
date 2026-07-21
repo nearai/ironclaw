@@ -1,5 +1,5 @@
-import { Card } from "../../../design-system/card";
-import { Icon } from "../../../design-system/icons";
+import { Card } from "@ironclaw/design-system";
+import { Icon } from "@ironclaw/design-system";
 import { useT } from "../../../lib/i18n";
 
 export function SettingsSearchEmpty({ query }) {

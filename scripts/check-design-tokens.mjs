@@ -32,7 +32,10 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SCAN_ROOT = join(REPO_ROOT, "crates/ironclaw_webui_v2/frontend/src");
+const SCAN_ROOTS = [
+  join(REPO_ROOT, "crates/ironclaw_webui_v2/frontend/src"),
+  join(REPO_ROOT, "crates/ironclaw_webui_v2/frontend/packages/design-system/src"),
+];
 const BASELINE_PATH = join(REPO_ROOT, "scripts/design-tokens-baseline.json");
 
 // color-mix(...) over --v2-* vars is sanctioned; bare rgb()/rgba()
@@ -108,7 +111,7 @@ const updateBaseline = process.argv.includes("--update-baseline");
 const counts = {};
 const details = {};
 
-for (const file of collectJsFiles(SCAN_ROOT).sort()) {
+for (const file of SCAN_ROOTS.flatMap((root) => collectJsFiles(root)).sort()) {
   const rel = relative(REPO_ROOT, file);
   const violations = findViolations(readFileSync(file, "utf8"));
   if (violations.length > 0) {
