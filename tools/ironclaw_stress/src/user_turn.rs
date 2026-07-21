@@ -30,10 +30,10 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, BlockedReason, DefaultTurnCoordinator, FilesystemTurnStateRowStore,
-    FilesystemTurnStateStore, GateRef, IdempotencyKey, LoopCheckpointStateRef,
-    ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnLeaseToken, TurnRunnerId, TurnStateStore, TurnStateStoreLimits,
+    GateRef, IdempotencyKey, LoopCheckpointStateRef, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory, TurnLeaseToken, TurnRunnerId,
+    TurnStateStore, TurnStateStoreLimits,
     runner::{
         BlockRunRequest, ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, TurnRunTransitionPort,
     },
@@ -52,13 +52,12 @@ use crate::{
     trace::{spawn_trace_reporter, stop_trace_reporter},
 };
 
-/// Backend-agnostic turn store for the stress workload. Both the durable
-/// `FilesystemTurnStateStore` and the row-store `FilesystemTurnStateRowStore`
-/// already implement the supertraits, so the impls are empty — this lets
-/// `turn_store_for_context` return one `Arc<dyn StressTurnStore>` and the
-/// workload submit/claim/complete against either without per-method dispatch.
+/// Backend-agnostic turn store for the stress workload. The row store
+/// `FilesystemTurnStateRowStore` implements the supertraits, so the impl is
+/// empty — this lets `turn_store_for_context` return one
+/// `Arc<dyn StressTurnStore>` and the workload submit/claim/complete against it
+/// without per-method dispatch.
 pub(crate) trait StressTurnStore: TurnStateStore + TurnRunTransitionPort {}
-impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateStore<F> {}
 impl<F: RootFilesystem + 'static> StressTurnStore for FilesystemTurnStateRowStore<F> {}
 
 pub(crate) struct UserTurnServices<F>
@@ -1689,21 +1688,6 @@ where
                             .with_limits(self.turn_state_limits),
                     )
                 })
-            }
-            // Durable path: a per-context store whose `/turns/state.json`
-            // resolves per (tenant, agent, project, user), so all of a user's
-            // concurrent turns contend on one document via CAS.
-            TurnStateBackend::Filesystem => {
-                let view =
-                    user_turn_mount_view(&self.run_id, &context.turn_scope.to_resource_scope())
-                        .map_err(|error| OperationFailure::invalid_request("turn_store", error))?;
-                let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
-                    Arc::clone(&self.root),
-                    view,
-                ));
-                Ok(Arc::new(
-                    FilesystemTurnStateStore::new(scoped).with_limits(self.turn_state_limits),
-                ) as Arc<dyn StressTurnStore>)
             }
         }
     }

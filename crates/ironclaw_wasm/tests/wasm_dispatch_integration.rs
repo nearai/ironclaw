@@ -102,7 +102,7 @@ async fn wasm_lane_guest_trap_releases_reservation_and_preserves_dispatch_failur
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(
@@ -168,7 +168,7 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            ..
         }
     ));
     let http_requests = http.requests.lock().unwrap();
@@ -221,7 +221,7 @@ async fn wasm_lane_missing_module_file_returns_sanitized_filesystem_error() {
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::FilesystemDenied,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(adapter.prepare_count(), 0);
@@ -267,7 +267,7 @@ async fn wasm_lane_malformed_module_returns_sanitized_manifest_error() {
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Manifest,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(
@@ -326,7 +326,7 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::OutputDecode,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(
@@ -376,7 +376,7 @@ async fn wasm_lane_rejects_unsupported_import_through_dispatcher_without_reserva
             kind: RuntimeDispatchErrorKind::Manifest
                 | RuntimeDispatchErrorKind::MethodMissing
                 | RuntimeDispatchErrorKind::Executor,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(adapter.prepare_count(), 0);
@@ -435,7 +435,7 @@ async fn wasm_lane_enforces_memory_growth_budget_through_dispatcher() {
             err,
             DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Guest | RuntimeDispatchErrorKind::Memory,
-                safe_summary: None,
+                ..
             }
         ),
         "unexpected memory-growth-bound dispatch error: {err:?}"
@@ -510,7 +510,7 @@ async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
         err,
         DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            ..
         }
     ));
     assert_eq!(http.requests.lock().unwrap().len(), 1);
@@ -634,7 +634,7 @@ impl WasmRuntimeAdapter {
                 .resolve_under(&request.package.root)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Manifest,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
             other => {
                 return Err(DispatchError::Wasm {
@@ -643,7 +643,7 @@ impl WasmRuntimeAdapter {
                     } else {
                         RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
                     },
-                    safe_summary: None,
+                    model_visible_cause: None,
                 });
             }
         };
@@ -662,14 +662,14 @@ impl WasmRuntimeAdapter {
             .await
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::FilesystemDenied,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         let prepared = Arc::new(
             self.runtime
                 .prepare(request.capability_id.as_str(), &wasm_bytes)
                 .map_err(|error| DispatchError::Wasm {
                     kind: wasm_error_kind(&error),
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         );
         let prepared = {
@@ -778,7 +778,7 @@ fn execute_prepared_wasm(
 ) -> Result<RuntimeAdapterResult, DispatchError> {
     let input_json = serde_json::to_string(&request.input).map_err(|_| DispatchError::Wasm {
         kind: RuntimeDispatchErrorKind::InputEncode,
-        safe_summary: None,
+        model_visible_cause: None,
     })?;
     let reservation = match request.resource_reservation {
         Some(reservation) => reservation,
@@ -787,7 +787,7 @@ fn execute_prepared_wasm(
             .reserve(request.scope, request.estimate)
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             })?,
     };
     let execution = match runtime.execute(prepared, host, WitToolRequest::new(input_json)) {
@@ -798,7 +798,7 @@ fn execute_prepared_wasm(
                     release_wasm_reservation(request.governor, reservation.id);
                     return Err(DispatchError::Wasm {
                         kind: RuntimeDispatchErrorKind::Resource,
-                        safe_summary: None,
+                        model_visible_cause: None,
                     });
                 }
             } else {
@@ -806,7 +806,7 @@ fn execute_prepared_wasm(
             }
             return Err(DispatchError::Wasm {
                 kind: wasm_error_kind(&error),
-                safe_summary: None,
+                model_visible_cause: None,
             });
         }
     };
@@ -814,14 +814,14 @@ fn execute_prepared_wasm(
         release_wasm_reservation(request.governor, reservation.id);
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Guest,
-            safe_summary: None,
+            model_visible_cause: None,
         });
     }
     let Some(output_json) = execution.output_json else {
         release_wasm_reservation(request.governor, reservation.id);
         return Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::InvalidResult,
-            safe_summary: None,
+            model_visible_cause: None,
         });
     };
     let output = match serde_json::from_str::<Value>(&output_json) {
@@ -830,7 +830,7 @@ fn execute_prepared_wasm(
             release_wasm_reservation(request.governor, reservation.id);
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::OutputDecode,
-                safe_summary: None,
+                model_visible_cause: None,
             });
         }
     };
@@ -843,7 +843,7 @@ fn execute_prepared_wasm(
             release_wasm_reservation(request.governor, reservation.id);
             return Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             });
         }
     };

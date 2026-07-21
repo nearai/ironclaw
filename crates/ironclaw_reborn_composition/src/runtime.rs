@@ -111,7 +111,9 @@ use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
-use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+use crate::outbound::outbound_preferences::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+};
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
     OutboundDeliveryTargetProvider, RebornOutboundPreferencesFacade,
@@ -125,7 +127,9 @@ use ironclaw_filesystem::CompositeRootFilesystem;
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone)]
 struct StaticOutboundDeliveryTargetProvider {
-    entry: OutboundDeliveryTargetEntry,
+    summary: RebornOutboundDeliveryTargetSummary,
+    capabilities: RebornOutboundDeliveryTargetCapabilities,
+    reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -133,9 +137,18 @@ struct StaticOutboundDeliveryTargetProvider {
 impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        _caller: &WebUiAuthenticatedCaller,
+        caller: &WebUiAuthenticatedCaller,
     ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
-        Ok(vec![self.entry.clone()])
+        // Static test/QA fixture available to whichever caller asks: it claims
+        // the querying caller as owner so it always survives the registry's
+        // caller-scoping filter. Real providers derive the owner from the
+        // resolved resource instead.
+        Ok(vec![OutboundDeliveryTargetEntry {
+            summary: self.summary.clone(),
+            capabilities: self.capabilities.clone(),
+            reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            owner: OutboundDeliveryTargetOwner::for_caller(caller),
+        }])
     }
 }
 #[cfg(any(test, feature = "test-support"))]
@@ -146,8 +159,12 @@ use crate::automation::trigger_poller::{
     TriggerPollerRuntimeHandle, spawn_trigger_poller,
 };
 use crate::runtime_input::{
-    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerPollerAuthorizerConfig,
-    TriggerPollerSettings,
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessChecker,
+    TriggerFireAccessGrant, TriggerPollerAuthorizerConfig, TriggerPollerSettings,
+};
+use crate::trigger_fire_access::{
+    CompositeTriggerFireChecker, IdentityMembershipTriggerFireChecker,
+    StaticOwnerTriggerFireChecker,
 };
 use crate::{
     RebornBuildError, RebornProductAuthServices, RebornReadiness, RebornServices,
@@ -1436,9 +1453,32 @@ impl RebornRuntime {
     /// `tenant_id`. Rides the same `reborn-local-dev.db` handle the runtime
     /// already owns rather than opening a second handle to that file (the
     /// host filesystem abstraction owns the substrate, not the caller).
-    /// Returns `None` when the runtime was built without a local-runtime
-    /// substrate, so callers fail closed instead of synthesizing a second
-    /// identity store outside the host-owned substrate.
+    /// Construct the canonical identity store over a host scoped filesystem.
+    /// Shared by the local-runtime and production-shaped accessors: the store is
+    /// generic over the backend filesystem `F`, tenant-partitions records by the
+    /// per-call tenant in the path, and takes the runtime-owner caller identity as
+    /// its fixed host-API scope.
+    fn identity_store_over<F>(
+        &self,
+        scoped_filesystem: Arc<ironclaw_filesystem::ScopedFilesystem<F>>,
+    ) -> ironclaw_reborn_identity::FilesystemRebornIdentityStore<F>
+    where
+        F: RootFilesystem + 'static,
+    {
+        ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+            scoped_filesystem,
+            self.thread_scope.tenant_id.clone(),
+            self.actor_user_id.clone(),
+            self.thread_scope.agent_id.clone(),
+            self.thread_scope.project_id.clone(),
+        )
+    }
+
+    /// Open the SSO/admin identity resolver over the host-owned identity substrate.
+    /// `None` only when the runtime has no durable substrate at all (neither a
+    /// local-runtime nor a production store graph), so callers fail closed instead
+    /// of synthesizing a second identity store. Greenfield: no legacy fold runs on
+    /// this tree (blank-slate deploy). See #5013.
     pub async fn open_reborn_identity_resolver(
         &self,
         _tenant_id: &TenantId,
@@ -1448,54 +1488,151 @@ impl RebornRuntime {
             ironclaw_reborn_identity::RebornIdentityError,
         >,
     > {
-        let local = self.services.local_runtime.as_ref()?;
-        // Build the store on the host scoped filesystem (same substrate
-        // boundary as every other durable store), scoped by the runtime-owner
-        // caller identity. Data is partitioned by tenant in the record path.
-        let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-            Arc::clone(&local.identity_filesystem),
-            self.thread_scope.tenant_id.clone(),
-            self.actor_user_id.clone(),
-            self.thread_scope.agent_id.clone(),
-            self.thread_scope.project_id.clone(),
-        );
-        Some(Ok(
-            Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>
-        ))
+        // Local-runtime substrate: build the store on the host scoped filesystem
+        // (same substrate boundary as every other durable store), scoped by the
+        // runtime-owner caller identity. Data is partitioned by tenant in the
+        // record path.
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            let store = self.identity_store_over(Arc::clone(&local.identity_filesystem));
+            return Some(Ok(
+                Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>
+            ));
+        }
+
+        // Production-shaped substrate (#5013): the identity store lives on the same
+        // `/tenant-shared/reborn-identity` mount the local build uses — production's
+        // `wrap_scoped` installs the identical `invocation_mount_view` resolver, which
+        // rewrites the prefix by the runtime-owner scope's tenant and treats the
+        // per-call tenant as an opaque path tail, so one owner-scoped store serves
+        // every tenant.
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                let store: Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver> =
+                    match production {
+                        #[cfg(feature = "libsql")]
+                        crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                        }
+                        #[cfg(feature = "postgres")]
+                        crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                        }
+                    };
+                return Some(Ok(store));
+            }
+        }
+        None
     }
 
     /// Open the admin user-directory surface over the host-owned identity
     /// substrate. Same store [`open_reborn_identity_resolver`] uses
     /// (`FilesystemRebornIdentityStore` implements both traits), so admin CRUD
-    /// enumerates exactly the users SSO login persists. `None` when the runtime
-    /// has no local-runtime substrate (fail closed). Synchronous and fold-free
-    /// (the legacy fold seeds identity/index records, not `StoredUser` rows the
-    /// directory reads), so `build_webui_services` can call it directly.
+    /// enumerates exactly the users SSO login persists. `None` only when the
+    /// runtime has no durable substrate at all — neither a local-runtime nor a
+    /// production store graph (fail closed). Synchronous and fold-free (the legacy
+    /// fold seeds identity/index records, not `StoredUser` rows the directory
+    /// reads), so `build_webui_services` can call it directly.
     pub(crate) fn reborn_user_directory(
         &self,
     ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
-        let local = self.services.local_runtime.as_ref()?;
-        let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
-            Arc::clone(&local.identity_filesystem),
-            self.thread_scope.tenant_id.clone(),
-            self.actor_user_id.clone(),
-            self.thread_scope.agent_id.clone(),
-            self.thread_scope.project_id.clone(),
-        );
-        Some(Arc::new(store) as Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>)
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            return Some(
+                Arc::new(self.identity_store_over(Arc::clone(&local.identity_filesystem)))
+                    as Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>,
+            );
+        }
+        // Production-shaped substrate (#5013): same identity mount and per-call
+        // tenant partitioning as the local path — see `open_reborn_identity_resolver`.
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
+                    match production {
+                        #[cfg(feature = "libsql")]
+                        crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                        }
+                        #[cfg(feature = "postgres")]
+                        crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                            Arc::new(self.identity_store_over(Arc::clone(&graph.scoped_filesystem)))
+                        }
+                    };
+                return Some(directory);
+            }
+        }
+        None
+    }
+
+    /// Test-only accessor for the admin user directory the WebUI facade wires.
+    /// Mirrors the production call `build_webui_services` makes to
+    /// [`Self::reborn_user_directory`] (`pub(crate)`), which integration tests
+    /// in a separate crate cannot reach. Gated behind `test-support` so the
+    /// substrate handle never leaks into production builds. For tests only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reborn_user_directory_for_tests(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
+        self.reborn_user_directory()
     }
 
     /// Admin per-user secret provisioner over the host-owned secret substrate,
-    /// scoped to an arbitrary target user (not the runtime owner). `None` when
-    /// no filesystem secret store was built. See `admin_secrets.rs`.
+    /// scoped to an arbitrary target user (not the runtime owner). `None` only
+    /// when no durable secret store was built (a no-storage local build).
+    /// Production-shaped builds source it from the production store graph.
+    /// See `admin_secrets.rs`.
     pub(crate) fn reborn_admin_secret_provisioner(
         &self,
     ) -> Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>> {
-        self.services
-            .local_runtime
-            .as_ref()?
-            .admin_secret_provisioner
-            .clone()
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            return local.admin_secret_provisioner.clone();
+        }
+        // Production-shaped substrate: the provisioner was built over the raw
+        // production root + the runtime's own crypto in `build_backend_production`.
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                return Some(match production {
+                    #[cfg(feature = "libsql")]
+                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                        Arc::clone(&graph.admin_secret_provisioner)
+                    }
+                    #[cfg(feature = "postgres")]
+                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                        Arc::clone(&graph.admin_secret_provisioner)
+                    }
+                });
+            }
+        }
+        None
+    }
+
+    /// First-class projects + membership (ACL) facade over the host-owned scoped
+    /// substrate, backing the WebUI project surface. `None` only when the runtime
+    /// has no durable substrate at all (neither a local-runtime nor a production
+    /// store graph). Production-shaped builds source it from the production graph.
+    pub(crate) fn reborn_project_service(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ProjectService>> {
+        if let Some(local) = self.services.local_runtime.as_ref() {
+            return Some(Arc::clone(&local.project_service));
+        }
+        #[cfg(any(feature = "libsql", feature = "postgres"))]
+        {
+            if let Some(production) = self.services.production_runtime.as_ref() {
+                return Some(match production {
+                    #[cfg(feature = "libsql")]
+                    crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
+                        Arc::clone(&graph.project_service)
+                    }
+                    #[cfg(feature = "postgres")]
+                    crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
+                        Arc::clone(&graph.project_service)
+                    }
+                });
+            }
+        }
+        None
     }
 
     /// The admin API-token minter supplied via
@@ -1702,15 +1839,13 @@ impl RebornRuntime {
         self.register_outbound_delivery_target_provider(
             provider_key,
             Arc::new(StaticOutboundDeliveryTargetProvider {
-                entry: OutboundDeliveryTargetEntry {
-                    summary,
-                    capabilities: RebornOutboundDeliveryTargetCapabilities {
-                        final_replies: true,
-                        gate_prompts: false,
-                        auth_prompts: false,
-                    },
-                    reply_target_binding_ref,
+                summary,
+                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                    final_replies: true,
+                    gate_prompts: false,
+                    auth_prompts: false,
                 },
+                reply_target_binding_ref,
             }),
         )
         .map(|_| ())
@@ -2920,6 +3055,7 @@ pub async fn build_reborn_runtime(
         trigger_poller,
         credential_refresh,
         trigger_fire_access_checker,
+        trigger_fire_access,
         poll,
         identity,
         default_project_id,
@@ -3910,16 +4046,73 @@ pub async fn build_reborn_runtime(
         let local_runtime = local_runtime.ok_or(RebornRuntimeError::InvalidArgument {
             reason: "trigger poller is not wired for production runtime launch".to_string(),
         })?;
+        // Fire-time authorizer: an explicit override wins (tests/advanced),
+        // otherwise build one from the deployment's `TriggerFireAccessPolicy`
+        // (arch-simplification §4.4 — the former `local_trigger_access` store is
+        // now a config value, not a per-deployment store type). Grants are
+        // OR-combined, preserving the union the single store expressed.
+        let mut grant_checkers: Vec<Arc<dyn TriggerFireAccessChecker>> = Vec::new();
+        for grant in trigger_fire_access.grants() {
+            match grant {
+                TriggerFireAccessGrant::StaticOwner {
+                    owner,
+                    agent,
+                    project,
+                } => {
+                    let checker: Arc<dyn TriggerFireAccessChecker> =
+                        Arc::new(StaticOwnerTriggerFireChecker::new(
+                            thread_scope.tenant_id.clone(),
+                            owner.clone(),
+                            agent.clone(),
+                            project.clone(),
+                        ));
+                    grant_checkers.push(checker);
+                }
+                TriggerFireAccessGrant::TenantMembership { agent, project } => {
+                    // Membership is resolved against the canonical identity
+                    // directory the SSO login path populates — the same store
+                    // `reborn_user_directory` opens, built here from the
+                    // runtime's own identity filesystem.
+                    let store = ironclaw_reborn_identity::FilesystemRebornIdentityStore::new(
+                        Arc::clone(&local_runtime.identity_filesystem),
+                        thread_scope.tenant_id.clone(),
+                        actor_user_id.clone(),
+                        thread_scope.agent_id.clone(),
+                        thread_scope.project_id.clone(),
+                    );
+                    let directory: Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> =
+                        Arc::new(store);
+                    let checker: Arc<dyn TriggerFireAccessChecker> =
+                        Arc::new(IdentityMembershipTriggerFireChecker::new(
+                            directory,
+                            thread_scope.tenant_id.clone(),
+                            agent.clone(),
+                            project.clone(),
+                        ));
+                    grant_checkers.push(checker);
+                }
+            }
+        }
+        let policy_checker: Option<Arc<dyn TriggerFireAccessChecker>> = if grant_checkers.len() <= 1
+        {
+            grant_checkers.into_iter().next()
+        } else {
+            let composite: Arc<dyn TriggerFireAccessChecker> =
+                Arc::new(CompositeTriggerFireChecker::new(grant_checkers));
+            Some(composite)
+        };
+        let effective_trigger_fire_access_checker =
+            trigger_fire_access_checker.clone().or(policy_checker);
         validate_trigger_poller_authorization(
             &trigger_poller,
-            trigger_fire_access_checker.as_ref(),
+            effective_trigger_fire_access_checker.as_ref(),
         )?;
         let trigger_poller_services = build_trigger_poller_services(
             local_runtime,
             Arc::clone(&planned_turn_coordinator),
             Arc::clone(&thread_service),
             trigger_poller.authorizer,
-            trigger_fire_access_checker.clone(),
+            effective_trigger_fire_access_checker.clone(),
             thread_scope.tenant_id.clone(),
             validated_identity.agent_id.clone(),
         )

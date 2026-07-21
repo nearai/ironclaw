@@ -25,7 +25,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
-use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId};
+use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalConversationRef, PreferenceTargetEncodeRequest,
 };
@@ -45,7 +45,9 @@ use crate::extension_host::channel_host::GenericChannelHostAssembly;
 use crate::extension_host::channel_subject_routes::{
     handle_declares_field, shared_channel_admission_handles,
 };
-use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+use crate::outbound::outbound_preferences::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+};
 use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
 
 /// The deployment identity every encoded binding ref carries (the same
@@ -227,6 +229,11 @@ impl GenericChannelOutboundTargetProvider {
         context: &ChannelTargetContext,
         conversation_id: &str,
     ) -> Option<OutboundDeliveryTargetEntry> {
+        // The owner is derived from the route's subject (the resolved
+        // resource), never echoed from the caller, so the registry's
+        // caller-scoping filter stays genuine defense in depth.
+        let subject = context.subject_routes.get(conversation_id)?;
+        let owner_user = UserId::new(subject.clone()).ok()?;
         let conversation =
             ExternalConversationRef::new(context.space_id.as_deref(), conversation_id, None, None)
                 .ok()?;
@@ -256,6 +263,10 @@ impl GenericChannelOutboundTargetProvider {
             summary,
             capabilities: full_capabilities(),
             reply_target_binding_ref,
+            owner: OutboundDeliveryTargetOwner::new(
+                self.deps.identity.tenant_id.clone(),
+                owner_user,
+            ),
         })
     }
 
@@ -295,6 +306,12 @@ impl GenericChannelOutboundTargetProvider {
             summary,
             capabilities: full_capabilities(),
             reply_target_binding_ref,
+            // The owner is the record's provisioned user (the resolved
+            // resource), never echoed from the caller.
+            owner: OutboundDeliveryTargetOwner::new(
+                self.deps.identity.tenant_id.clone(),
+                UserId::new(record.user_id.clone()).ok()?,
+            ),
         })
     }
 

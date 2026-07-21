@@ -78,6 +78,7 @@ async fn dispatcher_redacts_binding_failure_details() {
     let binding = RecordingBinding::failing(
         || DispatchError::Script {
             kind: RuntimeDispatchErrorKind::ExitFailure,
+            model_visible_cause: None,
         },
         Arc::clone(&governor),
     );
@@ -95,7 +96,8 @@ async fn dispatcher_redacts_binding_failure_details() {
     assert!(matches!(
         err,
         DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::ExitFailure
+            kind: RuntimeDispatchErrorKind::ExitFailure,
+            ..
         }
     ));
     let message = err.to_string();
@@ -376,7 +378,7 @@ impl BoundCapabilityAdapter for RecordingBinding {
                 .reserve(request.scope.clone(), request.estimate.clone())
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         };
         let receipt = self
@@ -384,7 +386,7 @@ impl BoundCapabilityAdapter for RecordingBinding {
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: self.output.clone(),

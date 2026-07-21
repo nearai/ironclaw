@@ -362,6 +362,7 @@ impl ToolAdapter for SettlingToolAdapter {
                 .map_err(|_| ToolError::Failed {
                     kind: ironclaw_host_api::RuntimeDispatchErrorKind::Resource,
                     safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         };
         match self.inner.invoke(call, ports).await {

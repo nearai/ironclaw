@@ -47,7 +47,6 @@ mod invocation_services;
 mod latency;
 pub mod memory_context;
 mod obligations;
-mod planner;
 mod post_edit_check;
 mod process_aliases;
 mod process_output;
@@ -112,7 +111,6 @@ pub use obligations::{
     ProcessObligationLifecycleStore, RuntimeCredentialAccessSecret,
     RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver,
 };
-pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use post_edit_check::{
     POST_EDIT_CHECK_ENV, POST_EDIT_CHECK_TIMEOUT_ENV, PostEditCheckConfig,
     PostEditCheckConfigError, PostEditCheckService,
@@ -568,12 +566,61 @@ pub struct RuntimeProcessHandle {
 }
 
 /// Sanitized capability failure outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `message` is the public label: it is persisted into run-state rows,
+/// published on the runtime event sink, and rendered by product surfaces, so
+/// producers keep it host-authored/strict-validated (wild raw causes degrade
+/// to the kind's fixed sentence). The raw descriptive cause rides
+/// `model_visible_cause` instead — an in-process-only channel.
+#[derive(Clone, Eq)]
 pub struct RuntimeCapabilityFailure {
     pub capability_id: CapabilityId,
     pub kind: RuntimeFailureKind,
     pub message: Option<String>,
     pub detail: Option<DispatchFailureDetail>,
+    /// Registry-scrubbed descriptive cause for the model-visible Diagnostic
+    /// channel ONLY. Deliberately absent from `Debug`/`PartialEq` and never
+    /// persisted or published by run-state/event writers — the loop-support
+    /// seam (`runtime_failure_diagnostic_detail`) re-scrubs and injection-
+    /// fences it before it reaches the model.
+    model_visible_cause: Option<String>,
+}
+
+impl fmt::Debug for RuntimeCapabilityFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `model_visible_cause` is intentionally omitted and raw Diagnostic
+        // text is redacted: Debug renders flow into tracing logs and
+        // test/public assertions, and either channel may carry backend paths
+        // or provider text. Structured invalid-input and host-remediation
+        // details remain useful and are already bounded by their contracts.
+        let mut debug = f.debug_struct("RuntimeCapabilityFailure");
+        debug
+            .field("capability_id", &self.capability_id)
+            .field("kind", &self.kind)
+            .field("message", &self.message);
+        match &self.detail {
+            Some(DispatchFailureDetail::Diagnostic { .. }) => {
+                debug.field("detail", &"<diagnostic redacted>");
+            }
+            detail => {
+                debug.field("detail", detail);
+            }
+        }
+        debug.finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RuntimeCapabilityFailure {
+    fn eq(&self, other: &Self) -> bool {
+        // Mirror the `Debug` exclusion: `model_visible_cause` is a private
+        // diagnostic channel, so equality compares only the public fields.
+        // Otherwise two failures differing only in the hidden cause would fail
+        // `assert_eq!` while their `Debug` diffs print identical.
+        self.capability_id == other.capability_id
+            && self.kind == other.kind
+            && self.message == other.message
+            && self.detail == other.detail
+    }
 }
 
 /// Explicit fallback for outcome categories that the loop adapter cannot handle
@@ -758,12 +805,27 @@ impl RuntimeCapabilityFailure {
             kind,
             message,
             detail: None,
+            model_visible_cause: None,
         }
     }
 
     pub fn with_detail(mut self, detail: DispatchFailureDetail) -> Self {
         self.detail = Some(detail);
         self
+    }
+
+    /// Attach the registry-scrubbed descriptive cause for the model-visible
+    /// Diagnostic channel. Never rendered in `Debug`, run-state rows, or
+    /// runtime events.
+    pub fn with_model_visible_cause(mut self, cause: impl Into<String>) -> Self {
+        self.model_visible_cause = Some(cause.into());
+        self
+    }
+
+    /// Return the scrubbed cause for the loop adapter's model-visible
+    /// Diagnostic seam. This value is never a public display label.
+    pub fn model_visible_cause(&self) -> Option<&str> {
+        self.model_visible_cause.as_deref()
     }
 
     pub fn safe_summary(&self) -> Option<String> {

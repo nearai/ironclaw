@@ -22,9 +22,9 @@
 //!   `LocalDev*`-prefixed names, owned by the sibling ratchet; localization
 //!   words like `Locale`/`Localization` are excluded structurally — they
 //!   continue lowercase, so the word is not `Local`). The `LocalTriggerAccess*`
-//!   family (incl. its `Reborn*LocalTriggerAccess*` backends) is genuine
-//!   Bucket-1 debt: §4.4 folds the `local_trigger_access` module into "seed the
-//!   owner grant from config at boot," a policy value. The `RebornLocal*`
+//!   family is gone: §4.4 folded the `local_trigger_access` module into a
+//!   config value (the `TriggerFireAccessPolicy` on `RebornRuntimeInput`,
+//!   backed by config + the identity directory). The `RebornLocal*`
 //!   composition family is Slice-B mode-as-type debt. Shrinks as those land.
 //!   `LocalInvocationServicesResolver` awaits a rename (a design call — it
 //!   wires host OR sandbox ports).
@@ -100,17 +100,11 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     "HostedMcpDiscoveryEgress",
     "HostedMcpDiscoveryError",
     "HostedMcpEndpoint",
-    // --- Local* (non-LocalDev): Bucket-1 DEBT — the `local_trigger_access` module
-    //     folds to "seed owner grant from config at boot" (§4.4). Shrinks as that
-    //     lands.
-    "LocalTriggerAccessBootstrap",
-    "LocalTriggerAccessBootstrapConfig",
-    "LocalTriggerAccessReconciliation",
-    "LocalTriggerAccessRole",
-    "LocalTriggerAccessSeed",
-    "LocalTriggerAccessSource",
-    "LocalTriggerAccessStatus",
-    "LocalTriggerAccessStore",
+    // --- Local* (non-LocalDev): the `local_trigger_access` module has been
+    //     folded to a config value — fire-time trigger access is now the
+    //     `TriggerFireAccessPolicy` on `RebornRuntimeInput`, backed by config
+    //     (static owner) and the identity directory (SSO membership), with no
+    //     persisted store type (§4.4). The `LocalTriggerAccess*` family is gone.
     // --- Local*: pending rename — its correct name is a design call (wires host
     //     OR sandbox process ports, so "Local…" understates it).
     "LocalInvocationServicesResolver",
@@ -119,11 +113,6 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     //   JUSTIFIED (Bucket-3 by meaning): "hook-local id" — an identifier local to
     //     one hook, a genuine domain concept, not a deployment tier.
     "HookLocalId",
-    //   local_trigger_access family (same Bucket-1 debt as the LocalTriggerAccess*
-    //     prefix group above — folds into config-seeded owner grants):
-    "RebornFilesystemLocalTriggerAccessStore",
-    "RebornLibSqlLocalTriggerAccessStore",
-    "RebornLocalTriggerAccessStoreError",
     //   RebornLocal* composition family — local-dev-as-type mode names in the
     //     composition surface; shrinks with Slice B (deployment mode becomes a
     //     `DeploymentConfig` value):

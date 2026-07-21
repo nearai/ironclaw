@@ -5,7 +5,7 @@
 //! (`group_approvals::scenario_approval_request_persists_after_reopen`) proves
 //! the approval-REQUEST record survives an independent reopen, but that
 //! scenario runs over the default `StorageMode::InMemory` group — the turn/gate
-//! STATE (`FilesystemTurnStateStore`, holding `TurnStatus::BlockedApproval` +
+//! STATE (`FilesystemTurnStateRowStore`, holding `TurnStatus::BlockedApproval` +
 //! `GateRef`) is never independently reopened there. This test drives a
 //! `StorageMode::LibSql` group so BOTH stores are genuinely on-disk, reopens
 //! BOTH independently of the live group, then resumes to completion — the

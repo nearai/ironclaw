@@ -20,7 +20,7 @@ async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
     let process_manager = RecordingProcessManager::default();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
-    let host = CapabilityHost::new(&registry, &dispatcher, &SpawnApprovalAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &SpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -36,7 +36,6 @@ async fn capability_host_blocks_spawn_for_approval_without_starting_process() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -111,7 +110,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
     let process_manager = RecordingProcessManager::default();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
-    let host = CapabilityHost::new(&registry, &dispatcher, &ShellSpawnApprovalAuthorizer)
+    let host = capability_host(&registry, &dispatcher, &ShellSpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -129,7 +128,6 @@ output_schema_ref = "schemas/shell.output.v1.json"
             capability_id,
             estimate: ResourceEstimate::default(),
             input,
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -175,7 +173,7 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(&registry, &dispatcher, &SpawnApprovalAuthorizer)
+    let block_host = capability_host(&registry, &dispatcher, &SpawnApprovalAuthorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -192,7 +190,6 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -224,7 +221,7 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(&registry, &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(&registry, &dispatcher, &resume_authorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
@@ -238,7 +235,6 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -272,7 +268,6 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -309,8 +304,13 @@ async fn capability_host_denies_spawn_when_trust_ceiling_omits_spawn_effect() {
     let dispatcher = RecordingDispatcher::default();
     let process_manager = RecordingProcessManager::default();
     let authorizer = GrantAuthorizer::new();
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
-        .with_process_manager(&process_manager);
+    // The kernel computes trust in-fold (§5.3.2/§9); inject a trust policy whose
+    // authority ceiling omits the SpawnProcess effect so the trust-aware
+    // authorizer denies the spawn on the trust ceiling.
+    let trust_policy = FixedTrustPolicy::with_effects(vec![EffectKind::DispatchCapability]);
+    let host =
+        capability_host_with_trust_policy(&registry, &dispatcher, &authorizer, &trust_policy)
+            .with_process_manager(&process_manager);
     let context = execution_context(CapabilitySet {
         grants: vec![spawn_grant()],
     });
@@ -321,7 +321,6 @@ async fn capability_host_denies_spawn_when_trust_ceiling_omits_spawn_effect() {
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "blocked spawn"}),
-            trust_decision: trust_decision_with_effects(vec![EffectKind::DispatchCapability]),
         })
         .await
         .unwrap_err();
@@ -344,7 +343,7 @@ async fn capability_host_returns_spawn_result_when_run_completion_fails_after_sp
     let process_manager = RecordingProcessManager::default();
     let run_state = FailCompleteRunStateStore::new();
     let authorizer = SpawnAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
+    let host = capability_host(&registry, &dispatcher, &authorizer)
         .with_process_manager(&process_manager)
         .with_run_state(&run_state);
     let context = execution_context(CapabilitySet {
@@ -357,7 +356,6 @@ async fn capability_host_returns_spawn_result_when_run_completion_fails_after_sp
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "background"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -373,8 +371,8 @@ async fn capability_host_spawns_authorized_process_without_dispatching_inline() 
     let dispatcher = RecordingDispatcher::default();
     let process_manager = RecordingProcessManager::default();
     let authorizer = SpawnAuthorizer;
-    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer)
-        .with_process_manager(&process_manager);
+    let host =
+        capability_host(&registry, &dispatcher, &authorizer).with_process_manager(&process_manager);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -385,7 +383,6 @@ async fn capability_host_spawns_authorized_process_without_dispatching_inline() 
             capability_id: capability_id(),
             estimate: ResourceEstimate::default(),
             input: json!({"message": "background"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();

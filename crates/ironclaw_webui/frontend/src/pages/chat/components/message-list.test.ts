@@ -29,6 +29,8 @@ function messageListSourceForTest() {
         .replace("export function isNearBottom", "function isNearBottom")
         .replace("export function shouldShowJumpToLatest", "function shouldShowJumpToLatest")
         .replace("export function scrollToBottom", "function scrollToBottom")
+        .replace("export function capturePrependScrollAnchor", "function capturePrependScrollAnchor")
+        .replace("export function restorePrependScrollAnchor", "function restorePrependScrollAnchor")
         .replace("export function messageKey", "function messageKey")
         .replace("export function isNewUserMessage", "function isNewUserMessage")
         .replace("export function MessageList", "function MessageList"),
@@ -44,6 +46,8 @@ globalThis.__testExports = {
   isNearBottom,
   shouldShowJumpToLatest,
   scrollToBottom,
+  capturePrependScrollAnchor,
+  restorePrependScrollAnchor,
   messageKey,
   isNewUserMessage,
 };`;
@@ -63,6 +67,8 @@ test("MessageList keeps scroll helpers exported", () => {
     "isNearBottom",
     "shouldShowJumpToLatest",
     "scrollToBottom",
+    "capturePrependScrollAnchor",
+    "restorePrependScrollAnchor",
     "messageKey",
     "isNewUserMessage",
   ]) {
@@ -136,6 +142,46 @@ test("MessageList scrollToBottom pins the viewport to the latest content", () =>
   assert.equal(distanceFromBottom(viewport), 0);
 });
 
+test("MessageList preserves the reading position when older messages are prepended", () => {
+  const { capturePrependScrollAnchor, restorePrependScrollAnchor } = loadHelpers();
+  let viewportTop = 100;
+  let anchorTop = 177;
+  const viewport = {
+    scrollHeight: 1000,
+    scrollTop: 24,
+    clientHeight: 600,
+    getBoundingClientRect: () => ({ top: viewportTop }),
+  };
+  const anchorElement = {
+    isConnected: true,
+    getBoundingClientRect: () => ({ top: anchorTop }),
+  };
+  const anchor = capturePrependScrollAnchor(viewport, anchorElement);
+
+  viewport.scrollHeight = 1480;
+  anchorTop = 657;
+  restorePrependScrollAnchor(viewport, anchor);
+
+  assert.equal(
+    viewport.scrollTop,
+    504,
+    "the previous viewport offset should move by exactly the prepended height",
+  );
+
+  // Chromium may apply native scroll anchoring before React's layout effect.
+  // Writing the absolute target keeps that browser correction idempotent.
+  viewport.scrollTop = 504;
+  anchorTop = 177;
+  restorePrependScrollAnchor(viewport, anchor);
+  assert.equal(viewport.scrollTop, 504);
+
+  // Fall back to the scroll-height delta if React replaced the anchor node.
+  anchorElement.isConnected = false;
+  viewport.scrollTop = 24;
+  restorePrependScrollAnchor(viewport, anchor);
+  assert.equal(viewport.scrollTop, 504);
+});
+
 test("MessageList force-follows when the latest message is newly sent by the user", () => {
   const { isNewUserMessage, messageKey } = loadHelpers();
   const previousAssistant = { id: "reply-1", role: "assistant" };
@@ -160,6 +206,21 @@ test("MessageList force-follows when the latest message is newly sent by the use
 });
 
 test("MessageList observes content growth from streamed markdown layout", () => {
+  assert.match(
+    messageListSource,
+    /const anchor = capturePrependScrollAnchor\([\s\S]*firstVisibleContentElement\(el, contentRef\.current\)[\s\S]*historyPrependAnchorRef\.current = \{[\s\S]*firstMessageKey:[\s\S]*restorePrependScrollAnchor\(el, anchor\);/,
+    "history pagination should restore the pre-prepend viewport before paint",
+  );
+  assert.match(
+    messageListSource,
+    /previousFirstStillPresent[\s\S]*firstKey !== anchor\.firstMessageKey[\s\S]*previousFirstStillPresent/,
+    "scroll restoration should only run when older messages were actually prepended",
+  );
+  assert.match(
+    messageListSource,
+    /loadOlder\(\);[\s\S]*onClick=\{loadOlder\}/,
+    "button and top-scroll pagination should share the anchored load path",
+  );
   assert.match(
     messageListSource,
     /const force = isNewUserMessage\(latestMessageKeyRef\.current, latestMessage\);[\s\S]*followLatest\(force\);/,

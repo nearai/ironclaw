@@ -141,11 +141,13 @@ fn dispatch_error_for_tool_error(
             credential_requirements,
         },
         ToolError::InvalidInput { .. } => {
-            dispatch_error_for_kind(runtime, RuntimeDispatchErrorKind::InputEncode, None)
+            dispatch_error_for_kind(runtime, RuntimeDispatchErrorKind::InputEncode, None, None)
         }
-        ToolError::Failed { kind, safe_summary } => {
-            dispatch_error_for_kind(runtime, kind, safe_summary)
-        }
+        ToolError::Failed {
+            kind,
+            safe_summary,
+            model_visible_cause,
+        } => dispatch_error_for_kind(runtime, kind, safe_summary, model_visible_cause),
     }
 }
 
@@ -153,11 +155,26 @@ fn dispatch_error_for_kind(
     runtime: RuntimeKind,
     kind: RuntimeDispatchErrorKind,
     safe_summary: Option<String>,
+    model_visible_cause: Option<String>,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Wasm => DispatchError::Wasm { kind, safe_summary },
-        RuntimeKind::Mcp => DispatchError::Mcp { kind },
-        RuntimeKind::Script => DispatchError::Script { kind },
+        // The lane variants carry the cause on `model_visible_cause` (#5965):
+        // raw-or-better cause text, scrubbed downstream at the model-visible
+        // Diagnostic seam. When an adapter supplied only a fixed host-authored
+        // summary, that text is trivially cause-safe, so it rides the same
+        // channel rather than being dropped.
+        RuntimeKind::Wasm => DispatchError::Wasm {
+            kind,
+            model_visible_cause: model_visible_cause.or(safe_summary),
+        },
+        RuntimeKind::Mcp => DispatchError::Mcp {
+            kind,
+            model_visible_cause: model_visible_cause.or(safe_summary),
+        },
+        RuntimeKind::Script => DispatchError::Script {
+            kind,
+            model_visible_cause: model_visible_cause.or(safe_summary),
+        },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
             kind,
             safe_summary,

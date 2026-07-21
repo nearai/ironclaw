@@ -6,6 +6,7 @@ import { messagesFromTimeline } from "../lib/history-messages";
 import {
   carryFinalAssistantOrderFlags,
   isFinalAssistantMessage,
+  isLiveAssistantMessage,
   isRunActivityMessage,
 } from "../lib/stream-order-memory";
 
@@ -469,6 +470,12 @@ function mergeFullRefresh(fresh, current, options = {}) {
     current,
   );
   const ids = new Set(hydratedFresh.map((m) => m?.id).filter(Boolean));
+  const finalizedRunIds = new Set(
+    hydratedFresh
+      .filter(isFinalAssistantMessage)
+      .map((message) => message?.turnRunId)
+      .filter((runId) => typeof runId === "string"),
+  );
   const freshSequenceWindow =
     rawFreshSequenceWindow || timelineSequenceWindow(hydratedFresh);
   const currentSequenceWindow =
@@ -492,6 +499,12 @@ function mergeFullRefresh(fresh, current, options = {}) {
       ids.has(`msg-${message.timelineMessageId}`)
     ) {
       return false;
+    }
+    if (
+      isLiveAssistantMessage(message) &&
+      !finalizedRunIds.has(message.turnRunId)
+    ) {
+      return true;
     }
     if (isSeededOptimisticMessage(message)) return true;
     if (

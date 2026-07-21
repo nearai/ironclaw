@@ -83,7 +83,7 @@ function AutoApproveCard({ settings, onSave, savedKeys, isLoading }) {
   );
 }
 
-function ToolRow({ tool, onPermissionChange, isSaved }) {
+function ToolRow({ tool, pendingPermission, onPermissionChange, isSaved }) {
   const t = useT();
   const description = translatedToolDescription(t, tool);
   const permissionStates = [
@@ -102,7 +102,8 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
   const current =
     permissionStates.find((p) => p.value === tool.state) || permissionStates[1];
   const effectiveSource = tool.effective_source || "default";
-  const selectedState = effectiveSource === "override" ? tool.state : "default";
+  const selectedState =
+    pendingPermission ?? (effectiveSource === "override" ? tool.state : "default");
   const isDefault = effectiveSource === "default" && tool.state === tool.default_state;
 
   return (
@@ -156,6 +157,7 @@ function ToolRow({ tool, onPermissionChange, isSaved }) {
                 options={permissionStates}
                 onChange={(value) => onPermissionChange(tool.name, value)}
                 ariaLabel={t("tools.permissionFor", { name: tool.name })}
+                aria-busy={pendingPermission != null}
                 className="w-36 sm:w-44"
                 data-testid="settings-tool-permission-select"
               />
@@ -179,7 +181,14 @@ export function ToolsTab({
   searchQuery = "",
 }) {
   const t = useT();
-  const { tools, query, setPermission, savedTools, error: permissionError } = useTools();
+  const {
+    tools,
+    query,
+    setPermission,
+    savedTools,
+    pendingPermissions,
+    error: permissionError,
+  } = useTools();
 
   if (query.isLoading) {
     return (
@@ -283,6 +292,7 @@ export function ToolsTab({
                   <ToolRow
                     key={tool.name}
                     tool={tool}
+                    pendingPermission={pendingPermissions?.[tool.name]?.state}
                     onPermissionChange={setPermission}
                     isSaved={savedTools[tool.name]}
                   />

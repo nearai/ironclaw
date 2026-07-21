@@ -4089,20 +4089,26 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
         .provider_call
         .as_ref()
         .expect("provider replay metadata");
-    assert_eq!(provider_call.provider_turn_id, "turn_1");
-    assert_eq!(provider_call.provider_call_id, "call_1");
-    assert_eq!(provider_call.provider_tool_name.as_str(), "demo__echo");
+    assert_eq!(provider_call.replay.provider_turn_id, "turn_1");
+    assert_eq!(provider_call.replay.provider_call_id, "call_1");
+    assert_eq!(
+        provider_call.replay.provider_tool_name.as_str(),
+        "demo__echo"
+    );
     assert_eq!(provider_call.capability_id, capability_id());
     assert_eq!(
-        provider_call.arguments,
+        provider_call.replay.arguments,
         serde_json::json!({"message":"hello"})
     );
     assert_eq!(
-        provider_call.response_reasoning.as_deref(),
+        provider_call.replay.response_reasoning.as_deref(),
         Some("response reasoning")
     );
-    assert_eq!(provider_call.reasoning.as_deref(), Some("call reasoning"));
-    assert_eq!(provider_call.signature.as_deref(), Some("sig-1"));
+    assert_eq!(
+        provider_call.replay.reasoning.as_deref(),
+        Some("call reasoning")
+    );
+    assert_eq!(provider_call.replay.signature.as_deref(), Some("sig-1"));
     let model_observation = appended[0]
         .model_observation
         .as_ref()
@@ -4180,10 +4186,10 @@ async fn denied_provider_call_appends_failure_tool_result_for_replay() {
         .provider_call
         .as_ref()
         .expect("provider replay metadata");
-    assert_eq!(denied_provider_call.provider_turn_id, "turn_1");
-    assert_eq!(denied_provider_call.provider_call_id, "call_2");
+    assert_eq!(denied_provider_call.replay.provider_turn_id, "turn_1");
+    assert_eq!(denied_provider_call.replay.provider_call_id, "call_2");
     assert_eq!(
-        denied_provider_call.provider_tool_name.as_str(),
+        denied_provider_call.replay.provider_tool_name.as_str(),
         "demo__echo"
     );
     match exit {
@@ -4532,9 +4538,12 @@ async fn model_visible_provider_tool_failures_append_failure_tool_result_for_rep
             .provider_call
             .as_ref()
             .expect("provider replay metadata");
-        assert_eq!(provider_call.provider_turn_id, "turn_1");
-        assert_eq!(provider_call.provider_call_id, "call_1");
-        assert_eq!(provider_call.provider_tool_name.as_str(), "demo__echo");
+        assert_eq!(provider_call.replay.provider_turn_id, "turn_1");
+        assert_eq!(provider_call.replay.provider_call_id, "call_1");
+        assert_eq!(
+            provider_call.replay.provider_tool_name.as_str(),
+            "demo__echo"
+        );
         match exit {
             LoopExit::Completed(completed) => {
                 assert_eq!(completed.result_refs, vec![appended[0].result_ref.clone()]);

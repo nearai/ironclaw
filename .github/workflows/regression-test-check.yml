@@ -64,14 +64,14 @@ jobs:
 
           TOUCHES_HIGH_RISK=false
           HIGH_RISK_PATTERNS=(
-            "src/context/state.rs"
-            "src/agent/session.rs"
-            "src/llm/circuit_breaker.rs"
-            "src/llm/retry.rs"
-            "src/llm/failover.rs"
-            "src/agent/self_repair.rs"
-            "src/agent/agentic_loop.rs"
-            "src/tools/execute.rs"
+            "crates/ironclaw_turns/src/coordinator.rs"
+            "crates/ironclaw_turns/src/status.rs"
+            "crates/ironclaw_run_state/src/"
+            "crates/ironclaw_llm/src/circuit_breaker.rs"
+            "crates/ironclaw_llm/src/retry.rs"
+            "crates/ironclaw_llm/src/failover.rs"
+            "crates/ironclaw_agent_loop/src/executor"
+            "crates/ironclaw_agent_loop/src/state"
             "crates/ironclaw_safety/src/"
           )
 
@@ -117,7 +117,7 @@ jobs:
           ALL_EXEMPT=true
           while IFS= read -r file; do
             case "$file" in
-              src/channels/web/static/*) ;;
+              crates/ironclaw_webui/frontend/public/*) ;;
               *.md) ;;
               *) ALL_EXEMPT=false; break ;;
             esac

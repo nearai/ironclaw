@@ -544,6 +544,7 @@ impl ironclaw_host_api::ToolAdapter for AcmeFixtureToolAdapter {
             _ => Err(ironclaw_host_api::ToolError::Failed {
                 kind: ironclaw_host_api::RuntimeDispatchErrorKind::UndeclaredCapability,
                 safe_summary: None,
+                model_visible_cause: None,
             }),
         }
     }

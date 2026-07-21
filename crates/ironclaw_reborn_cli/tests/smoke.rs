@@ -122,45 +122,45 @@ fn write_sparse_reborn_config(reborn_home: &Path) {
 
 #[test]
 fn dockerfile_reborn_builds_with_production_features() {
-    let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
-        .expect("Dockerfile.reborn");
+    let dockerfile =
+        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
 
     assert!(
         dockerfile.matches("--features libsql,postgres").count() >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
+        "Dockerfile must compile both cargo-chef deps and final binary with libsql and postgres: {dockerfile}"
     );
     assert!(
         dockerfile.contains("--bin ironclaw")
             && dockerfile
                 .contains("COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw"),
-        "Dockerfile.reborn must build and copy the canonical ironclaw binary: {dockerfile}"
+        "Dockerfile must build and copy the canonical ironclaw binary: {dockerfile}"
     );
     assert!(
         dockerfile.contains("corepack enable pnpm")
             && dockerfile.matches("pnpm install --frozen-lockfile").count() >= 2
             && dockerfile.contains("crates/ironclaw_webui/frontend"),
-        "Dockerfile.reborn must install WebUI frontend dependencies before cargo-chef and the final binary build: {dockerfile}"
+        "Dockerfile must install WebUI frontend dependencies before cargo-chef and the final binary build: {dockerfile}"
     );
     assert!(
         dockerfile.contains("config.production.toml"),
-        "Dockerfile.reborn must ship the opt-in production config: {dockerfile}"
+        "Dockerfile must ship the opt-in production config: {dockerfile}"
     );
     assert!(
         dockerfile.contains("config.hosted-single-tenant-volume.toml"),
-        "Dockerfile.reborn must ship the hosted volume seed config: {dockerfile}"
+        "Dockerfile must ship the hosted volume seed config: {dockerfile}"
     );
     let builder_stage = dockerfile
         .split_once("FROM deps AS builder")
         .map(|(_, stage)| stage)
-        .expect("Dockerfile.reborn should define a builder stage");
+        .expect("Dockerfile should define a builder stage");
     assert!(
         builder_stage.contains("COPY migrations/ migrations/")
             && dockerfile.matches("COPY migrations/ migrations/").count() == 1,
-        "Dockerfile.reborn must copy repo-level SQL migrations exactly once in the builder stage for postgres include_str! builds: {dockerfile}"
+        "Dockerfile must copy repo-level SQL migrations exactly once in the builder stage for postgres include_str! builds: {dockerfile}"
     );
     assert!(
         !dockerfile.contains("IRONCLAW_REBORN_HOME=/data/ironclaw-reborn"),
-        "Dockerfile.reborn must let the entrypoint resolve Railway volume mounts before falling back to /data: {dockerfile}"
+        "Dockerfile must let the entrypoint resolve Railway volume mounts before falling back to /data: {dockerfile}"
     );
     assert!(
         !dockerfile.contains("\nVOLUME "),
@@ -378,16 +378,16 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
 }
 
 #[test]
-fn dockerfile_reborn_does_not_package_the_retired_ownership_migration() {
+fn dockerfile_does_not_package_the_retired_ownership_migration() {
     // Greenfield reconciliation (owner decision D1): the one-time extension
     // ownership migration crate is deleted, so the image must not try to
     // build or ship its binary.
-    let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
-        .expect("Dockerfile.reborn");
+    let dockerfile =
+        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
     assert!(
         !dockerfile.contains("ironclaw_reborn_migration")
             && !dockerfile.contains("ironclaw-reborn-extension-ownership-migration"),
-        "Dockerfile.reborn must not reference the deleted ownership-migration crate: {dockerfile}"
+        "Dockerfile must not reference the deleted ownership-migration crate: {dockerfile}"
     );
 }
 
@@ -6832,13 +6832,13 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         "the independent Docker workflow must remain manually and periodically runnable"
     );
     assert!(
-        workspace_manifest.contains("name = \"ironclaw_legacy\"")
+        workspace_manifest.contains("name = \"ironclaw_reborn_integration_tests\"")
             && workspace_manifest.contains("[package.metadata.dist]\ndist = false")
             && workspace_manifest.contains("packages = [\"ironclaw\"]")
             && workspace_manifest.contains("allow-dirty = [\"ci\"]")
             && cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
             && cli_manifest.contains("[package.metadata.dist]\ndist = true"),
-        "cargo-dist package selection must exclude legacy and enable only Reborn"
+        "cargo-dist package selection must exclude the root test-only package and enable only Reborn"
     );
     assert!(
         wix_manifest.contains("Name='ironclaw'")
@@ -6847,6 +6847,35 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
             && !wix_manifest.contains("ironclaw-legacy")
             && !root.join("wix/main.wxs").exists(),
         "the MSI definition must install only the canonical Reborn executable"
+    );
+    let cli_package_section = cli_manifest
+        .split_once("[package]\n")
+        .map(|(_, remainder)| remainder)
+        .and_then(|remainder| remainder.split_once("\n[").map(|(section, _)| section))
+        .expect("Reborn CLI manifest must define a [package] section");
+    let cli_description = cli_package_section
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("description = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("Reborn CLI manifest must define a package description");
+    let wix_package_element = wix_manifest
+        .split_once("<Package Id='*'")
+        .map(|(_, remainder)| remainder)
+        .and_then(|remainder| remainder.split_once("/>").map(|(element, _)| element))
+        .expect("Reborn WiX manifest must define a Package element");
+    let wix_description = wix_package_element
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("Description='")
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .expect("Reborn WiX Package element must define a Description attribute");
+    assert_eq!(
+        wix_description, cli_description,
+        "the checked-in WiX package description must match the Cargo package metadata"
     );
     let reborn_cli_selector = code_style_workflow
         .lines()

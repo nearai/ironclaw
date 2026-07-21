@@ -174,6 +174,7 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_binding_failure() {
             adapter: Arc::new(FailingBinding {
                 error: || DispatchError::Script {
                     kind: RuntimeDispatchErrorKind::ExitFailure,
+                    model_visible_cause: None,
                 },
             }),
         },
@@ -191,7 +192,8 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_binding_failure() {
     assert!(matches!(
         err,
         DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::ExitFailure
+            kind: RuntimeDispatchErrorKind::ExitFailure,
+            ..
         }
     ));
 
@@ -326,7 +328,7 @@ impl BoundCapabilityAdapter for EchoBinding {
                 .reserve(request.scope.clone(), request.estimate.clone())
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         };
         let receipt = self
@@ -334,7 +336,7 @@ impl BoundCapabilityAdapter for EchoBinding {
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,

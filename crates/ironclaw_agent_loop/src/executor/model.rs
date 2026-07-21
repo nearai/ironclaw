@@ -21,7 +21,7 @@ use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
     HostStage, StageContext, exit_id, failed_exit, honor_retry_alteration, loop_gate_kind,
     model_error_class, model_error_failure_summary, model_preference_to_host,
-    sanitized_strategy_summary,
+    sanitized_strategy_summary_or_fallback,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -101,6 +101,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
         // a strategy contract bug: retrying past its declared ceiling.
         let max_model_attempts = ctx.planner.recovery().max_total_model_attempts().max(1);
         let mut last_error_summary: Option<ModelErrorSummary> = None;
+        let mut last_error_detail: Option<String> = None;
         for _ in 0..max_model_attempts {
             match ctx.host.stream_model(request.clone()).await {
                 Ok(response) => {
@@ -135,12 +136,28 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         return budget_approval_blocked_exit(ctx, state, gate_ref).await;
                     }
                     let Some(class) = model_error_class(&error) else {
-                        let detail = error.detail.clone();
+                        let raw_summary = error.safe_summary;
+                        let (safe_summary, rejected_summary_detail) =
+                            match LoopSafeSummary::new(raw_summary.clone()) {
+                                Ok(summary) => (summary, None),
+                                Err(validation_error) => {
+                                    debug!(
+                                        validation_error = %validation_error,
+                                        "model host error summary rejected; using fallback"
+                                    );
+                                    (
+                                    LoopSafeSummary::model_gateway_failed(),
+                                    Some(ironclaw_turns::run_profile::sanitize_model_visible_text(
+                                        raw_summary,
+                                    )),
+                                )
+                                }
+                            };
+                        let detail = error.detail.or(rejected_summary_detail);
                         return Err(AgentLoopExecutorError::HostUnavailableWithDiagnostics {
                             stage: HostStage::Model,
                             kind: error.kind,
-                            safe_summary: LoopSafeSummary::new(error.safe_summary)
-                                .unwrap_or_else(|_| LoopSafeSummary::model_gateway_failed()),
+                            safe_summary,
                             reason_kind: error.reason_kind,
                             diagnostic_ref: error.diagnostic_ref,
                             detail,
@@ -152,12 +169,20 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             .push(model_error_to_failure_kind(class));
                         recorded_failure = true;
                     }
+                    let upstream_detail = error.detail;
+                    let (safe_summary, rejected_summary_detail) =
+                        sanitized_strategy_summary_or_fallback(
+                            error.safe_summary,
+                            "model gateway failed",
+                        );
+                    let model_failure_detail = upstream_detail.or(rejected_summary_detail);
                     let summary = ModelErrorSummary {
                         class,
-                        safe_summary: sanitized_strategy_summary(error.safe_summary)?,
+                        safe_summary,
                         diagnostic_ref: error.diagnostic_ref,
                     };
                     last_error_summary = Some(summary.clone());
+                    last_error_detail.clone_from(&model_failure_detail);
                     match ctx
                         .planner
                         .recovery()
@@ -238,6 +263,10 @@ impl ExecutorStage<ModelInput> for ModelStage {
                             let checked = CheckpointStage
                                 .write(ctx, state, CheckpointKind::Final)
                                 .await?;
+                            let mut safe_failure = model_error_failure_summary(&summary)?;
+                            if let Some(detail) = model_failure_detail {
+                                safe_failure = safe_failure.with_detail(detail);
+                            }
                             return Ok(ModelStep::Exit(failed_exit(
                                 ctx.host,
                                 checked.state,
@@ -245,7 +274,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 Some(checked.checkpoint_id),
                                 FailedExitDetails {
                                     diagnostic_ref: summary.diagnostic_ref.clone(),
-                                    safe_summary: Some(model_error_failure_summary(&summary)?),
+                                    safe_summary: Some(safe_failure),
                                     explanation_message_ref: None,
                                 },
                             )?));
@@ -260,11 +289,17 @@ impl ExecutorStage<ModelInput> for ModelStage {
         // model error's diagnostics rather than a bare generic failure.
         state.recent_failure_kinds.push(LoopFailureKind::ModelError);
         let details = match &last_error_summary {
-            Some(summary) => FailedExitDetails {
-                diagnostic_ref: summary.diagnostic_ref.clone(),
-                safe_summary: Some(model_error_failure_summary(summary)?),
-                explanation_message_ref: None,
-            },
+            Some(summary) => {
+                let mut safe_failure = model_error_failure_summary(summary)?;
+                if let Some(detail) = last_error_detail {
+                    safe_failure = safe_failure.with_detail(detail);
+                }
+                FailedExitDetails {
+                    diagnostic_ref: summary.diagnostic_ref.clone(),
+                    safe_summary: Some(safe_failure),
+                    explanation_message_ref: None,
+                }
+            }
             None => FailedExitDetails::default(),
         };
         let checked = CheckpointStage

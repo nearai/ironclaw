@@ -139,6 +139,7 @@ where
             return Err(ToolError::Failed {
                 kind: ironclaw_host_api::RuntimeDispatchErrorKind::UndeclaredCapability,
                 safe_summary: None,
+                model_visible_cause: None,
             });
         };
         let execution = self
@@ -188,17 +189,33 @@ fn tool_error_from_dispatch(error: DispatchError) -> ToolError {
             required_secrets,
             credential_requirements,
         },
-        DispatchError::Wasm { kind, safe_summary } => ToolError::Failed { kind, safe_summary },
-        DispatchError::Mcp { kind } | DispatchError::Script { kind } => ToolError::Failed {
+        DispatchError::Wasm {
+            kind,
+            model_visible_cause,
+        }
+        | DispatchError::Mcp {
+            kind,
+            model_visible_cause,
+        }
+        | DispatchError::Script {
+            kind,
+            model_visible_cause,
+        } => ToolError::Failed {
             kind,
             safe_summary: None,
+            model_visible_cause,
         },
         DispatchError::FirstParty {
             kind, safe_summary, ..
-        } => ToolError::Failed { kind, safe_summary },
+        } => ToolError::Failed {
+            kind,
+            safe_summary,
+            model_visible_cause: None,
+        },
         other => ToolError::Failed {
             kind: ironclaw_host_api::RuntimeDispatchErrorKind::Client,
             safe_summary: Some(other.event_kind().replace('_', " ")),
+            model_visible_cause: None,
         },
     }
 }

@@ -6082,12 +6082,14 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
     };
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert_eq!(failure.capability_id, capability_id(HTTP_CAPABILITY_ID));
+    // Message is now the sanitized `DenyReason::PolicyDenied` form the kernel
+    // produces (see #6386): it conveys a policy denial and must not leak the
+    // internal `NetworkMode::` planner enum token.
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(message.contains("denied"), "unexpected message: {message}");
     assert!(
-        failure
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("NetworkMode::Deny")
+        !message.contains("NetworkMode::"),
+        "message leaked internal planner enum token: {message}"
     );
     assert!(egress.requests().is_empty());
 }

@@ -147,12 +147,11 @@ pub(crate) struct Args {
     #[arg(long, value_enum, default_value_t = Scenario::ReserveRelease)]
     pub(crate) scenario: Scenario,
 
-    /// Turn-state store backend for user-turn scenarios. `filesystem` = durable
-    /// per-user state.json (CAS, current production path);
+    /// Turn-state store backend for user-turn scenarios.
     /// `filesystem-row` = durable typed append-log deltas with a hot
-    /// in-process row cache; `memory` = one shared in-process authority
-    /// (runtime-wedge prototype). No effect on non-turn scenarios.
-    #[arg(long, value_enum, default_value_t = TurnStateBackend::Filesystem)]
+    /// in-process row cache (the production path); `row-memory` = the same row
+    /// store over an in-memory backend. No effect on non-turn scenarios.
+    #[arg(long, value_enum, default_value_t = TurnStateBackend::FilesystemRow)]
     pub(crate) turn_state_backend: TurnStateBackend,
 
     /// Override max retained terminal run records in the turn-state store.
@@ -607,12 +606,8 @@ impl Backend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum TurnStateBackend {
-    /// Durable per-user `state.json` via the filesystem store (per-step CAS
-    /// read-modify-write). The current production path; livelocks under
-    /// concurrent same-user writers.
-    Filesystem,
     /// Durable typed append-log deltas with one hot in-process store per
-    /// tenant/user. Candidate filesystem fix for the blob growth curve.
+    /// tenant/user. The production turn-state store.
     FilesystemRow,
     /// The row store over an in-memory `RootFilesystem` backend — the in-memory
     /// turn-state authority: coordination in memory with the durable backend
@@ -623,7 +618,6 @@ pub(crate) enum TurnStateBackend {
 impl TurnStateBackend {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Filesystem => "filesystem",
             Self::FilesystemRow => "filesystem-row",
             Self::RowMemory => "row-memory",
         }

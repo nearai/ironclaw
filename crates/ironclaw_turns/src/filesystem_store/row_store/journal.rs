@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -7,7 +8,8 @@ use std::{
 };
 
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo,
+    CasExpectation, ContentType, Entry, FilesystemError, IndexKey, IndexValue, RootFilesystem,
+    ScopedFilesystem, SeqNo,
 };
 use ironclaw_host_api::ResourceScope;
 use tokio::{
@@ -18,8 +20,7 @@ use tokio::{
 use crate::TurnError;
 
 use super::{
-    ACTIVE_LOCK_ROWS, ADMISSION_RESERVATION_ROWS, CHECKPOINT_ROWS, EVENT_ROWS, IDEMPOTENCY_ROWS,
-    LOOP_CHECKPOINT_ROWS, RUN_ROWS, SPAWN_TREE_RESERVATION_ROWS, TURN_ROWS,
+    RowCollection,
     delta::{
         RowStoreMeta, SnapshotDelta, active_lock_record_key, admission_reservation_record_key,
         checkpoint_record_key, event_record_key, idempotency_record_key,
@@ -339,7 +340,7 @@ where
     for record in &delta.turns_upsert {
         put_row(
             filesystem,
-            TURN_ROWS,
+            RowCollection::Turns,
             &turn_record_key(record)?,
             journal_seq,
             record,
@@ -347,12 +348,12 @@ where
         .await?;
     }
     for key in &delta.turns_delete {
-        delete_row(filesystem, TURN_ROWS, key, journal_seq).await?;
+        delete_row(filesystem, RowCollection::Turns, key, journal_seq).await?;
     }
     for record in &delta.runs_upsert {
         put_row(
             filesystem,
-            RUN_ROWS,
+            RowCollection::Runs,
             &run_record_key(record)?,
             journal_seq,
             record,
@@ -360,12 +361,12 @@ where
         .await?;
     }
     for key in &delta.runs_delete {
-        delete_row(filesystem, RUN_ROWS, key, journal_seq).await?;
+        delete_row(filesystem, RowCollection::Runs, key, journal_seq).await?;
     }
     for record in &delta.active_locks_upsert {
         put_row(
             filesystem,
-            ACTIVE_LOCK_ROWS,
+            RowCollection::ActiveLocks,
             &active_lock_record_key(record)?,
             journal_seq,
             record,
@@ -373,12 +374,12 @@ where
         .await?;
     }
     for key in &delta.active_locks_delete {
-        delete_row(filesystem, ACTIVE_LOCK_ROWS, key, journal_seq).await?;
+        delete_row(filesystem, RowCollection::ActiveLocks, key, journal_seq).await?;
     }
     for record in &delta.checkpoints_upsert {
         put_row(
             filesystem,
-            CHECKPOINT_ROWS,
+            RowCollection::Checkpoints,
             &checkpoint_record_key(record)?,
             journal_seq,
             record,
@@ -386,12 +387,12 @@ where
         .await?;
     }
     for key in &delta.checkpoints_delete {
-        delete_row(filesystem, CHECKPOINT_ROWS, key, journal_seq).await?;
+        delete_row(filesystem, RowCollection::Checkpoints, key, journal_seq).await?;
     }
     for record in &delta.loop_checkpoints_upsert {
         put_row(
             filesystem,
-            LOOP_CHECKPOINT_ROWS,
+            RowCollection::LoopCheckpoints,
             &loop_checkpoint_record_key(record)?,
             journal_seq,
             record,
@@ -399,12 +400,12 @@ where
         .await?;
     }
     for key in &delta.loop_checkpoints_delete {
-        delete_row(filesystem, LOOP_CHECKPOINT_ROWS, key, journal_seq).await?;
+        delete_row(filesystem, RowCollection::LoopCheckpoints, key, journal_seq).await?;
     }
     for record in &delta.idempotency_upsert {
         put_row(
             filesystem,
-            IDEMPOTENCY_ROWS,
+            RowCollection::Idempotency,
             &idempotency_record_key(record)?,
             journal_seq,
             record,
@@ -412,25 +413,18 @@ where
         .await?;
     }
     for key in &delta.idempotency_delete {
-        delete_row(filesystem, IDEMPOTENCY_ROWS, key, journal_seq).await?;
+        delete_row(filesystem, RowCollection::Idempotency, key, journal_seq).await?;
     }
     for record in &delta.events_upsert {
-        put_row(
-            filesystem,
-            EVENT_ROWS,
-            &event_record_key(record)?,
-            journal_seq,
-            record,
-        )
-        .await?;
+        put_event_row(filesystem, &event_record_key(record)?, journal_seq, record).await?;
     }
     for key in &delta.events_delete {
-        delete_row(filesystem, EVENT_ROWS, key, journal_seq).await?;
+        delete_row(filesystem, RowCollection::Events, key, journal_seq).await?;
     }
     for record in &delta.admission_reservations_upsert {
         put_row(
             filesystem,
-            ADMISSION_RESERVATION_ROWS,
+            RowCollection::AdmissionReservations,
             &admission_reservation_record_key(record)?,
             journal_seq,
             record,
@@ -438,12 +432,18 @@ where
         .await?;
     }
     for key in &delta.admission_reservations_delete {
-        delete_row(filesystem, ADMISSION_RESERVATION_ROWS, key, journal_seq).await?;
+        delete_row(
+            filesystem,
+            RowCollection::AdmissionReservations,
+            key,
+            journal_seq,
+        )
+        .await?;
     }
     for record in &delta.spawn_tree_reservations_upsert {
         put_row(
             filesystem,
-            SPAWN_TREE_RESERVATION_ROWS,
+            RowCollection::SpawnTreeReservations,
             &spawn_tree_reservation_record_key(record)?,
             journal_seq,
             record,
@@ -451,14 +451,20 @@ where
         .await?;
     }
     for key in &delta.spawn_tree_reservations_delete {
-        delete_row(filesystem, SPAWN_TREE_RESERVATION_ROWS, key, journal_seq).await?;
+        delete_row(
+            filesystem,
+            RowCollection::SpawnTreeReservations,
+            key,
+            journal_seq,
+        )
+        .await?;
     }
     Ok(())
 }
 
 async fn put_row<F, T>(
     filesystem: &ScopedFilesystem<F>,
-    collection: &'static str,
+    collection: RowCollection,
     key: &str,
     journal_seq: SeqNo,
     record: &T,
@@ -467,34 +473,81 @@ where
     F: RootFilesystem,
     T: serde::Serialize,
 {
-    let body = serialize_materialized_row(journal_seq, Some(record), collection)?;
-    write_materialized_row(filesystem, collection, key, journal_seq, body).await
+    let body = serialize_materialized_row(journal_seq, Some(record), collection.as_str())?;
+    write_materialized_row(
+        filesystem,
+        collection,
+        key,
+        journal_seq,
+        body,
+        BTreeMap::new(),
+    )
+    .await
+}
+
+/// Materialize an event row *with* its indexed projection so the durable
+/// read path can serve a scoped `cursor > after` range scan. Same body layout
+/// and seq-skip CAS as [`put_row`]; only the `indexed` map differs.
+async fn put_event_row<F>(
+    filesystem: &ScopedFilesystem<F>,
+    key: &str,
+    journal_seq: SeqNo,
+    record: &crate::TurnLifecycleEvent,
+) -> Result<(), TurnError>
+where
+    F: RootFilesystem,
+{
+    let body =
+        serialize_materialized_row(journal_seq, Some(record), RowCollection::Events.as_str())?;
+    let indexed = super::events_index::event_indexed_projection(record)?;
+    write_materialized_row(
+        filesystem,
+        RowCollection::Events,
+        key,
+        journal_seq,
+        body,
+        indexed,
+    )
+    .await
 }
 
 async fn delete_row<F>(
     filesystem: &ScopedFilesystem<F>,
-    collection: &'static str,
+    collection: RowCollection,
     key: &str,
     journal_seq: SeqNo,
 ) -> Result<(), TurnError>
 where
     F: RootFilesystem,
 {
-    let body = serialize_materialized_row::<serde_json::Value>(journal_seq, None, collection)?;
-    write_materialized_row(filesystem, collection, key, journal_seq, body).await
+    let body =
+        serialize_materialized_row::<serde_json::Value>(journal_seq, None, collection.as_str())?;
+    // Tombstones carry no indexed projection: they must never match a scoped
+    // event query (their `value` is `None`), and dropping the projection keeps
+    // the deleted cursor from lingering in the index.
+    write_materialized_row(
+        filesystem,
+        collection,
+        key,
+        journal_seq,
+        body,
+        BTreeMap::new(),
+    )
+    .await
 }
 
 async fn write_materialized_row<F>(
     filesystem: &ScopedFilesystem<F>,
-    collection: &'static str,
+    collection: RowCollection,
     key: &str,
     journal_seq: SeqNo,
     body: Vec<u8>,
+    indexed: BTreeMap<IndexKey, IndexValue>,
 ) -> Result<(), TurnError>
 where
     F: RootFilesystem,
 {
-    let path = row_path(collection, key)?;
+    let path = row_path(collection.as_str(), key)?;
     for attempt in 0..MATERIALIZED_ROW_CAS_RETRIES {
         let current = match filesystem.get(&ResourceScope::system(), &path).await {
             Ok(current) => current,
@@ -503,7 +556,7 @@ where
         };
         let cas = match current {
             Some(versioned) => {
-                let current_seq = materialized_row_seq(&versioned.entry.body, collection)?;
+                let current_seq = materialized_row_seq(&versioned.entry.body, collection.as_str())?;
                 if current_seq >= journal_seq {
                     return Ok(());
                 }
@@ -511,7 +564,8 @@ where
             }
             None => CasExpectation::Absent,
         };
-        let entry = Entry::bytes(body.clone()).with_content_type(ContentType::json());
+        let mut entry = Entry::bytes(body.clone()).with_content_type(ContentType::json());
+        entry.indexed = indexed.clone();
         match filesystem
             .put(&ResourceScope::system(), &path, entry, cas)
             .await
@@ -526,7 +580,10 @@ where
         }
     }
     Err(TurnError::Unavailable {
-        reason: format!("turn-state {collection} row CAS retry budget exhausted"),
+        reason: format!(
+            "turn-state {} row CAS retry budget exhausted",
+            collection.as_str()
+        ),
     })
 }
 
@@ -640,12 +697,12 @@ mod tests {
         filesystem: &ScopedFilesystem<InMemoryBackend>,
         key: &str,
     ) -> Option<TestRow> {
-        let path = row_path("test-rows", key).expect("create row path");
+        let path = row_path(RowCollection::Turns.as_str(), key).expect("create row path");
         let versioned = filesystem
             .get(&ResourceScope::system(), &path)
             .await
             .expect("read test row")?;
-        deserialize_materialized_row(&versioned.entry.body, "test-rows")
+        deserialize_materialized_row(&versioned.entry.body, RowCollection::Turns.as_str())
             .expect("deserialize test row")
     }
 
@@ -654,7 +711,7 @@ mod tests {
         let filesystem = scoped_filesystem();
         put_row(
             &filesystem,
-            "test-rows",
+            RowCollection::Turns,
             "row",
             SeqNo::from_backend(2),
             &TestRow {
@@ -666,7 +723,7 @@ mod tests {
 
         put_row(
             &filesystem,
-            "test-rows",
+            RowCollection::Turns,
             "row",
             SeqNo::from_backend(1),
             &TestRow {
@@ -689,7 +746,7 @@ mod tests {
         let filesystem = scoped_filesystem();
         put_row(
             &filesystem,
-            "test-rows",
+            RowCollection::Turns,
             "row",
             SeqNo::from_backend(2),
             &TestRow {
@@ -699,9 +756,14 @@ mod tests {
         .await
         .expect("write newer row");
 
-        delete_row(&filesystem, "test-rows", "row", SeqNo::from_backend(1))
-            .await
-            .expect("skip older tombstone");
+        delete_row(
+            &filesystem,
+            RowCollection::Turns,
+            "row",
+            SeqNo::from_backend(1),
+        )
+        .await
+        .expect("skip older tombstone");
 
         assert_eq!(
             read_test_row(&filesystem, "row").await,
@@ -710,9 +772,14 @@ mod tests {
             })
         );
 
-        delete_row(&filesystem, "test-rows", "row", SeqNo::from_backend(3))
-            .await
-            .expect("write newer tombstone");
+        delete_row(
+            &filesystem,
+            RowCollection::Turns,
+            "row",
+            SeqNo::from_backend(3),
+        )
+        .await
+        .expect("write newer tombstone");
         assert_eq!(read_test_row(&filesystem, "row").await, None);
     }
 }

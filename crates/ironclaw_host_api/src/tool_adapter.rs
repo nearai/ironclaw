@@ -74,6 +74,11 @@ pub enum ToolError {
         kind: RuntimeDispatchErrorKind,
         /// Fixed, host-authored text only — never interpolated payload data.
         safe_summary: Option<String>,
+        /// Raw-or-better failure cause for the model-visible Diagnostic seam
+        /// (#5965). Carried across the tool ABI verbatim and scrubbed
+        /// downstream (`scrub_model_visible_detail`) — NOT display-safe here;
+        /// never log or render it directly.
+        model_visible_cause: Option<String>,
     },
 }
 
@@ -190,6 +195,7 @@ mod tests {
         let error = ToolError::Failed {
             kind: RuntimeDispatchErrorKind::Backend,
             safe_summary: Some("vendor API unavailable".to_string()),
+            model_visible_cause: None,
         };
         let rendered = error.to_string();
         assert!(rendered.contains("Backend"), "{rendered}");
