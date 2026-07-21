@@ -773,12 +773,16 @@ impl AgentLoopHostErrorKind {
 #[serde(rename_all = "snake_case")]
 pub enum AgentLoopHostErrorReasonKind {
     ModelCreditsExhausted,
+    /// A failed model attempt already emitted text through the progress sink.
+    /// Retrying it could duplicate externally visible output.
+    ModelPartialOutputVisible,
 }
 
 impl AgentLoopHostErrorReasonKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ModelCreditsExhausted => "model_credits_exhausted",
+            Self::ModelPartialOutputVisible => "model_partial_output_visible",
         }
     }
 }

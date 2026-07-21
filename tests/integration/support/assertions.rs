@@ -932,6 +932,32 @@ impl RebornIntegrationHarness {
         Ok(self.persisted_history().await?.len())
     }
 
+    /// Assert that a model attempt appended neither a finalized assistant
+    /// message nor a tool-result reference carrying provider-call replay data.
+    /// These are the two model-visible durable transcript shapes an accepted
+    /// model response can create in the whole-turn harness.
+    pub async fn assert_no_model_attempt_commit_since(&self, baseline: usize) -> HarnessResult<()> {
+        let history = self.persisted_history().await?;
+        let committed: Vec<String> = Self::history_slice(&history, baseline)?
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message.kind,
+                    ironclaw_threads::MessageKind::Assistant
+                        | ironclaw_threads::MessageKind::ToolResultReference
+                )
+            })
+            .map(|message| format!("{:?}:{}", message.kind, message.sequence))
+            .collect();
+        if committed.is_empty() {
+            return Ok(());
+        }
+        Err(format!(
+            "incomplete model attempt committed durable model-visible history: {committed:?}"
+        )
+        .into())
+    }
+
     /// The MOST RECENT persisted `ToolResultReference` message (highest
     /// `sequence`), for durable tool-result projection scenarios (issue
     /// #5838) that need to script a dependent `result_read` call with a

@@ -21,10 +21,11 @@ mod support;
 use std::time::Duration;
 
 use ironclaw_product_adapters::ProductInboundAck;
+use ironclaw_threads::MessageKind;
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
-use reborn_support::scripted_provider::ParkingModelGate;
+use reborn_support::scripted_provider::{IncompleteModelAttemptProbe, ParkingModelGate};
 
 #[tokio::test]
 async fn cancels_a_parked_mid_turn_run() {
@@ -168,6 +169,108 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
         "model_context_overflow",
         "expected the context-overflow fidelity category (ContextLengthExceeded), got {failure:?}"
     );
+}
+
+/// A retryable provider error after an externally visible text delta must be
+/// terminal for that attempt: no retry, no assistant/tool-call transcript
+/// commit, and no capability dispatch.
+#[tokio::test]
+async fn partial_text_failure_does_not_commit_or_dispatch() {
+    let probe = IncompleteModelAttemptProbe::partial_text();
+    let harness = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .fail_incomplete_model_attempt(probe.clone())
+        .build()
+        .await
+        .expect("harness builds");
+    let baseline = 0;
+
+    let run_id = harness
+        .submit_turn_async("use builtin.echo")
+        .await
+        .expect("turn submitted");
+    harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("incomplete attempt fails the run");
+
+    assert_eq!(probe.attempts(), 1, "partial output must suppress retries");
+    assert_eq!(
+        probe.streaming_attempts(),
+        1,
+        "streaming path must run once"
+    );
+    harness
+        .assert_conversation_history_role_contains_since(
+            baseline,
+            MessageKind::User,
+            "use builtin.echo",
+        )
+        .await
+        .expect("accepted user input persists");
+    harness
+        .assert_no_model_attempt_commit_since(baseline)
+        .await
+        .expect("partial text never becomes durable model history");
+    harness
+        .assert_tool_not_invoked("builtin.echo")
+        .await
+        .expect("partial text cannot authorize capability dispatch");
+}
+
+/// A tool-call fragment that never reaches a terminal provider response is not
+/// a capability call. It must leave no model-visible durable history and must
+/// dispatch nothing.
+#[tokio::test]
+async fn partial_tool_call_failure_does_not_commit_or_dispatch() {
+    let probe = IncompleteModelAttemptProbe::partial_tool_call();
+    let harness = RebornIntegrationHarness::test_default()
+        .with_builtin_http_tools()
+        .fail_incomplete_model_attempt(probe.clone())
+        .build()
+        .await
+        .expect("harness builds");
+    let baseline = 0;
+
+    let run_id = harness
+        .submit_turn_async("use builtin.echo")
+        .await
+        .expect("turn submitted");
+    harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("incomplete attempt fails the run");
+
+    assert!(
+        probe.attempts() >= 1,
+        "provider must observe the failed attempt"
+    );
+    assert_eq!(
+        probe.streaming_attempts(),
+        probe.attempts(),
+        "every provider attempt must use the streaming caller path"
+    );
+    assert_eq!(
+        probe.partial_tool_fragments(),
+        probe.attempts(),
+        "each failed attempt must terminate after its partial tool call"
+    );
+    harness
+        .assert_conversation_history_role_contains_since(
+            baseline,
+            MessageKind::User,
+            "use builtin.echo",
+        )
+        .await
+        .expect("accepted user input persists");
+    harness
+        .assert_no_model_attempt_commit_since(baseline)
+        .await
+        .expect("partial tool call never becomes durable model history");
+    harness
+        .assert_tool_not_invoked("builtin.echo")
+        .await
+        .expect("partial tool call cannot authorize capability dispatch");
 }
 
 /// Regression guard, `Failed`-path sibling of

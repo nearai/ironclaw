@@ -2,8 +2,8 @@ use ironclaw_host_api::{Resolution, ToolVerdict};
 use ironclaw_turns::{
     LoopBlockedKind, LoopFailureKind, SanitizedFailure,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-        LoopCheckpointKind, LoopGateKind,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind, BatchPolicyKind,
+        CapabilityFailureKind, LoopCheckpointKind, LoopGateKind,
     },
 };
 
@@ -88,6 +88,12 @@ pub(super) fn model_preference_to_host(
 }
 
 pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelErrorClass> {
+    // The provider-level retry wrapper already suppresses retries once text has
+    // escaped through its stream sink. Preserve that guarantee at the outer
+    // loop recovery boundary, where a fresh attempt could duplicate output.
+    if error.reason_kind == Some(AgentLoopHostErrorReasonKind::ModelPartialOutputVisible) {
+        return None;
+    }
     match error.kind {
         AgentLoopHostErrorKind::Unavailable => Some(ModelErrorClass::Unavailable),
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),

@@ -124,7 +124,8 @@ use super::product_workflow::RebornProductWorkflowHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
-    ErrLlm, ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm, scripted_trace_llm,
+    ErrLlm, IncompleteAttemptLlm, IncompleteModelAttemptKind, IncompleteModelAttemptProbe,
+    ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
@@ -1129,6 +1130,9 @@ enum ThreadModelMode {
     /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
     /// `replies`. See [`super::scripted_provider::ErrLlm`].
     Failing,
+    /// The raw provider observes an incomplete text or tool-call stream, then
+    /// returns `Err` before a terminal response exists.
+    Incomplete(IncompleteModelAttemptProbe),
 }
 
 impl<'g> RebornThreadBuilder<'g> {
@@ -1181,6 +1185,18 @@ impl<'g> RebornThreadBuilder<'g> {
     pub(crate) fn fail_model_opt(mut self, fail: bool) -> Self {
         if fail && !matches!(self.model_mode, ThreadModelMode::Parked(_)) {
             self.model_mode = ThreadModelMode::Failing;
+        }
+        self
+    }
+
+    pub(crate) fn incomplete_model_attempt_opt(
+        mut self,
+        probe: Option<IncompleteModelAttemptProbe>,
+    ) -> Self {
+        if let Some(probe) = probe
+            && matches!(self.model_mode, ThreadModelMode::Normal)
+        {
+            self.model_mode = ThreadModelMode::Incomplete(probe);
         }
         self
     }
@@ -1253,11 +1269,17 @@ impl<'g> RebornThreadBuilder<'g> {
         // `Parked` swaps in the parking wrapper. `ThreadModelMode` makes the
         // three modes mutually exclusive by construction — no priority rule
         // needed here.
+        let exercise_partial_text_retry_guard = matches!(
+            &self.model_mode,
+            ThreadModelMode::Incomplete(probe)
+                if probe.kind() == IncompleteModelAttemptKind::PartialText
+        );
         let raw: Arc<dyn LlmProvider> = match self.model_mode {
             ThreadModelMode::Parked(gate) => {
                 Arc::new(parking_trace_llm(gate, scripted_llm.clone()))
             }
             ThreadModelMode::Failing => Arc::new(ErrLlm),
+            ThreadModelMode::Incomplete(probe) => Arc::new(IncompleteAttemptLlm::new(probe)),
             ThreadModelMode::Normal => scripted_llm.clone(),
         };
         let session = create_session_manager(SessionConfig {
@@ -1268,7 +1290,13 @@ impl<'g> RebornThreadBuilder<'g> {
             ..SessionConfig::default()
         })
         .await;
-        let llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
+        let mut llm_config = ironclaw_llm::testing::nearai_test_config(SCRIPTED_MODEL_NAME);
+        if exercise_partial_text_retry_guard {
+            // A retryable error after an externally visible text delta must not
+            // issue another provider attempt. Enable retries here so the test
+            // proves the guard instead of relying on the harness default of 0.
+            llm_config.max_retries = 3;
+        }
         let provider = provider_chain_over(raw, &llm_config, session).await?;
         let model_profile_id = ModelProfileId::new(INTERACTIVE_MODEL_PROFILE)
             .map_err(|reason| format!("invalid model profile id: {reason}"))?;

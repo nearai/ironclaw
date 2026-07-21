@@ -61,6 +61,7 @@ use super::http_matcher::ScriptedHttpResponse;
 use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
+use super::scripted_provider::IncompleteModelAttemptProbe;
 use super::scripted_provider::ParkingModelGate;
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -123,6 +124,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// fixed non-retryable `LlmError`. Threaded into the degenerate one-thread
     /// group. See [`RebornThreadBuilder::fail_model`].
     fail_model: bool,
+    /// E-GATEWAY: incomplete streaming attempt injected at the raw-provider
+    /// seam. Mutually exclusive with the ordinary fixed-error mode.
+    incomplete_model_attempt: Option<IncompleteModelAttemptProbe>,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
     /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
@@ -229,6 +233,13 @@ impl RebornIntegrationHarnessBuilder {
     /// [`RebornThreadBuilder::fail_model`](super::group::RebornThreadBuilder::fail_model).
     pub fn fail_model(mut self) -> Self {
         self.fail_model = true;
+        self
+    }
+
+    /// Fail after the raw provider has observed a partial text or tool-call
+    /// stream, before it can return a terminal response.
+    pub fn fail_incomplete_model_attempt(mut self, probe: IncompleteModelAttemptProbe) -> Self {
+        self.incomplete_model_attempt = Some(probe);
         self
     }
 
@@ -536,6 +547,7 @@ impl RebornIntegrationHarnessBuilder {
             .script(self.replies)
             .park_model_opt(self.park_gate)
             .fail_model_opt(self.fail_model)
+            .incomplete_model_attempt_opt(self.incomplete_model_attempt)
             .build()
             .await
     }
@@ -632,6 +644,7 @@ impl RebornIntegrationHarness {
             shell_mode: ShellMode::default(),
             park_gate: None,
             fail_model: false,
+            incomplete_model_attempt: None,
             turn_event_sink: false,
             tool_disclosure: None,
             budget_accounting: false,

@@ -39,13 +39,14 @@ use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
     ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InstructionMaterializationStore, InstructionSafetyContext, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
-        LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall,
-        ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
+        AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InMemoryLoopHostMilestoneSink, InstructionMaterializationStore, InstructionSafetyContext,
+        LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort,
+        LoopModelProgressSink, LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest,
+        LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode,
+        ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        sanitize_model_visible_text,
     },
 };
 use tracing::debug;
@@ -1119,6 +1120,26 @@ impl ProviderStreamSink {
             accumulated_text: Mutex::new(String::new()),
         }
     }
+
+    fn emitted_text(&self) -> bool {
+        let guard = match self.accumulated_text.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        !guard.is_empty()
+    }
+}
+
+fn map_streaming_provider_error(
+    error: LlmError,
+    stream_sink: Option<&ProviderStreamSink>,
+) -> HostManagedModelError {
+    let error = map_provider_error(error);
+    if stream_sink.is_some_and(ProviderStreamSink::emitted_text) {
+        error.with_reason_kind(AgentLoopHostErrorReasonKind::ModelPartialOutputVisible)
+    } else {
+        error
+    }
 }
 
 #[async_trait]
@@ -1139,6 +1160,14 @@ impl CompletionStreamSink for ProviderStreamSink {
     }
 }
 
+/// Execute one provider attempt behind the completed-response commit barrier.
+///
+/// `stream_sink` updates are progress-only and never authorize transcript
+/// writes or capability registration. The awaited provider call must return one
+/// successfully decoded terminal response before this function enters
+/// `response_to_host_reply` or `tool_response_to_host`; any `Err`, including one
+/// after partial text or a partial tool call, returns immediately with no host
+/// response for the agent loop to commit.
 #[tracing::instrument(
     level = "debug",
     skip(provider, completion, capabilities, stream_sink, replay_identity, cache_scope),
@@ -1202,11 +1231,14 @@ where
                 ToolCompletionRequest::from_completion_request(completion, llm_tool_definitions);
             debug!("reborn model gateway dispatching tool-capable provider request");
             let provider_started_at = live_latency_started_at();
-            let response = match if let Some(stream_sink) = stream_sink.as_ref() {
+            let provider_stream_sink = stream_sink
+                .as_ref()
+                .map(|stream_sink| Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))));
+            let response = match if let Some(stream_sink) = provider_stream_sink.as_ref() {
                 provider
                     .complete_with_tools_streaming(
                         tool_request.clone(),
-                        Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))),
+                        Arc::clone(stream_sink) as Arc<dyn CompletionStreamSink>,
                     )
                     .await
             } else {
@@ -1229,7 +1261,10 @@ where
                         provider_started_at,
                         &error,
                     );
-                    return Err(map_provider_error(error));
+                    return Err(map_streaming_provider_error(
+                        error,
+                        provider_stream_sink.as_deref(),
+                    ));
                 }
             };
             if let Some(scope) = cache_scope.as_ref() {
@@ -1239,6 +1274,8 @@ where
                     system_prompt_hash,
                 );
             }
+            // The provider `Ok` above is the attempt's commit barrier. Only now
+            // may terminal output be decoded into host-visible calls/replies.
             let response =
                 recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
             let host_response_started_at = live_latency_started_at();
@@ -1366,11 +1403,14 @@ where
     }
 
     let provider_started_at = live_latency_started_at();
-    let response = match if let Some(stream_sink) = stream_sink.as_ref() {
+    let provider_stream_sink = stream_sink
+        .as_ref()
+        .map(|stream_sink| Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))));
+    let response = match if let Some(stream_sink) = provider_stream_sink.as_ref() {
         provider
             .complete_streaming(
                 completion,
-                Arc::new(ProviderStreamSink::new(Arc::clone(stream_sink))),
+                Arc::clone(stream_sink) as Arc<dyn CompletionStreamSink>,
             )
             .await
     } else {
@@ -1393,9 +1433,14 @@ where
                 provider_started_at,
                 &error,
             );
-            return Err(map_provider_error(error));
+            return Err(map_streaming_provider_error(
+                error,
+                provider_stream_sink.as_deref(),
+            ));
         }
     };
+    // As on the tool-capable path, provider `Ok` is the sole transition from
+    // progress-only deltas to a terminal response the loop may commit.
     if let Some(scope) = cache_scope.as_ref() {
         scope.record(
             ModelCallCacheUsage::from_completion_response(&response),
