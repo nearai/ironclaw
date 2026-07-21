@@ -2687,9 +2687,11 @@ async fn build_local_runtime_store_graph(
     // Turn state runs the production `FilesystemTurnStateRowStore` over a
     // dedicated volatile `InMemoryBackend` (§4.3) — no bespoke private
     // turn-state engine standalone authority. Matches the sibling
-    // run-state/approval stores in this build (volatile, `LocalOnly`); the row
-    // store persists every transition synchronously, so this build needs no
-    // shutdown drain.
+    // run-state/approval stores in this build (volatile, `LocalOnly`). The row
+    // store still has a write-behind tail (only gate-park/terminal/new-run
+    // transitions flush synchronously), but the backend is volatile — a restart
+    // discards it entirely — so draining that tail at shutdown would persist
+    // nothing recoverable; this build intentionally skips the shutdown drain.
     let turn_state = Arc::new(
         FilesystemTurnStateRowStore::new(crate::wrap_scoped(Arc::new(InMemoryBackend::new())))
             .with_limits(turn_state_store_limits),
