@@ -2315,6 +2315,15 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 )
                     as Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>
             });
+        let generic_installation_store = store_graph
+            .local_runtime
+            .extension_management
+            .as_ref()
+            .map(|management| management.installation_store_handle())
+            .ok_or_else(|| RebornBuildError::InvalidConfig {
+                reason: "generic extension host requires extension management".to_string(),
+            })?;
+        let pairing_installation_store = Arc::clone(&generic_installation_store);
         let generic = crate::extension_host::generic_host::build_generic_extension_host(
             crate::extension_host::generic_host::GenericExtensionHostParams {
                 binder: services.extension_lane_tool_binder(),
@@ -2323,14 +2332,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     .iter()
                     .map(|binding| (binding.extension_id.clone(), Arc::clone(&binding.adapter)))
                     .collect(),
-                installation_store: store_graph
-                    .local_runtime
-                    .extension_management
-                    .as_ref()
-                    .map(|management| management.installation_store_handle())
-                    .ok_or_else(|| RebornBuildError::InvalidConfig {
-                        reason: "generic extension host requires extension management".to_string(),
-                    })?,
+                installation_store: generic_installation_store,
                 channel_config: store_graph.local_runtime.channel_config.clone(),
                 governor: Arc::clone(&store_graph.resource_governor)
                     as Arc<dyn ironclaw_resources::ResourceGovernor>,
@@ -2409,8 +2411,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     ),
                 );
                 let installation = Arc::new(
-                    crate::extension_host::channel_pairing::SnapshotPairingInstallationSource::new(
-                        generic.host.snapshot_watch(),
+                    crate::extension_host::channel_pairing::StoredPairingInstallationSource::new(
+                        Arc::clone(&pairing_installation_store),
                         extension_id.clone(),
                     ),
                 );

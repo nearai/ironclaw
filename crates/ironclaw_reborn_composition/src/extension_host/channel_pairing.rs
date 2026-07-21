@@ -29,6 +29,7 @@ use ironclaw_auth::{
 use ironclaw_conversations::{
     AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner, ExternalActorRef,
 };
+use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, cas_update,
 };
@@ -213,11 +214,15 @@ fn store_unavailable(reason: impl std::fmt::Display) -> ChannelPairingError {
     }
 }
 
-/// Resolves the extension's currently-routable installation. `Ok(None)` means
-/// the channel is not configured/active — pairing fails closed (no minting).
+/// Resolves the extension installation visible to the pairing caller.
+/// `Ok(None)` means the extension is not installed for that caller, so pairing
+/// fails closed without minting a code.
 #[async_trait]
 pub(crate) trait ChannelPairingInstallationSource: Send + Sync {
-    async fn current_installation(&self) -> Result<Option<AdapterInstallationId>, String>;
+    async fn current_installation(
+        &self,
+        caller: &UserId,
+    ) -> Result<Option<AdapterInstallationId>, String>;
 }
 
 /// Resolves the non-secret template values a deep-link template may
@@ -228,35 +233,46 @@ pub(crate) trait ChannelPairingTemplateValues: Send + Sync {
     async fn template_values(&self) -> Result<BTreeMap<String, String>, String>;
 }
 
-/// [`ChannelPairingInstallationSource`] over the generic host's active
-/// snapshot: the extension's routable installation is whatever the snapshot
-/// currently binds — absent (fail-closed) when the extension is not active.
-pub(crate) struct SnapshotPairingInstallationSource {
-    watch: ironclaw_extension_host::SnapshotWatch,
+/// [`ChannelPairingInstallationSource`] over the durable lifecycle store.
+/// Pairing is setup work performed after install and before activation, so an
+/// active-host snapshot is intentionally too narrow for this lookup.
+pub(crate) struct StoredPairingInstallationSource {
+    store: Arc<dyn ExtensionInstallationStore>,
     extension_id: ExtensionId,
 }
 
-impl SnapshotPairingInstallationSource {
+impl StoredPairingInstallationSource {
     pub(crate) fn new(
-        watch: ironclaw_extension_host::SnapshotWatch,
+        store: Arc<dyn ExtensionInstallationStore>,
         extension_id: ExtensionId,
     ) -> Self {
         Self {
-            watch,
+            store,
             extension_id,
         }
     }
 }
 
 #[async_trait]
-impl ChannelPairingInstallationSource for SnapshotPairingInstallationSource {
-    async fn current_installation(&self) -> Result<Option<AdapterInstallationId>, String> {
-        match self.watch.current().extension(self.extension_id.as_str()) {
-            Some(active) => AdapterInstallationId::new(&active.installation_id)
-                .map(Some)
-                .map_err(|error| format!("active installation id invalid: {error}")),
-            None => Ok(None),
-        }
+impl ChannelPairingInstallationSource for StoredPairingInstallationSource {
+    async fn current_installation(
+        &self,
+        caller: &UserId,
+    ) -> Result<Option<AdapterInstallationId>, String> {
+        let installation = self
+            .store
+            .list_installations()
+            .await
+            .map_err(|error| format!("installation lookup failed: {error}"))?
+            .into_iter()
+            .find(|installation| {
+                installation.extension_id() == &self.extension_id
+                    && installation.owner().visible_to(caller)
+            });
+        installation
+            .map(|installation| AdapterInstallationId::new(installation.installation_id().as_str()))
+            .transpose()
+            .map_err(|error| format!("installed installation id invalid: {error}"))
     }
 }
 
@@ -557,14 +573,14 @@ impl ChannelPairingService {
     }
 
     /// Mint (or rotate) the caller's pairing code. Fails closed when the
-    /// channel has no routable installation — no code is ever minted first.
+    /// channel is not installed for the caller — no code is ever minted first.
     pub(crate) async fn issue_or_rotate(
         &self,
         caller: &UserId,
     ) -> Result<ChannelPairingIssue, ChannelPairingError> {
         let installation_id = self
             .installation
-            .current_installation()
+            .current_installation(caller)
             .await
             .map_err(store_unavailable)?
             .ok_or(ChannelPairingError::NotConfigured)?;
@@ -597,7 +613,7 @@ impl ChannelPairingService {
     ) -> Result<ChannelPairingStatus, ChannelPairingError> {
         let installation_id = self
             .installation
-            .current_installation()
+            .current_installation(caller)
             .await
             .map_err(store_unavailable)?;
         let connected = match &installation_id {

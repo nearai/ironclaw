@@ -25,7 +25,10 @@ struct StaticInstallation(Option<AdapterInstallationId>);
 
 #[async_trait]
 impl ChannelPairingInstallationSource for StaticInstallation {
-    async fn current_installation(&self) -> Result<Option<AdapterInstallationId>, String> {
+    async fn current_installation(
+        &self,
+        _caller: &UserId,
+    ) -> Result<Option<AdapterInstallationId>, String> {
         Ok(self.0.clone())
     }
 }
@@ -279,7 +282,7 @@ fn user(id: &str) -> UserId {
 }
 
 #[tokio::test]
-async fn mint_fails_closed_without_active_installation() {
+async fn mint_fails_closed_without_installed_extension() {
     let fixture = fixture_with(None, None, BTreeMap::new());
     let error = fixture
         .service
