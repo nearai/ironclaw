@@ -1,4 +1,5 @@
 import type { StorybookConfig } from "@storybook/react-vite";
+import remarkGfm from "remark-gfm";
 
 const config: StorybookConfig = {
   stories: [
@@ -6,7 +7,18 @@ const config: StorybookConfig = {
     "../stories/**/*.stories.@(ts|tsx)",
   ],
   addons: [
-    "@storybook/addon-docs",
+    {
+      name: "@storybook/addon-docs",
+      options: {
+        mdxPluginOptions: {
+          mdxCompileOptions: {
+            // GFM tables in the MDX docs pages (brand spec, voice) don't
+            // render without this — MDX 3 dropped built-in table support.
+            remarkPlugins: [remarkGfm],
+          },
+        },
+      },
+    },
     "@storybook/addon-a11y",
     "@storybook/addon-themes",
   ],

@@ -41,6 +41,7 @@
     "@vitejs/plugin-react": "6.0.3",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "remark-gfm": "^4.0.1",
     "storybook": "^10.5.3",
     "tailwindcss": "4.3.2",
     "typescript": "6.0.3",
