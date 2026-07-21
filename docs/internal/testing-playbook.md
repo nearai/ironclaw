@@ -394,7 +394,8 @@ or behave in WebUI.
 
 ## Pull request test card
 
-Copy this into the pull request description:
+The pull request template includes this test card. Complete every field before
+requesting review; do not remove the section.
 
 ```markdown
 ### Test card
@@ -423,8 +424,8 @@ What the tests prove:
 Commands run:
 ```
 
-Leave unused fields blank or write `Not applicable`. If an expected test layer
-is omitted, explain why in one sentence.
+For every unused field, write `Not applicable: <reason>`. If an expected test
+layer is omitted, explain why in one sentence.
 
 ## Before creating a new test file
 
