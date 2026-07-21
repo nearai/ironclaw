@@ -3,9 +3,8 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, AuthSurface, GOOGLE_CALENDAR_EVENTS_SCOPE,
-    GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE, GOOGLE_GMAIL_READONLY_SCOPE,
-    GOOGLE_GMAIL_SEND_SCOPE, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
+    AuthProductScope, AuthProviderId, AuthSurface, SecretCleanupAction, SecretCleanupReport,
+    SecretCleanupRequest,
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionActivationState, ExtensionError, ExtensionInstallation,
@@ -2653,6 +2652,10 @@ mod tests {
         ExtensionRemovalCleanupRequirement,
     };
     use async_trait::async_trait;
+    use ironclaw_auth::{
+        GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE, GOOGLE_GMAIL_MODIFY_SCOPE,
+        GOOGLE_GMAIL_READONLY_SCOPE, GOOGLE_GMAIL_SEND_SCOPE,
+    };
     use ironclaw_extensions::{
         ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
         ExtensionManifest, ExtensionRegistry, InMemoryExtensionInstallationStore,

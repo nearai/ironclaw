@@ -350,16 +350,15 @@ def build_gateway_env(
     # tool dispatches parked on an approval gate instead of
     # auto-approving and never reached `installed=true`.
     #
-    # REBORN_TOOL_DISCLOSURE / REBORN_COLLAPSE_REPEATED_FAILURES are the two
-    # default-off reborn context-management flags. They are forwarded only so a
-    # canary lane can exercise the flag-ON path by setting them at the job level;
-    # unset (the default) they never reach the gateway, so the canary's default
-    # run stays byte-identical to production.
+    # Reborn experiment flags are forwarded only when a canary lane sets them.
+    # This includes the two default-off context-management flags and the
+    # default-on compact Google capability flag used by its A/B lane.
     for var in (
         "ALLOW_LOCAL_TOOLS",
         "AGENT_AUTO_APPROVE_TOOLS",
         "REBORN_TOOL_DISCLOSURE",
         "REBORN_COLLAPSE_REPEATED_FAILURES",
+        "IRONCLAW_COMPACT_GOOGLE_CAPABILITIES_ENABLED",
     ):
         value = os.environ.get(var)
         if value:
