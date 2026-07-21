@@ -134,6 +134,12 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   (default 3 concurrent; override via `WebUiV2State::with_sse_concurrency_limit`)
   — a caller cannot bypass the cap by mixing SSE and WS. Exhaustion returns
   `429` with `retryable: true`.
+- The SPA also sends a bounded, random `connection_id` that is stable for one
+  loaded browser tab. A new stream with the same caller and connection id
+  supersedes and cancels its prior stream without consuming another slot. This
+  prevents a proxy-delayed close during thread navigation from stranding the
+  replacement stream behind the cap; distinct tabs still consume distinct
+  slots.
 - Every stream is closed after a max lifetime (5 min) and every `socket.send` /
   drain await is `timeout`-bounded, so a back-pressuring client or a stalled
   facade cannot pin a slot past the budget. Slots are RAII (`SseSlot`), released

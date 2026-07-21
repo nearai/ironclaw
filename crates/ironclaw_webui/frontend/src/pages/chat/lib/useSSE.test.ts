@@ -49,7 +49,9 @@ function createHarness({
     EventSource,
     JSON,
     Math,
-    globalThis: {},
+    globalThis: {
+      crypto: { randomUUID: () => "browser-tab-connection" },
+    },
     openEventStream: (args) => {
       const listeners = new Map();
       const stream = {
@@ -348,6 +350,7 @@ test("useSSE resumes each thread from its own cursor after switching", () => {
   render("thread-2");
   assert.equal(streams[1].args.threadId, "thread-2");
   assert.equal(streams[1].args.afterCursor, undefined);
+  assert.equal(streams[1].args.connectionId, "browser-tab-connection");
 
   streams[1].listener("projection_update")({
     data: JSON.stringify({
@@ -360,6 +363,11 @@ test("useSSE resumes each thread from its own cursor after switching", () => {
   render("thread-1");
   assert.equal(streams[2].args.threadId, "thread-1");
   assert.equal(streams[2].args.afterCursor, "thread-1-cursor");
+  assert.equal(
+    streams[2].args.connectionId,
+    streams[1].args.connectionId,
+    "thread switches must reuse the tab connection id so the server can supersede the old stream",
+  );
 
   render("thread-2");
   assert.equal(streams[3].args.threadId, "thread-2");

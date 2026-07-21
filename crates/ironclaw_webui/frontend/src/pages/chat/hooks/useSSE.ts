@@ -35,6 +35,13 @@ const EVENT_SOURCE_CLOSED = 2;
 const EVENT_SOURCE_OPEN = 1;
 const MAX_CACHED_CURSORS = 30;
 const lastEventIdByThread = new Map<string, string>();
+// Stable for this browser tab's loaded SPA. Reusing it across Chat route
+// mounts lets the server supersede a proxy-held stream from the prior thread
+// instead of rejecting the replacement against the per-user connection cap.
+const SSE_CONNECTION_ID =
+  typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : undefined;
 
 function cursorKey(threadId: string) {
   return `${authScope()}:${threadId}`;
@@ -163,6 +170,7 @@ export function useSSE({ threadId, onEvent, enabled }) {
       es = openEventStream({
         threadId,
         afterCursor: getLastEventId(threadId) || undefined,
+        connectionId: SSE_CONNECTION_ID,
       });
       const source = es;
 
