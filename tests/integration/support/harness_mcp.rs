@@ -143,6 +143,7 @@ pub(super) fn mock_mcp_extension_package(
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
             resource_profile: None,
+            origin_gate_matrix: None,
         }],
     };
     // Inline schema so surface_descriptor returns Ok(descriptor) without
@@ -160,6 +161,7 @@ pub(super) fn mock_mcp_extension_package(
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
         resource_profile: None,
+        origin_gate_matrix: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
     Ok(

@@ -604,6 +604,7 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
     };
     let context = ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -1161,6 +1162,7 @@ fn test_descriptor(runtime: RuntimeKind, effects: Vec<EffectKind>) -> Capability
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
         resource_profile: None,
+        origin_gate_matrix: None,
     }
 }
 

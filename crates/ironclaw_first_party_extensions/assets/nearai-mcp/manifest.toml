@@ -11,6 +11,7 @@ transport = "http"
 url = "https://private.near.ai/mcp"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "nearai.web_search"
 description = "Search through the NEAR AI MCP server."
 effects = ["dispatch_capability", "network", "use_secret"]

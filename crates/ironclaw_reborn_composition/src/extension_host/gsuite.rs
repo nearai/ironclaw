@@ -227,6 +227,7 @@ fn capability_manifest(
         // special-case, not a manifest-declared allowlist.
         network_targets: Vec::new(),
         resource_profile: Some(gsuite_resource_profile()),
+        origin_gate_matrix: None,
     })
 }
 

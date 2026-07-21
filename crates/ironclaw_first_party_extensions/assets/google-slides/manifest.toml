@@ -10,6 +10,7 @@ kind = "wasm"
 module = "wasm/google_slides_tool.wasm"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.create_presentation"
 description = "Create a new presentation."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -24,6 +25,7 @@ prompt_doc_ref = "prompts/google-slides/create_presentation.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.get_presentation"
 description = "Get presentation metadata."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -38,6 +40,7 @@ prompt_doc_ref = "prompts/google-slides/get_presentation.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.get_thumbnail"
 description = "Get a slide thumbnail URL."
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -52,6 +55,7 @@ prompt_doc_ref = "prompts/google-slides/get_thumbnail.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.create_slide"
 description = "Create a new slide."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -66,6 +70,7 @@ prompt_doc_ref = "prompts/google-slides/create_slide.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.delete_object"
 description = "Delete a slide or page element."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -80,6 +85,7 @@ prompt_doc_ref = "prompts/google-slides/delete_object.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.insert_text"
 description = "Insert text into a shape."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -94,6 +100,7 @@ prompt_doc_ref = "prompts/google-slides/insert_text.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.delete_text"
 description = "Delete text from a shape."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -108,6 +115,7 @@ prompt_doc_ref = "prompts/google-slides/delete_text.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.replace_all_text"
 description = "Find and replace text."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -122,6 +130,7 @@ prompt_doc_ref = "prompts/google-slides/replace_all_text.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.create_shape"
 description = "Create a shape or text box."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -136,6 +145,7 @@ prompt_doc_ref = "prompts/google-slides/create_shape.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.insert_image"
 description = "Insert an image on a slide."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -150,6 +160,7 @@ prompt_doc_ref = "prompts/google-slides/insert_image.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.format_text"
 description = "Format text in a shape."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -164,6 +175,7 @@ prompt_doc_ref = "prompts/google-slides/format_text.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.format_paragraph"
 description = "Set paragraph alignment."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -178,6 +190,7 @@ prompt_doc_ref = "prompts/google-slides/format_paragraph.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.replace_shapes_with_image"
 description = "Replace matching shapes with an image."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]
@@ -192,6 +205,7 @@ prompt_doc_ref = "prompts/google-slides/replace_shapes_with_image.md"
 required_host_ports = ["host.runtime.http_egress"]
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-slides.batch_update"
 description = "Execute raw Slides API batchUpdate requests."
 effects = ["dispatch_capability", "network", "use_secret", "external_write"]

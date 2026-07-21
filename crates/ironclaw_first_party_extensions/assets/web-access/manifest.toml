@@ -10,6 +10,7 @@ kind = "first_party"
 service = "web-access"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "web-access.search"
 description = "Search the web with zero-config Exa MCP and return cited source results. Prefer GitHub extension capabilities for GitHub repository, issue, pull request, release, or workflow data when they are available."
 effects = ["dispatch_capability", "network"]
@@ -20,6 +21,7 @@ output_schema_ref = "schemas/web-access/search.output.v1.json"
 prompt_doc_ref = "prompts/web-access/search.md"
 
 [[capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "web-access.get_content"
 description = "Retrieve full web page content through Exa MCP, or read content cached from a previous web search response."
 effects = ["dispatch_capability", "network"]

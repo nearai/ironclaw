@@ -306,6 +306,7 @@ fn execution_context_for_scope<'a>(
     let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id"); // safety: static test extension id is valid.
     let context = ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id: resource_scope.invocation_id,
         correlation_id: ironclaw_host_api::CorrelationId::new(),
         process_id: None,

@@ -63,6 +63,16 @@ pub trait CapabilityAuthorizer {
 #[derive(Debug)]
 pub struct AuthorizationGrant(());
 
+/// The dispatch-lane parts a consumed [`Authorized`] yields: the exact
+/// invocation, the descriptor-resolved lane, the fold's `Option<MountView>`, and
+/// the fold's `Option<ResourceReservation>` — all verbatim, never re-derived.
+pub type AuthorizedParts = (
+    Invocation,
+    RuntimeLane,
+    Option<MountView>,
+    Option<ResourceReservation>,
+);
+
 /// The sealed proof that an [`Invocation`] passed `authorize()` — single-use,
 /// lane-bound, and deadline-bounded (§3, §5.3.2).
 ///
@@ -81,7 +91,16 @@ pub struct AuthorizationGrant(());
 pub struct Authorized {
     invocation: Invocation,
     lane: RuntimeLane,
-    mounts: MountView,
+    /// The filesystem mounts the fold's `UseScopedMounts` obligation produced
+    /// (`Some`), or `None` when the capability declares no mount obligation.
+    /// Kept as an `Option` — never collapsed to a default `MountView` — so the
+    /// witness carries the *exact* value the fold's `obligation_outcome`
+    /// produced: `dispatch()` routes it byte-for-byte, and the `None`-vs-empty
+    /// distinction the filesystem resolver relies on (a `None` mount fails a
+    /// `ScopedVirtual`-backed capability closed, an empty one does not) is not
+    /// silently erased. Single-use, lane-bound, deadline-bounded like the
+    /// witness that carries it.
+    mounts: Option<MountView>,
     /// The real reservation the fold's resource obligation produced (`Some`), or
     /// `None` when the capability declares no resource obligation. This is the
     /// authoritative reservation held for this invocation — never a synthesized
@@ -98,12 +117,14 @@ impl Authorized {
     /// `deadline`) are results the fold computed, not caller-supplied request
     /// fields. `reservation` is the real reservation the fold's resource
     /// obligation produced (`Some`), or `None` when the capability declares no
-    /// resource obligation — never a synthesized placeholder.
+    /// resource obligation — never a synthesized placeholder. `mounts` is
+    /// likewise the fold's `Option<MountView>` verbatim (`None` when the
+    /// capability declared no mount obligation), never a collapsed default.
     pub fn seal(
         _grant: AuthorizationGrant,
         invocation: Invocation,
         lane: RuntimeLane,
-        mounts: MountView,
+        mounts: Option<MountView>,
         reservation: Option<ResourceReservation>,
         deadline: Timestamp,
     ) -> Self {
@@ -126,9 +147,12 @@ impl Authorized {
         self.lane
     }
 
-    /// The filesystem mounts authorized for this invocation.
-    pub fn mounts(&self) -> &MountView {
-        &self.mounts
+    /// The filesystem mounts authorized for this invocation — the fold's
+    /// `Option<MountView>` verbatim (`None` when the capability declared no
+    /// mount obligation), so callers see the same `None`-vs-empty distinction
+    /// today's dispatch input carries.
+    pub fn mounts(&self) -> Option<&MountView> {
+        self.mounts.as_ref()
     }
 
     /// The real reservation the fold's resource obligation produced (`Some`), or
@@ -156,18 +180,7 @@ impl Authorized {
     /// caller releases its reservation through [`Authorized::abort`]. Single-use
     /// either way: an `Ok` consumes the witness, so it cannot be dispatched
     /// twice.
-    pub fn into_parts(
-        self,
-        now: Timestamp,
-    ) -> Result<
-        (
-            Invocation,
-            RuntimeLane,
-            MountView,
-            Option<ResourceReservation>,
-        ),
-        Box<Authorized>,
-    > {
+    pub fn into_parts(self, now: Timestamp) -> Result<AuthorizedParts, Box<Authorized>> {
         if self.is_expired(now) {
             // Boxed: the witness is large and the expiry arm is cold
             // (clippy::result_large_err).

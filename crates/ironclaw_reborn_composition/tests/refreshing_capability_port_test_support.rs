@@ -147,6 +147,7 @@ impl HostRuntime for StubHostRuntime {
                     runtime_credentials: Vec::new(),
                     network_targets: Vec::new(),
                     resource_profile: None,
+                    origin_gate_matrix: None,
                 },
                 access: VisibleCapabilityAccess::Available,
                 estimated_resources: ResourceEstimate::default(),

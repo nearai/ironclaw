@@ -49,12 +49,20 @@ fn seal_with_reservation(
     deadline: Timestamp,
     reservation: Option<ResourceReservation>,
 ) -> Authorized {
+    seal_with_mounts_and_reservation(deadline, Some(MountView::default()), reservation)
+}
+
+fn seal_with_mounts_and_reservation(
+    deadline: Timestamp,
+    mounts: Option<MountView>,
+    reservation: Option<ResourceReservation>,
+) -> Authorized {
     let grant = TestAuthorizer.authorization_grant();
     Authorized::seal(
         grant,
         invocation(),
         RuntimeLane::Process,
-        MountView::default(),
+        mounts,
         reservation,
         deadline,
     )
@@ -136,6 +144,26 @@ fn abort_returns_the_reservation_for_explicit_release() {
     let auth = seal_one(ts(1000));
     let reservation = auth.abort(); // consumed, not dropped implicitly
     assert!(reservation.is_some());
+}
+
+#[test]
+fn mounts_are_carried_and_consumed_as_an_option_not_a_collapsed_default() {
+    // The witness must preserve the fold's `Option<MountView>` verbatim so
+    // `dispatch()` routes the same `None`-vs-empty distinction today's dispatch
+    // input carries (a `None` mount fails a `ScopedVirtual` capability closed;
+    // an empty one does not). Collapsing `None` to a default would erase that.
+    let some = seal_with_mounts_and_reservation(ts(1000), Some(MountView::default()), None);
+    assert_eq!(some.mounts(), Some(&MountView::default()));
+    let (_inv, _lane, mounts, _res) = some.into_parts(ts(999)).expect("unexpired");
+    assert_eq!(mounts, Some(MountView::default()));
+
+    let none = seal_with_mounts_and_reservation(ts(1000), None, None);
+    assert!(none.mounts().is_none());
+    let (_inv, _lane, mounts, _res) = none.into_parts(ts(999)).expect("unexpired");
+    assert!(
+        mounts.is_none(),
+        "a `None` mount must not become an empty default"
+    );
 }
 
 #[test]
