@@ -690,6 +690,7 @@ fn first_party_registry_with_effects(effects: Vec<EffectKind>) -> ExtensionRegis
                 runtime_credentials: Vec::new(),
                 network_targets: Vec::new(),
                 resource_profile: None,
+                origin_gate_matrix: None,
             }],
             hooks: Vec::new(),
         },

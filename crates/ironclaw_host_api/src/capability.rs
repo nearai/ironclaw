@@ -10,10 +10,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CapabilityGrantId, CapabilityId, ExtensionId, MountView, NetworkPolicy, NetworkTargetPattern,
-    Principal, ResourceCeiling, ResourceProfile, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAuthRequirement, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    Timestamp, TrustClass,
+    CapabilityGrantId, CapabilityId, ExtensionId, InvocationOrigin, MountView, NetworkPolicy,
+    NetworkTargetPattern, Principal, ResourceCeiling, ResourceProfile,
+    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeCredentialTarget,
+    RuntimeKind, SecretHandle, Timestamp, TrustClass,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -61,6 +61,50 @@ pub enum PermissionMode {
     Deny,
 }
 
+/// Per-origin gate requirement (§5.2.1). Absence of a declaration for an
+/// origin means `Forbidden` (deny-by-default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OriginGatePolicy {
+    /// This origin may not invoke the capability at all.
+    #[default]
+    Forbidden,
+    /// Every invocation gates; persistent grants are never honored (§5.2.7).
+    AskAlways,
+    /// Gates unless a scoped persistent/policy grant covers it (§5.2.7).
+    GatedUnlessGranted,
+    /// The origin's own gesture is the consent evidence (`Product` only).
+    ConsentSufficient,
+    /// No approval gate — for `LoopRun` requires a reviewed allowlist entry (§10).
+    Ungated,
+}
+
+/// The per-origin gate matrix declared on a capability descriptor (§5.2.1).
+/// Each origin defaults to [`OriginGatePolicy::Forbidden`] when the declaration
+/// omits it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct OriginGateMatrix {
+    #[serde(default)]
+    pub loop_run: OriginGatePolicy,
+    #[serde(default)]
+    pub product: OriginGatePolicy,
+    #[serde(default)]
+    pub automation: OriginGatePolicy,
+}
+
+impl OriginGateMatrix {
+    /// The gate policy this matrix declares for the given invocation origin.
+    /// Maps each [`InvocationOrigin`] variant to its matching matrix field;
+    /// an omitted field is [`OriginGatePolicy::Forbidden`] by default.
+    pub fn policy_for(&self, origin: &InvocationOrigin) -> OriginGatePolicy {
+        match origin {
+            InvocationOrigin::LoopRun(_) => self.loop_run,
+            InvocationOrigin::Product(_) => self.product,
+            InvocationOrigin::Automation(_) => self.automation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CapabilityDescriptor {
     pub id: CapabilityId,
@@ -80,6 +124,12 @@ pub struct CapabilityDescriptor {
     #[serde(default)]
     pub network_targets: Vec<NetworkTargetPattern>,
     pub resource_profile: Option<ResourceProfile>,
+    /// Per-origin gate matrix (§5.2.1). `None` = undeclared: treated as
+    /// all-`Forbidden` (fail-closed) at authorization, and flagged by the
+    /// §5 architecture ratchet (a later slice) which requires every descriptor
+    /// to declare one. Populated per capability in a later slice.
+    #[serde(default)]
+    pub origin_gate_matrix: Option<OriginGateMatrix>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,6 +264,82 @@ mod credential_setup_wire_tests {
             serde_json::to_value(RuntimeCredentialAccountSetup::Pairing).expect("serializes"),
             serde_json::json!({"kind": "pairing"}),
             "the pairing gate's persisted wire shape is locked"
+        );
+    }
+}
+
+#[cfg(test)]
+mod origin_gate_wire_tests {
+    use super::{OriginGateMatrix, OriginGatePolicy};
+    use crate::{InvocationOrigin, ProductKind, RoutineId, RunId};
+
+    /// `OriginGatePolicy` is a wire-stable enum: every variant must serialize to
+    /// its snake_case tag and round-trip back. (§5.2.1)
+    #[test]
+    fn origin_gate_policy_is_snake_case_and_roundtrips() {
+        for (policy, wire) in [
+            (OriginGatePolicy::Forbidden, "forbidden"),
+            (OriginGatePolicy::AskAlways, "ask_always"),
+            (OriginGatePolicy::GatedUnlessGranted, "gated_unless_granted"),
+            (OriginGatePolicy::ConsentSufficient, "consent_sufficient"),
+            (OriginGatePolicy::Ungated, "ungated"),
+        ] {
+            let json = serde_json::to_value(policy).expect("serializes");
+            assert_eq!(json, serde_json::json!(wire));
+            let back: OriginGatePolicy = serde_json::from_value(json).expect("roundtrips");
+            assert_eq!(back, policy);
+        }
+        // Deny-by-default: the enum's `Default` is `Forbidden`.
+        assert_eq!(OriginGatePolicy::default(), OriginGatePolicy::Forbidden);
+    }
+
+    /// An omitted per-origin field defaults to `Forbidden` (deny-by-default),
+    /// so a partial matrix is fully specified with the rest closed.
+    #[test]
+    fn origin_gate_matrix_omitted_field_defaults_to_forbidden() {
+        // Only `loop_run` and `product` declared; `automation` omitted.
+        let matrix: OriginGateMatrix = serde_json::from_value(serde_json::json!({
+            "loop_run": "gated_unless_granted",
+            "product": "consent_sufficient",
+        }))
+        .expect("partial matrix parses");
+        assert_eq!(matrix.loop_run, OriginGatePolicy::GatedUnlessGranted);
+        assert_eq!(matrix.product, OriginGatePolicy::ConsentSufficient);
+        assert_eq!(
+            matrix.automation,
+            OriginGatePolicy::Forbidden,
+            "an omitted origin is deny-by-default"
+        );
+
+        // A fully empty matrix is all-Forbidden.
+        let empty: OriginGateMatrix =
+            serde_json::from_value(serde_json::json!({})).expect("empty matrix parses");
+        assert_eq!(empty, OriginGateMatrix::default());
+    }
+
+    /// `policy_for` selects the field matching the origin's variant.
+    #[test]
+    fn policy_for_maps_each_origin_variant_to_its_field() {
+        let matrix = OriginGateMatrix {
+            loop_run: OriginGatePolicy::AskAlways,
+            product: OriginGatePolicy::ConsentSufficient,
+            automation: OriginGatePolicy::GatedUnlessGranted,
+        };
+        assert_eq!(
+            matrix.policy_for(&InvocationOrigin::LoopRun(RunId::new())),
+            OriginGatePolicy::AskAlways
+        );
+        assert_eq!(
+            matrix.policy_for(&InvocationOrigin::Product(
+                ProductKind::new("settings").unwrap()
+            )),
+            OriginGatePolicy::ConsentSufficient
+        );
+        assert_eq!(
+            matrix.policy_for(&InvocationOrigin::Automation(
+                RoutineId::new("heartbeat").unwrap()
+            )),
+            OriginGatePolicy::GatedUnlessGranted
         );
     }
 }

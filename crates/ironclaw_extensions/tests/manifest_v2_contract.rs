@@ -9,7 +9,7 @@ use ironclaw_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityProfileId, ExtensionId, HostPortCatalog, HostPortCatalogEntry, HostPortId,
-    NetworkScheme, NetworkTargetPattern, PermissionMode, RequestedTrustClass,
+    NetworkScheme, NetworkTargetPattern, OriginGatePolicy, PermissionMode, RequestedTrustClass,
     RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
     RuntimeCredentialTarget, RuntimeKind, SecretHandle, TrustClass,
 };
@@ -72,6 +72,35 @@ fn parses_minimum_valid_v2_manifest_for_installed_third_party_extension() {
     assert_eq!(cap.visibility, CapabilityVisibility::Model);
     assert_eq!(cap.default_permission, PermissionMode::Allow);
     assert!(cap.prompt_doc_ref.is_none());
+    // A manifest that omits the §5.2.1 origin→gate key parses to `None`
+    // (undeclared), preserving compatibility with existing manifests.
+    assert!(cap.origin_gate_matrix.is_none());
+}
+
+#[test]
+fn parses_partial_origin_gate_matrix_with_omitted_origin_defaulting_to_forbidden() {
+    // A capability declaring only `loop_run` and `product` in its origin→gate
+    // matrix (§5.2.1): the omitted `automation` origin must default to
+    // `Forbidden` (deny-by-default), so the matrix is fully specified.
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo").replace(
+        r#"default_permission = "allow""#,
+        r#"default_permission = "allow"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "consent_sufficient" }"#,
+    );
+    let manifest =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap();
+
+    let matrix = manifest.capabilities[0]
+        .origin_gate_matrix
+        .as_ref()
+        .expect("declared matrix parses to Some");
+    assert_eq!(matrix.loop_run, OriginGatePolicy::GatedUnlessGranted);
+    assert_eq!(matrix.product, OriginGatePolicy::ConsentSufficient);
+    assert_eq!(
+        matrix.automation,
+        OriginGatePolicy::Forbidden,
+        "an omitted origin is deny-by-default"
+    );
 }
 
 #[test]

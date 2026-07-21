@@ -123,6 +123,7 @@ fn lifecycle_manifest(
                 .set_output_bytes(16 * 1024),
             hard_ceiling: None,
         }),
+        origin_gate_matrix: None,
     })
 }
 

@@ -464,6 +464,7 @@ fn first_party_capability_manifest(
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
         resource_profile,
+        origin_gate_matrix: None,
     })
 }
 

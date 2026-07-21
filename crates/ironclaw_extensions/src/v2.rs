@@ -39,10 +39,10 @@ use std::sync::Arc;
 
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
-    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern, PermissionMode,
-    RequestedTrustClass, ResourceProfile, RuntimeCredentialRequirement,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
-    TrustClass,
+    HostApiError, HostPortCatalog, HostPortId, NetworkScheme, NetworkTargetPattern,
+    OriginGateMatrix, PermissionMode, RequestedTrustClass, ResourceProfile,
+    RuntimeCredentialRequirement, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
+    RuntimeKind, SecretHandle, TrustClass,
 };
 use serde::{Deserialize, Deserializer};
 use thiserror::Error;
@@ -383,6 +383,9 @@ pub struct CapabilityDeclV2 {
     /// this to populate its egress allowlist directly from the manifest.
     pub network_targets: Vec<NetworkTargetPattern>,
     pub resource_profile: Option<ResourceProfile>,
+    /// Declared per-origin gate matrix (§5.2.1). `None` = undeclared; a later
+    /// slice populates real matrices and threads this into authorization.
+    pub origin_gate_matrix: Option<OriginGateMatrix>,
 }
 
 /// v2 runtime declaration.
@@ -1069,6 +1072,7 @@ impl CapabilityDeclV2 {
             runtime_credentials,
             network_targets,
             resource_profile: raw.resource_profile,
+            origin_gate_matrix: raw.origin_gate_matrix,
         })
     }
 }
@@ -1610,6 +1614,12 @@ pub(crate) struct RawCapabilityV2 {
     network_targets: Vec<NetworkTargetPattern>,
     #[serde(default)]
     resource_profile: Option<ResourceProfile>,
+    /// Per-origin gate matrix (§5.2.1). `#[serde(default)]` so existing
+    /// manifests without the key parse to `None`. `OriginGateMatrix`
+    /// deserializes directly from TOML (snake_case fields, each defaulting to
+    /// `Forbidden` when omitted), so no raw mirror is needed.
+    #[serde(default)]
+    origin_gate_matrix: Option<OriginGateMatrix>,
 }
 
 #[derive(Debug, Deserialize)]

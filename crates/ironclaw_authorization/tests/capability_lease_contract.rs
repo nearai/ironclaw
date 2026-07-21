@@ -1190,6 +1190,7 @@ fn descriptor(id: CapabilityId) -> CapabilityDescriptor {
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
         resource_profile: None,
+        origin_gate_matrix: None,
     }
 }
 
