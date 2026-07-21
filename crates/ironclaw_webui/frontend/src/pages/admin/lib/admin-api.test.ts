@@ -130,13 +130,13 @@ test("fetchExtensionAdminConfiguration reads every manifest-driven group", async
 test("replaceExtensionAdminConfiguration PUTs only descriptor handles and values", async () => {
   stubFetch(() => ({ group_id: "vendor.example", fields: [] }));
 
-  await replaceExtensionAdminConfiguration("vendor.example/a", [
+  await replaceExtensionAdminConfiguration("vendor.example", [
     { handle: "client_secret", value: "write-only" },
   ]);
 
   assert.equal(
     calls[0].path,
-    "/api/webchat/v2/operator/extension-configuration/vendor.example%2Fa",
+    "/api/webchat/v2/operator/extension-configuration/vendor.example",
   );
   assert.equal(calls[0].init.method, "PUT");
   assert.deepEqual(jsonBody(calls[0]), {

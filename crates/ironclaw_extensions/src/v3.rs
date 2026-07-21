@@ -29,6 +29,7 @@ use ironclaw_host_api::{
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::ExtensionAdminConfigurationDescriptor;
 use crate::resolved::{ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedMcpDeclaration};
 use crate::v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, ExtensionManifestV2, ExtensionRuntimeV2,
@@ -102,6 +103,8 @@ struct RawManifestV3 {
     channel: Option<ChannelDescriptor>,
     #[serde(default)]
     auth: BTreeMap<String, VendorAuthRecipe>,
+    #[serde(default)]
+    admin_configuration: Option<ExtensionAdminConfigurationDescriptor>,
     /// Free-form authoring metadata, ignored (same exemption as v2's
     /// `metadata` root).
     #[serde(default)]
@@ -318,6 +321,28 @@ pub(crate) fn parse_v3(
             .validate()
             .map_err(|error| ManifestV3Error::InvalidChannel { error })?;
     }
+    if let Some(descriptor) = &raw.admin_configuration {
+        descriptor
+            .validate()
+            .map_err(|error| ManifestV3Error::Invalid {
+                reason: format!("[admin_configuration] is invalid: {error}"),
+            })?;
+        if let Some(channel) = &raw.channel {
+            let aligned = descriptor.fields.len() == channel.config.fields.len()
+                && descriptor.fields.iter().zip(&channel.config.fields).all(
+                    |(admin_field, channel_field)| {
+                        admin_field.handle == channel_field.handle
+                            && admin_field.label == channel_field.label
+                            && admin_field.secret == channel_field.secret
+                    },
+                );
+            if !aligned {
+                return Err(ManifestV3Error::Invalid {
+                    reason: "[admin_configuration].fields must exactly match [channel.config].fields by order, handle, label, and secret flag".to_string(),
+                });
+            }
+        }
+    }
 
     // Normalize tools (or the synthesized MCP connection template) into the
     // internal capability model, reusing the v2 validated construction path.
@@ -530,6 +555,7 @@ pub(crate) fn parse_v3(
         }),
         tools: manifest.capabilities.clone(),
         channel: raw.channel,
+        admin_configuration: raw.admin_configuration.into_iter().collect(),
         auth,
         host_apis: Vec::new(),
         section_surfaces: Vec::new(),

@@ -152,6 +152,76 @@ fn acme_fixture_resolves_channel_and_auth_recipe() {
     );
 }
 
+#[test]
+fn admin_configuration_is_manifest_declared_and_resolved_without_installation_state() {
+    let toml = ACME_MANIFEST.replace(
+        "[runtime]",
+        r#"[admin_configuration]
+group_id = "vendor.acme"
+display_name = "Acme deployment credentials"
+description = "Shared OAuth client credentials."
+fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "acme_signing_secret", label = "Signing secret", secret = true, required = true },
+]
+
+[runtime]"#,
+    );
+
+    let record = parse_v3(&toml).expect("manifest-declared admin configuration should parse");
+    let [descriptor] = record.resolved().admin_configuration.as_slice() else {
+        panic!("expected one resolved admin configuration descriptor");
+    };
+    assert_eq!(descriptor.group_id.as_str(), "vendor.acme");
+    assert_eq!(descriptor.fields.len(), 2);
+    assert!(descriptor.fields[0].secret);
+    assert!(descriptor.fields[1].secret);
+}
+
+#[test]
+fn duplicate_admin_configuration_handles_fail_closed() {
+    let toml = ACME_MANIFEST.replace(
+        "[runtime]",
+        r#"[admin_configuration]
+group_id = "vendor.acme"
+display_name = "Acme deployment credentials"
+description = "Shared OAuth client credentials."
+fields = [
+  { handle = "acme_client_id", label = "Client ID", secret = false, required = true },
+  { handle = "acme_client_id", label = "Duplicate", secret = true, required = true },
+]
+
+[runtime]"#,
+    );
+
+    let error = parse_v3(&toml).expect_err("duplicate handles must fail closed");
+    assert!(
+        error.contains("duplicate") && error.contains("acme_client_id"),
+        "{error}"
+    );
+}
+
+#[test]
+fn channel_admin_configuration_cannot_drift_from_channel_config() {
+    let toml = ACME_MANIFEST.replace(
+        "[runtime]",
+        r#"[admin_configuration]
+group_id = "vendor.acme"
+display_name = "Acme deployment credentials"
+fields = [
+  { handle = "wrong_handle", label = "Wrong", secret = true, required = true },
+]
+
+[runtime]"#,
+    );
+
+    let error = parse_v3(&toml).expect_err("parallel channel declarations must not drift");
+    assert!(
+        error.contains("exactly match") && error.contains("channel.config"),
+        "{error}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Fail-closed validation (MAN-4, MAN-5)
 // ---------------------------------------------------------------------------

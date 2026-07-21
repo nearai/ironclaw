@@ -9,6 +9,15 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/google_docs_tool.wasm"
 
+[admin_configuration]
+group_id = "vendor.google"
+display_name = "Google OAuth client credentials"
+description = "Deployment OAuth client credentials shared by Google extensions."
+fields = [
+  { handle = "google_oauth_client_id", label = "Google OAuth client ID", secret = false, required = true },
+  { handle = "google_oauth_client_secret", label = "Google OAuth client secret", secret = true, required = true },
+]
+
 [auth.google]
 method = "oauth2_code"
 display_name = "Google account"

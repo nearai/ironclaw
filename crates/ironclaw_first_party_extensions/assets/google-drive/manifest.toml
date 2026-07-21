@@ -9,6 +9,15 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/google_drive_tool.wasm"
 
+[admin_configuration]
+group_id = "vendor.google"
+display_name = "Google OAuth client credentials"
+description = "Deployment OAuth client credentials shared by Google extensions."
+fields = [
+  { handle = "google_oauth_client_id", label = "Google OAuth client ID", secret = false, required = true },
+  { handle = "google_oauth_client_secret", label = "Google OAuth client secret", secret = true, required = true },
+]
+
 [[tools]]
 id = "google-drive.list_files"
 description = "Search or list files and folders, including Google Sheets/spreadsheets by name or title."

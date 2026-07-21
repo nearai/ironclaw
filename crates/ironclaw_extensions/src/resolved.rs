@@ -19,6 +19,8 @@ use ironclaw_host_api::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::ExtensionAdminConfigurationDescriptor;
+
 use crate::v2::{
     CapabilityDeclV2, CapabilitySurfaceDeclV2, ExtensionManifestV2, ExtensionRuntimeV2,
     HookSectionEntryV2, HostApiId, HostApiRefV2, ManifestSectionPath, ManifestSource,
@@ -46,6 +48,9 @@ pub struct ResolvedExtensionManifest {
     /// The declared channel surface (v3 `[channel]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel: Option<ChannelDescriptor>,
+    /// Deployment-owned values required before users can use this extension.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admin_configuration: Vec<ExtensionAdminConfigurationDescriptor>,
     /// One entry per vendor the extension authenticates against.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auth: Vec<ResolvedAuthSurface>,
@@ -147,6 +152,7 @@ impl ResolvedExtensionManifest {
             mcp: None,
             tools: manifest.capabilities.clone(),
             channel: None,
+            admin_configuration: Vec::new(),
             auth,
             host_apis: manifest
                 .host_apis

@@ -391,6 +391,7 @@ fn descriptors_match_except_schema(
         })
 }
 
+mod admin_configuration;
 mod canonicalization;
 pub mod host_api;
 mod hosted_mcp_discovery;
@@ -401,6 +402,10 @@ pub mod resolved;
 pub mod v2;
 pub mod v3;
 
+pub use admin_configuration::{
+    AdminConfigurationDescriptorError, AdminConfigurationField, AdminConfigurationGroupId,
+    ExtensionAdminConfigurationDescriptor,
+};
 pub use host_api::capability_provider::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
 };

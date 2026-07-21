@@ -22,7 +22,6 @@ test("configuration group renders generic operator fields and no lifecycle actio
           label: "Client secret",
           secret: true,
           required: true,
-          input: "operator",
           provided: true,
           value: null,
         },
@@ -31,7 +30,6 @@ test("configuration group renders generic operator fields and no lifecycle actio
           label: "Public name",
           secret: false,
           required: true,
-          input: "provisioned",
           provided: true,
           value: "fixture-bot",
         },
@@ -49,7 +47,8 @@ test("configuration group renders generic operator fields and no lifecycle actio
   assert.match(html, /Fixture credentials/);
   assert.match(html, /Client secret/);
   assert.match(html, /Configured\. Leave blank to keep/);
-  assert.match(html, /value="fixture-bot"[^>]*disabled|disabled=""[^>]*value="fixture-bot"/);
+  assert.match(html, /value="fixture-bot"/);
+  assert.doesNotMatch(html, /Set automatically by the provider/);
   assert.match(html, /Save configuration/);
   assert.doesNotMatch(html, />Install</);
   assert.doesNotMatch(html, />Remove</);

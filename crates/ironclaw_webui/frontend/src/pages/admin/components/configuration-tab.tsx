@@ -46,9 +46,10 @@ export function ConfigurationGroup({ group, state }) {
     event.preventDefault();
     setSaved(false);
     state.resetSave?.();
-    const submitted = group.fields
-      .filter((field) => field.input === "operator")
-      .map((field) => ({ handle: field.handle, value: values[field.handle] || "" }));
+    const submitted = group.fields.map((field) => ({
+      handle: field.handle,
+      value: values[field.handle] || "",
+    }));
     try {
       await state.save({ groupId: group.group_id, values: submitted });
       setSaved(true);
@@ -86,10 +87,9 @@ export function ConfigurationGroup({ group, state }) {
 
         <div className="mt-5 grid gap-4 md:grid-cols-2">
           {group.fields.map((field) => {
-            const provisioned = field.input === "provisioned";
             const hint = field.secret && field.provided
               ? "Configured. Leave blank to keep the stored value."
-              : provisioned ? "Set automatically by the provider." : null;
+              : null;
             return (
               <div key={field.handle}>
                 <label htmlFor={`${group.group_id}-${field.handle}`} className="mb-1 block text-xs text-iron-300">
@@ -100,7 +100,7 @@ export function ConfigurationGroup({ group, state }) {
                   size="sm"
                   type={field.secret ? "password" : "text"}
                   value={values[field.handle] || ""}
-                  disabled={provisioned || isSaving}
+                  disabled={isSaving}
                   autoComplete={field.secret ? "new-password" : "off"}
                   spellCheck={false}
                   onChange={(event) => {

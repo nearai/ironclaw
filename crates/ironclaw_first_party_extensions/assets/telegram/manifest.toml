@@ -13,6 +13,17 @@ trust = "first_party_requested"
 kind = "first_party"
 service = "telegram.extension/v1"
 
+[admin_configuration]
+group_id = "extension.telegram"
+display_name = "Telegram deployment configuration"
+description = "Deployment credentials and public account metadata for the Telegram channel."
+fields = [
+  { handle = "telegram_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true },
+  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true },
+  { handle = "bot_username", label = "Bot username", secret = false, required = true },
+]
+
 # ---- channel surface -------------------------------------------------------
 
 [channel]
