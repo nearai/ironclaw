@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -18,22 +19,18 @@ use super::host::{
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 use super::model_work::{ModelWorkOutcome, ModelWorkRequest};
 
-/// Hard ceiling on a single primary assistant model call.
+/// Maximum idle period for a primary assistant model call.
 ///
-/// This is a defense-in-depth bound that wraps the entire gateway call (every
-/// provider, not just NEAR AI). It MUST stay below the runner lease
+/// This is a defense-in-depth bound for every provider, not just NEAR AI. Text
+/// progress resets the watchdog so a healthy long response is not cancelled.
+/// It MUST stay below the runner lease
 /// ([`crate::filesystem_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS`] = 90s) so a hung
 /// provider is surfaced as a retryable `Unavailable` error before the lease
 /// reclaims the runner mid-flight — the failure mode that wedged the Reborn
 /// runtime on 2026-06-24. The invariant is enforced by
-/// `primary_model_call_timeout_is_below_runner_lease` below.
+/// `primary_model_call_idle_timeout_is_below_runner_lease` below.
 ///
-/// Layered ordering: provider HTTP timeout (`ironclaw_llm`
-/// `DEFAULT_REQUEST_TIMEOUT_SECS` = 60s) < this wrapper (75s) < runner lease
-/// (90s). The provider bound fires first on the common path so the precise
-/// provider error surfaces; this wrapper catches gateway-layer stalls the inner
-/// bound misses.
-const PRIMARY_MODEL_CALL_TIMEOUT: Duration = Duration::from_secs(75);
+const PRIMARY_MODEL_CALL_IDLE_TIMEOUT: Duration = Duration::from_secs(75);
 const FALLBACK_TEXT_DELTA_MILESTONE_STEP: usize = 15;
 
 /// Outcome passed to [`LoopModelBudgetAccountant::post_model_call`] so the
@@ -400,12 +397,13 @@ where
             );
         }
 
-        // Bound the primary model call so a hung provider/gateway surfaces as a
-        // retryable error before the runner lease reclaims this run mid-flight.
-        // See `PRIMARY_MODEL_CALL_TIMEOUT`.
+        // Bound inactivity, rather than total response time, so a hung gateway
+        // fails before lease expiry without killing a healthy long stream.
+        let (progress_generation, progress_updates) = tokio::sync::watch::channel(0_u64);
         let progress_sink = Arc::new(MilestoneModelProgressSink {
             milestones: self.milestones.clone(),
             emitted_text: AtomicBool::new(false),
+            progress_generation,
         });
         let gateway_call = self.gateway.stream_model_with_progress(
             LoopModelGatewayRequest {
@@ -414,11 +412,16 @@ where
             },
             progress_sink.clone(),
         );
-        let gateway_result =
-            match tokio::time::timeout(PRIMARY_MODEL_CALL_TIMEOUT, gateway_call).await {
-                Ok(result) => result.map(sanitize_model_response),
-                Err(_elapsed) => Err(LoopModelGatewayError::timed_out()),
-            };
+        let gateway_result = match await_with_progress_timeout(
+            gateway_call,
+            progress_updates,
+            PRIMARY_MODEL_CALL_IDLE_TIMEOUT,
+        )
+        .await
+        {
+            Ok(result) => result.map(sanitize_model_response),
+            Err(()) => Err(LoopModelGatewayError::timed_out()),
+        };
 
         // Post-call accounting fires on BOTH success and failure. The
         // RAII guard stays armed across this await — if the future is
@@ -534,6 +537,7 @@ where
 {
     milestones: LoopHostMilestoneEmitter<S>,
     emitted_text: AtomicBool,
+    progress_generation: tokio::sync::watch::Sender<u64>,
 }
 
 impl<S> MilestoneModelProgressSink<S>
@@ -552,12 +556,41 @@ where
 {
     async fn model_text_update(&self, safe_text: String) {
         self.emitted_text.store(true, Ordering::SeqCst);
+        self.progress_generation
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
         if let Err(error) = self.milestones.model_text_delta(safe_text).await {
             tracing::debug!(
                 kind = ?error.kind,
                 diagnostic_ref = ?error.diagnostic_ref,
                 "loop model text progress milestone failed during model stream"
             );
+        }
+    }
+}
+
+async fn await_with_progress_timeout<F, T>(
+    future: F,
+    mut progress_updates: tokio::sync::watch::Receiver<u64>,
+    idle_timeout: Duration,
+) -> Result<T, ()>
+where
+    F: Future<Output = T>,
+{
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return Ok(result),
+            progress = tokio::time::timeout(idle_timeout, progress_updates.changed()) => {
+                match progress {
+                    Ok(Ok(())) => continue,
+                    Err(_elapsed) => return Err(()),
+                    Ok(Err(_closed)) => {
+                        return tokio::time::timeout(idle_timeout, &mut future)
+                            .await
+                            .map_err(|_elapsed| ());
+                    }
+                }
+            }
         }
     }
 }
@@ -623,20 +656,20 @@ fn should_emit_fallback_text_delta(chunk_index: usize, chunk_count: usize) -> bo
 mod tests {
     use super::*;
 
-    /// The primary model-call timeout must fire before the runner lease can
+    /// The primary model-call idle timeout must fire before the runner lease can
     /// reclaim the run mid-flight. This guards against a silent regression of
     /// the 2026-06-24 wedge, where the provider timeout (120s) exceeded the
     /// lease (90s) and the lease killed runners before any timeout fired.
     #[test]
-    fn primary_model_call_timeout_is_below_runner_lease() {
+    fn primary_model_call_idle_timeout_is_below_runner_lease() {
         let lease_secs = u64::try_from(
             crate::filesystem_store::turn_state_engine::DEFAULT_RUNNER_LEASE_TTL_SECONDS,
         )
         .expect("runner lease TTL is non-negative");
         assert!(
-            PRIMARY_MODEL_CALL_TIMEOUT.as_secs() < lease_secs,
-            "primary model-call timeout ({}s) must be below the runner lease ({}s)",
-            PRIMARY_MODEL_CALL_TIMEOUT.as_secs(),
+            PRIMARY_MODEL_CALL_IDLE_TIMEOUT.as_secs() < lease_secs,
+            "primary model-call idle timeout ({}s) must be below the runner lease ({}s)",
+            PRIMARY_MODEL_CALL_IDLE_TIMEOUT.as_secs(),
             lease_secs,
         );
     }

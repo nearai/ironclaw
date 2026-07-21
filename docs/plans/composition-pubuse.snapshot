@@ -126,7 +126,8 @@ pub use runtime_input::{
     CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
     DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
-    TriggerFireAccessError, TriggerPollerSettings, TurnRunnerSettings,
+    TriggerFireAccessError, TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings,
+    TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
 pub use slack::slack_actor_identity::{
@@ -177,13 +178,6 @@ pub use webui::facade::build_webui_services_with_telegram_host_mounts;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 pub use webui::route_mounts::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,
-};
-#[cfg(feature = "postgres")]
-pub use ironclaw_runner::local_trigger_access::RebornFilesystemLocalTriggerAccessStore;
-pub use ironclaw_runner::local_trigger_access::{
-    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSeed,
-    LocalTriggerAccessSource, LocalTriggerAccessStore, RebornLibSqlLocalTriggerAccessStore,
-    RebornLocalTriggerAccessStoreError,
 };
 pub use ironclaw_reborn_identity::{
     ExternalSubjectId, IdentityKeyError, ProviderInstanceId, ProviderKind, RebornIdentityError,

@@ -436,12 +436,26 @@ impl RebornIntegrationHarness {
         &self,
         kind: ironclaw_turns::TurnEventKind,
     ) -> HarnessResult<()> {
-        let events = self.recorded_turn_events();
-        if events.iter().any(|event| event.kind == kind) {
-            return Ok(());
+        // Lifecycle events publish best-effort AFTER the status transition the
+        // caller waited on (`wait_for_status` reads the store's hot-cache
+        // status, which the transition sets synchronously; the sink publish
+        // runs just after that transition returns). So a just-completed turn's
+        // terminal event can land a moment after its status is observable —
+        // poll briefly rather than checking exactly once, which otherwise races
+        // the publish.
+        for _ in 0..100 {
+            if self
+                .recorded_turn_events()
+                .iter()
+                .any(|event| event.kind == kind)
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+        let events = self.recorded_turn_events();
         let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
-        Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
+        Err(format!("no recorded turn event of kind {kind:?} after waiting; saw {seen:?}").into())
     }
 
     /// Assert the always-wired security-audit recorder captured an event with

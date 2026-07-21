@@ -251,7 +251,7 @@ impl HostManagedModelGateway for AlwaysReplyGateway {
 /// block-persistence snapshot. This drives a real turn end to end over that
 /// store (submit → claim → terminal, through the production runtime), then
 /// gracefully `shutdown()`s — which routes through `RebornRuntime::shutdown →
-/// FilesystemTurnStateStoreKind::drain`, exercising the write-behind durable
+/// FilesystemTurnStateRowStore::drain`, exercising the write-behind durable
 /// tail drain for real: the test locks that composing the store, serving a
 /// real turn over it, and draining on shutdown all succeed without
 /// error/hang/panic.
@@ -305,7 +305,7 @@ async fn inmemory_turn_state_row_store_serves_turn_and_drains_on_shutdown() {
     );
 
     // Graceful shutdown drains the WriteBehind tail through
-    // `FilesystemTurnStateStoreKind::drain`; a broken drain wiring surfaces here.
+    // `FilesystemTurnStateRowStore::drain`; a broken drain wiring surfaces here.
     runtime
         .shutdown()
         .await

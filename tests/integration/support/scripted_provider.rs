@@ -13,9 +13,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw::error::LlmError;
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
+    CompletionRequest, CompletionResponse, LlmError, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
 };
 use rust_decimal::Decimal;

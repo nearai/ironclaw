@@ -37,11 +37,12 @@ use ironclaw_turns::{
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
         LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway,
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
-        LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome,
+        ModelWorkRequest, ParentLoopOutput, PromptMode, PromptSkillContextMetadata,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -2812,6 +2813,30 @@ struct HangingLoopModelGateway {
     delay: std::time::Duration,
 }
 
+struct ProgressingLoopModelGateway;
+
+#[async_trait]
+impl LoopModelGateway for ProgressingLoopModelGateway {
+    async fn stream_model(
+        &self,
+        _request: LoopModelGatewayRequest,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        panic!("progress-aware entry point must be used")
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Arc<dyn LoopModelProgressSink>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        for text in ["one", "one two", "one two three"] {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            progress_sink.model_text_update(text.to_string()).await;
+        }
+        Ok(success_response(&request.context))
+    }
+}
+
 #[async_trait]
 impl LoopModelGateway for HangingLoopModelGateway {
     async fn stream_model(
@@ -2862,6 +2887,36 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
             .any(|milestone| milestone.kind.kind_name() == "model_failed"),
         "a timed-out model call must emit a model_failed milestone"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_managed_model_port_allows_long_calls_that_keep_streaming_progress() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port = HostManagedLoopModelPort::new(
+        context.clone(),
+        Arc::new(ProgressingLoopModelGateway),
+        milestone_sink,
+    );
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+            }],
+            surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
+            model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            capability_view: None,
+        })
+        .await
+        .expect("progress must reset the model-call idle timeout");
+
+    assert!(matches!(
+        response.output,
+        ParentLoopOutput::AssistantReply(_)
+    ));
 }
 
 struct RecordingAgentLoopHost {

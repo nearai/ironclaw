@@ -2163,7 +2163,7 @@ async fn build_libsql_thread_service(
     ironclaw_threads::FilesystemSessionThreadService::new(scoped)
 }
 
-/// Construct a [`FilesystemTurnStateStore`] backed by [`LibSqlRootFilesystem`]
+/// Construct a [`FilesystemTurnStateRowStore`] backed by [`LibSqlRootFilesystem`]
 /// over the supplied libSQL database. The on-disk shape is the same single
 /// `/turns/state.json` snapshot the production composition uses; the libSQL
 /// backend just provides durability for the underlying filesystem record.
@@ -2173,7 +2173,7 @@ async fn build_libsql_thread_service(
 #[cfg(feature = "libsql-restart-tests")]
 async fn libsql_filesystem_turn_store(
     db: Arc<libsql::Database>,
-) -> ironclaw_turns::FilesystemTurnStateStore<ironclaw_filesystem::LibSqlRootFilesystem> {
+) -> ironclaw_turns::FilesystemTurnStateRowStore<ironclaw_filesystem::LibSqlRootFilesystem> {
     use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
     let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
@@ -2186,7 +2186,7 @@ async fn libsql_filesystem_turn_store(
     )])
     .unwrap();
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(filesystem, view));
-    ironclaw_turns::FilesystemTurnStateStore::new(scoped)
+    ironclaw_turns::FilesystemTurnStateRowStore::new(scoped)
 }
 
 #[tokio::test]
