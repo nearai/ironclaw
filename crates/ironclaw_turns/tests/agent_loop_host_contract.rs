@@ -42,7 +42,7 @@ use ironclaw_turns::{
         LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome,
         ModelWorkRequest, ParentLoopOutput, PromptMode, PromptSkillContextMetadata,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        SkillTrustLevel, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -404,7 +404,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                     safe_summary: "alpha skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "alpha".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 },
                 LoopContextSnippet {
@@ -1013,7 +1013,7 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
                     safe_summary: "GitHub skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "github".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 }],
                 memory_snippets: Vec::new(),
@@ -1037,7 +1037,7 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
 fn skill_instruction_request(
     model_content: impl Into<String>,
     safe_summary: impl Into<String>,
-    trust_level: &str,
+    trust_level: SkillTrustLevel,
 ) -> InstructionBundleRequest {
     InstructionBundleRequest {
         context_bundle: LoopContextBundle {
@@ -1050,7 +1050,7 @@ fn skill_instruction_request(
                 safe_summary: safe_summary.into(),
                 metadata: Some(LoopContextSnippetMetadata {
                     source_name: "github".to_string(),
-                    trust_level: trust_level.to_string(),
+                    trust_level,
                 }),
             }],
             memory_snippets: Vec::new(),
@@ -1077,7 +1077,7 @@ async fn instruction_bundle_rejects_empty_model_content() {
                     safe_summary: "empty skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "empty".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 }],
                 memory_snippets: Vec::new(),
@@ -1111,7 +1111,7 @@ async fn instruction_bundle_rejects_oversized_model_content() {
                     safe_summary: "oversized skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "oversized".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 }],
                 memory_snippets: Vec::new(),
@@ -1143,7 +1143,7 @@ async fn instruction_bundle_allows_security_vocabulary_in_model_content() {
         .build(skill_instruction_request(
             model_content.clone(),
             "Security review skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .unwrap();
 
@@ -1168,7 +1168,7 @@ async fn instruction_bundle_allows_trusted_skill_credential_shaped_value() {
         .build(skill_instruction_request(
             body.clone(),
             "GitHub skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .expect("trusted skill body must bypass content checks after #5169");
 
@@ -1188,7 +1188,7 @@ async fn instruction_bundle_allows_trusted_skill_authorization_scheme_value() {
         .build(skill_instruction_request(
             "Use Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ",
             "GitHub skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .expect("trusted skill body must bypass content checks after #5169");
 }
@@ -1200,7 +1200,7 @@ async fn instruction_bundle_rejects_trusted_skill_security_vocabulary_in_summary
         .build(skill_instruction_request(
             "Use the GitHub API with an Authorization header.",
             "Use Authorization: Bearer",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .unwrap_err();
 
@@ -1214,7 +1214,7 @@ async fn instruction_bundle_rejects_untrusted_skill_security_vocabulary() {
         .build(skill_instruction_request(
             "Use the GitHub API with an Authorization: Bearer header.",
             "GitHub skill",
-            "installed",
+            SkillTrustLevel::Installed,
         ))
         .unwrap_err();
 
@@ -1242,7 +1242,7 @@ async fn instruction_bundle_does_not_extend_trust_to_an_untrusted_chain_loaded_c
                         safe_summary: "code-review skill".to_string(),
                         metadata: Some(LoopContextSnippetMetadata {
                             source_name: "code-review".to_string(),
-                            trust_level: "trusted".to_string(),
+                            trust_level: SkillTrustLevel::Trusted,
                         }),
                     },
                     LoopContextSnippet {
@@ -1252,7 +1252,7 @@ async fn instruction_bundle_does_not_extend_trust_to_an_untrusted_chain_loaded_c
                         safe_summary: "github companion skill".to_string(),
                         metadata: Some(LoopContextSnippetMetadata {
                             source_name: "github".to_string(),
-                            trust_level: "installed".to_string(),
+                            trust_level: SkillTrustLevel::Installed,
                         }),
                     },
                 ],
@@ -1279,7 +1279,11 @@ async fn instruction_bundle_rejects_untrusted_skill_host_path_and_secret_value()
         "Use Authorization: Bearer ghp_secretvalue123",
     ] {
         let error = InstructionBundleBuilder::new(context.clone())
-            .build(skill_instruction_request(body, "GitHub skill", "installed"))
+            .build(skill_instruction_request(
+                body,
+                "GitHub skill",
+                SkillTrustLevel::Installed,
+            ))
             .unwrap_err();
         assert_eq!(
             error.kind,
@@ -1326,7 +1330,7 @@ async fn instruction_bundle_allows_trusted_skill_host_path() {
         .build(skill_instruction_request(
             "Read /Users/alice/.config/token before calling GitHub",
             "GitHub skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .expect("trusted skill body must bypass the host-path check after #5169");
 }
@@ -1773,7 +1777,7 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
             if skill_context.as_slice() == [PromptSkillContextMetadata {
                 ordinal: 0,
                 source_name: "alpha".to_string(),
-                trust_level: "trusted".to_string(),
+                trust_level: SkillTrustLevel::Trusted,
             }]
     ));
 }
@@ -3010,7 +3014,7 @@ impl RecordingAgentLoopHost {
                 .strip_prefix("skill:")
                 .map(|source_name| LoopContextSnippetMetadata {
                     source_name: source_name.to_string(),
-                    trust_level: "trusted".to_string(),
+                    trust_level: SkillTrustLevel::Trusted,
                 });
         self.context_instruction_snippets.push(LoopContextSnippet {
             snippet_ref,

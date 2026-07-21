@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import React from "react";
 import { useT } from "../../../lib/i18n";
 import { listWorkspace, readWorkspaceFile } from "../lib/workspace-api";
+import { expandWorkspaceSelection } from "../lib/workspace-presenters";
 
 // Read-only browser state for the agent filesystem viewer. The tree is rooted
 // at the mount list (empty path); selecting a file loads a preview, selecting a
@@ -10,9 +11,15 @@ import { listWorkspace, readWorkspaceFile } from "../lib/workspace-api";
 export function useWorkspaceBrowser(selectedPath) {
   const t = useT();
   const queryClient = useQueryClient();
-  const [expandedPaths, setExpandedPaths] = React.useState(new Set());
+  const [expandedPaths, setExpandedPaths] = React.useState<Set<string>>(() =>
+    expandWorkspaceSelection(new Set<string>(), selectedPath)
+  );
   const [filter, setFilter] = React.useState("");
   const [result, setResult] = React.useState(null);
+
+  React.useEffect(() => {
+    setExpandedPaths((current) => expandWorkspaceSelection(current, selectedPath));
+  }, [selectedPath]);
 
   const rootQuery = useQuery({
     queryKey: ["workspace-list", ""],

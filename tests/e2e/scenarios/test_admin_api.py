@@ -142,6 +142,86 @@ async def test_get_user_detail(admin_client, test_user):
     assert user["display_name"] == test_user["display_name"]
 
 
+async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
+    admin_client, reborn_v2_page, reborn_v2_server, test_user
+):
+    """Role/status pills refresh immediately instead of waiting for the 10s poll."""
+    # Keep a separate persisted admin so promoting and then demoting the target
+    # cannot trip last-admin protection. Like test_set_role_endpoint below, the
+    # anchor intentionally remains because the final admin cannot be deleted.
+    anchor_email = f"role-refresh-anchor-{uuid.uuid4().hex[:8]}@example.com"
+    anchor_response = await admin_client.post(
+        f"{ADMIN_BASE}/users",
+        json={
+            "display_name": "Role Refresh Anchor",
+            "email": anchor_email,
+            "role": "admin",
+        },
+    )
+    assert anchor_response.status_code == 200, anchor_response.text
+
+    page = reborn_v2_page
+    await page.goto(
+        f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
+    )
+    await page.get_by_role(
+        "button", name=test_user["display_name"], exact=True
+    ).click()
+
+    heading = page.get_by_role(
+        "heading", name=test_user["display_name"], exact=True
+    )
+    await expect(heading).to_be_visible(timeout=15000)
+    detail_header = heading.locator("xpath=..")
+    await expect(
+        detail_header.get_by_text(
+            SEL_V2["admin_member_role_name"], exact=True
+        )
+    ).to_be_visible()
+    await expect(
+        detail_header.get_by_text(
+            SEL_V2["admin_active_status_name"], exact=True
+        )
+    ).to_be_visible()
+
+    async def set_role(role_name) -> None:
+        await page.get_by_role(
+            "button",
+            name=SEL_V2["admin_current_role_button_name"],
+            exact=True,
+        ).click()
+        await page.get_by_role("option", name=role_name, exact=True).click()
+        await page.get_by_role(
+            "button",
+            name=SEL_V2["admin_save_role_button_name"],
+            exact=True,
+        ).click()
+        await expect(
+            detail_header.get_by_text(role_name, exact=True)
+        ).to_be_visible(timeout=5000)
+
+    async def set_status(action_name, status_name) -> None:
+        await page.get_by_role(
+            "button", name=action_name, exact=True
+        ).click()
+        await expect(
+            detail_header.get_by_text(status_name, exact=True)
+        ).to_be_visible(timeout=5000)
+
+    await set_role(SEL_V2["admin_admin_role_name"])
+    # Restore the fixture user to member so cleanup cannot trip last-admin
+    # protection, while also proving both role transitions refresh the detail.
+    await set_role(SEL_V2["admin_member_role_name"])
+    await set_status(
+        SEL_V2["admin_suspend_button_name"],
+        SEL_V2["admin_suspended_status_name"],
+    )
+    await set_status(
+        SEL_V2["admin_activate_button_name"],
+        SEL_V2["admin_active_status_name"],
+    )
+
+
 async def test_admin_token_visibility_matches_user_creation_lifecycle(
     admin_client, reborn_v2_page, reborn_v2_server, test_user
 ):

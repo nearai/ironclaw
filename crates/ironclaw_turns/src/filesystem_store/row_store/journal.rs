@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -7,7 +8,8 @@ use std::{
 };
 
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo,
+    CasExpectation, ContentType, Entry, FilesystemError, IndexKey, IndexValue, RootFilesystem,
+    ScopedFilesystem, SeqNo,
 };
 use ironclaw_host_api::ResourceScope;
 use tokio::{
@@ -414,14 +416,7 @@ where
         delete_row(filesystem, RowCollection::Idempotency, key, journal_seq).await?;
     }
     for record in &delta.events_upsert {
-        put_row(
-            filesystem,
-            RowCollection::Events,
-            &event_record_key(record)?,
-            journal_seq,
-            record,
-        )
-        .await?;
+        put_event_row(filesystem, &event_record_key(record)?, journal_seq, record).await?;
     }
     for key in &delta.events_delete {
         delete_row(filesystem, RowCollection::Events, key, journal_seq).await?;
@@ -479,7 +474,41 @@ where
     T: serde::Serialize,
 {
     let body = serialize_materialized_row(journal_seq, Some(record), collection.as_str())?;
-    write_materialized_row(filesystem, collection, key, journal_seq, body).await
+    write_materialized_row(
+        filesystem,
+        collection,
+        key,
+        journal_seq,
+        body,
+        BTreeMap::new(),
+    )
+    .await
+}
+
+/// Materialize an event row *with* its indexed projection so the durable
+/// read path can serve a scoped `cursor > after` range scan. Same body layout
+/// and seq-skip CAS as [`put_row`]; only the `indexed` map differs.
+async fn put_event_row<F>(
+    filesystem: &ScopedFilesystem<F>,
+    key: &str,
+    journal_seq: SeqNo,
+    record: &crate::TurnLifecycleEvent,
+) -> Result<(), TurnError>
+where
+    F: RootFilesystem,
+{
+    let body =
+        serialize_materialized_row(journal_seq, Some(record), RowCollection::Events.as_str())?;
+    let indexed = super::events_index::event_indexed_projection(record)?;
+    write_materialized_row(
+        filesystem,
+        RowCollection::Events,
+        key,
+        journal_seq,
+        body,
+        indexed,
+    )
+    .await
 }
 
 async fn delete_row<F>(
@@ -493,7 +522,18 @@ where
 {
     let body =
         serialize_materialized_row::<serde_json::Value>(journal_seq, None, collection.as_str())?;
-    write_materialized_row(filesystem, collection, key, journal_seq, body).await
+    // Tombstones carry no indexed projection: they must never match a scoped
+    // event query (their `value` is `None`), and dropping the projection keeps
+    // the deleted cursor from lingering in the index.
+    write_materialized_row(
+        filesystem,
+        collection,
+        key,
+        journal_seq,
+        body,
+        BTreeMap::new(),
+    )
+    .await
 }
 
 async fn write_materialized_row<F>(
@@ -502,6 +542,7 @@ async fn write_materialized_row<F>(
     key: &str,
     journal_seq: SeqNo,
     body: Vec<u8>,
+    indexed: BTreeMap<IndexKey, IndexValue>,
 ) -> Result<(), TurnError>
 where
     F: RootFilesystem,
@@ -523,7 +564,8 @@ where
             }
             None => CasExpectation::Absent,
         };
-        let entry = Entry::bytes(body.clone()).with_content_type(ContentType::json());
+        let mut entry = Entry::bytes(body.clone()).with_content_type(ContentType::json());
+        entry.indexed = indexed.clone();
         match filesystem
             .put(&ResourceScope::system(), &path, entry, cas)
             .await

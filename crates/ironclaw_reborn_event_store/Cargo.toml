@@ -37,5 +37,6 @@ webpki-roots = "1.0"
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -3,6 +3,7 @@ import { test, vi } from "vitest";
 
 import {
   areaDisplayName,
+  expandWorkspaceSelection,
   formatWorkspaceFileSize,
   sortEntries,
 } from "./workspace-presenters";
@@ -30,6 +31,40 @@ test("workspace root entries sort by their localized labels", () => {
     sortEntries(entries, (entry) => areaDisplayName(entry.path, t)).map((entry) => entry.path),
     ["workspace", "memory"],
   );
+});
+
+test("workspace deep links expand every parent without collapsing other branches", () => {
+  const expanded = new Set(["memory", "workspace/other"]);
+
+  const next = expandWorkspaceSelection(
+    expanded,
+    "workspace/projects/ironclaw/notes/plan.md",
+  );
+
+  assert.deepEqual([...next], [
+    "memory",
+    "workspace/other",
+    "workspace",
+    "workspace/projects",
+    "workspace/projects/ironclaw",
+    "workspace/projects/ironclaw/notes",
+  ]);
+  assert.deepEqual([...expanded], ["memory", "workspace/other"]);
+});
+
+test("workspace selection expansion reuses state when all parents are already open", () => {
+  const expanded = new Set(["workspace", "workspace/projects"]);
+
+  assert.equal(
+    expandWorkspaceSelection(expanded, "workspace/projects/plan.md"),
+    expanded,
+  );
+});
+
+test("workspace selection expansion tolerates an undefined selection", () => {
+  const expanded = new Set(["memory"]);
+
+  assert.equal(expandWorkspaceSelection(expanded, undefined), expanded);
 });
 
 test("workspace entry sorting tolerates missing display names", () => {

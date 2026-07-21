@@ -148,7 +148,11 @@ where
                         .as_ref()
                         .map(|reservation| reservation.id),
                 );
-                dispatch_error_for_runtime(request.descriptor.runtime, planner_error_kind(&error))
+                dispatch_error_for_runtime(
+                    request.descriptor.runtime,
+                    planner_error_kind(&error),
+                    Some(error.to_string()),
+                )
             })?;
         self.invocation_services
             .resolve(InvocationServicesResolutionRequest {
@@ -164,7 +168,11 @@ where
                         .as_ref()
                         .map(|reservation| reservation.id),
                 );
-                dispatch_error_for_runtime(request.descriptor.runtime, error.kind())
+                dispatch_error_for_runtime(
+                    request.descriptor.runtime,
+                    error.kind(),
+                    Some(error.to_string()),
+                )
             })?;
 
         self.inner.dispatch_json(request).await
@@ -329,6 +337,7 @@ where
             )
             .map_err(|error| DispatchError::Script {
                 kind: script_error_kind(&error),
+                model_visible_cause: Some(error.to_string()),
             })?;
 
         Ok(RuntimeAdapterResult {
@@ -389,6 +398,7 @@ where
                 },
                 error => DispatchError::Mcp {
                     kind: mcp_error_kind(&error),
+                    model_visible_cause: Some(error.to_string()),
                 },
             })?;
 
@@ -497,7 +507,7 @@ where
                 );
                 DispatchError::FirstParty {
                     kind,
-                    safe_summary: None,
+                    safe_summary: Some(error.to_string()),
                     detail: None,
                 }
             })?;
@@ -541,7 +551,7 @@ where
                 );
                 DispatchError::FirstParty {
                     kind: error.kind(),
-                    safe_summary: None,
+                    safe_summary: Some(error.to_string()),
                     detail: None,
                 }
             })?;
@@ -858,9 +868,9 @@ impl WasmRuntimeAdapter {
     fn prepared_guard(
         &self,
     ) -> Result<MutexGuard<'_, HashMap<String, Arc<PreparedWitTool>>>, DispatchError> {
-        self.prepared.lock().map_err(|_| DispatchError::Wasm {
+        self.prepared.lock().map_err(|error| DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Executor,
-            safe_summary: None,
+            model_visible_cause: Some(error.to_string()),
         })
     }
 
@@ -901,9 +911,9 @@ where
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => module
                 .resolve_under(&request.package.root)
-                .map_err(|_| DispatchError::Wasm {
+                .map_err(|error| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Manifest,
-                    safe_summary: None,
+                    model_visible_cause: Some(error.to_string()),
                 })?,
             other => {
                 return Err(DispatchError::Wasm {
@@ -912,7 +922,7 @@ where
                     } else {
                         RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
                     },
-                    safe_summary: None,
+                    model_visible_cause: None,
                 });
             }
         };
@@ -927,9 +937,9 @@ where
             .filesystem
             .read_file(&module_path)
             .await
-            .map_err(|_| DispatchError::Wasm {
+            .map_err(|error| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::FilesystemDenied,
-                safe_summary: None,
+                model_visible_cause: Some(error.to_string()),
             })?;
         let prepared = Arc::new(
             run_wasm_prepare_blocking(
@@ -940,7 +950,7 @@ where
             .await
             .map_err(|error| DispatchError::Wasm {
                 kind: wasm_error_kind(&error),
-                safe_summary: None,
+                model_visible_cause: Some(error.to_string()),
             })?,
         );
         let prepared = {
@@ -1000,17 +1010,24 @@ where
 fn dispatch_error_for_runtime(
     runtime: RuntimeKind,
     kind: RuntimeDispatchErrorKind,
+    cause: Option<String>,
 ) -> DispatchError {
     match runtime {
-        RuntimeKind::Mcp => DispatchError::Mcp { kind },
-        RuntimeKind::Script => DispatchError::Script { kind },
+        RuntimeKind::Mcp => DispatchError::Mcp {
+            kind,
+            model_visible_cause: cause,
+        },
+        RuntimeKind::Script => DispatchError::Script {
+            kind,
+            model_visible_cause: cause,
+        },
         RuntimeKind::Wasm => DispatchError::Wasm {
             kind,
-            safe_summary: None,
+            model_visible_cause: cause,
         },
         RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty {
             kind,
-            safe_summary: None,
+            safe_summary: cause,
             detail: None,
         },
     }

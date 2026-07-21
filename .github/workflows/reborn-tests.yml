@@ -348,7 +348,7 @@ jobs:
             echo "::endgroup::"
           done < <(printf '%s\n' "${BUCKET_PACKAGES}" | jq -r '.[]')
 
-          # Concat per-package lcov into one artifact per bucket (keeps artifact count at ~12, not ~60); merge script parses end_of_record blocks per file already, so `cat` is sufficient.
+          # Concat per-package lcov into one artifact per bucket (keeps artifact count bounded by the matrix, not ~60); merge script parses end_of_record blocks per file already, so `cat` is sufficient.
           cat coverage/*.lcov > "bucket-${BUCKET_NAME}.lcov"
 
       - name: Upload bucket lcov artifact

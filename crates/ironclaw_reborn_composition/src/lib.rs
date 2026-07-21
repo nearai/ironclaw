@@ -38,7 +38,6 @@ mod lifecycle_auth_continuation;
 mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_mounts;
-mod local_runtime_profile;
 mod observability;
 mod outbound;
 mod product_auth;
@@ -141,6 +140,12 @@ pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // verified-bearer evidence for protected OpenAI-compatible mounts. Ingress must
 // not depend on `ironclaw_product_adapters` directly (architecture boundary), so
 // it reaches this helper through composition's facade.
+pub use deployment::{
+    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    local_dev_yolo_runtime_policy, local_runtime_build_input,
+    local_runtime_build_input_with_options,
+};
 pub use ironclaw_product_adapters::mark_bearer_token_verified_for_tenant;
 pub use llm_admin::provider_admin::{
     DetectedEnvLlm, EXAMPLE_OVERLAY_PROVIDER_ID, ProviderMenuEntry, ProviderProbeOutcome,
@@ -150,12 +155,6 @@ pub use llm_admin::provider_admin::{
 };
 pub use llm_admin::provider_admin_product_command::RebornProviderAdminProductCommandService;
 pub use llm_admin::provider_repo::{ProviderRepo, ProviderRepoError};
-pub use local_runtime_profile::{
-    RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input,
-    local_runtime_build_input_with_options,
-};
 pub use observability::budget::build_default_budget_accountant;
 pub use observability::budget_events::{BudgetEventObserver, TracingBudgetEventObserver};
 pub use observability::hooks::{
