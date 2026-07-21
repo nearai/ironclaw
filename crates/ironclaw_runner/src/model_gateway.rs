@@ -1140,7 +1140,13 @@ fn map_streaming_provider_error(
     error: LlmError,
     stream_sink: Option<&ProviderStreamSink>,
 ) -> HostManagedModelError {
-    let error = map_provider_error(error);
+    mark_partial_output_visible(map_provider_error(error), stream_sink)
+}
+
+fn mark_partial_output_visible(
+    error: HostManagedModelError,
+    stream_sink: Option<&ProviderStreamSink>,
+) -> HostManagedModelError {
     if stream_sink.is_some_and(ProviderStreamSink::emitted_text) {
         error.with_reason_kind(AgentLoopHostErrorReasonKind::ModelPartialOutputVisible)
     } else {
@@ -1194,11 +1200,11 @@ impl CompletionStreamSink for ProviderStreamSink {
 /// Execute one provider attempt behind the completed-response commit barrier.
 ///
 /// `stream_sink` updates are progress-only and never authorize transcript
-/// writes or capability registration. The awaited provider call must return one
-/// successfully decoded terminal response before this function enters
-/// `response_to_host_reply` or `tool_response_to_host`; any `Err`, including one
-/// after partial text or a partial tool call, returns immediately with no host
-/// response for the agent loop to commit.
+/// writes or capability registration. The provider must return a terminal
+/// response and all following decoding and host validation must succeed before
+/// this function returns anything the agent loop can commit. Any `Err`,
+/// including one after partial text or a partial tool call, returns no host
+/// response; errors after visible text are marked to prevent an outer retry.
 #[tracing::instrument(
     level = "debug",
     skip(provider, completion, capabilities, stream_sink, replay_identity, cache_scope),
@@ -1305,10 +1311,13 @@ where
                     system_prompt_hash,
                 );
             }
-            // The provider `Ok` above is the attempt's commit barrier. Only now
-            // may terminal output be decoded into host-visible calls/replies.
+            // Provider `Ok` only crosses the transport barrier. Decoding and
+            // host validation below must also succeed before anything commits.
             let response =
-                recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)?;
+                recover_textual_tool_calls_from_tool_response(response, &recovery_tool_names)
+                    .map_err(|error| {
+                        mark_partial_output_visible(error, provider_stream_sink.as_deref())
+                    })?;
             let host_response_started_at = live_latency_started_at();
             match tool_response_to_host(
                 response.clone(),
@@ -1369,7 +1378,10 @@ where
                                 retry_started_at,
                                 &error,
                             );
-                            return Err(map_provider_error(error));
+                            return Err(mark_partial_output_visible(
+                                map_provider_error(error),
+                                provider_stream_sink.as_deref(),
+                            ));
                         }
                     };
                     if let Some(scope) = cache_scope.as_ref() {
@@ -1382,7 +1394,10 @@ where
                     let mut response = recover_textual_tool_calls_from_tool_response(
                         response,
                         &recovery_tool_names,
-                    )?;
+                    )
+                    .map_err(|error| {
+                        mark_partial_output_visible(error, provider_stream_sink.as_deref())
+                    })?;
                     accumulate_tool_response_usage(&mut response, &rejected_response);
                     let repair_host_started_at = live_latency_started_at();
                     let result = tool_response_to_host(
@@ -1410,7 +1425,9 @@ where
                             error,
                         ),
                     }
-                    return result;
+                    return result.map_err(|error| {
+                        mark_partial_output_visible(error, provider_stream_sink.as_deref())
+                    });
                 }
                 Err(error) => {
                     trace_model_latency_error(
@@ -1420,7 +1437,10 @@ where
                         host_response_started_at,
                         &error,
                     );
-                    return Err(error);
+                    return Err(mark_partial_output_visible(
+                        error,
+                        provider_stream_sink.as_deref(),
+                    ));
                 }
             }
         }
@@ -1470,8 +1490,8 @@ where
             ));
         }
     };
-    // As on the tool-capable path, provider `Ok` is the sole transition from
-    // progress-only deltas to a terminal response the loop may commit.
+    // As on the tool-capable path, provider `Ok` is not itself a commit: the
+    // terminal response must also pass host decoding below.
     if let Some(scope) = cache_scope.as_ref() {
         scope.record(
             ModelCallCacheUsage::from_completion_response(&response),
@@ -1485,6 +1505,7 @@ where
         "reborn model gateway received text-only provider response"
     );
     response_to_host_reply(response)
+        .map_err(|error| mark_partial_output_visible(error, provider_stream_sink.as_deref()))
 }
 
 fn accumulate_tool_response_usage(

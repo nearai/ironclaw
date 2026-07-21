@@ -21,7 +21,6 @@ mod support;
 use std::time::Duration;
 
 use ironclaw_product_adapters::ProductInboundAck;
-use ironclaw_threads::MessageKind;
 use ironclaw_turns::TurnStatus;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::reply::RebornScriptedReply;
@@ -184,43 +183,20 @@ async fn partial_text_failure_does_not_commit_or_dispatch() {
         .build()
         .await
         .expect("harness builds");
-    let baseline = 0;
-
     let run_id = harness
         .submit_turn_async("use builtin.echo")
         .await
         .expect("turn submitted");
     harness
-        .wait_for_status(run_id, TurnStatus::Failed)
-        .await
-        .expect("incomplete attempt fails the run");
-
-    assert_eq!(
-        probe.attempts(),
-        2,
-        "only the initial attempt and one replacement-safe retry may run"
-    );
-    assert_eq!(
-        probe.streaming_attempts(),
-        probe.attempts(),
-        "every provider attempt must use the streaming caller path"
-    );
-    harness
-        .assert_conversation_history_role_contains_since(
-            baseline,
-            MessageKind::User,
+        .assert_incomplete_model_attempt_isolated(
+            run_id,
+            0,
             "use builtin.echo",
+            "builtin.echo",
+            &probe,
         )
         .await
-        .expect("accepted user input persists");
-    harness
-        .assert_no_model_attempt_commit_since(baseline)
-        .await
-        .expect("partial text never becomes durable model history");
-    harness
-        .assert_tool_not_invoked("builtin.echo")
-        .await
-        .expect("partial text cannot authorize capability dispatch");
+        .expect("partial text remains progress-only and cannot dispatch");
 }
 
 /// A tool-call fragment that never reaches a terminal provider response is not
@@ -235,47 +211,20 @@ async fn partial_tool_call_failure_does_not_commit_or_dispatch() {
         .build()
         .await
         .expect("harness builds");
-    let baseline = 0;
-
     let run_id = harness
         .submit_turn_async("use builtin.echo")
         .await
         .expect("turn submitted");
     harness
-        .wait_for_status(run_id, TurnStatus::Failed)
-        .await
-        .expect("incomplete attempt fails the run");
-
-    assert!(
-        probe.attempts() >= 1,
-        "provider must observe the failed attempt"
-    );
-    assert_eq!(
-        probe.streaming_attempts(),
-        probe.attempts(),
-        "every provider attempt must use the streaming caller path"
-    );
-    assert_eq!(
-        probe.partial_tool_fragments(),
-        probe.attempts(),
-        "each failed attempt must terminate after its partial tool call"
-    );
-    harness
-        .assert_conversation_history_role_contains_since(
-            baseline,
-            MessageKind::User,
+        .assert_incomplete_model_attempt_isolated(
+            run_id,
+            0,
             "use builtin.echo",
+            "builtin.echo",
+            &probe,
         )
         .await
-        .expect("accepted user input persists");
-    harness
-        .assert_no_model_attempt_commit_since(baseline)
-        .await
-        .expect("partial tool call never becomes durable model history");
-    harness
-        .assert_tool_not_invoked("builtin.echo")
-        .await
-        .expect("partial tool call cannot authorize capability dispatch");
+        .expect("partial tool call remains uncommitted and cannot dispatch");
 }
 
 /// Regression guard, `Failed`-path sibling of

@@ -1112,14 +1112,11 @@ pub struct RebornThreadBuilder<'g> {
     model_override: Option<String>,
 }
 
-/// A thread's model-call behavior: exactly one of normal scripted playback,
-/// parked-until-released, or unconditional failure. One enum instead of an
-/// `Option<ParkingModelGate>` + `bool` pair (mirrors `ShellMode` in
-/// `builder.rs`) so the three modes are mutually exclusive BY CONSTRUCTION —
-/// no tuple-priority rule needed at the dispatch site, and no state can
-/// silently ask for "parked AND failing" at once.
+/// A thread's model-call behavior. One enum keeps normal playback, parking,
+/// unconditional failure, and incomplete-attempt failure mutually exclusive
+/// by construction, with no tuple-priority rule at the dispatch site.
 #[derive(Default)]
-enum ThreadModelMode {
+pub(crate) enum ThreadModelMode {
     /// Normal scripted playback (the default).
     #[default]
     Normal,
@@ -1147,18 +1144,7 @@ impl<'g> RebornThreadBuilder<'g> {
     /// The parking provider sits at the same vendor-SDK seam as the scripted
     /// provider, so the real decorator chain still runs on top.
     pub fn park_model(self, gate: ParkingModelGate) -> Self {
-        self.park_model_opt(Some(gate))
-    }
-
-    /// Internal: set the optional park gate (used by the flat builder to thread
-    /// its own park gate through the degenerate one-thread group). A `Some`
-    /// gate always wins, matching the old tuple-priority contract, even if
-    /// `fail_model_opt` is called first.
-    pub(crate) fn park_model_opt(mut self, gate: Option<ParkingModelGate>) -> Self {
-        if let Some(gate) = gate {
-            self.model_mode = ThreadModelMode::Parked(gate);
-        }
-        self
+        self.model_mode(ThreadModelMode::Parked(gate))
     }
 
     /// Resolve this thread's binding under a DISTINCT actor instead of the
@@ -1175,29 +1161,11 @@ impl<'g> RebornThreadBuilder<'g> {
     /// `LlmError` (E-GATEWAY seam, C-ERRORS — provider-`Err` failure category).
     /// Sits at the same vendor-SDK seam as `park_model`/scripted playback.
     pub fn fail_model(self) -> Self {
-        self.fail_model_opt(true)
+        self.model_mode(ThreadModelMode::Failing)
     }
 
-    /// Internal: set the fail-model flag (used by the flat builder to thread
-    /// its own knob through the degenerate one-thread group). Never downgrades
-    /// an already-`Parked` mode, matching the old tuple-priority contract
-    /// (`park_model` always wins over `fail_model`).
-    pub(crate) fn fail_model_opt(mut self, fail: bool) -> Self {
-        if fail && !matches!(self.model_mode, ThreadModelMode::Parked(_)) {
-            self.model_mode = ThreadModelMode::Failing;
-        }
-        self
-    }
-
-    pub(crate) fn incomplete_model_attempt_opt(
-        mut self,
-        probe: Option<IncompleteModelAttemptProbe>,
-    ) -> Self {
-        if let Some(probe) = probe
-            && matches!(self.model_mode, ThreadModelMode::Normal)
-        {
-            self.model_mode = ThreadModelMode::Incomplete(probe);
-        }
+    pub(crate) fn model_mode(mut self, model_mode: ThreadModelMode) -> Self {
+        self.model_mode = model_mode;
         self
     }
 
