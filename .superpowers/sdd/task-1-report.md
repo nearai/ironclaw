@@ -66,3 +66,24 @@ passed
 git diff --check
 passed
 ```
+
+## Follow-up composition test fix
+
+The exact Slack composition gate exposed `E0615` in the project-filesystem reader test: its assertion still treated canonical `MaterializedFile::size_bytes` as a field. The test now calls `file.size_bytes()`; production behavior is unchanged.
+
+Red evidence:
+
+```text
+cargo test -p ironclaw_reborn_composition --features test-support,libsql --lib support::fs::project_filesystem_reader
+error[E0615]: attempted to take value of method `size_bytes` on type `MaterializedFile<ScopedPath>`
+```
+
+Exact follow-up results:
+
+```text
+cargo test -p ironclaw_reborn_composition --features test-support,libsql --lib support::fs::project_filesystem_reader
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1652 filtered out
+
+cargo check -p ironclaw_reborn_composition --features test-support,libsql --lib
+Finished `dev` profile successfully
+```

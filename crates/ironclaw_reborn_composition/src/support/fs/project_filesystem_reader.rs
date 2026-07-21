@@ -318,7 +318,7 @@ mod tests {
             .await
             .expect("reading the seeded file succeeds");
         assert_eq!(file.bytes, b"a,b,c");
-        assert_eq!(file.size_bytes, 5);
+        assert_eq!(file.size_bytes(), 5);
         assert_eq!(file.filename.as_deref(), Some("report.csv"));
         assert_eq!(file.mime_type, "text/csv");
     }
