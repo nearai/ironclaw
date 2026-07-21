@@ -906,6 +906,42 @@ def _require_extension_setup_response(
     return body
 
 
+def _extension_projection(
+    extensions: list[object],
+    package_id: str,
+) -> dict[str, object] | None:
+    for extension in extensions:
+        if not isinstance(extension, dict):
+            continue
+        package_ref = extension.get("package_ref")
+        if isinstance(package_ref, dict) and package_ref.get("id") == package_id:
+            return extension
+    return None
+
+
+def _extension_setup_secret_readiness(status: object) -> dict[str, object]:
+    if not isinstance(status, dict):
+        return {"ready": False, "missing": ["setup_status"]}
+    projected_secrets = status.get("secrets")
+    if not isinstance(projected_secrets, list):
+        return {"ready": False, "missing": ["secrets_projection"]}
+    required = [
+        secret
+        for secret in projected_secrets
+        if isinstance(secret, dict) and secret.get("optional") is not True
+    ]
+    missing = sorted(
+        str(secret.get("name") or "unnamed_required_secret")
+        for secret in required
+        if secret.get("provided") is not True
+    )
+    return {
+        "ready": not missing,
+        "missing": missing,
+        "required_secret_count": len(required),
+    }
+
+
 async def _apply_extension_setup_api_after_start(
     *,
     base_url: str,
@@ -949,40 +985,56 @@ async def _apply_extension_setup_api_after_start(
             },
         )
         status = _require_extension_setup_response(response, "submit")
-
-    package_ref = status.get("package_ref")
-    if not isinstance(package_ref, dict) or package_ref.get("id") != package_id:
-        raise LiveQaError("Extension setup API returned a mismatched package projection")
-    projected_secrets = status.get("secrets")
-    projected_secret_presence = (
-        {
-            secret.get("name"): secret.get("provided")
-            for secret in projected_secrets
-            if isinstance(secret, dict) and isinstance(secret.get("name"), str)
-        }
-        if isinstance(projected_secrets, list)
-        else {}
-    )
-    missing_secret_presence = sorted(
-        handle for handle in secrets if projected_secret_presence.get(handle) is not True
-    )
-    projected_fields = status.get("fields")
-    projected_field_names = (
-        {
-            field.get("name")
-            for field in projected_fields
-            if isinstance(field, dict) and isinstance(field.get("name"), str)
-        }
-        if isinstance(projected_fields, list)
-        else set()
-    )
-    missing_fields = sorted(handle for handle in fields if handle not in projected_field_names)
-    if missing_secret_presence or missing_fields:
-        raise LiveQaError(
-            "Extension setup API returned incomplete setup projection: "
-            f"missing_secret_presence={missing_secret_presence!r} "
-            f"missing_fields={missing_fields!r}"
+        package_ref = status.get("package_ref")
+        if not isinstance(package_ref, dict) or package_ref.get("id") != package_id:
+            raise LiveQaError("Extension setup API returned a mismatched package projection")
+        projected_secrets = status.get("secrets")
+        projected_secret_presence = (
+            {
+                secret.get("name"): secret.get("provided")
+                for secret in projected_secrets
+                if isinstance(secret, dict) and isinstance(secret.get("name"), str)
+            }
+            if isinstance(projected_secrets, list)
+            else {}
         )
+        missing_secret_presence = sorted(
+            handle for handle in secrets if projected_secret_presence.get(handle) is not True
+        )
+        projected_fields = status.get("fields")
+        projected_field_names = (
+            {
+                field.get("name")
+                for field in projected_fields
+                if isinstance(field, dict) and isinstance(field.get("name"), str)
+            }
+            if isinstance(projected_fields, list)
+            else set()
+        )
+        missing_fields = sorted(handle for handle in fields if handle not in projected_field_names)
+        if missing_secret_presence or missing_fields:
+            raise LiveQaError(
+                "Extension setup API returned incomplete setup projection: "
+                f"missing_secret_presence={missing_secret_presence!r} "
+                f"missing_fields={missing_fields!r}"
+            )
+
+        activate_response = await client.post(
+            f"{extensions_url}/{encoded_package_id}/activate",
+            headers=headers,
+            json={},
+        )
+        activation = _require_extension_setup_response(activate_response, "activate")
+        if activation.get("success") is not True or activation.get("activated") is not True:
+            raise LiveQaError("Extension setup API activate did not report activated=true")
+        active_response = await client.get(extensions_url, headers=headers)
+        active_body = _require_extension_setup_response(active_response, "active read-back")
+        active_extensions = active_body.get("extensions")
+        if not isinstance(active_extensions, list):
+            raise LiveQaError("Extensions API active read-back omitted the extensions list")
+        active_projection = _extension_projection(active_extensions, package_id)
+        if not isinstance(active_projection, dict) or active_projection.get("active") is not True:
+            raise LiveQaError("Extension activation did not produce an active projection")
     return {
         "applied": True,
         "status_code": response.status_code,
@@ -992,6 +1044,11 @@ async def _apply_extension_setup_api_after_start(
             "field_handles": sorted(fields),
         },
         "status": status,
+        "activation": {
+            "response": activation,
+            "projection": active_projection,
+            "verified_active": True,
+        },
     }
 
 
@@ -1003,10 +1060,28 @@ async def _apply_slack_setup_api_after_start(
     config_text = _config_text(prepared_home.path / "config.toml")
     if not _slack_enabled(config_text):
         return {"applied": False, "reason": "slack_disabled"}
+    slack_preflight = prepared_home.preflight.get("slack")
+    auth_test = (
+        slack_preflight.get("auth_test")
+        if isinstance(slack_preflight, dict)
+        else None
+    )
+    bot_user_id = (
+        str(auth_test.get("user_id") or "").strip()
+        if isinstance(auth_test, dict)
+        else ""
+    )
+    shared_subject_user_id = (
+        str(slack_preflight.get("auth_user_id") or "").strip()
+        if isinstance(slack_preflight, dict)
+        else ""
+    ) or _auth_user_id()
     payload, preflight = _slack_setup_payload(
         prepared_home.path,
         config_text,
         prepared_home.env,
+        bot_user_id=bot_user_id,
+        shared_subject_user_id=shared_subject_user_id,
     )
     if payload is None:
         return {"applied": False, "reason": "setup_payload_missing", **preflight}
@@ -3604,17 +3679,25 @@ async def _slack_connect_case(ctx: LiveQaContext, *, case_name: str) -> ProbeRes
     try:
         slack = _slack_preflight(ctx)
         auth_test = slack.get("auth_test")
-        setup = slack.get("setup")
+        setup_api = slack.get("setup_api")
+        setup_status = (
+            setup_api.get("status")
+            if isinstance(setup_api, dict)
+            else None
+        )
+        setup_readiness = _extension_setup_secret_readiness(setup_status)
         if not slack.get("enabled_in_config") or not slack.get("env_present"):
             raise AssertionError(f"Slack was not enabled with env in preflight: {slack!r}")
-        if not isinstance(setup, dict) or not setup.get("personal_oauth_ready"):
-            raise AssertionError(f"Slack personal OAuth is not ready in preflight: {setup!r}")
+        if setup_readiness.get("ready") is not True:
+            raise AssertionError(
+                "Slack generic setup projection is not ready; missing required secrets: "
+                f"{setup_readiness.get('missing')!r}"
+            )
         if not isinstance(auth_test, dict) or not auth_test.get("ok"):
             raise AssertionError(f"Slack auth.test did not pass in preflight: {auth_test!r}")
-        observed["slack_personal_oauth_ready"] = setup.get("personal_oauth_ready")
-        observed["slack_oauth_client_id_configured"] = setup.get("oauth_client_id_configured")
-        observed["slack_oauth_client_secret_configured"] = setup.get(
-            "oauth_client_secret_configured"
+        observed["slack_generic_setup_ready"] = setup_readiness.get("ready")
+        observed["slack_required_setup_secret_count"] = setup_readiness.get(
+            "required_secret_count"
         )
         observed["slack_auth_team_id"] = auth_test.get("team_id")
         observed["slack_auth_user_id"] = auth_test.get("user_id")
@@ -5388,7 +5471,7 @@ async def _post_signed_slack_dm_event(
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(
-            f"{ctx.base_url}/webhooks/slack/events",
+            f"{ctx.base_url}/webhooks/extensions/slack/events",
             content=body,
             headers=_slack_event_headers(body, signing_secret),
         )
@@ -8664,9 +8747,6 @@ async def run_cases(args: argparse.Namespace) -> int:
                     )
                     continue
                 slack_preflight["setup_api"] = setup_api
-                setup_status = setup_api.get("status") if isinstance(setup_api, dict) else None
-                if isinstance(setup_status, dict):
-                    slack_preflight["setup"] = setup_status
                 write_preflight(args.output_dir, prepared_home)
                 shutil.copyfile(preflight_path, case_preflight_path)
             print(f"[reborn-webui-v2-live-qa] running case={name}", flush=True)

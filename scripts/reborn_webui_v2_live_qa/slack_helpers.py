@@ -42,6 +42,7 @@ SLACK_PERSONAL_ACCESS_TOKEN_ENV_NAMES = [
     "AUTH_LIVE_SLACK_USER_TOKEN",
     "REBORN_WEBUI_V2_LIVE_QA_SLACK_USER_TOKEN",
 ]
+SLACK_EXTENSION_INSTALLATION_ID = "slack"
 # Optional SECOND human identity (a dedicated canary user, distinct from the
 # connected personal account AND from the bot). Arms that strictly need a
 # second HUMAN actor must assert this env and fail loudly when it is absent —
@@ -542,16 +543,37 @@ def _slack_setup_payload(
     reborn_home: Path,
     config_text: str,
     extra_env: dict[str, str],
+    *,
+    bot_user_id: str | None = None,
+    shared_subject_user_id: str | None = None,
 ) -> tuple[dict[str, object] | None, dict[str, object]]:
     preflight = _slack_setup_preflight(reborn_home, config_text, extra_env)
+    setup = _slack_setup_from_reborn_home(reborn_home) or {}
     bot_token = _env_value(SLACK_BOT_TOKEN_ENV, extra_env)
     signing_secret = _env_value(SLACK_SIGNING_SECRET_ENV, extra_env)
+    resolved_bot_user_id = str(bot_user_id or "").strip() or _slack_setup_field(
+        setup,
+        config_text,
+        "bot_user_id",
+        "REBORN_WEBUI_V2_LIVE_QA_SLACK_BOT_USER_ID",
+    )
+    resolved_shared_subject_user_id = (
+        str(shared_subject_user_id or "").strip()
+        or _slack_setup_field(
+            setup,
+            config_text,
+            "shared_subject_user_id",
+            "REBORN_WEBUI_V2_LIVE_QA_SLACK_SHARED_SUBJECT_USER_ID",
+        )
+    )
     required = {
         "installation_id": preflight.get("installation_id"),
         "team_id": preflight.get("team_id"),
         "api_app_id": preflight.get("api_app_id"),
         "bot_token": bot_token,
         "signing_secret": signing_secret,
+        "bot_user_id": resolved_bot_user_id,
+        "shared_subject_user_id": resolved_shared_subject_user_id,
     }
     missing = [key for key, value in required.items() if not str(value or "").strip()]
     if missing:
@@ -562,6 +584,10 @@ def _slack_setup_payload(
         "api_app_id": str(required["api_app_id"]),
         "bot_token": bot_token,
         "signing_secret": signing_secret,
+        "bot_user_id": str(required["bot_user_id"]),
+        "shared_subject_user_id": str(required["shared_subject_user_id"]),
+        "allowed_channels": "[]",
+        "subject_routes": "{}",
     }
     oauth_client_id = str(preflight.get("oauth_client_id") or "").strip()
     oauth_client_secret = _env_value(SLACK_OAUTH_CLIENT_SECRET_ENV, extra_env)
@@ -575,13 +601,12 @@ def _slack_setup_payload(
 def _seed_slack_personal_identity_binding(
     db_path: Path,
     *,
-    installation_id: str,
     user_id: str,
     slack_user_id: str,
     now: str,
 ) -> dict[str, object]:
     provider = "slack"
-    provider_user_id = f"{installation_id}:{slack_user_id}"
+    provider_user_id = f"{SLACK_EXTENSION_INSTALLATION_ID}:{slack_user_id}"
     # The generic channel identity store replaced the Slack-specific
     # `slack-personal-binding` root; record shape is unchanged.
     identity_path = (
@@ -746,7 +771,6 @@ def _seed_slack_personal_dm_target(
     )
     identity_binding = _seed_slack_personal_identity_binding(
         db_path,
-        installation_id=installation_id,
         user_id=auth_user_id,
         slack_user_id=slack_user_id,
         now=now,
@@ -1212,7 +1236,6 @@ def _seed_generated_slack_product_auth_if_configured(
     )
     identity_binding = _seed_slack_personal_identity_binding(
         db_path,
-        installation_id=installation[1],
         user_id=user_id,
         slack_user_id=slack_user_id,
         now=now_s,
