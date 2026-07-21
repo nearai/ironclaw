@@ -235,6 +235,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
         self.assertEqual(contract.tier, "contract")
         self.assertTrue(contract.blocking)
+        self.assertTrue(contract.expects_llm_trace)
         self.assertEqual(behavioral.tier, "behavioral")
         self.assertFalse(behavioral.blocking)
         with self.assertRaisesRegex(ValueError, "tier"):
@@ -8866,8 +8867,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 require_slack_live=False,
             )
             cases = {
-                "case_a": run_live_qa.CaseSpec(fake_case),
-                "case_b": run_live_qa.CaseSpec(fake_case),
+                "case_a": run_live_qa.CaseSpec(fake_case, expects_llm_trace=False),
+                "case_b": run_live_qa.CaseSpec(fake_case, expects_llm_trace=False),
             }
             env = {
                 "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
@@ -8936,6 +8937,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             env: dict[str, str],
         ):
             captured_envs[reborn_home.name] = env
+            Path(env["IRONCLAW_TRACE_OUTPUT"]).write_text(
+                json.dumps({"model_name": "test", "steps": [{"type": "user_input"}]}),
+                encoding="utf-8",
+            )
             return object(), f"http://127.0.0.1/{reborn_home.name}"
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -9000,6 +9005,66 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             )
             # The per-case trace directory is created eagerly by the helper.
             self.assertTrue((output_dir / "llm-traces").is_dir())
+
+    def test_run_cases_fails_successful_model_case_when_trace_is_missing(self):
+        async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:
+            return run_live_qa.ProbeResult(
+                provider="test",
+                mode="live",
+                success=True,
+                latency_ms=1,
+                details={"case": "case_a", "blocking": False},
+            )
+
+        async def fake_start_reborn_server(*_args, **_kwargs):
+            return object(), "http://127.0.0.1:38555"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output_dir = root / "out"
+            binary = root / "ironclaw"
+            binary.touch()
+            args = argparse.Namespace(
+                all_cases=False,
+                non_telegram_qa_cases=False,
+                case=["case_a"],
+                output_dir=output_dir,
+                reborn_home=root / "missing-source-home",
+                skip_build=True,
+                require_slack_live=False,
+            )
+            cases = {"case_a": run_live_qa.CaseSpec(fake_case, blocking=False)}
+            env = {
+                "LIVE_OPENAI_COMPATIBLE_API_KEY": "fake-live-llm-key",
+                "REBORN_WEBUI_V2_LIVE_QA_LLM_API_KEY_ENV": (
+                    "LIVE_OPENAI_COMPATIBLE_API_KEY"
+                ),
+            }
+
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(run_live_qa, "CASES", cases),
+                patch.object(run_live_qa, "QA_SHEET_CASES", {}),
+                patch.object(run_live_qa, "_reborn_binary", return_value=binary),
+                patch.object(
+                    run_live_qa,
+                    "start_reborn_server",
+                    side_effect=fake_start_reborn_server,
+                ),
+                patch.object(run_live_qa, "stop_process"),
+            ):
+                status = asyncio.run(run_live_qa.run_cases(args))
+
+            payload = json.loads(
+                (output_dir / "results.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(status, 1)
+        result = payload["results"][0]
+        self.assertFalse(result["success"])
+        self.assertTrue(result["details"]["blocking"])
+        self.assertEqual(result["details"]["failure_category"], "trace_harvest")
+        self.assertIn("missing or invalid", result["details"]["error"])
 
     def test_run_cases_blocks_slack_connect_without_personal_product_auth(self):
         async def fake_case(_ctx: run_live_qa.LiveQaContext) -> run_live_qa.ProbeResult:

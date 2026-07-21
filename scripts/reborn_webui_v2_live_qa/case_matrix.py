@@ -29,6 +29,7 @@ class CaseSpec:
         requires_google_runtime_access: bool = False,
         requires_telegram: bool = False,
         requires_github_auth: bool = False,
+        expects_llm_trace: bool = True,
         default_enabled: bool = True,
         implemented: bool = True,
     ) -> None:
@@ -46,6 +47,7 @@ class CaseSpec:
         self.requires_google_runtime_access = requires_google_runtime_access
         self.requires_telegram = requires_telegram
         self.requires_github_auth = requires_github_auth
+        self.expects_llm_trace = expects_llm_trace
         self.default_enabled = default_enabled
         self.implemented = implemented
 

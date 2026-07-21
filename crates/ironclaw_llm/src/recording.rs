@@ -942,7 +942,14 @@ impl RecordingLlm {
             steps,
         };
         let json = serde_json::to_string_pretty(&trace).map_err(std::io::Error::other)?;
-        tokio::fs::write(&self.output_path, json).await?;
+        let mut temp_path = self.output_path.as_os_str().to_os_string();
+        temp_path.push(".tmp");
+        let temp_path = PathBuf::from(temp_path);
+        tokio::fs::write(&temp_path, json).await?;
+        if let Err(error) = tokio::fs::rename(&temp_path, &self.output_path).await {
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            return Err(error);
+        }
         // `debug!` (not `info!`): `complete`/`complete_with_tools` call this
         // after every step (see `flush_after_step`), so an `info!` here would
         // fire once per LLM call and corrupt the REPL/TUI (see the logging rule
@@ -1405,6 +1412,35 @@ mod tests {
             .expect("trace I/O failure must not fail the model completion");
 
         assert_eq!(response.content, "recorded answer");
+    }
+
+    #[tokio::test]
+    async fn flush_preserves_existing_trace_when_temporary_write_fails() {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("trace.json");
+        tokio::fs::write(&path, "previous complete trace")
+            .await
+            .expect("seed existing trace");
+        tokio::fs::create_dir(path.with_extension("json.tmp"))
+            .await
+            .expect("block temporary file creation");
+
+        let recorder = RecordingLlm::new(
+            Arc::new(StubLlm::new("unused")),
+            path.clone(),
+            "atomic-write-test".to_string(),
+        );
+
+        recorder
+            .flush()
+            .await
+            .expect_err("temporary write must fail when its path is a directory");
+        assert_eq!(
+            tokio::fs::read_to_string(path)
+                .await
+                .expect("existing trace remains readable"),
+            "previous complete trace"
+        );
     }
 
     #[tokio::test]
