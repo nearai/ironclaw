@@ -36,6 +36,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
                 .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "hello wasm"}),
         })
         .await
@@ -53,6 +54,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
                 .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "hello script"}),
         })
         .await
@@ -109,6 +111,7 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
                 .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "event sink fails"}),
         })
         .await
@@ -137,6 +140,7 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
                 .set_process_count(1),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "missing backend"}),
         })
         .await
@@ -177,6 +181,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
                 .set_process_count(1),
             mounts: None,
             resource_reservation: Some(reservation.clone()),
+            pinned_lane: None,
             input: json!({"message": "missing backend"}),
         })
         .instrument(tracing::info_span!(
@@ -219,6 +224,7 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
                 .set_process_count(1),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "adapter fails"}),
         })
         .await
@@ -264,6 +270,7 @@ async fn dispatcher_emits_events_for_mcp_success() {
                 .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"query": "ironclaw"}),
         })
         .await
@@ -304,6 +311,7 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
                 .set_process_count(1),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "blocked"}),
         })
         .await

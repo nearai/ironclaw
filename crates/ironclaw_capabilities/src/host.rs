@@ -358,7 +358,7 @@ where
         // single-use, failing closed on expiry), or falls back to the fold's
         // obligation-derived inputs when no witness was sealed. See
         // [`Self::dispatch_inputs_from_witness`].
-        let (dispatch_mounts, dispatch_reservation) = self
+        let (dispatch_mounts, dispatch_reservation, pinned_lane) = self
             .dispatch_inputs_from_witness(
                 CapabilityObligationPhase::Invoke,
                 witness,
@@ -381,6 +381,7 @@ where
                 estimate: request.estimate.clone(),
                 mounts: dispatch_mounts,
                 resource_reservation: dispatch_reservation,
+                pinned_lane,
                 input: request.input,
             })
             .await
@@ -2046,7 +2047,12 @@ where
         // fold's obligation-derived inputs when no witness was sealed
         // (`system.process_sandbox` is System-runtime with no lane, so it seals
         // none yet spawns legitimately). See [`Self::dispatch_inputs_from_witness`].
-        let (witness_mounts, witness_reservation) = self
+        // Spawn starts a process through the `ProcessManager`, not the runtime
+        // dispatcher's `dispatch_json`, so there is no `CapabilityDispatchRequest`
+        // to carry a pinned lane on — the witness's lane binding (finding C) is a
+        // dispatcher-path concern. The witness is still consumed here for its
+        // single-use + expiry semantics; the lane it yields is unused on this path.
+        let (witness_mounts, witness_reservation, _pinned_lane) = self
             .dispatch_inputs_from_witness(
                 CapabilityObligationPhase::Spawn,
                 witness,
@@ -2769,10 +2775,14 @@ where
             lease_state,
         } = params;
 
-        let obligations = match fold {
+        let (witness, obligations) = match fold {
             AuthorizeFold::Authorized(fold) => {
-                let AuthorizedFold { obligations, .. } = *fold;
-                obligations
+                let AuthorizedFold {
+                    result,
+                    obligations,
+                    ..
+                } = *fold;
+                (result, obligations)
             }
             AuthorizeFold::Denied { reason, .. } => {
                 return Err(CapabilityInvocationError::AuthorizationDenied {
@@ -2868,6 +2878,65 @@ where
             }
         };
 
+        // Finding B (§5.3.2): the witness sealed in `authorize_resumed` froze the
+        // approval/grant deadline BEFORE the lease claim, but against a provisional
+        // (empty) obligation outcome — the authoritative outcome is only prepared
+        // above, post-claim, to keep the resume paths' claim-before-dispatch
+        // ordering. Re-seal that witness against the ACTUAL prepared outcome
+        // (preserving its invocation/lane/deadline verbatim) so the witness the
+        // tail consumes carries the real dispatch inputs, then consume it through
+        // the shared `dispatch_inputs_from_witness` helper exactly like
+        // invoke/spawn — enforcing the deadline and failing CLOSED on expiry
+        // BEFORE the side effect. An approval lease that expired during the async
+        // authorization/obligation gap (after `begin_dispatch_claimed` advanced it)
+        // is caught here, not after dispatch when the later consume observes it.
+        let witness = match witness {
+            Some(AuthorizeResult::Authorized(authorized)) => Some(AuthorizeResult::Authorized(
+                Box::new(authorized.reseal_with_outcome(
+                    self.authorization_grant(),
+                    obligation_outcome.mounts.clone(),
+                    obligation_outcome.resource_reservation.clone(),
+                )),
+            )),
+            other => other,
+        };
+        let (dispatch_mounts, dispatch_reservation, pinned_lane) = match self
+            .dispatch_inputs_from_witness(
+                CapabilityObligationPhase::Resume,
+                witness,
+                &authorized_context,
+                &capability_id,
+                &estimate,
+                obligations.as_slice(),
+                &obligation_outcome,
+            )
+            .await
+        {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                // Witness expired: `dispatch_inputs_from_witness` already aborted
+                // the prepared obligations, aborted the witness, and failed the
+                // run. The resume preamble additionally advanced the lease to
+                // Dispatching/claimed it, so expiry is terminal — REVOKE it so it
+                // does not stay stuck (mirror the `Decision::Deny` arm in
+                // `authorize_resumed`); a non-terminal revert would leave a
+                // dead-but-Claimed lease reusable against an expired approval.
+                if let Some((capability_leases, ref claimed)) = claimed_lease
+                    && let Err(revoke_error) =
+                        capability_leases.revoke(&scope, claimed.grant.id).await
+                {
+                    warn!(
+                        lease_id = %claimed.grant.id,
+                        invocation_id = %invocation_id,
+                        capability_id = %capability_id,
+                        revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                        "capability lease revoke failed after resume witness expiry; lease may remain claimed",
+                    );
+                }
+                return Err(error);
+            }
+        };
+
         let dispatch = match self
             .dispatcher
             .dispatch_json(CapabilityDispatchRequest {
@@ -2876,8 +2945,9 @@ where
                 authenticated_actor_user_id: authorized_context.authenticated_actor_user_id.clone(),
                 run_id: authorized_context.run_id,
                 estimate: estimate.clone(),
-                mounts: obligation_outcome.mounts.clone(),
-                resource_reservation: obligation_outcome.resource_reservation.clone(),
+                mounts: dispatch_mounts,
+                resource_reservation: dispatch_reservation,
+                pinned_lane,
                 input,
             })
             .await
@@ -3074,8 +3144,10 @@ where
     /// lifecycle), consuming the witness via `abort` (never `Drop`), failing the
     /// run, and returning a terminal denial. The sealed `mounts`/`reservation`
     /// are the fold's `obligation_outcome` values verbatim, so dispatch inputs
-    /// are byte-identical to the pre-S6 path; the sealed `lane` is dropped here
-    /// (the dispatcher re-derives the identical descriptor lane it owns).
+    /// are byte-identical to the pre-S6 path; the sealed `lane` is returned as the
+    /// pinned lane so the caller can bind dispatch to it — the dispatcher
+    /// re-resolves the descriptor lane from its hot registry and fails closed if
+    /// it no longer matches this pinned lane (§5.3.2, mutable-registry TOCTOU).
     ///
     /// A `None` witness is NOT an error: the seal mints none for a host-internal
     /// `System`-runtime descriptor (no untrusted lane — `system.process_sandbox`
@@ -3099,17 +3171,26 @@ where
         (
             Option<ironclaw_host_api::MountView>,
             Option<ironclaw_host_api::ResourceReservation>,
+            Option<RuntimeLane>,
         ),
         CapabilityInvocationError,
     > {
         let Some(AuthorizeResult::Authorized(witness)) = witness else {
+            // No witness (host-internal `System` runtime with no lane, or a
+            // defensively origin-less context): no lane to pin, so dispatch keeps
+            // the obligation-derived inputs and the dispatcher's lane check is
+            // skipped — byte-identical to the pre-pinning path.
             return Ok((
                 obligation_outcome.mounts.clone(),
                 obligation_outcome.resource_reservation.clone(),
+                None,
             ));
         };
         match witness.into_parts(chrono::Utc::now()) {
-            Ok((_invocation, _lane, mounts, reservation)) => Ok((mounts, reservation)),
+            // `lane` is the descriptor-resolved lane the authorization pinned:
+            // threaded into the dispatch request so the dispatcher fails closed
+            // if the hot registry re-resolves a different lane (§5.3.2, finding C).
+            Ok((_invocation, lane, mounts, reservation)) => Ok((mounts, reservation, Some(lane))),
             Err(expired) => {
                 self.abort_obligations(
                     phase,
@@ -4336,6 +4417,243 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
             authorized.deadline(),
             lease_expiry,
             "the sealed witness deadline must be bounded by the approval lease expiry, not the default TTL"
+        );
+    }
+
+    // Lease store double for the resume-tail expiry test. Records the single
+    // `claim` (the PendingClaim tail claims here) and the single `revoke` (the
+    // terminal expiry cleanup), returning a Claimed lease carrying the expired
+    // grant. Every other method is unreachable on this path.
+    struct ClaimRecordingLeaseStore {
+        grant_id: CapabilityGrantId,
+        expires_at: Timestamp,
+        capability_id: CapabilityId,
+        claimed: std::sync::Mutex<bool>,
+        revoked: std::sync::Mutex<Option<CapabilityGrantId>>,
+    }
+
+    impl ClaimRecordingLeaseStore {
+        fn lease(&self, scope: &ResourceScope) -> CapabilityLease {
+            use ironclaw_host_api::{
+                CapabilityGrant, GrantConstraints, MountView, NetworkPolicy, Principal,
+            };
+            CapabilityLease {
+                scope: scope.clone(),
+                grant: CapabilityGrant {
+                    id: self.grant_id,
+                    capability: self.capability_id.clone(),
+                    grantee: Principal::User(scope.user_id.clone()),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: Vec::new(),
+                        mounts: MountView::default(),
+                        network: NetworkPolicy::default(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: Some(self.expires_at),
+                        max_invocations: Some(1),
+                    },
+                },
+                invocation_fingerprint: None,
+                status: ironclaw_authorization::CapabilityLeaseStatus::Claimed,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CapabilityLeaseStore for ClaimRecordingLeaseStore {
+        async fn issue(
+            &self,
+            _lease: CapabilityLease,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            unimplemented!("resume tail does not issue leases")
+        }
+
+        async fn revoke(
+            &self,
+            scope: &ResourceScope,
+            lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            *self.revoked.lock().unwrap() = Some(lease_id);
+            Ok(self.lease(scope))
+        }
+
+        async fn get(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+        ) -> Option<CapabilityLease> {
+            unimplemented!("resume tail does not read leases here")
+        }
+
+        async fn claim(
+            &self,
+            scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+            _invocation_fingerprint: &InvocationFingerprint,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            *self.claimed.lock().unwrap() = true;
+            Ok(self.lease(scope))
+        }
+
+        async fn consume(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            unimplemented!("expired resume must not consume the lease")
+        }
+
+        async fn begin_dispatch_claimed(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+            _invocation_fingerprint: &InvocationFingerprint,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            unimplemented!("driving the tail directly bypasses the preamble")
+        }
+
+        async fn abort_dispatch_claimed(
+            &self,
+            _scope: &ResourceScope,
+            _lease_id: CapabilityGrantId,
+        ) -> Result<CapabilityLease, ironclaw_authorization::CapabilityLeaseError> {
+            unimplemented!("expired resume revokes, not aborts-dispatch")
+        }
+
+        async fn leases_for_scope(&self, _scope: &ResourceScope) -> Vec<CapabilityLease> {
+            unimplemented!("resume tail does not enumerate leases")
+        }
+
+        async fn active_leases_for_context(
+            &self,
+            _context: &ExecutionContext,
+        ) -> Vec<CapabilityLease> {
+            unimplemented!("resume tail does not enumerate leases")
+        }
+    }
+
+    // Finding B (§5.3.2): a resume whose sealed witness deadline has already
+    // passed must dispatch NOTHING, fail the run, and revoke the claimed lease —
+    // it must not dispatch the side effect and only observe expiry at the later
+    // lease consume. Drives `dispatch_resumed_capability` (the whole resume tail:
+    // claim → prepare obligations → re-seal witness → consume witness → dispatch)
+    // through a `PendingClaim` whose approval-lease expiry is in the past, so the
+    // witness `into_parts(now)` fails closed before the dispatcher is ever called.
+    #[tokio::test]
+    async fn expired_resume_witness_dispatches_nothing_fails_run_and_revokes_lease() {
+        let past_expiry = chrono::Utc::now() - chrono::Duration::minutes(1);
+
+        let registry = echo_registry();
+        // A recording dispatcher that must never fire on the expired path. Its
+        // responder returns an error so a regression (dispatch actually firing)
+        // is caught by the `call_count() == 0` assertion, not masked by a success.
+        let dispatcher =
+            ironclaw_host_api::dispatch_test_support::TestDispatcher::responding(|req, _| {
+                Err(DispatchError::UnknownCapability {
+                    capability: req.capability_id.clone(),
+                })
+            });
+        let authorizer = AllowAuthorizer;
+        let trust_policy = StaticTrustPolicy;
+        let runtime_policy = permissive_runtime_policy();
+        let policy_facts = SatisfiedPolicyFacts;
+        let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
+
+        let request = allow_request();
+        let capability_id = request.capability_id.clone();
+        let estimate = request.estimate.clone();
+        let input = request.input.clone();
+        let context = request.context.clone();
+        let scope = context.resource_scope.clone();
+        let invocation_id = context.invocation_id;
+
+        // Start + block the run so the terminal fail transition has a record to
+        // move to `Failed`.
+        run_state
+            .start(RunStart {
+                invocation_id,
+                scope: scope.clone(),
+                capability_id: capability_id.clone(),
+                authenticated_actor_user_id: context.authenticated_actor_user_id.clone(),
+            })
+            .await
+            .unwrap();
+        run_state
+            .block_auth(&scope, invocation_id, "AuthRequired".to_string())
+            .await
+            .unwrap();
+
+        let host = CapabilityHost::new(
+            &registry,
+            &dispatcher,
+            &authorizer,
+            &trust_policy,
+            &runtime_policy,
+            &policy_facts,
+        )
+        .with_run_state(&run_state);
+
+        let descriptor = registry
+            .get_capability(&capability_id)
+            .expect("echo.say is registered");
+        let fingerprint =
+            InvocationFingerprint::for_dispatch(&scope, &capability_id, &estimate, &input).unwrap();
+        let leases = ClaimRecordingLeaseStore {
+            grant_id: CapabilityGrantId::new(),
+            expires_at: past_expiry,
+            capability_id: capability_id.clone(),
+            claimed: std::sync::Mutex::new(false),
+            revoked: std::sync::Mutex::new(None),
+        };
+        let expected_grant_id = leases.grant_id;
+
+        let params = ResumedDispatchParams {
+            run_state: &run_state,
+            scope: scope.clone(),
+            invocation_id,
+            capability_id,
+            estimate,
+            input,
+            authorized_context: context,
+            descriptor,
+            lease_state: ResumedLeaseState::PendingClaim(PendingClaimAfterAuth {
+                leases: &leases,
+                grant_id: expected_grant_id,
+                fingerprint,
+                grant_expiry: Some(past_expiry),
+            }),
+        };
+
+        let error = host.dispatch_resumed_capability(params).await.unwrap_err();
+
+        // Terminal fail-closed denial, no side effect.
+        assert!(
+            matches!(error, CapabilityInvocationError::AuthorizationDenied { .. }),
+            "expired resume witness must fail closed with a terminal denial, got {error:?}"
+        );
+        assert_eq!(
+            dispatcher.call_count(),
+            0,
+            "the side effect must NOT be dispatched on an expired resume witness"
+        );
+        // The lease was claimed (claim-before-dispatch ordering) and then revoked
+        // by the terminal expiry cleanup.
+        assert!(
+            *leases.claimed.lock().unwrap(),
+            "the PendingClaim tail must have claimed the lease before the witness check"
+        );
+        assert_eq!(
+            *leases.revoked.lock().unwrap(),
+            Some(expected_grant_id),
+            "the expired resume must REVOKE the claimed lease (terminal), not leave it Claimed"
+        );
+        // The run failed.
+        let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+        assert_eq!(
+            run.status,
+            ironclaw_run_state::RunStatus::Failed,
+            "an expired resume witness must fail the run"
         );
     }
 }

@@ -224,6 +224,12 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
                 estimate: request.estimate,
                 mounts: Some(request.mounts),
                 resource_reservation: request.resource_reservation,
+                // Witness-free path: this executor forwards an already-authorized
+                // process request and does not hold the `Authorized` witness (nor
+                // the descriptor), so it pins no lane — the dispatcher's lane
+                // check (§5.3.2, finding C) is a best-effort no-op here. The
+                // authorization that produced this request ran upstream.
+                pinned_lane: None,
                 input: request.input,
             })
             .await

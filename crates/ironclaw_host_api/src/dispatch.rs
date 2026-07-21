@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::{
     CapabilityId, ExtensionId, HostRemediation, MountView, ResourceEstimate, ResourceReceipt,
     ResourceReservation, ResourceScope, ResourceUsage, RunId, RuntimeCredentialAuthRequirement,
-    RuntimeKind, SecretHandle, UserId,
+    RuntimeKind, RuntimeLane, SecretHandle, UserId,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -29,6 +29,20 @@ pub struct CapabilityDispatchRequest {
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
+    /// The runtime lane the authorization pinned into the `Authorized` witness
+    /// (`authorized.lane()`), threaded through so the dispatcher can bind
+    /// execution to the lane the authorization named (§5.3.2, mutable-registry
+    /// TOCTOU): the dispatcher re-resolves the descriptor's lane from the hot
+    /// registry and MUST fail closed with [`DispatchError::LaneMismatch`] when the
+    /// freshly-resolved lane differs from this pinned lane — an extension update
+    /// between authorize and dispatch must never execute a replacement runtime on
+    /// authority prepared for the old one.
+    ///
+    /// `None` means no lane was pinned (a witness-free/legacy dispatch or a
+    /// host-internal `System` descriptor that resolved to no lane); the dispatcher
+    /// skips the check and behaves exactly as before. Full descriptor-content
+    /// pinning (a same-lane descriptor swap) is tracked separately in #6434.
+    pub pinned_lane: Option<RuntimeLane>,
     pub input: Value,
 }
 
@@ -303,6 +317,7 @@ pub enum DispatchFailureKind {
     MissingRuntimeBackend,
     UnsupportedRuntime,
     AuthRequired,
+    LaneMismatch,
     Runtime(RuntimeDispatchErrorKind),
 }
 
@@ -315,6 +330,7 @@ impl DispatchFailureKind {
             Self::MissingRuntimeBackend => "MissingRuntimeBackend",
             Self::UnsupportedRuntime => "UnsupportedRuntime",
             Self::AuthRequired => "AuthRequired",
+            Self::LaneMismatch => "LaneMismatch",
             Self::Runtime(kind) => kind.as_str(),
         }
     }
@@ -329,6 +345,9 @@ impl DispatchFailureKind {
             Self::MissingRuntimeBackend => "the tool runtime backend is unavailable",
             Self::UnsupportedRuntime => "the tool runtime is not supported",
             Self::AuthRequired => "the tool requires authentication",
+            Self::LaneMismatch => {
+                "the tool runtime changed and no longer matches its authorization"
+            }
             Self::Runtime(kind) => kind.human_summary(),
         }
     }
@@ -360,6 +379,20 @@ pub enum DispatchError {
     },
     #[error("runtime backend {runtime:?} is not configured")]
     MissingRuntimeBackend { runtime: RuntimeKind },
+    /// The lane the dispatcher freshly resolved for this capability does not
+    /// match the lane the authorization pinned into the witness — an extension
+    /// update between authorize and dispatch moved the descriptor onto a
+    /// different runtime lane. Fail closed: never execute a replacement runtime
+    /// on authority (mounts/reservation/trust) prepared for the old lane
+    /// (§5.3.2). Full descriptor-content pinning is tracked in #6434.
+    #[error(
+        "capability {capability} resolved to runtime lane {resolved} but the authorization pinned lane {authorized}"
+    )]
+    LaneMismatch {
+        capability: CapabilityId,
+        authorized: RuntimeLane,
+        resolved: RuntimeLane,
+    },
     #[error(
         "runtime {runtime:?} is recognized but not supported by this dispatcher yet for capability {capability}"
     )]
@@ -443,6 +476,16 @@ impl fmt::Debug for DispatchError {
                 .debug_struct("MissingRuntimeBackend")
                 .field("runtime", runtime)
                 .finish(),
+            Self::LaneMismatch {
+                capability,
+                authorized,
+                resolved,
+            } => f
+                .debug_struct("LaneMismatch")
+                .field("capability", capability)
+                .field("authorized", authorized)
+                .field("resolved", resolved)
+                .finish(),
             Self::UnsupportedRuntime {
                 capability,
                 runtime,
@@ -504,6 +547,7 @@ impl DispatchError {
             Self::MissingRuntimeBackend { .. } => DispatchFailureKind::MissingRuntimeBackend,
             Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
+            Self::LaneMismatch { .. } => DispatchFailureKind::LaneMismatch,
             Self::Mcp { kind, .. }
             | Self::Script { kind, .. }
             | Self::Wasm { kind, .. }
@@ -523,6 +567,7 @@ impl DispatchError {
             Self::MissingRuntimeBackend { .. } => "missing_runtime_backend",
             Self::UnsupportedRuntime { .. } => "unsupported_runtime",
             Self::AuthRequired { .. } => "auth_required",
+            Self::LaneMismatch { .. } => "lane_mismatch",
             Self::Mcp { kind, .. }
             | Self::Script { kind, .. }
             | Self::Wasm { kind, .. }

@@ -42,6 +42,7 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
                 .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "hello dispatcher"}),
         })
         .await
@@ -106,6 +107,7 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
                 .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "hello script dispatcher"}),
         })
         .await
@@ -157,6 +159,7 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
                 .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "redact stderr"}),
         })
         .await
@@ -213,6 +216,7 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
                 .set_output_bytes(10_000),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"query": "ironclaw"}),
         })
         .await
@@ -249,6 +253,7 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
             estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "nope"}),
         })
         .await
@@ -281,6 +286,7 @@ async fn dispatcher_releases_prepared_reservation_when_validation_fails_before_a
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
+            pinned_lane: None,
             input: json!({"message": "release on validation failure"}),
         })
         .await
@@ -314,6 +320,7 @@ async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
                 .set_process_count(1),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"query": "blocked"}),
         })
         .await
@@ -352,6 +359,7 @@ async fn dispatcher_requires_script_backend_before_reserving_resources() {
                 .set_process_count(1),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "blocked"}),
         })
         .await
@@ -388,6 +396,7 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
             estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "blocked"}),
         })
         .await
@@ -433,6 +442,7 @@ async fn dispatcher_fails_closed_for_system_runtime_without_routing_to_a_lane() 
             estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
             input: json!({"message": "host-internal"}),
         })
         .await

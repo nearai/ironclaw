@@ -140,6 +140,7 @@ impl From<DispatchError> for CapabilityInvocationError {
             | DispatchError::RuntimeMismatch { .. }
             | DispatchError::MissingRuntimeBackend { .. }
             | DispatchError::UnsupportedRuntime { .. }
+            | DispatchError::LaneMismatch { .. }
             | DispatchError::Mcp { .. }
             | DispatchError::Script { .. }
             | DispatchError::Wasm { .. }
@@ -181,7 +182,8 @@ fn dispatch_error_model_visible_cause(error: &DispatchError) -> Option<String> {
         | DispatchError::UnknownProvider { .. }
         | DispatchError::RuntimeMismatch { .. }
         | DispatchError::MissingRuntimeBackend { .. }
-        | DispatchError::UnsupportedRuntime { .. } => Some(error.to_string()),
+        | DispatchError::UnsupportedRuntime { .. }
+        | DispatchError::LaneMismatch { .. } => Some(error.to_string()),
         // Auth-required carries redacted secret handles; keep it summary-free.
         DispatchError::AuthRequired { .. } => None,
     }

@@ -1879,6 +1879,11 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             DispatchFailureKind::MissingRuntimeBackend
             | DispatchFailureKind::UnsupportedRuntime => RuntimeFailureKind::MissingRuntime,
             DispatchFailureKind::AuthRequired => RuntimeFailureKind::Authorization,
+            // The dispatcher resolved a lane the authorization did not name (an
+            // extension update between authorize and dispatch). Fail closed as an
+            // authorization failure — the run must not execute on unauthorized
+            // authority (§5.3.2, finding C).
+            DispatchFailureKind::LaneMismatch => RuntimeFailureKind::Authorization,
             DispatchFailureKind::RuntimeMismatch => RuntimeFailureKind::Backend,
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExtensionRuntimeMismatch) => {
                 RuntimeFailureKind::MissingRuntime
