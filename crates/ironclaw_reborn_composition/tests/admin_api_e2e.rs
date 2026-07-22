@@ -2,17 +2,14 @@
 //!
 //! Unlike the crate-tier facade tests (which drive `RebornServicesApi` against
 //! a fake port), this stands up a REAL local-dev `RebornRuntime` with the admin
-//! service wired (identity user-directory + admin secret provisioner + a signed
-//! session-store token minter), composes the full `webui_v2_app` with a real
+//! service wired (identity user-directory + admin secret provisioner), composes
+//! the full `webui_v2_app` with a real
 //! bearer authenticator, and drives the whole admin surface over HTTP through
 //! `tower::ServiceExt::oneshot`.
 //!
-//! The flagship proof: an admin (operator bearer) creates a user, receives the
-//! one-time `api_token`, and that token then authenticates a follow-up request
-//! AS the new user — exercising the entire mint → return → validate chain
-//! (facade → composition adapter → identity store → minter → the session
-//! authenticator that validates the bearer). Nothing above the token crypto is
-//! stubbed.
+//! The flagship proofs are that private-user and managed-agent creation return
+//! no credential, and only a real tenant admin may manage resources belonging
+//! to a same-tenant managed subject.
 
 #![cfg(feature = "test-support")]
 
@@ -32,8 +29,8 @@ use ironclaw_loop_host::{
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    AdminApiTokenMinter, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, build_reborn_runtime, build_webui_services,
+    PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
+    build_reborn_runtime, build_webui_services,
 };
 use ironclaw_webui::{
     EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore, signed_session_store,
@@ -67,28 +64,7 @@ impl HostManagedModelGateway for NoOpGateway {
     }
 }
 
-// ─── token minter (mirrors production's serve-layer minter) ───────────────
-
-struct SessionTokenMinter {
-    store: Arc<SignedTokenSessionStore>,
-}
-
-#[async_trait]
-impl AdminApiTokenMinter for SessionTokenMinter {
-    async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
-        self.store
-            .create_session(
-                tenant.clone(),
-                user_id.clone(),
-                chrono::Duration::days(365),
-                false,
-            )
-            .await
-            .map_err(|error| error.to_string())
-    }
-}
-
-// ─── authenticator: operator env-bearer OR minted session bearer ──────────
+// ─── authenticator: operator env-bearer OR verified-login session bearer ──
 
 struct DualAuthenticator {
     env: EnvBearerAuthenticator,
@@ -129,6 +105,7 @@ fn local_dev_effective_policy() -> EffectiveRuntimePolicy {
 
 struct AdminHarness {
     router: axum::Router,
+    session_store: Arc<SignedTokenSessionStore>,
     // Kept alive for the test: the runtime owns the durable stores the router
     // reads through, and the tempdir backs them.
     _runtime: RebornRuntime,
@@ -145,8 +122,8 @@ async fn build_admin_harness() -> AdminHarness {
 
 /// Assemble the full admin HTTP harness over a caller-supplied
 /// `RebornBuildInput` (already carrying its profile, policy, trust, and process
-/// binding). Everything above the substrate — the shared signed session store /
-/// minter / authenticator, the WebUI bundle, and the composed router — is
+/// binding). Everything above the substrate — the signed-session authenticator,
+/// the WebUI bundle, and the composed router — is
 /// profile-agnostic, so the local-dev and production-shaped runs share it and
 /// only differ in the build input.
 async fn build_admin_harness_from(
@@ -155,14 +132,8 @@ async fn build_admin_harness_from(
 ) -> AdminHarness {
     let tenant = TenantId::new(TENANT).expect("tenant");
 
-    // One signed session store, shared by the minter (issues bearers) and the
-    // authenticator (validates them) — the same instance, so a minted token is
-    // always accepted.
     let operator_secret = SecretString::from(OPERATOR_TOKEN.to_string());
     let session_store = signed_session_store(&operator_secret, &tenant);
-    let minter: Arc<dyn AdminApiTokenMinter> = Arc::new(SessionTokenMinter {
-        store: session_store.clone(),
-    });
 
     let input = RebornRuntimeInput::from_services(build_input)
         .with_identity(RebornRuntimeIdentity {
@@ -175,8 +146,7 @@ async fn build_admin_harness_from(
             interval: std::time::Duration::from_millis(10),
             max_total: std::time::Duration::from_secs(10),
         })
-        .with_model_gateway_override(Arc::new(NoOpGateway))
-        .with_admin_api_token_minter(minter);
+        .with_model_gateway_override(Arc::new(NoOpGateway));
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
@@ -184,7 +154,7 @@ async fn build_admin_harness_from(
     let env =
         EnvBearerAuthenticator::new(operator_secret, UserId::new(OPERATOR_USER).expect("user"))
             .expect("env authenticator");
-    let session = SessionAuthenticator::new(session_store);
+    let session = SessionAuthenticator::new(session_store.clone());
     let authenticator = Arc::new(DualAuthenticator { env, session });
 
     let config = WebuiServeConfig::new(
@@ -197,6 +167,7 @@ async fn build_admin_harness_from(
 
     AdminHarness {
         router,
+        session_store,
         _runtime: runtime,
         _root: root,
     }
@@ -254,11 +225,6 @@ impl AdminApiDriver {
         (status, json)
     }
 
-    async fn session(&self) -> (StatusCode, Value) {
-        self.send(Method::GET, "/api/webchat/v2/session", None)
-            .await
-    }
-
     async fn list_users(&self) -> (StatusCode, Value) {
         self.send(Method::GET, "/api/webchat/v2/admin/users", None)
             .await
@@ -280,6 +246,15 @@ impl AdminApiDriver {
             Method::POST,
             "/api/webchat/v2/admin/users",
             Some(Value::Object(body)),
+        )
+        .await
+    }
+
+    async fn create_managed_agent(&self, display_name: &str) -> (StatusCode, Value) {
+        self.send(
+            Method::POST,
+            "/api/webchat/v2/admin/agents",
+            Some(json!({ "display_name": display_name })),
         )
         .await
     }
@@ -349,7 +324,7 @@ fn user_id_of(created: &Value) -> String {
 // ─── tests ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn admin_full_lifecycle_and_api_token_login() {
+async fn admin_creation_and_managed_resource_policy_over_http() {
     let harness = build_admin_harness().await;
     let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
 
@@ -362,87 +337,57 @@ async fn admin_full_lifecycle_and_api_token_login() {
         "no users exist before the admin creates any"
     );
 
-    // Create an admin and a member.
+    // Private user creation preserves normal RBAC lifecycle but never returns
+    // an admin-minted login credential.
     let (status, admin) = operator
         .create_user(Some("admin@acme.test"), "Ada Admin", "admin")
         .await;
     assert_eq!(status, StatusCode::OK, "operator creates an admin user");
     let admin_id = user_id_of(&admin);
-    let admin_token = admin["api_token"]
-        .as_str()
-        .expect("create returns a one-time api_token")
-        .to_string();
+    assert!(admin.get("api_token").is_none());
+    assert_eq!(
+        admin["user"]["content_access_policy"].as_str(),
+        Some("private")
+    );
+    let admin_token = harness
+        .session_store
+        .create_session(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new(&admin_id).expect("admin user"),
+            chrono::Duration::hours(1),
+            false,
+        )
+        .await
+        .expect("simulate verified admin login");
+    let admin_session = operator.as_bearer(admin_token.expose_secret());
 
-    let (status, member) = operator
-        .create_user(Some("member@acme.test"), "Mo Member", "member")
-        .await;
-    assert_eq!(status, StatusCode::OK, "operator creates a member user");
-    let member_id = user_id_of(&member);
-    let member_token = member["api_token"]
-        .as_str()
-        .expect("create returns a one-time api_token")
-        .to_string();
+    // Managed-agent creation is a separate workflow but still returns an
+    // ordinary UserId. It is fixed to Member and carries no credential.
+    let (status, managed) = admin_session.create_managed_agent("Managed Agent").await;
+    assert_eq!(status, StatusCode::OK, "operator creates a managed agent");
+    let managed_id = user_id_of(&managed);
+    assert!(managed.get("api_token").is_none());
+    assert_eq!(managed["user"]["role"].as_str(), Some("member"));
+    assert_eq!(
+        managed["user"]["content_access_policy"].as_str(),
+        Some("tenant_admin_managed")
+    );
 
     let (_, users) = operator.list_users().await;
     assert_eq!(
         users["users"].as_array().map(Vec::len),
         Some(2),
-        "both created users are enumerated"
+        "both ordinary UserId records are enumerated"
     );
 
-    // ── The flagship proof: the minted token logs in AS the new user. ──
-    let admin_session = operator.as_bearer(&admin_token);
-    let (status, session) = admin_session.session().await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "the minted admin token authenticates"
-    );
-    assert_eq!(
-        session["user_id"].as_str(),
-        Some(admin_id.as_str()),
-        "logging in with the API token resolves to the created user"
-    );
+    // Immutable policy: a managed subject cannot be promoted to Admin.
+    let (status, _) = admin_session.set_role(&managed_id, "admin").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // An admin-role token clears the admin boundary; a member-role token does not.
-    let (status, _) = admin_session.list_users().await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "an admin-role session may list users"
-    );
-
-    let member_session = operator.as_bearer(&member_token);
-    let (status, member_who) = member_session.session().await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "the member token also authenticates"
-    );
-    assert_eq!(
-        member_who["user_id"].as_str(),
-        Some(member_id.as_str()),
-        "the member token resolves to the member user"
-    );
-    let (status, _) = member_session.list_users().await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "a member must not reach the admin surface"
-    );
-
-    // Role + status mutations round-trip.
-    let (status, promoted) = operator.set_role(&member_id, "admin").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(promoted["user"]["role"].as_str(), Some("admin"));
-
-    let (status, suspended) = operator.set_status(&member_id, "suspended").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(suspended["user"]["status"].as_str(), Some("suspended"));
-
-    // Per-user secret provisioning: put then list; the material is never echoed.
-    let (status, put) = operator
-        .put_secret(&admin_id, "openai_key", "sk-super-secret-value")
+    // The same admin may manage an explicitly allowed resource for the managed
+    // target, with actor and subject remaining distinct at the service seam.
+    let (status, put) = admin_session
+        .put_secret(&managed_id, "openai_key", "sk-super-secret-value")
         .await;
     assert_eq!(status, StatusCode::OK, "admin provisions a per-user secret");
     assert_eq!(put["secret"]["handle"].as_str(), Some("openai_key"));
@@ -450,7 +395,7 @@ async fn admin_full_lifecycle_and_api_token_login() {
         !put.to_string().contains("sk-super-secret-value"),
         "the secret material must never be echoed back"
     );
-    let (status, secrets) = operator.list_secrets(&admin_id).await;
+    let (status, secrets) = admin_session.list_secrets(&managed_id).await;
     assert_eq!(status, StatusCode::OK);
     let handles: Vec<&str> = secrets["secrets"]
         .as_array()
@@ -467,11 +412,31 @@ async fn admin_full_lifecycle_and_api_token_login() {
         "listing secrets must not expose material"
     );
 
-    // Delete cascades: the record is gone, and a re-read is a 404.
-    let (status, deleted) = operator.delete_user(&member_id).await;
+    // Admin/operator status alone is never enough to reach a private human's
+    // resources. The existing endpoint now fails closed.
+    let (status, _) = admin_session
+        .put_secret(&admin_id, "forbidden", "must-not-persist")
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = admin_session.list_secrets(&admin_id).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The managed policy permits administrator-on-behalf access; it does not
+    // grant access to an arbitrary same-tenant authenticated member.
+    let (status, member) = operator
+        .create_user(Some("member@acme.test"), "Mira Member", "member")
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let member_id = user_id_of(&member);
+    let member_session = authenticated_user(&harness, &operator, &member_id).await;
+    let (status, _) = member_session.list_secrets(&managed_id).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Delete cascades: the managed record is gone, and a re-read is a 404.
+    let (status, deleted) = operator.delete_user(&managed_id).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(deleted["deleted"].as_bool(), Some(true));
-    let (status, _) = operator.get_user(&member_id).await;
+    let (status, _) = operator.get_user(&managed_id).await;
     assert_eq!(
         status,
         StatusCode::NOT_FOUND,
@@ -519,11 +484,9 @@ async fn admin_last_admin_protection_over_http() {
 
 // ─── adversarial / corner-case coverage ─────────────────────────────────────
 
-/// Build a signed-session store keyed by `(secret, TENANT)`. Because the store
-/// is deterministic in that pair, a store built here with `OPERATOR_TOKEN` mints
-/// bearers that validate under the harness's own authenticator (the exact
-/// property `signed_session_store`'s doc-comment guarantees); a store built with
-/// a *different* secret derives a different HMAC key, so its tokens fail closed.
+/// Build a signed-session store keyed by `(secret, TENANT)` for authentication
+/// boundary tests. Production user creation never exposes this store or a
+/// bearer; tests use it only to simulate the existing verified-login flow.
 fn session_store_with_secret(secret: &str) -> Arc<SignedTokenSessionStore> {
     signed_session_store(
         &SecretString::from(secret.to_string()),
@@ -531,127 +494,31 @@ fn session_store_with_secret(secret: &str) -> Arc<SignedTokenSessionStore> {
     )
 }
 
-/// Create an admin user via the API as the operator and return `(user_id,
-/// api_token)`. The `api_token` is the one-time minted session bearer.
-async fn create_admin(operator: &AdminApiDriver, display_name: &str) -> (String, String) {
+async fn create_admin(operator: &AdminApiDriver, display_name: &str) -> (String, ()) {
     let (status, created) = operator.create_user(None, display_name, "admin").await;
     assert_eq!(status, StatusCode::OK, "operator creates an admin user");
-    let id = user_id_of(&created);
-    let token = created["api_token"]
-        .as_str()
-        .expect("create returns a one-time api_token")
-        .to_string();
-    (id, token)
+    (user_id_of(&created), ())
 }
 
-/// 1. A deleted admin's minted token loses admin access: with no user record,
-///    `authorize_admin` fails closed → 403 on any admin verb.
-#[tokio::test]
-async fn deleted_admin_token_is_denied_on_admin_routes() {
-    let harness = build_admin_harness().await;
-    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
-
-    // A second admin so deleting the first is not blocked by last-admin
-    // protection (delete of the sole admin would 409, not 200).
-    let (admin_id, admin_token) = create_admin(&operator, "Del Admin").await;
-    let _ = create_admin(&operator, "Keep Admin").await;
-
-    // Sanity: the token clears the admin boundary while the record exists.
-    let admin_session = operator.as_bearer(&admin_token);
-    let (status, _) = admin_session.list_users().await;
-    assert_eq!(status, StatusCode::OK, "admin token works before delete");
-
-    let (status, deleted) = operator.delete_user(&admin_id).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(deleted["deleted"].as_bool(), Some(true));
-
-    // The deleted user's token no longer authorizes admin actions: the record
-    // is gone, so `authorize_admin`'s `get_user` returns None → 403.
-    let (status, _) = admin_session.list_users().await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "a deleted admin's token must not reach the admin surface"
-    );
-
-    // KNOWN REVOCATION GAP (verified, deliberately NOT asserted as desired):
-    // signed session tokens are stateless and are NOT revoked on user delete,
-    // so the same deleted token still authenticates a non-admin route
-    // (`GET /api/webchat/v2/session` returns 200 as the tombstoned user id).
-    // We exercise that path to document the gap but do not lock it in with an
-    // assertion — when session revocation-on-delete lands this should change to
-    // a 401, and a test asserting 200 here would then wrongly fail-block the fix.
-    let _ = admin_session.session().await;
+async fn authenticated_user(
+    harness: &AdminHarness,
+    operator: &AdminApiDriver,
+    user_id: &str,
+) -> AdminApiDriver {
+    let token = harness
+        .session_store
+        .create_session(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new(user_id).expect("user"),
+            chrono::Duration::hours(1),
+            false,
+        )
+        .await
+        .expect("simulate verified login");
+    operator.as_bearer(token.expose_secret())
 }
 
-/// 2. A suspended admin's own token loses admin access. Relies on the
-///    status-gate in `authorize_admin` (role.is_admin() AND status==Active).
-#[tokio::test]
-async fn suspended_admin_token_is_denied_on_admin_routes() {
-    let harness = build_admin_harness().await;
-    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
-
-    // Two admins so suspending one is not blocked by last-admin protection.
-    let (admin_id, admin_token) = create_admin(&operator, "Suspendable Admin").await;
-    let _ = create_admin(&operator, "Other Admin").await;
-
-    let admin_session = operator.as_bearer(&admin_token);
-    let (status, _) = admin_session.list_users().await;
-    assert_eq!(status, StatusCode::OK, "admin token works while active");
-
-    let (status, suspended) = operator.set_status(&admin_id, "suspended").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(suspended["user"]["status"].as_str(), Some("suspended"));
-
-    // The suspended admin keeps the `admin` role but a non-Active status must
-    // immediately revoke admin API access.
-    let (status, _) = admin_session.list_users().await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "a suspended admin's token must not reach the admin surface"
-    );
-}
-
-/// 3. A minted admin *session* bearer is admin for user-management but must NOT
-///    carry `operator_webui_config`: it is rejected on an operator-gated route
-///    (`GET /api/webchat/v2/operator/status`) that the operator env-bearer may
-///    reach. The harness mounts operator routes
-///    (`mounts_operator_webui_config_routes() == true`).
-#[tokio::test]
-async fn admin_session_bearer_cannot_reach_operator_routes() {
-    let harness = build_admin_harness().await;
-    let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
-    let (_admin_id, admin_token) = create_admin(&operator, "Ops Curious Admin").await;
-
-    const OPERATOR_STATUS: &str = "/api/webchat/v2/operator/status";
-
-    // The operator env-bearer clears the operator capability gate.
-    let (status, _) = operator.send(Method::GET, OPERATOR_STATUS, None).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "operator env-bearer reaches the operator status route"
-    );
-
-    // The admin session bearer is admin for user CRUD but not an operator: the
-    // capability gate in composition rejects it before the handler runs.
-    let admin_session = operator.as_bearer(&admin_token);
-    let (status, _) = admin_session.list_users().await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "the admin session bearer IS admin for user management"
-    );
-    let (status, _) = admin_session.send(Method::GET, OPERATOR_STATUS, None).await;
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "an admin session bearer must NOT carry operator_webui_config"
-    );
-}
-
-/// 4. Forged / tampered / expired tokens are rejected at the auth boundary with
+/// Forged / tampered / expired tokens are rejected at the auth boundary with
 ///    a 401 — they never reach the admin facade.
 #[tokio::test]
 async fn forged_and_expired_tokens_are_rejected() {
@@ -794,11 +661,17 @@ async fn secret_handle_path_traversal_is_contained() {
     let harness = build_admin_harness().await;
     let operator = AdminApiDriver::new(harness.router.clone(), OPERATOR_TOKEN);
 
-    let (target_id, _) = create_admin(&operator, "Secret Target").await;
-    let (other_id, _) = create_admin(&operator, "Bystander").await;
+    let (admin_id, _) = create_admin(&operator, "Admin").await;
+    let admin = authenticated_user(&harness, &operator, &admin_id).await;
+    let (status, target) = admin.create_managed_agent("Secret Target").await;
+    assert_eq!(status, StatusCode::OK);
+    let target_id = user_id_of(&target);
+    let (status, other) = admin.create_managed_agent("Bystander").await;
+    assert_eq!(status, StatusCode::OK);
+    let other_id = user_id_of(&other);
 
     for handle in ["..%2F..%2Fother", "a%2Fb"] {
-        let (status, _) = operator
+        let (status, _) = admin
             .send(
                 Method::PUT,
                 &format!("/api/webchat/v2/admin/users/{target_id}/secrets/{handle}"),
@@ -815,7 +688,7 @@ async fn secret_handle_path_traversal_is_contained() {
     }
 
     // Nothing leaked into the target's namespace...
-    let (status, secrets) = operator.list_secrets(&target_id).await;
+    let (status, secrets) = admin.list_secrets(&target_id).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         secrets["secrets"].as_array().map(Vec::len),
@@ -823,7 +696,7 @@ async fn secret_handle_path_traversal_is_contained() {
         "no secret was written under the target user despite the traversal attempt"
     );
     // ...and nothing escaped into the bystander's namespace either.
-    let (status, secrets) = operator.list_secrets(&other_id).await;
+    let (status, secrets) = admin.list_secrets(&other_id).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         secrets["secrets"].as_array().map(Vec::len),
@@ -978,26 +851,37 @@ async fn production_admin_surface_provisions_and_isolates_per_user_secrets() {
         "admin user surface must be wired on production; got {users:?}"
     );
 
-    // create_user needs the identity directory (#6395); its success confirms
-    // the directory half of the trio is sourced from the production graph.
-    let (status, user_a) = operator
-        .create_user(Some("a@prod.test"), "User A", "member")
+    let (status, admin) = operator
+        .create_user(Some("admin@prod.test"), "Production Admin", "admin")
         .await;
     assert_eq!(
         status,
         StatusCode::OK,
-        "operator creates a user on production"
+        "operator creates an admin identity on production"
     );
+    let admin_id = user_id_of(&admin);
+    let admin_token = harness
+        .session_store
+        .create_session(
+            TenantId::new(TENANT).expect("tenant"),
+            UserId::new(&admin_id).expect("admin user"),
+            chrono::Duration::hours(1),
+            false,
+        )
+        .await
+        .expect("simulate verified admin login");
+    let admin_session = operator.as_bearer(admin_token.expose_secret());
+
+    let (status, user_a) = admin_session.create_managed_agent("Agent A").await;
+    assert_eq!(status, StatusCode::OK);
     let user_a = user_id_of(&user_a);
-    let (status, user_b) = operator
-        .create_user(Some("b@prod.test"), "User B", "member")
-        .await;
+    let (status, user_b) = admin_session.create_managed_agent("Agent B").await;
     assert_eq!(status, StatusCode::OK);
     let user_b = user_id_of(&user_b);
 
     // The admin secret provisioner (this change) accepts a per-user secret over
     // the production secret substrate — the direct regression assertion.
-    let (status, put) = operator
+    let (status, put) = admin_session
         .put_secret(&user_a, "openai_key", "sk-prod-secret-value")
         .await;
     assert_eq!(
@@ -1012,7 +896,7 @@ async fn production_admin_surface_provisions_and_isolates_per_user_secrets() {
     );
 
     // Per-user isolation: A's secret lists for A and NOT for B.
-    let (status, a_secrets) = operator.list_secrets(&user_a).await;
+    let (status, a_secrets) = admin_session.list_secrets(&user_a).await;
     assert_eq!(status, StatusCode::OK);
     let a_handles: Vec<&str> = a_secrets["secrets"]
         .as_array()
@@ -1025,7 +909,7 @@ async fn production_admin_surface_provisions_and_isolates_per_user_secrets() {
         "user A sees its provisioned secret"
     );
 
-    let (status, b_secrets) = operator.list_secrets(&user_b).await;
+    let (status, b_secrets) = admin_session.list_secrets(&user_b).await;
     assert_eq!(status, StatusCode::OK);
     let b_handles: Vec<&str> = b_secrets["secrets"]
         .as_array()

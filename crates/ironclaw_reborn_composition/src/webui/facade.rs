@@ -259,22 +259,21 @@ pub(crate) fn build_webui_services_with_channel_connection(
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
-    // Admin user-management surface: wired only when the identity directory,
-    // the admin secret provisioner, and a token minter are all available.
-    // Otherwise the fail-closed RejectingAdminUserService default stands and
-    // admin routes report the service unavailable.
-    if let (Some(directory), Some(provisioner), Some(minter)) = (
-        runtime.reborn_user_directory(),
-        runtime.reborn_admin_secret_provisioner(),
-        runtime.reborn_admin_token_minter(),
-    ) {
+    // Identity lifecycle is available whenever the canonical directory is.
+    // Managed-resource access is a separate, narrower port and is wired only
+    // when its substrate exists; both fail closed independently.
+    if let Some(directory) = runtime.reborn_user_directory() {
         api = api.with_admin_user_service(Arc::new(
-            crate::admin_user_directory::RebornAdminUserDirectory::new(
-                directory,
-                provisioner,
-                minter,
-            ),
+            crate::admin_user_directory::RebornAdminUserDirectory::new(Arc::clone(&directory)),
         ));
+        if let Some(provisioner) = runtime.reborn_admin_secret_provisioner() {
+            api = api.with_admin_managed_resource_service(Arc::new(
+                crate::admin_managed_resources::RebornAdminManagedResources::new(
+                    directory,
+                    provisioner,
+                ),
+            ));
+        }
     }
     if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
         api = api

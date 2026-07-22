@@ -31,6 +31,7 @@ pub struct RebornUser {
     pub display_name: Option<String>,
     pub status: RebornUserStatus,
     pub role: RebornUserRole,
+    pub content_access_policy: UserContentAccessPolicy,
     pub created_at: String,
     pub updated_at: String,
     /// The admin `UserId` that provisioned this account, if it was created
@@ -57,6 +58,26 @@ pub enum RebornUserRole {
     Owner,
     Admin,
     Member,
+}
+
+/// Immutable authority governing login and administrator-on-behalf access to
+/// user-owned content. This is deliberately independent of RBAC role.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum UserContentAccessPolicy {
+    /// A human account. Administrators may manage its lifecycle, but may not
+    /// read or mutate its user-owned resources on the user's behalf.
+    #[default]
+    Private,
+    /// A non-login subject intentionally created for tenant administrators to
+    /// manage. The subject remains a Member and receives no login credential.
+    TenantAdminManaged,
+}
+
+/// Closed set of administrator-on-behalf operations. Adding a new resource
+/// operation requires an explicit identity-domain policy decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminManagedUserOperation {
+    ManageSecrets,
 }
 
 impl RebornUserRole {
@@ -104,16 +125,16 @@ pub trait RebornUserDirectory: Send + Sync {
     /// One user by id, or `None` if no record exists.
     async fn get_user(&self, user_id: &UserId) -> Result<Option<RebornUser>, RebornIdentityError>;
 
-    /// Admin-mint a new active user with no external identity. Returns the
-    /// created record (carrying the freshly minted `UserId`). Unlike an SSO
-    /// first-login this writes only the `users/` record — no verified-email
-    /// index — so it does not weaken the resolver's OAuth-surface index gate.
+    /// Create a new active user with no external identity. A private user with
+    /// an email reserves the verified-email claim index, but an external
+    /// identity is linked only after the existing OAuth verification gate.
     async fn create_user(
         &self,
         tenant_id: &TenantId,
         email: Option<String>,
         display_name: Option<String>,
         role: RebornUserRole,
+        content_access_policy: UserContentAccessPolicy,
         created_by: &UserId,
     ) -> Result<RebornUser, RebornIdentityError>;
 
@@ -138,6 +159,18 @@ pub trait RebornUserDirectory: Send + Sync {
         user_id: &UserId,
         role: RebornUserRole,
     ) -> Result<RebornUser, RebornIdentityError>;
+
+    /// Canonical authorization decision for an administrator acting on a
+    /// managed target's user-owned resources. Requires an active admin actor,
+    /// same-tenant actor and target records, a managed target policy, and an
+    /// explicitly modeled operation.
+    async fn authorize_admin_managed_target(
+        &self,
+        tenant_id: &TenantId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
+        operation: AdminManagedUserOperation,
+    ) -> Result<bool, RebornIdentityError>;
 
     /// Record a successful login. Updates `last_login_at` only — it does not
     /// bump `updated_at`, which tracks profile mutations, not login activity.

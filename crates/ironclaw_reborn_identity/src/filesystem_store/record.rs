@@ -27,6 +27,8 @@ pub(super) struct StoredUser {
     pub(super) status: StoredUserStatus,
     #[serde(default)]
     pub(super) role: StoredUserRole,
+    #[serde(default)]
+    pub(super) content_access_policy: StoredUserContentAccessPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) created_by: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +61,16 @@ pub(super) enum StoredUserRole {
     Admin,
     #[default]
     Member,
+}
+
+/// Immutable user content/login policy. `Private` is the compatibility-safe
+/// default for every record written before this field existed.
+#[derive(Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum StoredUserContentAccessPolicy {
+    #[default]
+    Private,
+    TenantAdminManaged,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]

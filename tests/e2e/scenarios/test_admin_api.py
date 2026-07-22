@@ -3,14 +3,9 @@
 Drives the WebChat v2 admin surface (`/api/webchat/v2/admin/*`, backed by
 `ironclaw_product_workflow::AdminUserService`) over HTTP against the standalone
 Reborn binary — so unlike the crate-tier `admin_api_e2e.rs` (which composes the
-router in-process), this exercises serve.rs's real wiring: the operator
-env-bearer authenticator, and the signed-session-store token minter that must
-share its signing secret with the SSO login surface.
-
-The flagship proof is `test_created_user_token_authenticates_as_that_user`: an
-admin creates a user, receives the one-time `api_token`, and that token then
-authenticates a follow-up `/session` request AS the new user — end-to-end
-through the real minter + session-store wiring in the binary.
+router in-process), this exercises serve.rs's real wiring and operator
+env-bearer authenticator. User creation returns identity records only; login
+credentials remain owned by verified login/claim flows.
 
 Authorization: the operator env-bearer (`IRONCLAW_REBORN_WEBUI_TOKEN`) is an
 implicit owner, so it clears the admin boundary. Last-admin protection (409) is
@@ -49,7 +44,7 @@ async def admin_client(reborn_v2_server):
 
 @pytest.fixture()
 async def test_user(admin_client):
-    """Create a member user, yield its record + one-time token, delete after."""
+    """Create a private member user, yield its record, delete after."""
     suffix = uuid.uuid4().hex[:8]
     email = f"test-{suffix}@example.com"
     display_name = f"E2E Test User {suffix}"
@@ -64,17 +59,16 @@ async def test_user(admin_client):
         "id": user["user_id"],
         "email": email,
         "display_name": display_name,
-        "token": body["api_token"],
     }
     await admin_client.delete(f"{ADMIN_BASE}/users/{user['user_id']}")
 
 
 # ---------------------------------------------------------------
-# Create + one-time token
+# Private-user and managed-agent creation
 # ---------------------------------------------------------------
 
 
-async def test_create_user_returns_record_and_one_time_token(admin_client):
+async def test_create_private_user_returns_record_without_login_credential(admin_client):
     email = f"test-{uuid.uuid4().hex[:8]}@example.com"
     r = await admin_client.post(
         f"{ADMIN_BASE}/users",
@@ -82,45 +76,27 @@ async def test_create_user_returns_record_and_one_time_token(admin_client):
     )
     assert r.status_code == 200, r.text
     body = r.json()
-    # v2 shape: the record is nested under `user`; the token is a sibling
-    # exposed exactly once here.
     assert body["user"]["user_id"]
     assert body["user"]["status"] == "active"
     assert body["user"]["role"] == "member"
-    assert body["api_token"]
+    assert body["user"]["content_access_policy"] == "private"
+    assert "api_token" not in body
     await admin_client.delete(f"{ADMIN_BASE}/users/{body['user']['user_id']}")
 
 
-async def test_created_user_token_authenticates_as_that_user(admin_client, reborn_v2_server):
-    """Flagship: the one-time api_token logs in AS the new user.
-
-    Exercises the whole mint -> return -> validate chain through the real serve
-    binary: the admin minter's signed session store must share its signing
-    secret with the SSO login surface's store, or this bearer would not
-    validate at `/session`.
-    """
-    email = f"test-{uuid.uuid4().hex[:8]}@example.com"
+async def test_create_managed_agent_returns_member_user_without_login_credential(admin_client):
     r = await admin_client.post(
-        f"{ADMIN_BASE}/users",
-        json={"display_name": "Token Login", "email": email, "role": "member"},
+        f"{ADMIN_BASE}/agents",
+        json={"display_name": "Managed Agent"},
     )
     assert r.status_code == 200, r.text
     created = r.json()
-    new_user_id = created["user"]["user_id"]
-    api_token = created["api_token"]
-
-    # The minted token is distinct from the operator bearer that created the user.
-    assert api_token != REBORN_V2_AUTH_TOKEN
-
-    async with httpx.AsyncClient(base_url=reborn_v2_server, timeout=15) as user_client:
-        session = await user_client.get(
-            "/api/webchat/v2/session",
-            headers={"Authorization": f"Bearer {api_token}"},
-        )
-    assert session.status_code == 200, session.text
-    assert session.json()["user_id"] == new_user_id
-
-    await admin_client.delete(f"{ADMIN_BASE}/users/{new_user_id}")
+    user = created["user"]
+    assert user["user_id"]
+    assert user["role"] == "member"
+    assert user["content_access_policy"] == "tenant_admin_managed"
+    assert "api_token" not in created
+    await admin_client.delete(f"{ADMIN_BASE}/users/{user['user_id']}")
 
 
 # ---------------------------------------------------------------
@@ -223,10 +199,10 @@ async def test_admin_user_detail_refreshes_role_and_status_after_mutations(
     )
 
 
-async def test_admin_token_visibility_matches_user_creation_lifecycle(
+async def test_admin_user_creation_never_renders_a_login_token(
     admin_client, reborn_v2_page, reborn_v2_server, test_user
 ):
-    """Creation shows the one-time token; existing-user details do not."""
+    """Private-user creation and user details never expose a login token."""
     await reborn_v2_page.goto(
         f"{reborn_v2_server}/admin/users?token={REBORN_V2_AUTH_TOKEN}"
     )
@@ -252,23 +228,8 @@ async def test_admin_token_visibility_matches_user_creation_lifecycle(
         assert create_response.status == 200
         created = await create_response.json()
         created_user_id = created["user"]["user_id"]
-        one_time_token = created["api_token"]
-
-        await expect(
-            reborn_v2_page.get_by_text(
-                SEL_V2["admin_token_created_text"], exact=True
-            )
-        ).to_be_visible(timeout=15000)
-        await expect(
-            reborn_v2_page.locator(SEL_V2["admin_token_value"]).filter(
-                has_text=one_time_token
-            )
-        ).to_be_visible()
-        await expect(
-            reborn_v2_page.get_by_text(
-                SEL_V2["admin_token_description_text"], exact=True
-            )
-        ).to_be_visible()
+        assert "api_token" not in created
+        await expect(reborn_v2_page.locator(SEL_V2["admin_token_value"])).to_have_count(0)
 
         await reborn_v2_page.get_by_role(
             "button", name=test_user["display_name"], exact=True

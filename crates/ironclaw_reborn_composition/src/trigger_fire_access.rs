@@ -318,8 +318,8 @@ mod tests {
     mod identity {
         use super::*;
         use ironclaw_reborn_identity::{
-            RebornIdentityError, RebornUser, RebornUserDirectory, RebornUserProfileUpdate,
-            RebornUserRole, RebornUserStatus,
+            AdminManagedUserOperation, RebornIdentityError, RebornUser, RebornUserDirectory,
+            RebornUserProfileUpdate, RebornUserRole, RebornUserStatus, UserContentAccessPolicy,
         };
 
         /// Directory double returning one configured user (or none), and a
@@ -357,6 +357,7 @@ mod tests {
                 display_name: None,
                 status,
                 role: RebornUserRole::Member,
+                content_access_policy: UserContentAccessPolicy::Private,
                 created_at: String::new(),
                 updated_at: String::new(),
                 created_by: None,
@@ -392,6 +393,7 @@ mod tests {
                 _email: Option<String>,
                 _display_name: Option<String>,
                 _role: RebornUserRole,
+                _content_access_policy: UserContentAccessPolicy,
                 _created_by: &UserId,
             ) -> Result<RebornUser, RebornIdentityError> {
                 unimplemented!("not used")
@@ -415,6 +417,15 @@ mod tests {
                 _user_id: &UserId,
                 _role: RebornUserRole,
             ) -> Result<RebornUser, RebornIdentityError> {
+                unimplemented!("not used")
+            }
+            async fn authorize_admin_managed_target(
+                &self,
+                _tenant_id: &TenantId,
+                _actor_user_id: &UserId,
+                _subject_user_id: &UserId,
+                _operation: AdminManagedUserOperation,
+            ) -> Result<bool, RebornIdentityError> {
                 unimplemented!("not used")
             }
             async fn record_last_login(

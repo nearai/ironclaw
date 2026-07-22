@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Admin-managed identities:** represent managed agents as ordinary `UserId`
+  subjects with an immutable, fail-closed content-access policy; separate
+  private-user and managed-agent creation, remove administrator-minted login
+  tokens, and require same-tenant administrator authorization before managed
+  secret access.
 - **Hosted MCP discovery:** bound overlong valid tool descriptions at the
   generic MCP boundary instead of rejecting the provider's entire catalog.
 - **Channel delivery:** keep live source-route observers attached for normal

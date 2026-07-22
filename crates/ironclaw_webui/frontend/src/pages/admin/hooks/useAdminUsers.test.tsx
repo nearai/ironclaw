@@ -11,6 +11,7 @@ import { beforeEach, test, vi } from "vitest";
 const adminApi = vi.hoisted(() => ({
   activateAdminUser: vi.fn(),
   createAdminUser: vi.fn(),
+  createManagedAgent: vi.fn(),
   deleteAdminUser: vi.fn(),
   deleteUserSecret: vi.fn(),
   fetchAdminUser: vi.fn(),
@@ -67,6 +68,12 @@ beforeEach(() => {
   adminApi.activateAdminUser.mockImplementation(async (id) => ({ id, status: "active" }));
   adminApi.createAdminUser.mockImplementation(async (payload) => ({
     id: "created-user",
+    ...payload,
+  }));
+  adminApi.createManagedAgent.mockImplementation(async (payload) => ({
+    id: "managed-user",
+    role: "member",
+    content_access_policy: "tenant_admin_managed",
     ...payload,
   }));
   adminApi.deleteAdminUser.mockResolvedValue({});

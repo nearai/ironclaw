@@ -8,6 +8,7 @@ test("admin user hook exposes pending and error state for every management actio
   const resetCalls = [];
   const mutationStates = [
     { data: null, error: null, isPending: false, variables: null },
+    { data: null, error: null, isPending: false, variables: null },
     { error: new Error("role failed"), isPending: true, variables: { id: "user-role" } },
     { error: new Error("delete failed"), isPending: true, variables: "user-delete" },
     { error: new Error("suspend failed"), isPending: true, variables: "user-suspend" },
@@ -34,6 +35,7 @@ test("admin user hook exposes pending and error state for every management actio
       fetchAdminUsers: () => {},
       fetchAdminUser: () => {},
       createAdminUser: () => {},
+      createManagedAgent: () => {},
       updateAdminUser: () => {},
       deleteAdminUser: () => {},
       suspendAdminUser: () => {},
@@ -63,8 +65,8 @@ test("admin user hook exposes pending and error state for every management actio
   state.resetUpdate();
   state.resetDelete();
   state.resetSuspend();
-  assert.deepEqual(resetCalls, [1, 2, 3]);
+  assert.deepEqual(resetCalls, [2, 3, 4]);
 
   state.resetActionErrors();
-  assert.deepEqual(resetCalls, [1, 2, 3, 1, 2, 3, 4]);
+  assert.deepEqual(resetCalls, [2, 3, 4, 2, 3, 4, 5]);
 });

@@ -28,41 +28,6 @@ function buildFilters(t) {
   ];
 }
 
-function TokenBanner({ token, onDismiss }) {
-  const t = useT();
-  const [copied, setCopied] = React.useState(false);
-
-  const handleCopy = () => {
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText(token);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
-  return (
-    <div className="rounded-xl border border-signal/30 bg-signal/10 p-4 sm:p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-iron-100">{t("admin.users.tokenCreated")}</p>
-          <p className="mt-1 text-xs text-iron-300">{t("admin.users.tokenCreatedDesc")}</p>
-          <div className="mt-3 flex items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded-md border border-iron-700 bg-iron-800/70 px-3 py-2 font-mono text-xs text-iron-100">
-              {token}
-            </code>
-            <Button variant="secondary" onClick={handleCopy}>
-              {copied ? t("admin.users.copied") : t("admin.users.copy")}
-            </Button>
-          </div>
-        </div>
-        <button onClick={onDismiss} className="text-iron-300 hover:text-iron-100">
-          <Icon name="close" className="h-4 w-4" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function CreateUserForm({ onCreate, isCreating, error, resetError }) {
   const t = useT();
   const [name, setName] = React.useState("");
@@ -144,6 +109,48 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
   );
 }
 
+function CreateManagedAgentForm({ onCreate, isCreating, error, resetError }) {
+  const t = useT();
+  const [name, setName] = React.useState("");
+  const [isOpen, setIsOpen] = React.useState(false);
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    if (!name.trim()) return;
+    resetError?.();
+    try {
+      await onCreate({ display_name: name.trim() });
+      setName("");
+      setIsOpen(false);
+    } catch (_) {
+      // Keep the form open; the mutation exposes its sanitized error below.
+    }
+  };
+  const createLabel = `${t("admin.users.createUser")} · ${t("settings.agent")}`;
+  if (!isOpen) {
+    return <Button variant="secondary" onClick={() => setIsOpen(true)}>{createLabel}</Button>;
+  }
+  return (
+    <Panel className="p-5 sm:p-6">
+      <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{createLabel}</h3>
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <input
+          type="text"
+          value={name}
+          onChange={(event) => setName(event.currentTarget.value)}
+          required
+          placeholder={t("settings.field.agentName")}
+          className="h-9 w-full rounded-md border border-iron-700 bg-iron-800/70 px-3 text-sm text-iron-100 outline-none placeholder:text-iron-400 focus:border-signal/45"
+        />
+        {error && (<p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p>)}
+        <div className="flex gap-2">
+          <Button type="submit" disabled={isCreating}>{isCreating ? t("common.loading") : createLabel}</Button>
+          <Button variant="ghost" type="button" onClick={() => setIsOpen(false)}>{t("common.cancel")}</Button>
+        </div>
+      </form>
+    </Panel>
+  );
+}
+
 export function ConfirmModal({ title, message, confirmLabel, onConfirm, onCancel, isPending, error }) {
   const t = useT();
   return (
@@ -215,7 +222,7 @@ export function UserRow({
             : (<button data-testid="admin-user-activate" disabled={isActionPending} aria-busy={isActivating || undefined} onClick={() => onActivate(user.id)} className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-signal/30 hover:text-signal disabled:cursor-not-allowed disabled:opacity-50">{isActivating ? t("common.loading") : t("admin.users.activate")}</button>)}
           <button
             data-testid="admin-user-role"
-            disabled={isActionPending}
+            disabled={isActionPending || user.content_access_policy === "tenant_admin_managed"}
             aria-busy={isUpdating || undefined}
             onClick={() => onChangeRole(user.id, user.role === "admin" ? "member" : "admin")}
             className="rounded-md border border-iron-700 px-2.5 py-1.5 text-[11px] font-medium text-iron-300 hover:border-iron-700 hover:text-iron-100 disabled:cursor-not-allowed disabled:opacity-50"
@@ -245,12 +252,13 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
   const {
     users, query, isForbidden, createUser, isCreating, createError,
     resetCreate,
+    createManagedAgent, isCreatingManagedAgent, createManagedAgentError,
+    resetCreateManagedAgent,
     updateUser, suspendUser, activateUser,
     isUpdating, updateError, updatingUserId,
     isSuspending, suspendError, suspendingUserId, resetSuspend,
     isActivating, activateError, activatingUserId,
     resetActionErrors,
-    newToken, clearToken,
   } = adminState;
 
   const [search, setSearch] = React.useState("");
@@ -340,18 +348,17 @@ export function AdminUsersTabView({ onSelectUser, adminState }) {
 
   return (
     <div className="space-y-5">
-      {newToken && (
-        <TokenBanner
-          token={newToken.token || newToken.plaintext_token}
-          onDismiss={clearToken}
-        />
-      )}
-
       <CreateUserForm
         onCreate={createUser}
         isCreating={isCreating}
         error={createError}
         resetError={resetCreate}
+      />
+      <CreateManagedAgentForm
+        onCreate={createManagedAgent}
+        isCreating={isCreatingManagedAgent}
+        error={createManagedAgentError}
+        resetError={resetCreateManagedAgent}
       />
 
       <Panel className="p-5 sm:p-6">

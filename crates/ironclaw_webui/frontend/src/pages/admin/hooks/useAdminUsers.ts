@@ -5,6 +5,7 @@ import {
   fetchAdminUsers,
   fetchAdminUser,
   createAdminUser,
+  createManagedAgent,
   updateAdminUser,
   deleteAdminUser,
   suspendAdminUser,
@@ -59,6 +60,10 @@ export function useAdminUsers() {
   };
 
   const createMut = useMutation({ mutationFn: createAdminUser, onSuccess: invalidateUsers });
+  const createManagedMut = useMutation({
+    mutationFn: createManagedAgent,
+    onSuccess: invalidateUsers,
+  });
   const updateMut = useMutation({
     mutationFn: ({ id, payload }) => updateAdminUser(id, payload),
     onSuccess: (user, { id }) => refreshUser(id, user),
@@ -91,6 +96,10 @@ export function useAdminUsers() {
     isCreating: createMut.isPending,
     createError: createMut.error,
     resetCreate: createMut.reset,
+    createManagedAgent: createManagedMut.mutateAsync,
+    isCreatingManagedAgent: createManagedMut.isPending,
+    createManagedAgentError: createManagedMut.error,
+    resetCreateManagedAgent: createManagedMut.reset,
     updateUser: (id, payload) => updateMut.mutateAsync({ id, payload }),
     isUpdating: updateMut.isPending,
     updateError: updateMut.error,
@@ -111,14 +120,6 @@ export function useAdminUsers() {
     activateError: activateMut.error,
     activatingUserId: activateMut.variables || null,
     resetActionErrors,
-    // The one-time API bearer is issued ONLY at user creation, so the create
-    // result (which carries `.token`) feeds the one-time token banner. There is
-    // no re-issue endpoint for existing users, so no `createToken` action is
-    // exposed here — see `lib/admin-api.ts::createUserToken`.
-    newToken: createMut.data?.token ? createMut.data : null,
-    clearToken: () => {
-      createMut.reset();
-    },
   };
 }
 

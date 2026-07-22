@@ -8,10 +8,14 @@ scenarios exercise the real Reborn binary without duplicating process plumbing.
 """
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import signal
 import socket
+import time
 import uuid
 from pathlib import Path
 
@@ -421,6 +425,46 @@ async def open_reborn_v2_page(page, base_url: str, path: str = "/") -> None:
 
 def reborn_bearer_headers(token: str = REBORN_V2_AUTH_TOKEN) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def signed_test_user_session(
+    user_id: str,
+    *,
+    tenant_id: str = "reborn-v2-e2e",
+    operator_secret: str = REBORN_V2_AUTH_TOKEN,
+) -> str:
+    """Mint a non-operator session for an E2E user without a login provider.
+
+    Production user sessions still come only from verified login/claim flows.
+    This test helper mirrors the signed-session wire contract so multi-user
+    black-box tests can authenticate fixture users without restoring the
+    removed admin bearer-token minting path.
+    """
+    tenant_bytes = tenant_id.encode()
+    key_material = (
+        b"ironclaw-reborn-webui-session-v1::"
+        + len(tenant_bytes).to_bytes(8, "little")
+        + tenant_bytes
+        + b"::"
+        + operator_secret.encode()
+    )
+    key = hashlib.sha256(key_material).digest()
+    now = int(time.time())
+    payload = json.dumps(
+        {
+            "sid": str(uuid.uuid4()),
+            "tenant": tenant_id,
+            "user": user_id,
+            "iat": now,
+            "exp": now + 3600,
+            "op": False,
+        },
+        separators=(",", ":"),
+    ).encode()
+    payload_b64 = base64.urlsafe_b64encode(payload).rstrip(b"=")
+    signature = hmac.new(key, payload_b64, hashlib.sha256).digest()
+    signature_b64 = base64.urlsafe_b64encode(signature).rstrip(b"=")
+    return f"{payload_b64.decode()}.{signature_b64.decode()}"
 
 
 def client_action_id() -> str:

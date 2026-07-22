@@ -115,8 +115,10 @@ function baseAdminState(overrides = {}) {
     activateError: null,
     activatingUserId: null,
     resetActionErrors: () => {},
-    newToken: null,
-    clearToken: () => {},
+    createManagedAgent: async () => {},
+    isCreatingManagedAgent: false,
+    createManagedAgentError: null,
+    resetCreateManagedAgent: () => {},
     ...overrides,
   };
 }

@@ -22,13 +22,14 @@ use super::paths::{
     users_dir_path, verified_email_path,
 };
 use super::record::{
-    StoredExternalIdentity, StoredUser, StoredUserRole, StoredUserStatus, StoredUserTombstone,
-    StoredVerifiedEmailIndex,
+    StoredExternalIdentity, StoredUser, StoredUserContentAccessPolicy, StoredUserRole,
+    StoredUserStatus, StoredUserTombstone, StoredVerifiedEmailIndex,
 };
 use super::{FilesystemRebornIdentityStore, backend, to_user_id};
 use crate::RebornIdentityError;
 use crate::user_directory::{
-    RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole, RebornUserStatus,
+    AdminManagedUserOperation, RebornUser, RebornUserDirectory, RebornUserProfileUpdate,
+    RebornUserRole, RebornUserStatus, UserContentAccessPolicy,
 };
 
 fn now_rfc3339() -> String {
@@ -74,6 +75,24 @@ fn status_from_stored(status: StoredUserStatus) -> RebornUserStatus {
     }
 }
 
+fn policy_to_stored(policy: UserContentAccessPolicy) -> StoredUserContentAccessPolicy {
+    match policy {
+        UserContentAccessPolicy::Private => StoredUserContentAccessPolicy::Private,
+        UserContentAccessPolicy::TenantAdminManaged => {
+            StoredUserContentAccessPolicy::TenantAdminManaged
+        }
+    }
+}
+
+fn policy_from_stored(policy: StoredUserContentAccessPolicy) -> UserContentAccessPolicy {
+    match policy {
+        StoredUserContentAccessPolicy::Private => UserContentAccessPolicy::Private,
+        StoredUserContentAccessPolicy::TenantAdminManaged => {
+            UserContentAccessPolicy::TenantAdminManaged
+        }
+    }
+}
+
 /// Map a persisted row to the public domain type, validating the persisted
 /// `user_id` / `created_by` / `tenant_id` strings on the way out (a malformed
 /// persisted id is a backend inconsistency, surfaced rather than dropped).
@@ -94,6 +113,7 @@ fn to_reborn_user(user_id: String, stored: StoredUser) -> Result<RebornUser, Reb
         display_name: stored.display_name,
         status: status_from_stored(stored.status),
         role: role_from_stored(stored.role),
+        content_access_policy: policy_from_stored(stored.content_access_policy),
         created_at: stored.created_at,
         updated_at: stored.updated_at,
         created_by,
@@ -326,8 +346,16 @@ where
         email: Option<String>,
         display_name: Option<String>,
         role: RebornUserRole,
+        content_access_policy: UserContentAccessPolicy,
         created_by: &UserId,
     ) -> Result<RebornUser, RebornIdentityError> {
+        if content_access_policy == UserContentAccessPolicy::TenantAdminManaged
+            && role != RebornUserRole::Member
+        {
+            return Err(RebornIdentityError::UserPolicyViolation(
+                "admin-managed users must remain members",
+            ));
+        }
         let new_user_id = to_user_id(Uuid::new_v4().to_string())?;
         let now = now_rfc3339();
         let record = StoredUser {
@@ -337,6 +365,7 @@ where
             updated_at: now,
             status: StoredUserStatus::Active,
             role: role_to_stored(role),
+            content_access_policy: policy_to_stored(content_access_policy),
             created_by: Some(created_by.as_str().to_string()),
             last_login_at: None,
             tenant_id: Some(tenant_id.as_str().to_string()),
@@ -352,6 +381,43 @@ where
         )
         .await
         .map_err(backend)?;
+
+        // A private user with an email is an invitation/claim target: only a
+        // later provider-verified OAuth identity can consume this index. The
+        // user record is written first so a crash can leave only an
+        // unreferenced user, never an index pointing at a missing user.
+        if content_access_policy == UserContentAccessPolicy::Private
+            && let Some(email) = record
+                .email
+                .as_deref()
+                .map(str::to_ascii_lowercase)
+                .filter(|email| !email.is_empty())
+        {
+            let index_path = verified_email_path(tenant_id.as_str(), &email)?;
+            let index_write = self
+                .write_record(
+                    &index_path,
+                    &StoredVerifiedEmailIndex {
+                        user_id: new_user_id.as_str().to_string(),
+                    },
+                    CasExpectation::Absent,
+                )
+                .await;
+            if let Err(error) = index_write {
+                self.filesystem
+                    .delete(&self.scope, &user_path(new_user_id.as_str())?)
+                    .await
+                    .map_err(backend)?;
+                return match error {
+                    FilesystemError::VersionMismatch { .. } => {
+                        Err(RebornIdentityError::UserPolicyViolation(
+                            "email is already assigned to a user",
+                        ))
+                    }
+                    other => Err(backend(other)),
+                };
+            }
+        }
         to_reborn_user(new_user_id.as_str().to_string(), record)
     }
 
@@ -392,6 +458,15 @@ where
         user_id: &UserId,
         role: RebornUserRole,
     ) -> Result<RebornUser, RebornIdentityError> {
+        if role.is_admin()
+            && self.get_user(user_id).await?.is_some_and(|user| {
+                user.content_access_policy == UserContentAccessPolicy::TenantAdminManaged
+            })
+        {
+            return Err(RebornIdentityError::UserPolicyViolation(
+                "admin-managed users cannot hold an administrator role",
+            ));
+        }
         let now = now_rfc3339();
         let stored = role_to_stored(role);
         self.mutate_user(user_id, move |user| {
@@ -401,11 +476,48 @@ where
         .await
     }
 
+    async fn authorize_admin_managed_target(
+        &self,
+        tenant_id: &TenantId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
+        operation: AdminManagedUserOperation,
+    ) -> Result<bool, RebornIdentityError> {
+        let Some(actor) = self.get_user(actor_user_id).await? else {
+            return Ok(false);
+        };
+        let Some(subject) = self.get_user(subject_user_id).await? else {
+            return Ok(false);
+        };
+        // Unlike lifecycle listing, administrator-on-behalf resource access
+        // cannot safely infer a tenant for legacy tenantless records. Require
+        // explicit tenant ownership on both sides of this security boundary.
+        let belongs_to_tenant = |user: &RebornUser| {
+            user.tenant_id
+                .as_ref()
+                .is_some_and(|owner| owner == tenant_id)
+        };
+        let operation_allowed = matches!(operation, AdminManagedUserOperation::ManageSecrets);
+        Ok(operation_allowed
+            && belongs_to_tenant(&actor)
+            && belongs_to_tenant(&subject)
+            && actor.status == RebornUserStatus::Active
+            && actor.role.is_admin()
+            && subject.content_access_policy == UserContentAccessPolicy::TenantAdminManaged)
+    }
+
     async fn record_last_login(
         &self,
         user_id: &UserId,
         at: String,
     ) -> Result<(), RebornIdentityError> {
+        if self.get_user(user_id).await?.is_some_and(|user| {
+            user.content_access_policy == UserContentAccessPolicy::TenantAdminManaged
+        }) {
+            return Err(RebornIdentityError::ManagedUserLoginDisabled(
+                user_id.as_str().to_string(),
+            ));
+        }
         // Deliberately does NOT bump updated_at (that tracks profile edits).
         self.mutate_user(user_id, move |user| {
             user.last_login_at = Some(at.clone());

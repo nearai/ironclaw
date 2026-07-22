@@ -582,10 +582,6 @@ pub struct RebornRuntime {
     outbound_delivery_target_registry: Option<Arc<MutableOutboundDeliveryTargetRegistry>>,
     budget_event_projection: Option<crate::observability::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
-    /// Mints the one-time API bearer on admin user creation. Read by
-    /// `build_webui_services` when wiring the admin surface. `None` leaves the
-    /// admin create path reporting the token minter unavailable.
-    admin_api_token_minter: Option<Arc<dyn crate::AdminApiTokenMinter>>,
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -1557,12 +1553,6 @@ impl RebornRuntime {
             });
         }
         None
-    }
-
-    /// The admin API-token minter supplied via
-    /// [`RebornRuntimeInput::with_admin_api_token_minter`], if any.
-    pub(crate) fn reborn_admin_token_minter(&self) -> Option<Arc<dyn crate::AdminApiTokenMinter>> {
-        self.admin_api_token_minter.clone()
     }
 
     pub(crate) fn webui_thread_service(&self) -> Arc<dyn SessionThreadService> {
@@ -2989,7 +2979,6 @@ pub async fn build_reborn_runtime(
         budget_defaults,
         budget_event_observer,
         trajectory_observer,
-        admin_api_token_minter,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -4211,7 +4200,6 @@ pub async fn build_reborn_runtime(
         outbound_delivery_target_registry,
         budget_event_projection,
         poll_settings: poll,
-        admin_api_token_minter,
         actor_user_id,
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,

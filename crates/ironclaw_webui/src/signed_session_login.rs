@@ -144,9 +144,8 @@ pub struct SignedTokenSessionStore {
 /// operator secret + tenant. The store is stateless and deterministic in the
 /// signing key, so an instance built here mints tokens that validate under any
 /// other instance sharing the same operator secret + tenant (e.g. the SSO login
-/// surface's own store). Used by the admin user-management surface to mint the
-/// one-time API bearer on user create, which must be wired before the login
-/// surface (and its own store) is composed.
+/// surface's own store). User sessions are issued only by authenticated
+/// login/claim flows; administrator user creation does not use this store.
 pub fn signed_session_store(
     operator_secret: &SecretString,
     tenant_id: &TenantId,
@@ -339,9 +338,8 @@ struct TokenPayload {
 /// keeps working while a browser SSO login mints a signed session token.
 ///
 /// Public so the CLI can compose the same env-OR-session pair on the **no-SSO**
-/// serve path: `ironclaw-reborn serve` always mints admin-API session tokens
-/// (the user-create bearer), so their `SessionAuthenticator` must be wired even
-/// when no SSO provider is configured, or those tokens would never validate.
+/// serve path: the CLI claim/login route still issues non-operator sessions
+/// when no SSO provider is configured.
 /// Operator-capability gating still follows the env token only (see
 /// [`WebuiAuthenticator::mounts_operator_webui_config_routes`] below), so a
 /// minted session bearer stays non-operator regardless of this reuse.

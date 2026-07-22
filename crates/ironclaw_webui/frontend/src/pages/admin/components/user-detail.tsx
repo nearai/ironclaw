@@ -229,13 +229,13 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
               value={role || user.role}
               options={roleOptions}
               onChange={handleRoleChange}
-              disabled={isActionPending}
+              disabled={isActionPending || user.content_access_policy === "tenant_admin_managed"}
               ariaLabel={t("admin.user.currentRole")}
               className="!min-w-0 w-36"
               buttonClassName="h-9 rounded-md border-white/12 bg-white/[0.04] px-3 font-sans text-sm text-iron-100"
             />
           </div>
-          <Button data-testid="admin-user-detail-save-role" onClick={handleSaveRole} loading={isUpdating} disabled={isActionPending || !role || role === user.role}>
+          <Button data-testid="admin-user-detail-save-role" onClick={handleSaveRole} loading={isUpdating} disabled={isActionPending || user.content_access_policy === "tenant_admin_managed" || !role || role === user.role}>
             {isUpdating ? t("common.saving") : t("admin.user.saveRole")}
           </Button>
         </div>
@@ -246,7 +246,9 @@ export function UserDetailView({ onBack, userQuery, usageQuery, adminState }) {
         )}
       </Panel>
 
-      <UserSecretsPanel key={user.id} userId={user.id} />
+      {user.content_access_policy === "tenant_admin_managed" && (
+        <UserSecretsPanel key={user.id} userId={user.id} />
+      )}
 
       <Panel className="p-5 sm:p-6">
         <h3 className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-signal">{t("admin.user.usage30Days")}</h3>

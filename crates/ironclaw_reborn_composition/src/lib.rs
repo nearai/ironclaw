@@ -20,8 +20,8 @@
 
 use std::sync::Arc;
 
+mod admin_managed_resources;
 mod admin_secrets;
-mod admin_token;
 mod admin_user_directory;
 #[cfg(test)]
 mod approval_test_support;
@@ -57,7 +57,6 @@ mod turn_run_snapshot;
 mod web_access;
 mod webui;
 
-pub use admin_token::AdminApiTokenMinter;
 pub use automation::facade::RebornAutomationProductFacade;
 pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;

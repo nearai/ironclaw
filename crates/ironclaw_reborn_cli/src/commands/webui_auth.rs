@@ -36,7 +36,7 @@ pub(crate) struct WebuiAuthSurface {
 ///
 /// With no SSO provider configured (`sso_startup` is `None`), the listener
 /// keeps its env-bearer authenticator, also validates signed session tokens
-/// minted by the admin API, and mounts only the inert auth surface so
+/// issued by the existing CLI claim/login flow, and mounts the inert auth surface so
 /// `/auth/providers` can return an empty provider list.
 /// With providers configured, this layers the fail-closed email-domain
 /// admission adapter on top of the runtime-owned canonical Reborn identity
@@ -58,16 +58,14 @@ pub(crate) async fn build_webui_auth_surface(
     env_authenticator: Arc<dyn WebuiAuthenticator>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
-        // No SSO providers: no public login routes. But the
-        // serve layer *always* wires the admin-API token minter, which mints
-        // signed **session** tokens (the user-create bearer). Those validate
-        // only through a `SessionAuthenticator` over the same signed store —
-        // absent it, an admin-created user's API token would 401 on every
-        // request (regression caught by `tests/e2e/scenarios/test_admin_api.py`).
+        // No SSO providers: the separate CLI claim/login route still issues
+        // signed sessions. Those validate only through a
+        // `SessionAuthenticator` over the same signed store.
         // Compose the env-bearer (operator) authenticator with a session
         // authenticator over that store so minted tokens work without SSO;
         // operator capabilities still follow the env token only, so the session
-        // bearer stays non-operator.
+        // bearer stays non-operator. Admin user creation never reaches this
+        // store and never mints a session.
         let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(
             SessionAuthenticator::new(signed_session_store(&session_signing_secret, &tenant_id)),
         );
@@ -199,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn no_sso_composes_env_and_session_auth_and_mounts_empty_provider_route() {
         // With no SSO configured the surface still needs env-bearer access
-        // plus signed-session bearer access for admin-created users. It also
+        // plus signed-session bearer access for the CLI claim/login flow. It also
         // mounts an inert public auth surface for provider discovery. The
         // absent-resolver check must not fire on this path.
         let result = build_webui_auth_surface(

@@ -1,51 +1,33 @@
 //! Composition adapter implementing the product-workflow
 //! [`AdminUserService`](ironclaw_product_workflow::AdminUserService) port over
-//! the Reborn identity user-directory + admin secret provisioner + a token
-//! minter.
+//! the Reborn identity user-directory.
 //!
-//! This is the one place identity, secrets, and token issuance meet — the
-//! composition root is the only crate allowed to depend on all three, so the
-//! product-workflow facade and the webui_v2 routes stay free of those deps
-//! (the crate boundary the architecture tests enforce).
+//! Resource access is intentionally implemented by the separate, narrow
+//! `RebornAdminManagedResources` adapter.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{SecretHandle, TenantId, UserId};
+use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_product_workflow::{
-    AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
-    AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+    AdminCreateManagedUserFields, AdminCreatePrivateUserFields, AdminCreatedUser,
+    AdminUserContentAccessPolicy, AdminUserError, AdminUserRecord, AdminUserRole, AdminUserService,
+    AdminUserStatus,
 };
 use ironclaw_reborn_identity::{
     RebornIdentityError, RebornUser, RebornUserDirectory, RebornUserProfileUpdate, RebornUserRole,
-    RebornUserStatus,
+    RebornUserStatus, UserContentAccessPolicy,
 };
-use ironclaw_secrets::{SecretMetadata, SecretStoreError};
-use secrecy::SecretString;
 
-use crate::admin_secrets::AdminSecretProvisioner;
-use crate::admin_token::AdminApiTokenMinter;
-
-/// Adapter wiring the identity directory, admin secret provisioner, and token
-/// minter into the product-workflow `AdminUserService` contract.
+/// Adapter wiring identity lifecycle into the product-workflow contract.
 pub(crate) struct RebornAdminUserDirectory {
     directory: Arc<dyn RebornUserDirectory>,
-    secrets: Arc<dyn AdminSecretProvisioner>,
-    token_minter: Arc<dyn AdminApiTokenMinter>,
 }
 
 impl RebornAdminUserDirectory {
-    pub(crate) fn new(
-        directory: Arc<dyn RebornUserDirectory>,
-        secrets: Arc<dyn AdminSecretProvisioner>,
-        token_minter: Arc<dyn AdminApiTokenMinter>,
-    ) -> Self {
-        Self {
-            directory,
-            secrets,
-            token_minter,
-        }
+    pub(crate) fn new(directory: Arc<dyn RebornUserDirectory>) -> Self {
+        Self { directory }
     }
 
     /// Fetch a user and confirm it belongs to `tenant`. A record with no
@@ -97,11 +79,11 @@ impl AdminUserService for RebornAdminUserDirectory {
             .map(to_admin_record))
     }
 
-    async fn create_user(
+    async fn create_private_user(
         &self,
         tenant: &TenantId,
         actor: &UserId,
-        fields: AdminCreateUserFields,
+        fields: AdminCreatePrivateUserFields,
     ) -> Result<AdminCreatedUser, AdminUserError> {
         let created = self
             .directory
@@ -110,24 +92,36 @@ impl AdminUserService for RebornAdminUserDirectory {
                 fields.email,
                 fields.display_name,
                 role_to_identity(fields.role),
+                UserContentAccessPolicy::Private,
                 actor,
             )
             .await
             .map_err(map_identity_error)?;
-        // Mint the one-time bearer after the user exists. A mint failure leaves
-        // the user created but tokenless; surfaced as Internal (logged) so the
-        // admin can re-issue rather than silently succeeding.
-        let api_token = self
-            .token_minter
-            .mint(tenant, &created.user_id)
-            .await
-            .map_err(|reason| {
-                tracing::error!(error = %reason, "admin api token mint failed");
-                AdminUserError::Internal
-            })?;
         Ok(AdminCreatedUser {
             record: to_admin_record(created),
-            api_token,
+        })
+    }
+
+    async fn create_managed_user(
+        &self,
+        tenant: &TenantId,
+        actor: &UserId,
+        fields: AdminCreateManagedUserFields,
+    ) -> Result<AdminCreatedUser, AdminUserError> {
+        let created = self
+            .directory
+            .create_user(
+                tenant,
+                None,
+                fields.display_name,
+                RebornUserRole::Member,
+                UserContentAccessPolicy::TenantAdminManaged,
+                actor,
+            )
+            .await
+            .map_err(map_identity_error)?;
+        Ok(AdminCreatedUser {
+            record: to_admin_record(created),
         })
     }
 
@@ -195,49 +189,6 @@ impl AdminUserService for RebornAdminUserDirectory {
             .await
             .map_err(map_identity_error)
     }
-
-    async fn list_secrets(
-        &self,
-        tenant: &TenantId,
-        user_id: &UserId,
-    ) -> Result<Vec<AdminUserSecretMeta>, AdminUserError> {
-        let secrets = self
-            .secrets
-            .list(tenant, user_id)
-            .await
-            .map_err(map_secret_error)?;
-        Ok(secrets.into_iter().map(to_secret_meta).collect())
-    }
-
-    async fn put_secret(
-        &self,
-        tenant: &TenantId,
-        user_id: &UserId,
-        handle: SecretHandle,
-        material: SecretString,
-    ) -> Result<AdminUserSecretMeta, AdminUserError> {
-        // `handle` is already the validated domain type — the WebUI handler
-        // parses `SecretHandle` at the HTTP edge (a malformed handle is a 400
-        // there), so the adapter never sees a raw string to re-validate.
-        let meta = self
-            .secrets
-            .put(tenant, user_id, handle, material)
-            .await
-            .map_err(map_secret_error)?;
-        Ok(to_secret_meta(meta))
-    }
-
-    async fn delete_secret(
-        &self,
-        tenant: &TenantId,
-        user_id: &UserId,
-        handle: SecretHandle,
-    ) -> Result<bool, AdminUserError> {
-        self.secrets
-            .delete(tenant, user_id, &handle)
-            .await
-            .map_err(map_secret_error)
-    }
 }
 
 fn to_admin_record(user: RebornUser) -> AdminUserRecord {
@@ -247,19 +198,12 @@ fn to_admin_record(user: RebornUser) -> AdminUserRecord {
         display_name: user.display_name,
         status: status_from_identity(user.status),
         role: role_from_identity(user.role),
+        content_access_policy: policy_from_identity(user.content_access_policy),
         created_at: user.created_at,
         updated_at: user.updated_at,
         created_by: user.created_by,
         last_login_at: user.last_login_at,
         metadata: user.metadata,
-    }
-}
-
-fn to_secret_meta(meta: SecretMetadata) -> AdminUserSecretMeta {
-    AdminUserSecretMeta {
-        handle: meta.handle.as_str().to_string(),
-        created_at: None,
-        updated_at: None,
     }
 }
 
@@ -293,6 +237,15 @@ fn status_from_identity(status: RebornUserStatus) -> AdminUserStatus {
     }
 }
 
+fn policy_from_identity(policy: UserContentAccessPolicy) -> AdminUserContentAccessPolicy {
+    match policy {
+        UserContentAccessPolicy::Private => AdminUserContentAccessPolicy::Private,
+        UserContentAccessPolicy::TenantAdminManaged => {
+            AdminUserContentAccessPolicy::TenantAdminManaged
+        }
+    }
+}
+
 /// Map identity errors into the coarse port error, scrubbing storage paths
 /// (`RebornIdentityError::Backend` carries a `ScopedPath`).
 fn map_identity_error(error: RebornIdentityError) -> AdminUserError {
@@ -301,22 +254,14 @@ fn map_identity_error(error: RebornIdentityError) -> AdminUserError {
         RebornIdentityError::Backend(_) => AdminUserError::Unavailable,
         // A persisted-id inconsistency or a channel-actor misuse is not
         // retryable and not the client's fault.
+        RebornIdentityError::UserPolicyViolation(_) => AdminUserError::InvalidInput,
         RebornIdentityError::InvalidUserId(_) | RebornIdentityError::ChannelActorNotMintable => {
             AdminUserError::Internal
         }
         // Only `resolve_or_create` (the SSO login path) raises this; the admin
         // directory operations never resolve external identities, so reaching
         // it here is a backend inconsistency rather than the client's fault.
-        RebornIdentityError::UserSuspended(_) => AdminUserError::Internal,
-    }
-}
-
-fn map_secret_error(error: SecretStoreError) -> AdminUserError {
-    match error {
-        SecretStoreError::UnknownSecret { .. } | SecretStoreError::UnknownLease { .. } => {
-            AdminUserError::NotFound
-        }
-        SecretStoreError::StoreUnavailable { .. } => AdminUserError::Unavailable,
-        _ => AdminUserError::Internal,
+        RebornIdentityError::UserSuspended(_)
+        | RebornIdentityError::ManagedUserLoginDisabled(_) => AdminUserError::Internal,
     }
 }
