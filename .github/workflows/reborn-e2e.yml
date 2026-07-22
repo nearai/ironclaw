@@ -205,11 +205,12 @@ jobs:
       - name: Run Reborn WebUI v2 smoke
         run: pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
 
-      - name: Replay harvested QA traces with Emulate
+      - name: Run harvested QA replay and provider contracts with Emulate
         env:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
         run: >-
           pytest
+          tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py
           tests/e2e/scenarios/test_reborn_qa_trace_replay.py
           tests/e2e/scenarios/test_reborn_qa_trace_full_path.py
           -v
