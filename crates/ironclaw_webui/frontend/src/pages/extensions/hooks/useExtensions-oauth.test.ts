@@ -54,8 +54,6 @@ function loadLocalizedMutationHooks({ startExtensionOauth, submitExtensionSetup 
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth,
     submitExtensionSetup,
@@ -1277,7 +1275,7 @@ test("useOauthSetup translates expired and canceled flow-status failures", async
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "oauth_test_provider",
         provided: true,
       },
     },
