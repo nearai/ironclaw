@@ -338,6 +338,7 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             return Err(error);
         }
         let response = ResumeTurnResponse {
+            replayed: false,
             run_id,
             status: TurnStatus::Queued,
             event_cursor: EventCursor(41),
@@ -1003,6 +1004,7 @@ async fn idempotent_auth_deny_replay_returns_same_resumed_response_as_first_deny
         run_id,
         IdempotencyKey::new("idem-auth-deny").unwrap(),
         ResumeTurnResponse {
+            replayed: false,
             run_id,
             status: TurnStatus::Queued,
             event_cursor: EventCursor(41),
@@ -1197,6 +1199,7 @@ async fn duplicate_denied_auth_on_already_resumed_run_is_idempotent() {
         run_id,
         IdempotencyKey::new("auth-action-replay-denied").unwrap(),
         ResumeTurnResponse {
+            replayed: false,
             run_id,
             status: TurnStatus::Queued,
             event_cursor: EventCursor(41),
@@ -1328,6 +1331,7 @@ async fn duplicate_denied_auth_on_cancelled_run_with_same_key_returns_resumed() 
         run_id,
         IdempotencyKey::new("auth-action-replay-denied-terminal").unwrap(),
         ResumeTurnResponse {
+            replayed: false,
             run_id,
             status: TurnStatus::Queued,
             event_cursor: EventCursor(41),

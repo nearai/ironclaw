@@ -3124,8 +3124,10 @@ impl RebornRuntime {
                 // tool output, not by the runtime — short-circuit the wait and
                 // return the parked state instead of polling forever.
                 | TurnStatus::BlockedExternalTool
+                | TurnStatus::BlockedAttested
                 | TurnStatus::BlockedResource => true,
                 TurnStatus::BlockedDependentRun
+                | TurnStatus::AttestedResolved
                 | TurnStatus::Queued
                 | TurnStatus::Running
                 | TurnStatus::CancelRequested

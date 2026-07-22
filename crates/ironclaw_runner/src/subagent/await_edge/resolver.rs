@@ -497,6 +497,7 @@ where
         let parent_scope = edge.parent_run_context.scope.clone();
         let result = coordinator
             .resume_turn(ResumeTurnRequest {
+                attestation: None,
                 scope: parent_scope,
                 actor,
                 run_id: parent_run_id,
@@ -967,6 +968,7 @@ mod tests {
         resolved_run_profile: ironclaw_turns::run_profile::ResolvedRunProfile,
     ) -> TurnRunRecord {
         TurnRunRecord {
+            expected_tx_hash: None,
             run_id: child_run_id,
             turn_id: ironclaw_turns::TurnId::new(),
             scope: TurnScope::new(
@@ -1824,6 +1826,8 @@ fn status_label(status: TurnStatus) -> &'static str {
         TurnStatus::BlockedResource => "blocked_resource",
         TurnStatus::BlockedDependentRun => "blocked_dependent_run",
         TurnStatus::BlockedExternalTool => "blocked_external_tool",
+        TurnStatus::BlockedAttested => "blocked_attested",
+        TurnStatus::AttestedResolved => "attested_resolved",
         TurnStatus::CancelRequested => "cancel_requested",
         TurnStatus::Cancelled => "cancelled",
         TurnStatus::Completed => "completed",

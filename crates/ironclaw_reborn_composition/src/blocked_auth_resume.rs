@@ -157,6 +157,7 @@ impl BlockedAuthResumeFanout {
                 continue;
             };
             let request = ResumeTurnRequest {
+                attestation: None,
                 scope: run.scope.clone(),
                 actor,
                 run_id: run.run_id,
@@ -336,6 +337,7 @@ mod tests {
             let run_id = request.run_id;
             self.resumed.lock().expect("resume lock").push(request);
             Ok(ironclaw_turns::ResumeTurnResponse {
+                replayed: false,
                 run_id,
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(1),
@@ -399,6 +401,7 @@ mod tests {
             Some(UserId::new(owner).expect("owner")),
         );
         ironclaw_turns::TurnRunRecord {
+            expected_tx_hash: None,
             run_id,
             turn_id,
             scope,

@@ -3106,6 +3106,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
             // blocked_run_id stays set — the run is still blocked, now on auth.
             return Ok(ResolveApprovalInteractionResponse::Approved(
                 ResumeTurnResponse {
+                    replayed: false,
                     run_id,
                     status: TurnStatus::BlockedAuth,
                     event_cursor: EventCursor::default(),
@@ -3124,6 +3125,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
         let _ = &self.threads;
         Ok(ResolveApprovalInteractionResponse::Approved(
             ResumeTurnResponse {
+                replayed: false,
                 run_id,
                 status: TurnStatus::Completed,
                 event_cursor: EventCursor::default(),
@@ -3186,6 +3188,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
             AuthInteractionDecision::CredentialProvided { .. }
             | AuthInteractionDecision::CallbackCompleted { .. } => {
                 ResolveAuthInteractionResponse::Resumed(ResumeTurnResponse {
+                    replayed: false,
                     run_id,
                     status: TurnStatus::Queued,
                     event_cursor: EventCursor::default(),

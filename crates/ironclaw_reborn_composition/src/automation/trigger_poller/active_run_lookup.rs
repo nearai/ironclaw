@@ -115,6 +115,8 @@ fn terminal_run_history_status(status: TurnStatus) -> TriggerRunHistoryStatus {
         | TurnStatus::BlockedResource
         | TurnStatus::BlockedDependentRun
         | TurnStatus::BlockedExternalTool
+        | TurnStatus::BlockedAttested
+        | TurnStatus::AttestedResolved
         | TurnStatus::CancelRequested => TriggerRunHistoryStatus::Error,
     }
 }
@@ -426,6 +428,7 @@ mod tests {
             ironclaw_host_api::ThreadId::new(format!("thread-{run_id}")).expect("thread id"),
         );
         TurnRunRecord {
+            expected_tx_hash: None,
             run_id,
             turn_id: TurnId::new(),
             scope,

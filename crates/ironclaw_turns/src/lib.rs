@@ -7,6 +7,7 @@
 #![warn(unreachable_pub)]
 
 mod admission;
+mod attested_resume;
 mod block_persistence;
 mod checkpoint_state;
 mod coordinator;
@@ -59,7 +60,8 @@ pub use external_tool_catalog::{
     ExternalToolCatalog, ExternalToolCatalogError, ExternalToolSpec, ExternalToolSpecError,
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
-pub use ids::{
+pub use attested_resume::{AttestedResumePort, AttestedResumeRejection, AttestedResumeRequest};
+pub use ids::{ AttestationClaimRef, ApprovedTxHashRef,
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
     LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, ReplyTargetBindingRef, RunProfileId,
     RunProfileRequest, RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId,

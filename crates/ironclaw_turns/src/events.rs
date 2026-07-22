@@ -42,6 +42,7 @@ pub enum TurnBlockedGateKind {
     Resource,
     AwaitDependentRun,
     ExternalTool,
+    Attested,
 }
 
 impl From<GateKind> for TurnBlockedGateKind {
@@ -52,6 +53,7 @@ impl From<GateKind> for TurnBlockedGateKind {
             GateKind::Resource => Self::Resource,
             GateKind::AwaitDependentRun => Self::AwaitDependentRun,
             GateKind::ExternalTool => Self::ExternalTool,
+            GateKind::Attested => Self::Attested,
         }
     }
 }

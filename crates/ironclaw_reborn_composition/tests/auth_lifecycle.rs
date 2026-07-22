@@ -175,6 +175,7 @@ impl TurnCoordinator for LifecycleTurnCoordinator {
             .push(request.clone());
         *self.status.lock().expect("status lock") = TurnStatus::Queued;
         Ok(ResumeTurnResponse {
+            replayed: false,
             run_id: request.run_id,
             status: TurnStatus::Queued,
             event_cursor: EventCursor(2),

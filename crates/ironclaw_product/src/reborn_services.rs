@@ -5888,6 +5888,7 @@ where
                 let response = self
                     .turn_coordinator
                     .resume_turn(ResumeTurnRequest {
+                        attestation: None,
                         scope,
                         actor,
                         run_id,
