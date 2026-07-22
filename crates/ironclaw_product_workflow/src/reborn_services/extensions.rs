@@ -3,6 +3,7 @@ use std::{
     sync::Arc,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::{StreamExt, TryStreamExt, stream};
 use ironclaw_auth::{CredentialAccountStatus, project_auth_account_state};
 use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId, InstallationState};
@@ -12,10 +13,10 @@ use crate::{
     LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
     LifecycleProductSurfaceContext, RebornAccountBindingSource, RebornAuthAccount,
-    RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornExtensionSurface, RebornServicesError, RebornVendorAuthAccounts, RebornViewDescriptor,
-    WebUiAuthenticatedCaller,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingState,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSurface,
+    RebornServicesError, RebornVendorAuthAccounts, RebornViewDescriptor, WebUiAuthenticatedCaller,
+    WebUiInboundValidationCode,
 };
 
 use super::{
@@ -24,7 +25,7 @@ use super::{
         ExtensionCredentialReadiness, credential_scope, readiness_for_requirements,
     },
     extension_onboarding,
-    lifecycle_setup::map_lifecycle_error,
+    lifecycle_setup::{map_lifecycle_error, validation_error},
 };
 
 const EXTENSION_READINESS_CONCURRENCY: usize = 8;
@@ -121,17 +122,34 @@ pub(super) async fn list_extension_registry(
     })
 }
 
-pub(super) async fn import_extension(
+pub(super) async fn import_extension_capability(
     facade: &dyn LifecycleProductFacade,
     caller: WebUiAuthenticatedCaller,
-    bundle: Vec<u8>,
-) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+    input: serde_json::Value,
+) -> Result<(), RebornServicesError> {
+    let bundle_base64 = match input {
+        serde_json::Value::Object(mut object) => object
+            .remove("bundle_base64")
+            .and_then(|value| value.as_str().map(ToString::to_string))
+            .ok_or_else(|| {
+                validation_error("bundle_base64", WebUiInboundValidationCode::MissingField)
+            })?,
+        _ => {
+            return Err(validation_error(
+                "input",
+                WebUiInboundValidationCode::InvalidValue,
+            ));
+        }
+    };
+    let bundle = STANDARD
+        .decode(bundle_base64)
+        .map_err(|_| validation_error("bundle_base64", WebUiInboundValidationCode::InvalidValue))?;
     let context = lifecycle_surface_context(caller);
-    let lifecycle = facade
+    facade
         .import_extension_bundle(context, bundle)
         .await
         .map_err(map_lifecycle_error)?;
-    Ok(action_response(&lifecycle, None, None))
+    Ok(())
 }
 
 async fn execute_lifecycle(
@@ -436,34 +454,6 @@ fn vendor_auth_accounts(
     }]
 }
 
-fn action_response(
-    lifecycle: &LifecycleProductResponse,
-    activated: Option<bool>,
-    projection: Option<&LifecycleProductResponse>,
-) -> RebornExtensionActionResponse {
-    let success = !matches!(
-        lifecycle.phase,
-        InstallationState::Failed | InstallationState::Unsupported
-    );
-    let onboarding = projection
-        .map(extension_onboarding::from_lifecycle)
-        .unwrap_or_else(extension_onboarding::ExtensionOnboarding::empty);
-    RebornExtensionActionResponse {
-        success,
-        message: onboarding
-            .instructions
-            .clone()
-            .or_else(|| lifecycle.message.clone())
-            .unwrap_or_else(|| "Extension lifecycle action completed".to_string()),
-        activated,
-        auth_url: None,
-        awaiting_token: onboarding.awaiting_token,
-        instructions: onboarding.instructions,
-        onboarding_state: onboarding.state,
-        onboarding: onboarding.onboarding,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -485,9 +475,10 @@ mod tests {
         ExtensionCredentialSubmitRequest, LifecycleExtensionCredentialRequirement,
         LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding,
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecycleSearchExtensionSummary,
-        ProductWorkflowError, RebornExtensionOnboardingState, RebornServicesError,
-        RebornServicesErrorCode, RebornServicesErrorKind, WebUiAuthenticatedCaller,
+        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
+        LifecycleSearchExtensionSummary, ProductWorkflowError, RebornExtensionOnboardingState,
+        RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+        WebUiAuthenticatedCaller,
     };
 
     #[derive(Default)]
@@ -1087,10 +1078,6 @@ mod tests {
             Some(AgentId::new("agent-alpha").expect("valid agent")),
             Some(ProjectId::new("project-alpha").expect("valid project")),
         )
-    }
-
-    fn package_ref() -> LifecyclePackageRef {
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture").expect("valid ref")
     }
 
     fn summary_with_onboarding() -> LifecycleExtensionSummary {

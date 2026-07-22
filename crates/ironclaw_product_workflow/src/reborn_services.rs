@@ -211,6 +211,7 @@ pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
     "builtin.operator_config_set_auto_approve";
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
+pub const EXTENSION_IMPORT_CAPABILITY_ID: &str = "builtin.extension_import";
 pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 pub const EXTENSION_SETUP_SUBMIT_CAPABILITY_ID: &str = "builtin.extension_setup_submit";
@@ -2279,17 +2280,6 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    /// Import a standalone extension from an uploaded bundle (zip bytes) — the
-    /// WebUI "Install Tool" path. Default is unavailable so non-local impls and
-    /// test stubs need no change.
-    async fn import_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _bundle: Vec<u8>,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     /// Add or update a custom LLM provider (and optionally its key / active state).
     ///
     /// LLM-config mutations, probes, and login starts default to "service
@@ -3111,6 +3101,11 @@ where
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
+        if capability.as_str() == EXTENSION_IMPORT_CAPABILITY_ID {
+            extensions::import_extension_capability(self.lifecycle_facade.as_ref(), caller, input)
+                .await?;
+            return self.api_capability_success(activity_id, "extension imported");
+        }
         if capability.as_str() == EXTENSION_SETUP_SUBMIT_CAPABILITY_ID {
             lifecycle_setup::submit_extension_setup_capability(
                 self.lifecycle_facade.as_ref(),
@@ -4752,14 +4747,6 @@ where
         self.automation_facade
             .delete_automation(caller, automation_id)
             .await
-    }
-
-    async fn import_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        bundle: Vec<u8>,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::import_extension(self.lifecycle_facade.as_ref(), caller, bundle).await
     }
 
     async fn run_operator_service_lifecycle(

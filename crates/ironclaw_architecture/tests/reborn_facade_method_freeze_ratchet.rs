@@ -105,8 +105,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     // --- trace / credits ---
     "trace_account_login_link",
     "authorize_trace_hold",
-    // --- extensions + skills ---
-    "import_extension",
     // --- LLM admin config ---
     "upsert_llm_provider",
     "delete_llm_provider",

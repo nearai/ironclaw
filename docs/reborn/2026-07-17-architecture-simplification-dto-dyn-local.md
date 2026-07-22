@@ -75,8 +75,8 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   existing extension onboarding response shape. Extension setup read now uses
   the descriptor-backed `extension_setup` ProductSurface view, and setup submit
   uses `builtin.extension_setup_submit` with the same query read-back. Zip
-  import remains an explicit follow-up because it needs an upload-specific
-  capability shape.
+  import now uses the API-only `builtin.extension_import` ProductSurface
+  capability with upload bytes carried as a base64 JSON field.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -2381,9 +2381,9 @@ loop-facing capability result and every result mirror is deleted.
   after success, and maps auth-blocked outcomes onto the existing extension
   onboarding response shape. Extension setup read now flows through the
   descriptor-backed `extension_setup` view, and setup submit now invokes
-  `builtin.extension_setup_submit` before reading back that view. Zip import
-  remains an explicit follow-up because it needs an upload-specific API
-  capability shape. The migrated legacy
+  `builtin.extension_setup_submit` before reading back that view. Zip import now
+  invokes `builtin.extension_import` with upload bytes encoded into an
+  API-only base64 JSON payload. The migrated legacy
   `RebornServicesApi` methods were removed from the ratchet allowlist. This is
   the migration pattern for product mutations: authenticated product gesture ->
   `ProductSurface::invoke` -> descriptor-declared first-party handler or

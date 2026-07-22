@@ -7,6 +7,8 @@
 //! the facade method bodies that are already covered in
 //! `ironclaw_product_workflow`.
 
+// arch-exempt: large_file, WebUI ProductSurface route contracts stay in the caller-level handler suite until the WebUI route split lands, plan #5985
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -15,6 +17,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderName, Method, Request, StatusCode, header};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
@@ -29,21 +32,21 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
-    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
-    EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductSurface,
-    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
-    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
+    EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
+    LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
+    ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
     RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
@@ -316,9 +319,6 @@ struct StubServices {
     query_logs_calls: Mutex<Vec<LogsCall>>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
     run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
-    /// Raw zip bytes each `import_extension` call forwards, so the route test
-    /// can assert the uploaded body reaches the facade intact.
-    import_extension_calls: Mutex<Vec<Vec<u8>>>,
     get_llm_config_calls: Mutex<usize>,
     upsert_llm_provider_calls: Mutex<Vec<String>>,
     delete_llm_provider_calls: Mutex<Vec<String>>,
@@ -1320,18 +1320,6 @@ impl RebornServicesApi for StubServices {
         ))
     }
 
-    async fn import_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        bundle: Vec<u8>,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        self.import_extension_calls
-            .lock()
-            .expect("lock")
-            .push(bundle);
-        Ok(extension_action_response("discovered"))
-    }
-
     async fn upsert_llm_provider(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1442,19 +1430,6 @@ fn operator_config_entry(key: String, value: Value) -> RebornOperatorConfigEntry
         source: "test".to_string(),
         redacted: false,
         mutable: true,
-    }
-}
-
-fn extension_action_response(message: &str) -> RebornExtensionActionResponse {
-    RebornExtensionActionResponse {
-        success: true,
-        message: message.to_string(),
-        activated: None,
-        auth_url: None,
-        awaiting_token: None,
-        instructions: None,
-        onboarding_state: None,
-        onboarding: None,
     }
 }
 
@@ -4633,21 +4608,18 @@ async fn import_extension_requires_operator_webui_config() {
     let body = read_json(response).await;
     assert_eq!(body["error"], "forbidden");
     assert!(
-        services
-            .import_extension_calls
-            .lock()
-            .expect("lock")
-            .is_empty(),
+        services.invoke_calls.lock().expect("lock").is_empty(),
         "a non-operator caller must never reach the import facade"
     );
 }
 
 /// #5499 review finding #4: an operator upload must forward the raw zip bytes
-/// to the facade unmodified — a route regression that drops or re-encodes the
-/// body would pass every lifecycle-tier test.
+/// through the single ProductSurface capability path. The HTTP boundary encodes
+/// bytes as base64; product-workflow decodes before reaching lifecycle import.
 #[tokio::test]
-async fn import_extension_forwards_zip_bytes_to_facade_call() {
+async fn import_extension_invokes_product_surface_with_zip_bytes() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with_capabilities(
         services.clone(),
         WebUiV2Capabilities {
@@ -4671,13 +4643,15 @@ async fn import_extension_forwards_zip_bytes_to_facade_call() {
         .expect("oneshot");
 
     assert_eq!(response.status(), StatusCode::OK);
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        services
-            .import_extension_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        [bundle]
+        invoke_calls[0].0,
+        CapabilityId::new(EXTENSION_IMPORT_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({ "bundle_base64": STANDARD.encode(&bundle) })
     );
 }
 
