@@ -29,7 +29,7 @@ use crate::{CommandExecutionOutput, RuntimeProcessError};
 
 use super::{
     ContainerWorkdir, LABEL_PREFIX, RebornSandboxConfig, RebornSandboxUserKey,
-    registry::{build_user_container_labels, user_container_label_filter},
+    registry::{self, build_user_container_labels, user_container_label_filter},
     shell_single_quote,
 };
 
@@ -273,6 +273,124 @@ pub(super) async fn exec_in_container(
         sandboxed: true,
         duration: started_at.elapsed(),
     })
+}
+
+/// Result of launching a detached (`background: true`) command inside the
+/// container: the pid the launch script reported (which is also its
+/// `setsid`-created pgid, per [`wrap_command_for_pgid_isolation`]) and the
+/// container-local log path its stdout/stderr were redirected to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct BackgroundLaunch {
+    pub(super) pid: u32,
+    pub(super) log_path: String,
+}
+
+/// Launches `command` detached inside the container (`setsid ... &`),
+/// redirecting its output to a per-pid log under `/workspace/.ironclaw/`,
+/// and returns immediately with the launched pid instead of waiting for
+/// completion.
+pub(super) async fn exec_background_in_container(
+    docker: &Docker,
+    container_id: &str,
+    workdir: ContainerWorkdir,
+    env: Vec<String>,
+    command: String,
+) -> Result<BackgroundLaunch, RuntimeProcessError> {
+    let launch_script = format!(
+        "mkdir -p /workspace/.ironclaw && {} >>/workspace/.ironclaw/bg-$$.log 2>&1 & echo $!",
+        wrap_command_for_pgid_isolation(&command),
+    );
+    let exec = docker
+        .create_exec(
+            container_id,
+            CreateExecOptions {
+                cmd: Some(vec!["sh".to_string(), "-c".to_string(), launch_script]),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                working_dir: Some(workdir.into_string()),
+                env: Some(env),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| {
+            RuntimeProcessError::ExecutionFailed(format!(
+                "sandbox background launch failed: {error}"
+            ))
+        })?;
+    let launch_timeout = Duration::from_secs(10);
+    let pid_output = tokio::time::timeout(launch_timeout, async {
+        match docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    tty: false,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|error| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "sandbox background launch start failed: {error}"
+                ))
+            })? {
+            StartExecResults::Attached { output, .. } => collect_exec_output(output, 256).await,
+            StartExecResults::Detached => Ok(String::new()),
+        }
+    })
+    .await
+    .map_err(|_| RuntimeProcessError::Timeout(launch_timeout))??;
+    let pid: u32 = pid_output.trim().parse().map_err(|_| {
+        RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox background launch did not report a pid: {pid_output:?}"
+        ))
+    })?;
+    Ok(BackgroundLaunch {
+        pid,
+        log_path: format!("/workspace/.ironclaw/bg-{pid}.log"),
+    })
+}
+
+/// Renders the "still-live background processes" footer appended to every
+/// foreground shell result. Empty when there are no tracked survivors.
+pub(super) fn render_background_footer(jobs: &[registry::BackgroundJob]) -> String {
+    if jobs.is_empty() {
+        return String::new();
+    }
+    let mut footer = String::from("\n\nLive background processes:");
+    for job in jobs {
+        footer.push_str(&format!("\n  pid {} ({})", job.pid, job.command_preview));
+    }
+    footer
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+
+    #[test]
+    fn empty_job_list_renders_no_footer() {
+        assert_eq!(render_background_footer(&[]), "");
+    }
+
+    #[test]
+    fn footer_lists_every_survivor_with_pid_and_command_preview() {
+        let jobs = vec![
+            registry::BackgroundJob {
+                pid: 101,
+                command_preview: "npm run dev".to_string(),
+            },
+            registry::BackgroundJob {
+                pid: 202,
+                command_preview: "python -m http.server".to_string(),
+            },
+        ];
+        assert_eq!(
+            render_background_footer(&jobs),
+            "\n\nLive background processes:\n  pid 101 (npm run dev)\n  pid 202 (python -m http.server)",
+        );
+    }
 }
 
 /// Best-effort: kills the whole process group the timed-out exec started

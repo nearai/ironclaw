@@ -545,6 +545,7 @@ async fn inherited_env_runtime_policy_selects_inherited_local_process_port() {
             timeout_secs: Some(5),
             extra_env: Default::default(),
             output_limit_bytes: None,
+            background: false,
         })
         .await
         .expect("command succeeds");
@@ -581,6 +582,7 @@ async fn scrubbed_runtime_policy_resets_managed_local_process_port_after_inherit
             timeout_secs: Some(5),
             extra_env: Default::default(),
             output_limit_bytes: None,
+            background: false,
         })
         .await
         .expect("command succeeds");

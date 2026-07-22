@@ -357,6 +357,7 @@ pub(crate) async fn run_post_edit_check(
             timeout_secs: Some(config.timeout().as_secs()),
             extra_env: HashMap::new(),
             output_limit_bytes: None,
+            background: false,
         })
         .await;
     match outcome {

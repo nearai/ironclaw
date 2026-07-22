@@ -160,6 +160,7 @@ async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_proces
                 timeout_secs: Some(30),
                 extra_env: std::collections::HashMap::new(),
                 output_limit_bytes: None,
+                background: false,
             })
             .await
             .expect("named test port runs");
@@ -268,6 +269,7 @@ async fn local_resolver_uses_configured_sandbox_process_backend() {
             timeout_secs: None,
             extra_env: Default::default(),
             output_limit_bytes: None,
+            background: false,
         })
         .await
         .unwrap();

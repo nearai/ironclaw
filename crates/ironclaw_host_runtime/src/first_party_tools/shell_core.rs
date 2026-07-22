@@ -69,6 +69,7 @@ pub(super) struct ShellExecutionRequest {
     pub timeout_secs: Option<u64>,
     pub output_limit_bytes: Option<u64>,
     pub extra_env: HashMap<String, String>,
+    pub background: bool,
 }
 
 impl ShellExecutionRequest {
@@ -79,6 +80,7 @@ impl ShellExecutionRequest {
             timeout_secs: None,
             output_limit_bytes: None,
             extra_env: HashMap::new(),
+            background: false,
         }
     }
 }
@@ -96,7 +98,18 @@ pub(super) fn parse_shell_request(
     request.workdir = parse_workdir(params)?;
     request.timeout_secs = parse_timeout(params)?;
     request.output_limit_bytes = parse_output_limit(params)?;
+    request.background = parse_background(params)?;
     Ok(request)
+}
+
+fn parse_background(params: &Value) -> Result<bool, ShellExecutionError> {
+    match params.get("background") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(_) => Err(ShellExecutionError::InvalidParameters(
+            "background must be a boolean".to_string(),
+        )),
+    }
 }
 
 fn parse_workdir(params: &Value) -> Result<Option<String>, ShellExecutionError> {
@@ -581,6 +594,15 @@ mod tests {
                 "expected invalid parameters for {input:?}"
             );
         }
+    }
+
+    #[test]
+    fn parse_shell_request_reads_background_flag_default_false() {
+        let parsed = parse_shell_request(&json!({"command": "echo hi"})).unwrap();
+        assert!(!parsed.background);
+        let parsed =
+            parse_shell_request(&json!({"command": "npm run dev", "background": true})).unwrap();
+        assert!(parsed.background);
     }
 
     #[test]

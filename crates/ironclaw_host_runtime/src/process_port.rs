@@ -78,6 +78,12 @@ pub struct CommandExecutionRequest {
     /// `sandbox_process::shell_limits` for the sandbox transport's clamp.
     pub output_limit_bytes: Option<u64>,
     pub extra_env: HashMap<String, String>,
+    /// Run the command detached and return immediately instead of waiting
+    /// for completion. Only the sandboxed transport
+    /// ([`TenantSandboxProcessPort`]) supports this; [`HostProcessPort`]
+    /// rejects it since the unsandboxed host path has no container to
+    /// outlive the request.
+    pub background: bool,
 }
 
 /// Process-port command result normalized for capability handlers.
@@ -228,6 +234,11 @@ impl RuntimeProcessPort for HostProcessPort {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        if request.background {
+            return Err(RuntimeProcessError::ExecutionFailed(
+                "background execution is not supported outside the sandboxed profile".to_string(),
+            ));
+        }
         let cwd = resolve_local_host_workdir(request.workdir.as_deref(), &self.workdir_aliases)
             .map_err(|e| {
                 RuntimeProcessError::ExecutionFailed(format!(
@@ -461,6 +472,7 @@ mod tests {
                 timeout_secs: None,
                 extra_env: HashMap::new(),
                 output_limit_bytes: None,
+                background: false,
             })
             .await
             .unwrap();
@@ -482,6 +494,7 @@ mod tests {
             timeout_secs: None,
             extra_env: HashMap::new(),
             output_limit_bytes: None,
+            background: false,
         })
         .await
         .unwrap();
@@ -506,6 +519,7 @@ mod tests {
             timeout_secs: Some(6_000),
             extra_env: HashMap::new(),
             output_limit_bytes: None,
+            background: false,
         })
         .await
         .unwrap();
@@ -530,6 +544,7 @@ mod tests {
             timeout_secs: Some(45),
             extra_env: HashMap::new(),
             output_limit_bytes: None,
+            background: false,
         })
         .await
         .unwrap();
@@ -550,6 +565,7 @@ mod tests {
             timeout_secs: None,
             extra_env: HashMap::new(),
             output_limit_bytes: None,
+            background: false,
         })
         .await
         .unwrap();
@@ -573,6 +589,7 @@ mod tests {
             timeout_secs: None,
             extra_env: HashMap::new(),
             output_limit_bytes: Some(10 * 1024 * 1024),
+            background: false,
         })
         .await
         .unwrap();
@@ -596,6 +613,7 @@ mod tests {
             timeout_secs: None,
             extra_env: HashMap::new(),
             output_limit_bytes: Some(10),
+            background: false,
         })
         .await
         .unwrap();
@@ -619,6 +637,7 @@ mod tests {
                 timeout_secs: None,
                 extra_env: HashMap::new(),
                 output_limit_bytes: None,
+                background: false,
             })
             .await
             .unwrap_err();
@@ -642,6 +661,7 @@ mod tests {
                 timeout_secs: Some(1),
                 extra_env: HashMap::new(),
                 output_limit_bytes: None,
+                background: false,
             })
             .await
             .unwrap_err();
@@ -666,11 +686,34 @@ mod tests {
                 timeout_secs: None,
                 extra_env: HashMap::new(),
                 output_limit_bytes: None,
+                background: false,
             })
             .await
             .unwrap();
 
         assert!(output.output.contains("... [truncated 1 bytes] ..."));
+    }
+
+    #[tokio::test]
+    async fn host_process_port_rejects_background_true() {
+        let port = HostProcessPort::new();
+        let error = port
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "sleep 1".to_string(),
+                workdir: None,
+                timeout_secs: Some(1),
+                extra_env: HashMap::new(),
+                output_limit_bytes: None,
+                background: true,
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, RuntimeProcessError::ExecutionFailed(ref reason) if reason.contains("background")),
+            "expected background rejection reason, got: {error:?}"
+        );
     }
 
     #[cfg(unix)]
@@ -775,6 +818,7 @@ mod tests {
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
                 output_limit_bytes: None,
+                background: false,
             })
             .await
             .expect("command succeeds");
@@ -806,6 +850,7 @@ mod tests {
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
                 output_limit_bytes: None,
+                background: false,
             })
             .await
             .expect("command succeeds");
@@ -830,6 +875,7 @@ mod tests {
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
                 output_limit_bytes: None,
+                background: false,
             })
             .await
             .expect("command succeeds");

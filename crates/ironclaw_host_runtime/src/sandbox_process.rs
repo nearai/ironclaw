@@ -43,6 +43,7 @@ pub use network_allowlist::{
     sandbox_extra_allowed_domains, sandbox_network_policy,
 };
 pub use reaper::{ReapSummary, SandboxReaper, SandboxReaperConfig};
+use registry::BackgroundJobRegistry;
 pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
 pub use shell_limits::{
@@ -243,6 +244,7 @@ pub struct RebornScopedSandboxCommandTransport {
     docker: Docker,
     config: RebornSandboxConfig,
     activity: Arc<SandboxActivityRegistry>,
+    background_jobs: Arc<BackgroundJobRegistry>,
 }
 
 impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
@@ -270,6 +272,7 @@ impl RebornScopedSandboxCommandTransport {
             docker,
             config,
             activity: Arc::new(SandboxActivityRegistry::new()),
+            background_jobs: Arc::new(BackgroundJobRegistry::new()),
         }
     }
 
@@ -417,7 +420,33 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
             &workspace,
         )
         .await?;
-        let output = exec_transport::exec_in_container(
+
+        if request.background {
+            let command_preview = request.command.clone();
+            let launch = exec_transport::exec_background_in_container(
+                &self.docker,
+                &container_id,
+                workdir,
+                env,
+                request.command,
+            )
+            .await?;
+            self.background_jobs
+                .record(&key, launch.pid, command_preview);
+            self.activity.touch(&key);
+            return Ok(CommandExecutionOutput {
+                output: format!(
+                    "Started in background: pid {}, log {}",
+                    launch.pid, launch.log_path
+                ),
+                saved_output: None,
+                exit_code: 0,
+                sandboxed: true,
+                duration: Duration::from_secs(0),
+            });
+        }
+
+        let mut output = exec_transport::exec_in_container(
             &self.docker,
             &container_id,
             workdir,
@@ -428,7 +457,44 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
         )
         .await?;
         self.activity.touch(&key);
+        self.reconcile_background_jobs(&container_id, &key).await;
+        output
+            .output
+            .push_str(&exec_transport::render_background_footer(
+                &self.background_jobs.jobs_for(&key),
+            ));
         Ok(output)
+    }
+}
+
+impl RebornScopedSandboxCommandTransport {
+    /// Cheap `ps -o pid=` sweep against the tracked background pids so a
+    /// process that has since exited drops off the footer instead of being
+    /// reported as still live forever.
+    async fn reconcile_background_jobs(&self, container_id: &str, key: &RebornSandboxUserKey) {
+        let tracked = self.background_jobs.jobs_for(key);
+        if tracked.is_empty() {
+            return;
+        }
+        let alive = exec_transport::exec_in_container(
+            &self.docker,
+            container_id,
+            ContainerWorkdir::workspace_root(),
+            Vec::new(),
+            "ps -o pid= --no-headers".to_string(),
+            Duration::from_secs(5),
+            4096,
+        )
+        .await;
+        let Ok(alive) = alive else {
+            return;
+        };
+        let alive_pids: Vec<u32> = alive
+            .output
+            .split_whitespace()
+            .filter_map(|token| token.trim().parse::<u32>().ok())
+            .collect();
+        self.background_jobs.drop_dead(key, &alive_pids);
     }
 }
 
@@ -840,6 +906,7 @@ mod tests {
                 timeout_secs: Some(1),
                 extra_env: HashMap::new(),
                 output_limit_bytes: None,
+                background: false,
             })
             .await
             .unwrap_err();

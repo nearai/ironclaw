@@ -125,6 +125,58 @@ impl SandboxActivityRegistry {
     }
 }
 
+/// A single tracked background (`background: true`) shell launch, kept
+/// per-user so the foreground command path can render a "still-live
+/// background processes" footer. A named struct rather than a `(u32,
+/// String)` tuple — `jobs_for` return values flow into formatting code
+/// where a bare tuple's field order is not self-documenting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BackgroundJob {
+    pub(crate) pid: u32,
+    pub(crate) command_preview: String,
+}
+
+/// Push-based in-memory map of per-user background job launches, keyed on
+/// [`RebornSandboxUserKey`] the same way [`SandboxActivityRegistry`] is.
+/// Kept as a sibling registry (single responsibility) rather than folded
+/// into the activity map.
+#[derive(Debug, Default)]
+pub(crate) struct BackgroundJobRegistry {
+    jobs: Mutex<HashMap<RebornSandboxUserKey, Vec<BackgroundJob>>>,
+}
+
+impl BackgroundJobRegistry {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RebornSandboxUserKey, Vec<BackgroundJob>>> {
+        self.jobs
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    pub(crate) fn record(&self, key: &RebornSandboxUserKey, pid: u32, command_preview: String) {
+        self.lock()
+            .entry(key.clone())
+            .or_default()
+            .push(BackgroundJob {
+                pid,
+                command_preview,
+            });
+    }
+
+    pub(crate) fn jobs_for(&self, key: &RebornSandboxUserKey) -> Vec<BackgroundJob> {
+        self.lock().get(key).cloned().unwrap_or_default()
+    }
+
+    pub(crate) fn drop_dead(&self, key: &RebornSandboxUserKey, alive_pids: &[u32]) {
+        if let Some(jobs) = self.lock().get_mut(key) {
+            jobs.retain(|job| alive_pids.contains(&job.pid));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

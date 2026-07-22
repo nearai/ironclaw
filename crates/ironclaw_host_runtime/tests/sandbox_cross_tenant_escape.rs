@@ -100,6 +100,7 @@ async fn sandbox_containers_cannot_read_across_tenant_host_bind_mounts() {
             timeout_secs: Some(30),
             extra_env: HashMap::new(),
             output_limit_bytes: None,
+            background: false,
         })
         .await
         .expect("tenant A marker write should succeed");
@@ -133,6 +134,7 @@ async fn sandbox_containers_cannot_read_across_tenant_host_bind_mounts() {
             timeout_secs: Some(30),
             extra_env: HashMap::new(),
             output_limit_bytes: None,
+            background: false,
         })
         .await
         .expect("tenant B read attempt should complete (denial is expected inside the output, not a transport error)");

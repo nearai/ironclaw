@@ -154,7 +154,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
                 "command": { "type": "string", "description": "Shell command to execute. Prefer ONE command that does the whole job: combine steps with '&&' or pipes, or write and run a single script (awk/python) — do NOT issue one command per metric/day/line, and don't re-read files you already have." },
                 "workdir": { "type": "string", "description": "Optional scoped working directory" },
                 "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in seconds. Default 120, maximum 600 (values above are clamped)." },
-                "output_limit": { "type": "integer", "minimum": 1024, "description": "Maximum captured output (stdout+stderr) in bytes. Default 65536, maximum 1048576 (values above are clamped)." }
+                "output_limit": { "type": "integer", "minimum": 1024, "description": "Maximum captured output (stdout+stderr) in bytes. Default 65536, maximum 1048576 (values above are clamped)." },
+                "background": { "type": "boolean", "description": "Run detached and return immediately with a pid and log path instead of waiting for completion. Default false. Use for long-running processes such as dev servers; the container survives after this call returns, and subsequent shell calls report still-live background processes in a footer." }
             },
             "required": ["command"],
             "additionalProperties": false
@@ -855,6 +856,18 @@ fn response_body_limit_schema(require_save_to: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::resolve_builtin_input_schema_ref;
+
+    #[test]
+    fn shell_schema_documents_background_flag_default_and_capability() {
+        let schema = resolve_builtin_input_schema_ref("schemas/builtin/shell.input.v1.json")
+            .expect("shell schema is registered");
+        let description = schema["properties"]["background"]["description"]
+            .as_str()
+            .expect("background description is a string");
+        assert!(description.contains("false"));
+        assert!(description.contains("dev server") || description.contains("returns immediately"));
+        assert_eq!(schema["properties"]["background"]["type"], "boolean");
+    }
 
     #[test]
     fn trigger_create_prompt_description_warns_against_self_referential_creation_prompts() {
