@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_host_runtime::{
-    CommandExecutionRequest, RebornSandboxConfig, RebornSandboxScopeKey,
+    CommandExecutionRequest, RebornSandboxConfig, RebornSandboxUserKey,
     RebornScopedSandboxCommandTransport, SandboxCommandTransport,
 };
 
@@ -81,7 +81,7 @@ async fn sandbox_containers_cannot_read_across_tenant_host_bind_mounts() {
     // container to disclose it, it derives it independently host-side,
     // exactly like an attacker who already knows (or guesses) the scope
     // digest scheme would.
-    let key_a = RebornSandboxScopeKey::from_scope(&scope_a);
+    let key_a = RebornSandboxUserKey::from_scope(&scope_a);
     let a_dir_name = key_a
         .workspace_path(workspace_root.path())
         .file_name()
@@ -174,7 +174,7 @@ async fn sandbox_containers_cannot_read_across_tenant_host_bind_mounts() {
     // And B's own scope directory must never have received A's file either
     // (rules out a bug where the write silently fanned out to every scope
     // dir under the shared root).
-    let key_b = RebornSandboxScopeKey::from_scope(&scope_b);
+    let key_b = RebornSandboxUserKey::from_scope(&scope_b);
     let b_marker_path = key_b
         .workspace_path(workspace_root.path())
         .join("marker.txt");
