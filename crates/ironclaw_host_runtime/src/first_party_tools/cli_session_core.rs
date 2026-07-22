@@ -97,13 +97,19 @@ pub(super) struct CliSessionRequest {
 pub(super) fn parse_cli_session_request(
     params: &Value,
 ) -> Result<CliSessionRequest, CliSessionError> {
-    let action = params.get("action").and_then(Value::as_str).ok_or_else(|| {
-        CliSessionError::InvalidParameters("missing 'action' parameter".to_string())
-    })?;
+    let action = params
+        .get("action")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            CliSessionError::InvalidParameters("missing 'action' parameter".to_string())
+        })?;
     let action = CliSessionAction::parse(action)?;
-    let session = params.get("session").and_then(Value::as_str).ok_or_else(|| {
-        CliSessionError::InvalidParameters("missing 'session' parameter".to_string())
-    })?;
+    let session = params
+        .get("session")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            CliSessionError::InvalidParameters("missing 'session' parameter".to_string())
+        })?;
     let session = CliSessionName::parse(session)?;
     let command = optional_nonempty_string(params, "command")?;
     let text = optional_nonempty_string(params, "text")?;
@@ -162,9 +168,7 @@ pub(super) fn build_tmux_command(request: &CliSessionRequest) -> String {
         }
         CliSessionAction::Send => {
             let text = shell_single_quote(request.text.as_deref().expect("validated by parse"));
-            format!(
-                "tmux send-keys -t {session} -l -- {text} && tmux send-keys -t {session} Enter"
-            )
+            format!("tmux send-keys -t {session} -l -- {text} && tmux send-keys -t {session} Enter")
         }
         CliSessionAction::Read => format!("tmux capture-pane -t {session} -p"),
         CliSessionAction::Kill => format!("tmux kill-session -t {session}"),
@@ -313,13 +317,19 @@ mod tests {
             "action": "start", "session": "s"
         }))
         .unwrap_err();
-        assert!(matches!(missing_command, CliSessionError::InvalidParameters(_)));
+        assert!(matches!(
+            missing_command,
+            CliSessionError::InvalidParameters(_)
+        ));
 
         let missing_text = parse_cli_session_request(&serde_json::json!({
             "action": "send", "session": "s"
         }))
         .unwrap_err();
-        assert!(matches!(missing_text, CliSessionError::InvalidParameters(_)));
+        assert!(matches!(
+            missing_text,
+            CliSessionError::InvalidParameters(_)
+        ));
     }
 
     #[test]
