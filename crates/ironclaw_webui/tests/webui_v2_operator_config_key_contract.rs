@@ -135,25 +135,11 @@ impl RebornServicesApi for RecordingServices {
         unreachable!("not exercised by this test")
     }
 
-    async fn get_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
     async fn set_outbound_preferences(
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
         unreachable!("not exercised by this test")
     }
 

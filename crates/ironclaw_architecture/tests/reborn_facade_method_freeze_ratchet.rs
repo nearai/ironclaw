@@ -106,9 +106,7 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "trace_account_login_link",
     "authorize_trace_hold",
     // --- outbound channels ---
-    "get_outbound_preferences",
     "set_outbound_preferences",
-    "list_outbound_delivery_targets",
     // --- extensions + skills ---
     "list_extensions",
     "list_skills",

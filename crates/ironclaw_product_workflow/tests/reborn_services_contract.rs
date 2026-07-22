@@ -5706,10 +5706,19 @@ async fn get_outbound_preferences_unwired_returns_empty_projection() {
         Arc::new(FakeTurnCoordinator::default()),
     );
 
-    let response = services
-        .get_outbound_preferences(caller())
+    let page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
         .await
         .expect("default outbound preferences");
+    let response: RebornOutboundPreferencesResponse =
+        serde_json::from_value(page.payload).expect("outbound preferences payload");
 
     assert!(response.final_reply_target.is_none());
     assert_eq!(
@@ -6132,7 +6141,14 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
     assert!(!set_error.retryable);
 
     let list_error = services
-        .list_outbound_delivery_targets(caller())
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
         .await
         .expect_err("unwired target listing");
     assert_eq!(list_error.code, RebornServicesErrorCode::Unavailable);
@@ -6149,10 +6165,19 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
     )
     .with_outbound_preferences_facade(outbound_facade.clone());
 
-    let get_response = services
-        .get_outbound_preferences(caller())
+    let get_page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
         .await
         .expect("get outbound preferences");
+    let get_response: RebornOutboundPreferencesResponse =
+        serde_json::from_value(get_page.payload).expect("outbound preferences payload");
     assert_eq!(
         get_response
             .final_reply_target
@@ -6178,10 +6203,19 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
         Some("slack-dm-beta")
     );
 
-    let targets = services
-        .list_outbound_delivery_targets(caller_for_user("user-charlie"))
+    let targets_page = services
+        .query(
+            caller_for_user("user-charlie"),
+            RebornViewQuery {
+                view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
         .await
         .expect("list outbound targets");
+    let targets: RebornOutboundDeliveryTargetListResponse =
+        serde_json::from_value(targets_page.payload).expect("outbound targets payload");
     assert_eq!(targets.targets.len(), 1);
     assert_eq!(
         targets.targets[0].target.target_id.as_str(),

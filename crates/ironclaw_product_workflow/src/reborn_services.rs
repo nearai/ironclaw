@@ -2250,16 +2250,6 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    /// Return the authenticated caller's scoped outbound preferences.
-    ///
-    /// Implementations must scope stored preferences by the caller's
-    /// tenant/user identity. Unsupported behavior belongs in
-    /// `UnsupportedOutboundPreferencesProductFacade`, not in trait defaults.
-    async fn get_outbound_preferences(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
-
     /// Persist the authenticated caller's outbound delivery preference.
     ///
     /// Implementations must scope mutations by the caller's tenant/user
@@ -2270,16 +2260,6 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
-
-    /// List delivery targets available to the authenticated caller.
-    ///
-    /// Implementations must scope target inventory by the caller's tenant/user
-    /// identity and fail closed when no outbound target inventory facade is
-    /// wired.
-    async fn list_outbound_delivery_targets(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError>;
 
     async fn list_extensions(
         &self,
@@ -4878,23 +4858,6 @@ where
             .await
     }
 
-    async fn get_outbound_preferences(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        let page = self
-            .query(
-                caller,
-                RebornViewQuery {
-                    view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                    params: serde_json::json!({}),
-                    cursor: None,
-                },
-            )
-            .await?;
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
-    }
-
     async fn set_outbound_preferences(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4903,23 +4866,6 @@ where
         self.outbound_preferences_facade
             .set_outbound_preferences(caller, request)
             .await
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        let page = self
-            .query(
-                caller,
-                RebornViewQuery {
-                    view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
-                    params: serde_json::json!({}),
-                    cursor: None,
-                },
-            )
-            .await?;
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
     }
 
     async fn list_extensions(

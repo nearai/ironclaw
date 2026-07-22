@@ -1364,14 +1364,6 @@ impl RebornServicesApi for StubServices {
         ))
     }
 
-    async fn get_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        *self.get_outbound_preferences_calls.lock().expect("lock") += 1;
-        Ok(outbound_preferences_response("slack-dm-alpha"))
-    }
-
     async fn set_outbound_preferences(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1401,17 +1393,6 @@ impl RebornServicesApi for StubServices {
                 default_modality: Default::default(),
             },
         })
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        *self
-            .list_outbound_delivery_targets_calls
-            .lock()
-            .expect("lock") += 1;
-        Ok(outbound_delivery_targets_response())
     }
 
     async fn list_extension_registry(
@@ -5328,23 +5309,11 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
         ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
-        async fn get_outbound_preferences(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
         async fn set_outbound_preferences(
             &self,
             _caller: WebUiAuthenticatedCaller,
             _request: RebornSetOutboundPreferencesRequest,
         ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_outbound_delivery_targets(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn list_extensions(
