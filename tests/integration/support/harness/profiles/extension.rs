@@ -128,6 +128,7 @@ section = "capability_provider.tools"
 [capability_provider.tools]
 
 [[capability_provider.tools.capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "visprobe.search"
 description = "Model-visible probe capability"
 effects = ["network"]
@@ -137,6 +138,7 @@ input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 
 [[capability_provider.tools.capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "visprobe.audit"
 description = "Host-internal probe capability"
 effects = ["network", "external_write"]

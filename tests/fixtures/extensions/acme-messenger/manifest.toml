@@ -19,6 +19,7 @@ service = "acme-messenger.extension/v1"
 # ---- tool surface ----------------------------------------------------------
 
 [[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "acme-messenger.send_note"
 description = "Send a note to an Acme Messenger conversation as the connected user. Side effect inside a job; never used to deliver the final answer."
 effects = ["network", "use_secret", "external_write"]

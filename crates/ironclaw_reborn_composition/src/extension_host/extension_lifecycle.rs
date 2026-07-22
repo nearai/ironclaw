@@ -599,12 +599,21 @@ impl RebornLocalExtensionManagementPort {
         };
         let effective =
             crate::extension_host::generic_host::effective_resolved_for_package(&base, package);
-        let config = match self.channel_config.get().and_then(Weak::upgrade) {
-            Some(channel_config) => channel_config
+        // This shortcut deliberately publishes without creating a durable
+        // installation. A tool-only package has no channel configuration to
+        // resolve, and asking the attached configuration consumer to load its
+        // absent installed manifest would make the test-support seam fail
+        // before the tool surface can be published.
+        let config = match (
+            effective.channel.is_some(),
+            self.channel_config.get().and_then(Weak::upgrade),
+        ) {
+            (false, _) => Vec::new(),
+            (true, Some(channel_config)) => channel_config
                 .effective_non_secret_config(&package.id)
                 .await
                 .map_err(map_channel_config_error)?,
-            None => self
+            (true, None) => self
                 .installation_store
                 .channel_config(&package.id)
                 .await
