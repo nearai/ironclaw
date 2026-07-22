@@ -31,6 +31,7 @@ mod network_allowlist;
 mod reaper;
 mod registry;
 mod scope_key;
+mod secret_lease;
 pub mod shell_limits;
 mod user_key;
 
@@ -48,6 +49,10 @@ pub use reaper::{ReapSummary, SandboxReaper, SandboxReaperConfig};
 use registry::BackgroundJobRegistry;
 pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
+pub use secret_lease::{
+    SandboxSecretLease, SandboxSecretLeaseError, SandboxSecretLeaseResolver,
+    SandboxSecretLeaseServer,
+};
 pub use shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
 pub use user_key::RebornSandboxUserKey;
 
