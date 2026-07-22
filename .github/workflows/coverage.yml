@@ -28,7 +28,7 @@
 name: Code Coverage
 on:
   push:
-    branches: [main, main-ci-checks-20260722]
+    branches: [main]
 
 permissions:
   contents: read
