@@ -5,6 +5,7 @@
 #   - reborn-coverage-summary.sh        (report + --zero-crates modes)
 #   - reborn-coverage-comment.sh        (sticky PR comment upsert via `gh api`)
 #   - reborn-coverage-int-tier-tests.sh (int-tier suite discovery)
+#   - reborn-coverage-lane-run.sh       (int-tier lane assignment/execution)
 #   - reborn-coverage-ratchet.sh        (coverage-floor ratchet gate)
 #
 # Mirrors test-classify-test-scope.sh: self-contained, locates the
@@ -12,8 +13,7 @@
 # fixtures in a mktemp dir, and reports PASS/FAIL per case. Unlike that
 # precedent (which exits on the first failure), this suite runs every case
 # and prints a final summary, exiting non-zero only if something failed —
-# with five scripts and 50 cases (M/A/B/C/D/R sections), seeing the full
-# picture in one run beats stopping at the first mismatch.
+# seeing the full picture in one run beats stopping at the first mismatch.
 #
 # reborn-coverage-summary.sh and reborn-coverage-ratchet.sh share one lcov-
 # parsing + exemption-filtering + by-crate-aggregation implementation
@@ -23,8 +23,8 @@
 #
 # The R section (reborn-coverage-ratchet.sh cases) lives in the sibling
 # test-reborn-coverage-ratchet-cases.sh, `source`d near the end of this file —
-# split out to keep this file under 1000 lines once a fifth script's cases
-# joined the suite. That file is not standalone; it shares this script's
+# split out to keep this file under 1000 lines as the suite grew. That file is
+# not standalone; it shares this script's
 # helpers, fixtures, and PASS_COUNT/FAIL_COUNT counters.
 #
 # reborn-coverage-summary.sh and reborn-coverage-comment.sh consume a merged,
@@ -55,6 +55,7 @@ merge_sh="${script_dir}/reborn-coverage-merge-lcov.sh"
 summary_sh="${script_dir}/reborn-coverage-summary.sh"
 comment_sh="${script_dir}/reborn-coverage-comment.sh"
 int_tier_sh="${script_dir}/reborn-coverage-int-tier-tests.sh"
+lane_sh="${script_dir}/reborn-coverage-lane-run.sh"
 ratchet_sh="${script_dir}/reborn-coverage-ratchet.sh"
 
 tmp_root="$(mktemp -d)"
@@ -944,6 +945,13 @@ assert_exit_code "D6: nested auth targets exit 0" 0 "${CAP_RC}"
 assert_eq "D6: all nested auth targets are emitted exactly once and shared fixtures are excluded" \
   "$(printf -- '--test\nreborn_integration_auth_failure\n--test\nreborn_integration_auth_gate\n--test\nreborn_integration_oauth_connect\n--test\nreborn_integration_oauth_popup_journeys\n--test\nreborn_integration_oauth_refresh\n--test\nreborn_integration_reopen_resume_through_gate')" \
   "${CAP_OUT}"
+
+# ---------------------------------------------------------------------------
+# E. reborn-coverage-lane-run.sh (coverage-lane assignment/execution)
+# ---------------------------------------------------------------------------
+
+# shellcheck source=./test-reborn-coverage-lane-cases.sh
+source "${script_dir}/test-reborn-coverage-lane-cases.sh"
 
 # ---------------------------------------------------------------------------
 # R. reborn-coverage-ratchet.sh (coverage-floor ratchet gate)

@@ -529,7 +529,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
-    # This is the ONLY execution of the flat reborn_integration_* suites
+    # This is the ONLY execution of the non-group integration-tier suites
     # (there is no separate uninstrumented pass/fail run of them — `cargo
     # llvm-cov ... test` has the same pass/fail semantics as `cargo test`, just
     # instrumented) plus one more, instrumented, run of the reborn_group_*
@@ -865,7 +865,7 @@ jobs:
             exit 1
           fi
 
-          # This is the ONLY execution of the flat reborn_integration_*
+          # This is the ONLY execution of the non-group integration-tier
           # suites (see the reborn-integration-coverage job), so it gates like
           # every other test job above — real pass/fail, not the coverage
           # percentage (that's coverage-report below).

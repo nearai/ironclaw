@@ -347,6 +347,14 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
+  "reborn coverage regression suite, sourced sibling (lane cases)" \
+  "scripts/ci/test-reborn-coverage-lane-cases.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
   "test suite boundaries checker script" \
   "scripts/ci/check-test-suite-boundaries.sh" \
   "docs_only=false
