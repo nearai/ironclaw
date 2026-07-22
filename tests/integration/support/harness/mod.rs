@@ -1080,6 +1080,20 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
+    /// Enqueue one exact status/body response on the recording network lane.
+    /// Used when a WASM guest's error classification depends on both fields.
+    pub(crate) fn install_network_response_script(
+        &self,
+        status: u16,
+        body: Vec<u8>,
+    ) -> HarnessResult<()> {
+        self.network_egress
+            .as_ref()
+            .ok_or("host runtime harness has no recording network egress to script")?
+            .push_response(status, body);
+        Ok(())
+    }
+
     /// Install a sticky scripted `builtin.shell` process result on the inert
     /// recording process port (mirrors `install_http_responses`). Errors if the
     /// harness has no recording port (e.g. the `.with_live_shell()` path).

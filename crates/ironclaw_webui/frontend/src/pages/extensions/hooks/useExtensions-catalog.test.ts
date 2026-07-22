@@ -298,12 +298,12 @@ test("install/activate auth popups: noopener null is not an error; insecure URLs
   );
   assert.equal(lastError(), undefined);
 
-  // A genuinely non-HTTPS URL still reports the HTTPS problem.
+  // A genuinely non-HTTPS URL reports the translated client-side error key.
   activateConfig.onSuccess(
     { success: false, auth_url: "http://insecure.example/authorize" },
     { displayName: "Slack" },
   );
-  assert.match(lastError().message, /HTTPS/);
+  assert.equal(lastError().message, "extensions.oauthInvalidAuthorizationUrl");
 });
 
 test("useOauthSetup waits for flow completion after the OAuth popup closes", async () => {

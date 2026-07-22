@@ -15,7 +15,8 @@ use ironclaw_host_api::{
 };
 use serde_json::Value;
 
-use super::wasm_execution::{ReservationGuard, execute_prepared_wasm, run_wasm_prepare_blocking};
+use super::wasm_blocking::run_wasm_prepare_blocking;
+use super::wasm_execution::{ReservationGuard, execute_prepared_wasm};
 use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
@@ -1003,8 +1004,8 @@ where
             )
             .await
             .map_err(|error| DispatchError::Wasm {
-                kind: wasm_error_kind(&error),
-                model_visible_cause: Some(error.to_string()),
+                kind: error.kind(),
+                model_visible_cause: Some(error.source().to_string()),
             })?,
         );
         let prepared = {
@@ -1114,6 +1115,11 @@ fn script_error_kind(error: &ScriptError) -> RuntimeDispatchErrorKind {
         ScriptError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
         ScriptError::ExitFailure { .. } => RuntimeDispatchErrorKind::ExitFailure,
         ScriptError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
+        // A script timeout does not encode whether the request, runtime, or
+        // backend caused the deadline to elapse. Keep it in the executor lane
+        // until the runtime can provide typed timeout provenance; otherwise a
+        // transient host slowdown would be mislabeled as a deterministic
+        // model-visible operation failure and lose its retry path.
         ScriptError::Timeout { .. } => RuntimeDispatchErrorKind::Executor,
         ScriptError::InvalidOutput { .. } => RuntimeDispatchErrorKind::OutputDecode,
     }

@@ -3785,6 +3785,12 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
             );
             assert!(
                 failure
+                    .model_visible_cause()
+                    .is_some_and(|cause| cause.contains("run command must not be empty")),
+                "public spawn_capability must preserve the corrective validation cause: {failure:?}"
+            );
+            assert!(
+                failure
                     .message
                     .as_deref()
                     .unwrap_or_default()
@@ -4080,6 +4086,12 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+            assert!(
+                failure
+                    .model_visible_cause()
+                    .is_some_and(|cause| cause.contains("run command must not be empty")),
+                "public resume_spawn_capability must preserve the corrective validation cause: {failure:?}"
             );
             assert!(
                 failure

@@ -123,7 +123,8 @@ use super::product_workflow::RebornProductWorkflowHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
-    ErrLlm, ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm, scripted_trace_llm,
+    ErrLlm, ErrLlmKind, ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm,
+    scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -1127,7 +1128,7 @@ enum ThreadModelMode {
     /// This thread's model call always fails with a fixed non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
     /// `replies`. See [`super::scripted_provider::ErrLlm`].
-    Failing,
+    Failing(ErrLlmKind),
 }
 
 impl<'g> RebornThreadBuilder<'g> {
@@ -1170,16 +1171,26 @@ impl<'g> RebornThreadBuilder<'g> {
     /// `LlmError` (E-GATEWAY seam, C-ERRORS — provider-`Err` failure category).
     /// Sits at the same vendor-SDK seam as `park_model`/scripted playback.
     pub fn fail_model(self) -> Self {
-        self.fail_model_opt(true)
+        self.fail_model_opt(Some(ErrLlmKind::ContextLength))
     }
 
-    /// Internal: set the fail-model flag (used by the flat builder to thread
+    /// Credentials arm of [`Self::fail_model`]: the model call always fails
+    /// with non-retryable `LlmError::AuthFailed`, driving the pinned
+    /// `model_credentials_unavailable` failure category through the real
+    /// provider-error mapping.
+    pub fn fail_model_auth(self) -> Self {
+        self.fail_model_opt(Some(ErrLlmKind::AuthFailed))
+    }
+
+    /// Internal: set the fail-model kind (used by the flat builder to thread
     /// its own knob through the degenerate one-thread group). Never downgrades
     /// an already-`Parked` mode, matching the old tuple-priority contract
     /// (`park_model` always wins over `fail_model`).
-    pub(crate) fn fail_model_opt(mut self, fail: bool) -> Self {
-        if fail && !matches!(self.model_mode, ThreadModelMode::Parked(_)) {
-            self.model_mode = ThreadModelMode::Failing;
+    pub(crate) fn fail_model_opt(mut self, fail: Option<ErrLlmKind>) -> Self {
+        if let Some(kind) = fail
+            && !matches!(self.model_mode, ThreadModelMode::Parked(_))
+        {
+            self.model_mode = ThreadModelMode::Failing(kind);
         }
         self
     }
@@ -1255,7 +1266,7 @@ impl<'g> RebornThreadBuilder<'g> {
             ThreadModelMode::Parked(gate) => {
                 Arc::new(parking_trace_llm(gate, scripted_llm.clone()))
             }
-            ThreadModelMode::Failing => Arc::new(ErrLlm),
+            ThreadModelMode::Failing(kind) => Arc::new(ErrLlm::new(kind)),
             ThreadModelMode::Normal => scripted_llm.clone(),
         };
         let session = create_session_manager(SessionConfig {
