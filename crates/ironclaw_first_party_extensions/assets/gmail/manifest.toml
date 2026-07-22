@@ -1,4 +1,4 @@
-schema_version = "reborn.extension_manifest.v2"
+schema_version = "reborn.extension_manifest.v3"
 id = "gmail"
 name = "Gmail"
 version = "0.1.0"
@@ -9,86 +9,135 @@ trust = "first_party_requested"
 kind = "first_party"
 service = "gmail"
 
-[[capabilities]]
+[admin_configuration]
+group_id = "vendor.google"
+display_name = "Google OAuth client credentials"
+description = "Deployment OAuth client credentials shared by Google extensions."
+fields = [
+  { handle = "google_oauth_client_id", label = "Google OAuth client ID", secret = false, required = true },
+  { handle = "google_oauth_client_secret", label = "Google OAuth client secret", secret = true, required = true },
+]
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.list_messages"
 description = "List Gmail messages."
-effects = ["dispatch_capability", "network", "use_secret"]
+effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
-runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.readonly"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/gmail/list_messages.input.v1.json"
-output_schema_ref = "schemas/gmail/list_messages.output.v1.json"
 prompt_doc_ref = "prompts/gmail/list_messages.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "gmail_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
+audience = { scheme = "https", host = "gmail.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.get_message"
 description = "Get a Gmail message."
-effects = ["dispatch_capability", "network", "use_secret"]
+effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
-runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.readonly"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/gmail/get_message.input.v1.json"
-output_schema_ref = "schemas/gmail/get_message.output.v1.json"
 prompt_doc_ref = "prompts/gmail/get_message.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "gmail_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/gmail.readonly"]
+audience = { scheme = "https", host = "gmail.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.send_message"
-description = "Send a Gmail message."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+description = "Send a Gmail message as the user — a side effect inside the current job (the email comes from their account). Never use this to deliver your final answer to the user: the host delivers final replies on the conversation's outbound channel."
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
-runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.send"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.send"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/gmail/send_message.input.v1.json"
-output_schema_ref = "schemas/gmail/send_message.output.v1.json"
 prompt_doc_ref = "prompts/gmail/send_message.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "gmail_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/gmail.send"]
+audience = { scheme = "https", host = "gmail.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.create_draft"
 description = "Create a Gmail draft."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
-runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.modify"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/gmail/create_draft.input.v1.json"
-output_schema_ref = "schemas/gmail/create_draft.output.v1.json"
 prompt_doc_ref = "prompts/gmail/create_draft.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "gmail_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/gmail.modify"]
+audience = { scheme = "https", host = "gmail.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.reply_to_message"
-description = "Reply to a Gmail message."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+description = "Reply to a Gmail message as the user — a side effect inside the current job, not a way to deliver your final answer."
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
-runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.send"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.send"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/gmail/reply_to_message.input.v1.json"
-output_schema_ref = "schemas/gmail/reply_to_message.output.v1.json"
 prompt_doc_ref = "prompts/gmail/reply_to_message.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "gmail_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/gmail.send"]
+audience = { scheme = "https", host = "gmail.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "gmail.trash_message"
 description = "Move a Gmail message to trash."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
-runtime_credentials = [
-  { handle = "gmail_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.modify"] } }, provider_scopes = ["https://www.googleapis.com/auth/gmail.modify"], audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/gmail/trash_message.input.v1.json"
-output_schema_ref = "schemas/gmail/trash_message.output.v1.json"
 prompt_doc_ref = "prompts/gmail/trash_message.md"
+
+[[tools.credentials]]
+handle = "gmail_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/gmail.modify"]
+audience = { scheme = "https", host = "gmail.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[auth.google]
+method = "oauth2_code"
+display_name = "Google account"
+authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
+token_endpoint = "https://oauth2.googleapis.com/token"
+pkce = "s256"
+scopes = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.modify"]
+extra_authorize_params = { access_type = "offline", include_granted_scopes = "true", prompt = "consent" }
+client_credentials = { client_id_handle = "google_oauth_client_id", client_secret_handle = "google_oauth_client_secret" }
+
+[auth.google.refresh]
+# Google refresh tokens for apps in "testing" publishing status expire after
+# 7 days of inactivity; the host auth engine's keepalive sweep proactively
+# refreshes idle accounts well before this vendor lifetime.
+keepalive_idle_seconds = 604800
+
+[auth.google.token_response]
+access_token = "/access_token"
+refresh_token = "/refresh_token"
+expires_in = "/expires_in"
+scope = { path = "/scope" }

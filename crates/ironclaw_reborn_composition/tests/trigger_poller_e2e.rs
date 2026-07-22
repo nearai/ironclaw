@@ -1547,3 +1547,4 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         all_triggers[0]
     );
 }
+// arch-exempt: large_file, trigger poller end-to-end coverage remains centralized, plan #6175

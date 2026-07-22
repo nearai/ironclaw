@@ -11,8 +11,8 @@
 
 ## What This Crate Owns
 
-- The neutral runtime dispatch port that routes already-authorized capability requests to runtime lanes. Currently:
-- `RuntimeDispatcher<'a, F, G, E>` holds one monomorphized `RuntimeExecutor` (`E`) and routes each capability by matching the resolved `RuntimeLane` — a closed enum collapse of the former `HashMap<RuntimeKind, dyn RuntimeAdapter>` trait-object registry (arch-simplification §4.2). The concrete executor enum (`RuntimeLaneExecutor` over WASM/Script/MCP/first-party) lives host-runtime-side; this crate only owns the `RuntimeExecutor` port and the `RuntimeAdapter` per-lane execution shape, with `RuntimeAdapterRequest` / `RuntimeAdapterResult` (no direct WASM/Script/MCP deps).
+- The neutral runtime dispatch port that routes already-authorized capability requests to prebound bindings resolved by capability id.
+- `RuntimeDispatcher<'a, G>` consumes a snapshot-shaped `ToolResolver`; package, manifest, and runtime selection happen when a binding is published, never per invocation. The concrete WASM/MCP/process/first-party lane set remains closed behind host-runtime's exhaustive `RuntimeLaneExecutor` match (arch-simplification §4.2), with no `HashMap<RuntimeKind, dyn RuntimeAdapter>` production router.
 - The re-exported `ironclaw_host_api` dispatch contracts: `CapabilityDispatcher`, `CapabilityDispatchRequest`, `CapabilityDispatchResult`, `DispatchError`, `RuntimeDispatchErrorKind` (runtime errors redacted to stable kinds at the public surface).
 - Crate-local public API, tests, and fixtures needed to prove that ownership.
 

@@ -124,7 +124,7 @@ impl GateRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ExtensionId, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup};
+    use crate::{ExtensionId, RuntimeCredentialAccountSetup, VendorId};
 
     fn summary() -> SafeSummary {
         SafeSummary::new("awaiting decision").unwrap()
@@ -132,7 +132,7 @@ mod tests {
 
     fn credential_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: VendorId::new("github").unwrap(),
             setup: RuntimeCredentialAccountSetup::ManualToken,
             requester_extension: ExtensionId::new("github").unwrap(),
             provider_scopes: vec!["repo".to_string()],

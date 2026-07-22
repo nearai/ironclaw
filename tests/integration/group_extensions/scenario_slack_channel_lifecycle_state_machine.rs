@@ -1,39 +1,62 @@
 //! Scenario 6 (C-SLACK-LIFECYCLE, issue #6105): the Slack channel-extension
-//! lifecycle STATE MACHINE — install → activate → connect → use → disconnect
-//! (via `builtin.extension_remove`, the production path: there is no separate
-//! disconnect route) → reconnect → reinstall/activate → use again — with
-//! surface consistency asserted after every transition.
+//! lifecycle STATE MACHINE — install → activate → configure → connect → use →
+//! disconnect (via `builtin.extension_remove`, the production path: there is
+//! no separate disconnect route) → reinstall/reconfigure → reconnect → use
+//! again — with surface consistency asserted after every transition,
+//! re-expressed onto the unified generic extension runtime.
 //!
 //! The three surfaces that disagreed in issue #6091 are each read through
 //! their REAL implementation:
-//! - **connection state**: the production `SlackChannelConnectionFacade`
-//!   over durable host-state identity bindings (what the Extensions page
-//!   merges via `caller_channel_connections`), plus the binding store itself
-//!   as durable evidence;
+//! - **connection state**: the production `GenericChannelConnectionFacade`
+//!   (extension-runtime §6.4) over the durable channel-identity store (what
+//!   the Extensions page merges via `caller_channel_connections`), plus the
+//!   binding store itself as durable evidence;
 //! - **capability surface**: whether a scripted `slack.*` call actually
 //!   dispatches through the model gateway + capability port;
 //! - **lifecycle phase**: `builtin.extension_search`'s `installation_phase`.
 //!
 //! Key distinctions this pins (the #6091 divergence axes):
 //! - activation publishes tools but does NOT connect (installed ≠ connected);
-//! - removal runs the REAL personal-connection cleanup — connection state,
+//! - removal runs the REAL per-caller channel disconnect — connection state,
 //!   durable bindings, lifecycle phase, and tool dispatchability must ALL
 //!   flip together, not drift;
-//! - a reconnect (new OAuth epoch) + reinstall restores service end to end.
+//! - a reinstall + fresh reconnect restores service end to end, with no
+//!   stale-binding carryover from before the removal.
 //!
-//! Uses the group's Slack channel-connection bundle
-//! (`ironclaw_reborn_composition::test_support`), whose connect mirrors the
-//! `slack_personal` OAuth callback and whose facade is late-bound into the
-//! same cleanup slot `extension_remove` dispatches to.
+//! Uses the group's generic channel-connection bundle
+//! (`ironclaw_reborn_composition::test_support`), whose connect drives the
+//! production OAuth-callback identity-binding hook
+//! (`bind_channel_identities_for_callback`) and whose facade is late-bound
+//! into the same cleanup slot `extension_remove` dispatches to.
+//!
+//! Divergences from the retired per-vendor (slack-host-beta) expression of
+//! this scenario, forced by the generic architecture:
+//! - **configure is a real phase**: the generic identity bind fails closed
+//!   until the extension's `[channel.config]` connection-scoping values
+//!   (`slack_team_id` / `slack_api_app_id`) are configured through the
+//!   production configure port, so this scenario configures them explicitly
+//!   (the retired lane carried them in test-bundle config instead);
+//! - **connect requires an installed extension**: the generic hook binds by
+//!   discovering installed channel extensions, so the post-removal reconnect
+//!   happens AFTER reinstall (the retired lane's binding service was
+//!   installation-config-carried and could bind while uninstalled);
+//! - **no connection epochs**: the retired lane fenced reconnects with
+//!   `SlackConnectionEpoch`; the generic store has no epoch vocabulary — the
+//!   equivalent pin is that removal deletes the binding outright, so a fresh
+//!   reconnect succeeds with no stale-state conflict (`bind_user_identity`
+//!   would reject a binding held by a different user);
+//! - **bindings are deleted, not tombstoned**: `has_any_active_identity_binding`
+//!   reads record absence rather than tombstone state.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;
+use ironclaw_auth::OAuthProviderIdentity;
 use serde_json::json;
 
-/// Mirrors the `slack_personal` scope union the extension-lifecycle profile
-/// seeds (`profiles/extension.rs`): read scopes for `search_messages` plus
-/// `chat:write` for `send_message`.
-const SLACK_PERSONAL_SCOPES: &[&str] = &[
+/// Mirrors the slack manifest's `[[tools.credentials]]` scope union
+/// (`crates/ironclaw_first_party_extensions/assets/slack/manifest.toml`):
+/// read scopes shared by every tool plus `chat:write` for `send_message`.
+const SLACK_SCOPES: &[&str] = &[
     "search:read",
     "channels:history",
     "groups:history",
@@ -47,20 +70,69 @@ const SLACK_PERSONAL_SCOPES: &[&str] = &[
     "chat:write",
 ];
 
+/// The `[channel.config]` connection-scoping claims this scenario configures
+/// and the proven OAuth identity must match (fail-closed on mismatch).
+const SLACK_TEAM_ID: &str = "T-ITEST";
+const SLACK_API_APP_ID: &str = "A-ITEST";
+
+/// The proven vendor identity of a successful personal OAuth grant
+/// (`authed_user.id` plus the workspace/app claims the token exchange
+/// extracts through the manifest's `[auth.slack.identity]` pointers).
+fn proven_slack_identity() -> Result<OAuthProviderIdentity, String> {
+    OAuthProviderIdentity::new(
+        "U-ITEST-ALPHA",
+        Some(SLACK_TEAM_ID.to_string()),
+        None,
+        Some(SLACK_API_APP_ID.to_string()),
+    )
+    .map_err(|error| format!("proven slack identity: {error}"))
+}
+
+/// Configure slack's `[channel.config]` connection-scoping values through
+/// the PRODUCTION configure port (`ChannelConfigService` via
+/// `RebornServices::channel_config_facade`) — the §6.5 configure step the
+/// generic identity bind fails closed without. Requires the extension to be
+/// installed, so this runs after every (re)install.
+async fn configure_slack_connection_scoping(g: &RebornIntegrationGroup) -> HarnessResult<()> {
+    let services = g
+        .capability_harness()
+        .and_then(|harness| harness.reborn_services_for_test())
+        .ok_or("extension_lifecycle group must expose its RebornServices bundle")?;
+    let channel_config = services
+        .channel_config_facade()
+        .ok_or("composed runtime must expose the channel-config configure port")?;
+    let slack_id = ironclaw_host_api::ExtensionId::new("slack")
+        .map_err(|error| format!("slack extension id: {error}"))?;
+    channel_config
+        .save_values(
+            &slack_id,
+            vec![
+                ("slack_team_id".to_string(), SLACK_TEAM_ID.to_string()),
+                ("slack_api_app_id".to_string(), SLACK_API_APP_ID.to_string()),
+            ],
+        )
+        .await
+        .map_err(|error| format!("slack channel config save failed: {:?}", error.code))?;
+    Ok(())
+}
+
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let slack = g
-        .slack_channel_connection()
-        .ok_or("extension_lifecycle group must carry the Slack channel-connection bundle")?;
+        .channel_connection()
+        .ok_or("extension_lifecycle group must carry the channel-connection bundle")?;
     // Direct-chat bindings resolve subject == actor, so this one identity is
     // both the capability dispatch user and the authenticated actor removal
     // cleanup disconnects.
     let actor = g.canonical_actor_user();
 
     // ── Phase 0: nothing installed, nothing connected ────────────────────────
-    if slack.caller_channel_connected(&actor).await? {
+    if slack.caller_channel_connected("slack", &actor).await? {
         return Err("slack must not report connected before any OAuth connect".into());
     }
-    if slack.has_any_active_identity_binding(&actor).await? {
+    if slack
+        .has_any_active_identity_binding("slack", &actor)
+        .await?
+    {
         return Err("no active slack identity binding may exist before connect".into());
     }
 
@@ -80,11 +152,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
-    // Activation's credential gate and dispatch-time staging select a
-    // `slack_personal` account under the capability dispatch scope.
+    // Activation's credential gate and dispatch-time staging select a slack
+    // account under the capability dispatch scope.
     lifecycle
-        .seed_capability_credential_account("slack_personal", "itest slack", SLACK_PERSONAL_SCOPES)
+        .seed_capability_credential_account("slack", "itest slack", SLACK_SCOPES)
         .await?;
+    eprintln!("SLACK-LIFECYCLE PHASE1-install-activate begin");
     lifecycle.submit_turn("install and activate slack").await?;
     lifecycle
         .assert_tool_result_contains("\"installed\":true")
@@ -92,23 +165,41 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     lifecycle
         .assert_tool_result_contains("\"activated\":true")
         .await?;
+    lifecycle
+        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .await?;
+    lifecycle
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .await?;
     // Activation published the tool surface…
     lifecycle
         .assert_tool_result_contains(r#""slack.send_message""#)
         .await?;
-    // …but activation is NOT connection (the #6091 distinction).
-    if slack.caller_channel_connected(&actor).await? {
-        return Err("slack must not report connected after activate alone; \
+    // …and the §6.5 configure step binds the connection-scoping values the
+    // generic identity bind validates proven identities against.
+    eprintln!("SLACK-LIFECYCLE PHASE1b-configure begin");
+    configure_slack_connection_scoping(g).await?;
+    // …but neither activation nor configuration is connection (the #6091
+    // distinction).
+    if slack.caller_channel_connected("slack", &actor).await? {
+        return Err(
+            "slack must not report connected after activate + configure alone; \
              activation published tools without any OAuth connect"
-            .into());
+                .into(),
+        );
     }
 
     // ── Phase 2: connect (OAuth-callback-shaped) flips connection state ─────
-    slack.connect_personal_user(&actor, "U-ITEST-ALPHA").await?;
-    if !slack.caller_channel_connected(&actor).await? {
+    slack
+        .connect_provider_user(&actor, "slack", proven_slack_identity()?)
+        .await?;
+    if !slack.caller_channel_connected("slack", &actor).await? {
         return Err("slack must report connected after the personal OAuth connect".into());
     }
-    if !slack.has_any_active_identity_binding(&actor).await? {
+    if !slack
+        .has_any_active_identity_binding("slack", &actor)
+        .await?
+    {
         return Err("connect must persist an active slack identity binding".into());
     }
 
@@ -134,6 +225,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
+    eprintln!("SLACK-LIFECYCLE PHASE3-search begin");
     caller.submit_turn("search my slack messages").await?;
     caller.assert_tool_invoked("slack.search_messages").await?;
     caller.assert_reply_contains("searched slack").await?;
@@ -150,19 +242,26 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
+    eprintln!("SLACK-LIFECYCLE PHASE4-remove begin");
     remover.submit_turn("remove slack").await?;
     remover
         .assert_tool_result_contains("\"removed\":true")
         .await?;
+    remover
+        .assert_model_message_content_contains(r#"\"removed\":true"#)
+        .await?;
     // Every surface flips together: connection facade…
-    if slack.caller_channel_connected(&actor).await? {
+    if slack.caller_channel_connected("slack", &actor).await? {
         return Err("slack still reports connected after extension_remove; \
-             removal did not run the personal-connection cleanup (issue #6091 shape)"
+             removal did not run the per-caller channel disconnect (issue #6091 shape)"
             .into());
     }
-    // …durable identity bindings (tombstoned out of the active state)…
-    if slack.has_any_active_identity_binding(&actor).await? {
-        return Err("extension_remove must deactivate durable slack identity bindings".into());
+    // …durable identity bindings (deleted by the generic disconnect)…
+    if slack
+        .has_any_active_identity_binding("slack", &actor)
+        .await?
+    {
+        return Err("extension_remove must delete durable slack identity bindings".into());
     }
     // …and the lifecycle phase seen by extension_search (fresh viewer thread
     // so earlier `"activated":true` results can't satisfy the negative check).
@@ -174,6 +273,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
+    eprintln!("SLACK-LIFECYCLE PHASE4c-viewer begin");
     viewer.submit_turn("search slack after removal").await?;
     if viewer
         .assert_tool_result_contains(r#""installation_phase":"active""#)
@@ -188,8 +288,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     }
     // Non-vacuity: the catalog entry itself must still be discoverable.
     viewer.assert_tool_result_contains("\"slack\"").await?;
+    viewer
+        .assert_model_message_content_contains(r#"\"id\":\"slack\""#)
+        .await?;
 
     // ── Phase 5: use after remove — the identical call no longer dispatches ─
+    eprintln!("SLACK-LIFECYCLE PHASE5-send-after-remove begin");
     caller.submit_turn("send a slack message").await?;
     if caller
         .assert_tool_invoked("slack.send_message")
@@ -202,8 +306,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     }
     caller.assert_reply_contains("slack unavailable").await?;
 
-    // ── Phase 6: reconnect (new epoch) + reinstall/activate restores service ─
-    // A real reconnect is a fresh OAuth grant: new credential, new epoch.
+    // ── Phase 6: reinstall/activate + reconfigure + reconnect restores service
+    // A real reconnect is a fresh OAuth grant against a fresh install. The
+    // generic identity bind discovers INSTALLED channel extensions
+    // (fail-closed while slack is removed), so — unlike the retired
+    // per-vendor lane, which could bind while uninstalled — the reconnect
+    // runs after reinstall + reconfigure.
     let restorer = g
         .thread("slack-lifecycle-restore")
         .script([
@@ -219,19 +327,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         ])
         .build()
         .await?;
+    // Removal revoked the caller's personal slack credential; a reconnect
+    // mints a fresh account, exactly like a fresh OAuth grant.
     restorer
-        .seed_capability_credential_account(
-            "slack_personal",
-            "itest slack reconnect",
-            SLACK_PERSONAL_SCOPES,
-        )
+        .seed_capability_credential_account("slack", "itest slack reconnect", SLACK_SCOPES)
         .await?;
-    slack.connect_personal_user(&actor, "U-ITEST-ALPHA").await?;
-    if !slack.caller_channel_connected(&actor).await? {
-        return Err("slack must report connected after reconnect; \
-             a completed disconnect must not fence out a NEW connection epoch (issue #6092 shape)"
-            .into());
-    }
+    eprintln!("SLACK-LIFECYCLE PHASE6-reinstall begin");
     restorer.submit_turn("reinstall and activate slack").await?;
     restorer
         .assert_tool_result_contains("\"installed\":true")
@@ -239,8 +340,24 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     restorer
         .assert_tool_result_contains("\"activated\":true")
         .await?;
+    restorer
+        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .await?;
+    restorer
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .await?;
+    configure_slack_connection_scoping(g).await?;
+    slack
+        .connect_provider_user(&actor, "slack", proven_slack_identity()?)
+        .await?;
+    if !slack.caller_channel_connected("slack", &actor).await? {
+        return Err("slack must report connected after reconnect; \
+             a completed removal must not fence out a NEW connection (issue #6092 shape)"
+            .into());
+    }
 
     // ── Phase 7: use again — the same call that was rejected now dispatches ─
+    eprintln!("SLACK-LIFECYCLE PHASE7-send-again begin");
     caller.submit_turn("send the slack message again").await?;
     caller.assert_tool_invoked("slack.send_message").await?;
     caller.assert_reply_contains("sent slack message").await?;

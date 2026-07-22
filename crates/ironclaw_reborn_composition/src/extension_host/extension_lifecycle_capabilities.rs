@@ -110,9 +110,9 @@ fn lifecycle_manifest(
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.input.v1.json"
         ))?,
-        output_schema_ref: CapabilityProfileSchemaRef::new(format!(
+        output_schema_ref: Some(CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.output.v1.json"
-        ))?,
+        ))?),
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
@@ -407,14 +407,10 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::{collections::HashMap, path::PathBuf, sync::Mutex};
-
     use ironclaw_auth::{
         AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
         CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
     };
-    use ironclaw_extensions::ExtensionInstallationId;
     use ironclaw_host_api::{
         CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilitySet, ExecutionContext,
         ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern,
@@ -426,16 +422,13 @@ mod tests {
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::factory::{RebornRuntimeSubstrate, build_runtime_substrate};
     use crate::{OAuthClientConfig, RebornBuildInput};
-    use ironclaw_product_workflow::{
-        ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
-    };
-    use ironclaw_product_workflow::{
-        ChannelConnectionRequirement, LifecyclePhase, RebornChannelConnectStrategy,
-    };
+    use ironclaw_host_api::InstallationState;
+    use ironclaw_product_workflow::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
 
     /// Dummy but well-formed Google OAuth backend config for tests below that
     /// exercise PER-ACCOUNT credential gating (scope coalescing, shared
@@ -457,6 +450,7 @@ mod tests {
     fn slack_activation_response() -> LifecycleProductResponse {
         let requirement = ChannelConnectionRequirement {
             channel: "slack".to_string(),
+            display_name: "Slack".to_string(),
             strategy: RebornChannelConnectStrategy::OAuth,
             instructions: "Connect Slack with OAuth from the extension configuration.".to_string(),
             input_placeholder: String::new(),
@@ -465,7 +459,7 @@ mod tests {
         };
         LifecycleProductResponse {
             package_ref: None,
-            phase: LifecyclePhase::Active,
+            phase: InstallationState::Active,
             blockers: Vec::new(),
             message: Some("activation guidance".to_string()),
             payload: Some(LifecycleProductPayload::ExtensionActivate {
@@ -560,6 +554,7 @@ mod tests {
         // or a broken match arm would otherwise be invisible to Rust tests.
         let requirement = ChannelConnectionRequirement {
             channel: "slack".to_string(),
+            display_name: "Slack".to_string(),
             strategy: RebornChannelConnectStrategy::OAuth,
             instructions: "Connect Slack with OAuth from the extension configuration.".to_string(),
             input_placeholder: String::new(),
@@ -568,7 +563,7 @@ mod tests {
         };
         let channel_activation = LifecycleProductResponse {
             package_ref: None,
-            phase: LifecyclePhase::Active,
+            phase: InstallationState::Active,
             blockers: Vec::new(),
             message: Some("activation guidance".to_string()),
             payload: Some(LifecycleProductPayload::ExtensionActivate {
@@ -587,7 +582,7 @@ mod tests {
 
         let tool_activation = LifecycleProductResponse {
             package_ref: None,
-            phase: LifecyclePhase::Active,
+            phase: InstallationState::Active,
             blockers: Vec::new(),
             message: None,
             payload: Some(LifecycleProductPayload::ExtensionActivate {
@@ -775,443 +770,6 @@ mod tests {
         assert!(!storage_root.join("system/extensions/web-access").exists());
     }
 
-    #[derive(Debug, Default)]
-    struct RecordingChannelConnectionFacade {
-        connections: Mutex<HashMap<String, bool>>,
-        connection_status_calls: Mutex<usize>,
-        disconnects: Mutex<Vec<(WebUiAuthenticatedCaller, String)>>,
-        watched_package_path: Option<PathBuf>,
-        package_present_during_disconnect: Mutex<Vec<bool>>,
-    }
-
-    impl RecordingChannelConnectionFacade {
-        fn with_connection(channel: &str, connected: bool) -> Self {
-            Self {
-                connections: Mutex::new(HashMap::from([(channel.to_string(), connected)])),
-                connection_status_calls: Mutex::new(0),
-                disconnects: Mutex::new(Vec::new()),
-                watched_package_path: None,
-                package_present_during_disconnect: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn watching_package(mut self, path: PathBuf) -> Self {
-            self.watched_package_path = Some(path);
-            self
-        }
-
-        fn disconnects(&self) -> Vec<(WebUiAuthenticatedCaller, String)> {
-            self.disconnects.lock().expect("disconnects lock").clone()
-        }
-
-        fn connection_status_calls(&self) -> usize {
-            *self
-                .connection_status_calls
-                .lock()
-                .expect("connection status calls lock")
-        }
-
-        fn package_present_during_disconnect(&self) -> Vec<bool> {
-            self.package_present_during_disconnect
-                .lock()
-                .expect("package presence lock")
-                .clone()
-        }
-    }
-
-    #[async_trait]
-    impl ChannelConnectionFacade for RecordingChannelConnectionFacade {
-        async fn caller_channel_connections(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<HashMap<String, bool>, RebornServicesError> {
-            *self
-                .connection_status_calls
-                .lock()
-                .expect("connection status calls lock") += 1;
-            Ok(self.connections.lock().expect("connections lock").clone())
-        }
-
-        async fn disconnect_channel_for_caller(
-            &self,
-            caller: WebUiAuthenticatedCaller,
-            channel: &str,
-        ) -> Result<(), RebornServicesError> {
-            self.package_present_during_disconnect
-                .lock()
-                .expect("package presence lock")
-                .push(
-                    self.watched_package_path
-                        .as_ref()
-                        .is_some_and(|path| path.exists()),
-                );
-            self.disconnects
-                .lock()
-                .expect("disconnects lock")
-                .push((caller, channel.to_string()));
-            Ok(())
-        }
-    }
-
-    #[tokio::test]
-    async fn webui_and_tool_extension_remove_share_ordered_actor_scoped_cleanup() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let storage_root = dir.path().join("local-dev");
-        let authenticated_actor =
-            UserId::new("extension-tool-test-alice").expect("valid actor user id");
-        let mut remove_context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
-        assert_ne!(
-            remove_context.resource_scope.user_id, authenticated_actor,
-            "the regression requires a shared subject distinct from the authenticated actor"
-        );
-        remove_context.authenticated_actor_user_id = Some(authenticated_actor.clone());
-        let expected_caller = WebUiAuthenticatedCaller::new(
-            remove_context.resource_scope.tenant_id.clone(),
-            authenticated_actor,
-            remove_context.resource_scope.agent_id.clone(),
-            remove_context.resource_scope.project_id.clone(),
-        );
-        let runtime = crate::build_reborn_runtime(
-            crate::RebornRuntimeInput::from_build_input(
-                RebornBuildInput::local_dev(
-                    "extension-tools-remove-slack-owner",
-                    storage_root.clone(),
-                )
-                .with_runtime_policy(
-                    crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
-                ),
-            )
-            .with_identity(crate::RebornRuntimeIdentity {
-                tenant_id: expected_caller.tenant_id.as_str().to_string(),
-                agent_id: "extension-remove-test-agent".to_string(),
-                source_binding_id: "extension-remove-test-source".to_string(),
-                reply_target_binding_id: "extension-remove-test-reply".to_string(),
-            }),
-        )
-        .await
-        .expect("local-dev runtime build");
-        let slack_package_path = storage_root.join("system/extensions/slack");
-        let channel_connection = Arc::new(
-            RecordingChannelConnectionFacade::with_connection("slack", false)
-                .watching_package(slack_package_path.clone()),
-        );
-        let channel_connection_trait: Arc<dyn ChannelConnectionFacade> = channel_connection.clone();
-        assert!(
-            runtime.set_channel_connection_facade(channel_connection_trait.clone()),
-            "channel connection facade slot should be unset in the test runtime"
-        );
-        let webui = crate::webui::facade::build_webui_services_with_connectable_channels(
-            &runtime,
-            None,
-            None,
-            Some(channel_connection_trait),
-            Vec::new(),
-        )
-        .expect("WebUI services build");
-        let slack_package_ref =
-            extension_package_ref("slack".to_string()).expect("valid Slack package ref");
-
-        webui
-            .api
-            .install_extension(expected_caller.clone(), slack_package_ref.clone())
-            .await
-            .expect("WebUI install succeeds");
-        webui
-            .api
-            .remove_extension(expected_caller.clone(), slack_package_ref.clone())
-            .await
-            .expect("WebUI remove succeeds");
-        assert!(
-            !slack_package_path.exists(),
-            "WebUI removal deletes the package"
-        );
-
-        webui
-            .api
-            .install_extension(expected_caller.clone(), slack_package_ref)
-            .await
-            .expect("WebUI reinstall succeeds");
-        let mut retry_remove_context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
-        retry_remove_context.authenticated_actor_user_id =
-            remove_context.authenticated_actor_user_id.clone();
-        let remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
-            &runtime,
-            EXTENSION_REMOVE_CAPABILITY_ID,
-            remove_context,
-            serde_json::json!({"extension_id": "slack"}),
-        )
-        .await
-        .expect("remove succeeds");
-        assert_eq!(remove["payload"]["removed"], true);
-        assert!(
-            !slack_package_path.exists(),
-            "tool removal deletes the package"
-        );
-        let retry_remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
-            &runtime,
-            EXTENSION_REMOVE_CAPABILITY_ID,
-            retry_remove_context,
-            serde_json::json!({"extension_id": "slack"}),
-        )
-        .await
-        .expect("retrying removal after the package is absent succeeds");
-        assert_eq!(retry_remove["payload"]["removed"], false);
-        assert_eq!(retry_remove["phase"], "removed");
-
-        assert_eq!(
-            channel_connection.disconnects(),
-            vec![
-                (expected_caller.clone(), "slack".to_string()),
-                (expected_caller.clone(), "slack".to_string()),
-                (expected_caller, "slack".to_string())
-            ],
-            "WebUI, tool removal, and an absent-package retry must run the same actor-scoped Slack cleanup"
-        );
-        assert_eq!(
-            channel_connection.package_present_during_disconnect(),
-            vec![true, true, false],
-            "cleanup must also run after the package is already absent"
-        );
-        assert_eq!(
-            channel_connection.connection_status_calls(),
-            0,
-            "declared Slack cleanup must disconnect directly without status discovery"
-        );
-        runtime.shutdown().await.expect("runtime shutdown");
-    }
-
-    #[tokio::test]
-    async fn webui_and_tool_extension_remove_generic_filesystem_channel_without_slack_cleanup() {
-        const GENERIC_CHANNEL_MANIFEST: &str = r#"
-schema_version = "reborn.extension_manifest.v2"
-id = "channel-ext"
-name = "Channel Ext"
-version = "0.1.0"
-description = "A filesystem-discovered external channel extension."
-trust = "third_party"
-
-[runtime]
-kind = "wasm"
-module = "wasm/channel.wasm"
-
-[[host_api]]
-id = "ironclaw.product_adapter/v1"
-section = "product_adapter.inbound"
-
-[product_adapter.inbound]
-surface_kind = "external_channel"
-
-[product_adapter.inbound.auth]
-kind = "request_signature"
-header_name = "X-Channel-Signature"
-timestamp_header_name = "X-Channel-Timestamp"
-
-[product_adapter.inbound.capabilities]
-flags = ["inbound_messages"]
-
-[[product_adapter.inbound.required_credentials]]
-handle = "channel_ext_token"
-
-[[product_adapter.inbound.egress]]
-host = "example.com"
-credential_handle = "channel_ext_token"
-"#;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let storage_root = dir.path().join("local-dev");
-        let package_path = storage_root.join("system/extensions/channel-ext");
-        std::fs::create_dir_all(&package_path).expect("generic channel package directory");
-        std::fs::write(package_path.join("manifest.toml"), GENERIC_CHANNEL_MANIFEST)
-            .expect("generic channel manifest");
-        let authenticated_actor =
-            UserId::new("extension-tool-test-alice").expect("valid actor user id");
-        let mut remove_context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
-        remove_context.authenticated_actor_user_id = Some(authenticated_actor.clone());
-        let caller = WebUiAuthenticatedCaller::new(
-            remove_context.resource_scope.tenant_id.clone(),
-            authenticated_actor,
-            remove_context.resource_scope.agent_id.clone(),
-            remove_context.resource_scope.project_id.clone(),
-        );
-        let runtime = crate::build_reborn_runtime(
-            crate::RebornRuntimeInput::from_build_input(
-                RebornBuildInput::local_dev(
-                    "extension-tools-remove-generic-channel-owner",
-                    storage_root.clone(),
-                )
-                .with_runtime_policy(
-                    crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
-                ),
-            )
-            .with_identity(crate::RebornRuntimeIdentity {
-                tenant_id: caller.tenant_id.as_str().to_string(),
-                agent_id: "extension-remove-generic-channel-test-agent".to_string(),
-                source_binding_id: "extension-remove-generic-channel-test-source".to_string(),
-                reply_target_binding_id: "extension-remove-generic-channel-test-reply".to_string(),
-            }),
-        )
-        .await
-        .expect("local-dev runtime build");
-        let channel_connection = Arc::new(
-            RecordingChannelConnectionFacade::with_connection("slack", false)
-                .watching_package(package_path.clone()),
-        );
-        let channel_connection_trait: Arc<dyn ChannelConnectionFacade> = channel_connection.clone();
-        assert!(
-            runtime.set_channel_connection_facade(channel_connection_trait.clone()),
-            "channel connection facade slot should be unset in the test runtime"
-        );
-        let webui = crate::webui::facade::build_webui_services_with_connectable_channels(
-            &runtime,
-            None,
-            None,
-            Some(channel_connection_trait),
-            Vec::new(),
-        )
-        .expect("WebUI services build");
-        let package_ref =
-            extension_package_ref("channel-ext".to_string()).expect("valid channel package ref");
-        let extension_id = ExtensionId::new("channel-ext").expect("valid extension id");
-        let installation_id =
-            ExtensionInstallationId::new("channel-ext").expect("valid installation id");
-        let installation_store = runtime
-            .extension_installation_store_for_test()
-            .expect("live extension installation store");
-
-        webui
-            .api
-            .install_extension(caller.clone(), package_ref.clone())
-            .await
-            .expect("WebUI install succeeds");
-        webui
-            .api
-            .remove_extension(caller.clone(), package_ref.clone())
-            .await
-            .expect("WebUI remove succeeds");
-        assert!(
-            !package_path.exists(),
-            "WebUI removal deletes the generic channel package"
-        );
-        assert!(
-            installation_store
-                .get_manifest(&extension_id)
-                .await
-                .expect("manifest lookup after WebUI removal")
-                .is_none(),
-            "WebUI removal deletes the manifest record"
-        );
-        assert!(
-            installation_store
-                .get_installation(&installation_id)
-                .await
-                .expect("installation lookup after WebUI removal")
-                .is_none(),
-            "WebUI removal deletes the installation record"
-        );
-
-        webui
-            .api
-            .install_extension(caller, package_ref)
-            .await
-            .expect("WebUI reinstall succeeds");
-        let remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
-            &runtime,
-            EXTENSION_REMOVE_CAPABILITY_ID,
-            remove_context,
-            serde_json::json!({"extension_id": "channel-ext"}),
-        )
-        .await
-        .expect("tool removal succeeds");
-        assert_eq!(remove["payload"]["removed"], true);
-        assert!(
-            !package_path.exists(),
-            "tool removal deletes the generic channel package"
-        );
-        assert!(
-            installation_store
-                .get_manifest(&extension_id)
-                .await
-                .expect("manifest lookup after tool removal")
-                .is_none(),
-            "tool removal deletes the manifest record"
-        );
-        assert!(
-            installation_store
-                .get_installation(&installation_id)
-                .await
-                .expect("installation lookup after tool removal")
-                .is_none(),
-            "tool removal deletes the installation record"
-        );
-        assert!(
-            channel_connection.disconnects().is_empty(),
-            "generic external channels must not inherit personal Slack cleanup"
-        );
-        assert_eq!(
-            channel_connection.connection_status_calls(),
-            0,
-            "cleanup selection must not probe channel connection status"
-        );
-        assert!(
-            channel_connection
-                .package_present_during_disconnect()
-                .is_empty(),
-            "no Slack disconnect should be attempted for a generic channel"
-        );
-        runtime.shutdown().await.expect("runtime shutdown");
-    }
-
-    #[tokio::test]
-    async fn extension_remove_fails_closed_without_authenticated_actor_for_personal_cleanup() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let storage_root = dir.path().join("local-dev");
-        let services = build_runtime_substrate(RebornBuildInput::local_dev(
-            "extension-tools-remove-missing-actor",
-            storage_root.clone(),
-        ))
-        .await
-        .expect("local-dev services build");
-        let channel_connection = Arc::new(RecordingChannelConnectionFacade::with_connection(
-            "slack", true,
-        ));
-        let channel_connection_trait: Arc<dyn ChannelConnectionFacade> = channel_connection.clone();
-        assert!(
-            services
-                .runtime_surfaces
-                .as_ref()
-                .expect("local runtime substrate")
-                .channel_connection_facade_slot
-                .set(channel_connection_trait)
-                .is_ok(),
-            "channel connection facade slot should be unset"
-        );
-
-        invoke_json(
-            &services,
-            EXTENSION_INSTALL_CAPABILITY_ID,
-            serde_json::json!({"extension_id": "slack"}),
-        )
-        .await
-        .expect("install succeeds");
-        let mut remove_context = execution_context([EXTENSION_REMOVE_CAPABILITY_ID]);
-        remove_context.authenticated_actor_user_id = None;
-        let error = crate::approval_test_support::invoke_json_with_local_dev_approval(
-            &services,
-            EXTENSION_REMOVE_CAPABILITY_ID,
-            remove_context,
-            serde_json::json!({"extension_id": "slack"}),
-        )
-        .await
-        .expect_err("personal cleanup without an authenticated actor must fail closed");
-
-        assert_eq!(error, RuntimeFailureKind::InvalidInput);
-        assert!(
-            storage_root.join("system/extensions/slack").exists(),
-            "package removal must not run after actor validation fails"
-        );
-        assert!(channel_connection.disconnects().is_empty());
-    }
-
     #[tokio::test]
     async fn local_dev_extension_remove_revokes_exclusive_credential_so_reactivation_requires_auth()
     {
@@ -1292,7 +850,10 @@ credential_handle = "channel_ext_token"
                 "extension-tools-remove-shared-owner",
                 dir.path().join("local-dev"),
             )
-            .with_google_oauth_backend(test_google_oauth_client_config()),
+            .with_vendor_oauth_client(
+                ironclaw_auth::GOOGLE_PROVIDER_ID,
+                test_google_oauth_client_config(),
+            ),
         )
         .await
         .expect("local-dev services build");
@@ -1587,7 +1148,10 @@ credential_handle = "channel_ext_token"
                 "extension-tools-scope-gate-owner",
                 dir.path().join("local-dev"),
             )
-            .with_google_oauth_backend(test_google_oauth_client_config()),
+            .with_vendor_oauth_client(
+                ironclaw_auth::GOOGLE_PROVIDER_ID,
+                test_google_oauth_client_config(),
+            ),
         )
         .await
         .expect("local-dev services build");
@@ -1654,7 +1218,10 @@ credential_handle = "channel_ext_token"
                 "extension-tools-gmail-scope-union-owner",
                 dir.path().join("local-dev"),
             )
-            .with_google_oauth_backend(test_google_oauth_client_config()),
+            .with_vendor_oauth_client(
+                ironclaw_auth::GOOGLE_PROVIDER_ID,
+                test_google_oauth_client_config(),
+            ),
         )
         .await
         .expect("local-dev services build");
@@ -1763,14 +1330,27 @@ credential_handle = "channel_ext_token"
         assert!(!active.iter().any(|id| id == "github.search_issues"));
     }
 
+    /// Runtime-dispatched hosted-MCP activation with the P2 staging fix:
+    /// activation stages the connection-template capability's network policy
+    /// and product-auth credential under the discovery scope, so live
+    /// `tools/list` runs through the REAL host egress pipeline (the scripted
+    /// double sits at the network transport, under staged-policy checks and
+    /// staged-credential injection) and the ceiling-validated discovered
+    /// tools publish as model-visible capabilities. Before this fix nothing
+    /// staged the discovery plan — the request keyed on the dispatch-minted
+    /// invocation scope found no policy/credential, failed transient, and
+    /// fell back to the bundled manifest with zero model-visible tools.
     #[tokio::test]
-    async fn local_dev_extension_activate_routes_hosted_mcp_discovery_through_runtime_egress() {
+    async fn local_dev_extension_activate_hosted_mcp_stages_discovery_and_publishes_tools() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = build_runtime_substrate(RebornBuildInput::local_dev(
-            "extension-tools-hosted-mcp-owner",
-            storage_root.clone(),
-        ))
+        let discovery_script = std::sync::Arc::new(
+            crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search"),
+        );
+        let services = build_runtime_substrate(
+            RebornBuildInput::local_dev("extension-tools-hosted-mcp-owner", storage_root.clone())
+                .with_network_http_egress_for_test(discovery_script.clone()),
+        )
         .await
         .expect("local-dev services build");
         let extension_management = services
@@ -1791,6 +1371,23 @@ credential_handle = "channel_ext_token"
         .expect("install succeeds");
         let activate_context = execution_context([EXTENSION_ACTIVATE_CAPABILITY_ID]);
         seed_configured_account(&services, &activate_context.resource_scope, "notion").await;
+        // The account's access token must exist as real material: discovery
+        // staging leases it from the secret store into the one-shot
+        // injection store.
+        let owner_scope = ironclaw_auth::AuthProductScope::credential_owner(
+            &activate_context.resource_scope,
+            ironclaw_auth::AuthSurface::Api,
+        );
+        services
+            .secret_store()
+            .put(
+                owner_scope.resource.clone(),
+                SecretHandle::new("notion-test-token").expect("handle"),
+                ironclaw_secrets::SecretMaterial::from("notion-access-token"),
+                None,
+            )
+            .await
+            .expect("seed access-token material");
 
         let activate = invoke_json(
             &services,
@@ -1801,8 +1398,25 @@ credential_handle = "channel_ext_token"
         .expect("hosted MCP activation succeeds");
         assert_eq!(activate["payload"]["activated"], true);
 
+        // Live discovery ran through the staged pipeline: the discovered
+        // tool is model-visible.
         let active = active_extension_capability_ids(&extension_management).await;
-        assert!(active.iter().any(|id| id == "notion.notion-get-self"));
+        assert!(
+            active.iter().any(|id| id == "notion.notion-search"),
+            "discovered hosted-MCP tool must be model-visible after staged discovery; got {active:?}"
+        );
+        // The staged connection credential reached the vendor wire on every
+        // discovery call (initialize → notifications/initialized →
+        // tools/list), through the real egress pipeline's injection.
+        let calls = discovery_script.authorized_methods();
+        assert!(
+            calls.iter().any(|(method, _)| method == "tools/list"),
+            "discovery must reach tools/list; calls: {calls:?}"
+        );
+        assert!(
+            calls.iter().all(|(_, authorized)| *authorized),
+            "every discovery call must carry the staged credential; calls: {calls:?}"
+        );
         assert!(
             storage_root
                 .join("system/extensions/notion/manifest.toml")

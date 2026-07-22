@@ -73,3 +73,19 @@ test("global auto-activation mutation keeps its confirmed value in the active ca
   });
   queryClient.clear();
 });
+
+test("global auto-activation stays disabled until its initial value is loaded", () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false },
+    },
+  });
+  settingsApi.fetchSkills.mockReturnValue(new Promise(() => {}));
+
+  const skills = renderUseSkills(queryClient);
+
+  assert.equal(skills.query.isLoading, true);
+  assert.equal(skills.isSettingAutoActivateLearned, true);
+  queryClient.clear();
+});

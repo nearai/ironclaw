@@ -32,7 +32,7 @@ pub(crate) trait LocalDevApprovalHarness {
 
 impl LocalDevApprovalHarness for RebornRuntime {
     fn host_runtime(&self) -> Option<&Arc<dyn HostRuntime>> {
-        self.host_runtime.as_ref()
+        Some(&self.host_runtime)
     }
 
     fn approval_requests(&self) -> Option<&Arc<ComposedApprovalRequestStore>> {

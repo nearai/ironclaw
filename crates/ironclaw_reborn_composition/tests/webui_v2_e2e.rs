@@ -692,7 +692,8 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     let mut build_input =
         RebornBuildInput::local_dev(runtime_owner_id, storage_root).with_runtime_policy(policy);
     if let Some(google_oauth_backend) = google_oauth_backend {
-        build_input = build_input.with_google_oauth_backend(google_oauth_backend);
+        build_input = build_input
+            .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend);
     }
     let input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {
@@ -1706,7 +1707,10 @@ async fn webui_v2_google_docs_setup_projects_oauth_before_install() {
     assert_eq!(setup.status(), StatusCode::OK);
     let setup_body = read_json(setup).await;
     assert_eq!(setup_body["package_ref"]["id"], "google-docs");
-    assert_eq!(setup_body["phase"], "discovered");
+    // Option A retired the "discovered" wire phase: a catalog package that
+    // is not yet installed projects the neutral "installed"-vocabulary
+    // installation_state ("installed" here), never a transient phase string.
+    assert_eq!(setup_body["phase"], "installed");
 
     let secrets = setup_body["secrets"]
         .as_array()
@@ -1736,6 +1740,68 @@ async fn webui_v2_google_docs_setup_projects_oauth_before_install() {
             "https://www.googleapis.com/auth/documents.readonly".to_string(),
         ]],
         "Google Docs setup should expose one OAuth credential with the WASM-declared scope union before install: {setup_body}"
+    );
+
+    harness
+        .runtime
+        .shutdown()
+        .await
+        .expect("runtime shutdown clean");
+}
+
+// AUTH-11: the `api_key` recipe half of the setup wire projection. Sibling of
+// the OAuth `google-docs` test above, but for the manual-token path — the real
+// `github` manifest declares `[auth.github] method = "api_key"` with a single
+// `github_runtime_token` field, and every tool references that one handle. The
+// setup route must project that recipe, through the production
+// composition→product-workflow chain, into exactly one manual-token secret
+// descriptor (handle-named, not-yet-provided) with no per-vendor code.
+#[tokio::test]
+async fn webui_v2_github_api_key_setup_projects_manual_token_secret() {
+    let harness = build_harness().await;
+
+    let setup = harness
+        .router
+        .clone()
+        .oneshot(bearer_get("/api/webchat/v2/extensions/github/setup"))
+        .await
+        .expect("setup GitHub oneshot");
+    assert_eq!(setup.status(), StatusCode::OK);
+    let setup_body = read_json(setup).await;
+    assert_eq!(setup_body["package_ref"]["id"], "github");
+    // Option A retired the "discovered" wire phase: a catalog package that
+    // is not yet installed projects the neutral "installed"-vocabulary
+    // installation_state ("installed" here), never a transient phase string.
+    assert_eq!(setup_body["phase"], "installed");
+
+    let secrets = setup_body["secrets"]
+        .as_array()
+        .expect("setup secrets should be an array");
+    let github_secrets = secrets
+        .iter()
+        .filter(|secret| secret["provider"] == "github")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        github_secrets.len(),
+        1,
+        "the api_key recipe's single field handle should coalesce every tool credential into one secret: {setup_body}"
+    );
+    let github_secret = github_secrets[0];
+    assert_eq!(
+        github_secret["name"], "github_runtime_token",
+        "the secret is named after the recipe field handle: {setup_body}"
+    );
+    assert_eq!(
+        github_secret["setup"]["kind"], "manual_token",
+        "api_key recipe must render as a manual-token secret, not OAuth: {setup_body}"
+    );
+    assert_eq!(
+        github_secret["provided"], false,
+        "no credential seeded, so the field is not yet provided: {setup_body}"
+    );
+    assert_eq!(
+        github_secret["optional"], false,
+        "the required api_key field projects as non-optional: {setup_body}"
     );
 
     harness
@@ -2333,3 +2399,4 @@ fn extract_assistant_text(message: &Value) -> Option<String> {
         .as_str()
         .map(std::string::ToString::to_string)
 }
+// arch-exempt: large_file, WebUI end-to-end coverage remains centralized, plan #6175

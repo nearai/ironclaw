@@ -1,59 +1,79 @@
-# The Telegram messaging channel — a single user-visible extension that owns
-# the Telegram Bot API webhook ingress. Zero tools: Telegram is an entrypoint
-# only; per-user connection is the WebGeneratedCode pairing flow. The
-# `telegram_webhook_secret` handle verifies the ingress route; the
-# `telegram_bot_token` handle is egress-only (never surfaced to users).
-schema_version = "reborn.extension_manifest.v2"
+# The Telegram messaging channel — the extension runtime's second production
+# channel (the "addition test", DEL-10): a pure channel extension whose entire
+# vendor surface is one manifest plus the channel adapter crate. No tools, no
+# WASM module, no bespoke host code.
+schema_version = "reborn.extension_manifest.v3"
 id = "telegram"
 name = "Telegram"
 version = "0.1.0"
-description = "Telegram Bot API channel: DM IronClaw on Telegram after pairing your account."
+description = "Telegram messaging channel via the Bot API"
 trust = "first_party_requested"
 
 [runtime]
 kind = "first_party"
-service = "telegram_v2_host_beta"
+service = "telegram.extension/v1"
 
-[[host_api]]
-id = "ironclaw.product_adapter/v1"
-section = "product_adapter.inbound"
+[admin_configuration]
+group_id = "extension.telegram"
+display_name = "Telegram deployment configuration"
+description = "Deployment credentials and public account metadata for the Telegram channel."
+fields = [
+  { handle = "telegram_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true, required = true },
+  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false, required = true },
+  { handle = "bot_username", label = "Bot username", secret = false, required = true },
+]
 
-[product_adapter.inbound]
-surface_kind = "external_channel"
+# ---- channel surface -------------------------------------------------------
 
-[product_adapter.inbound.auth]
-kind = "shared_secret_header"
-header_name = "X-Telegram-Bot-Api-Secret-Token"
+[channel]
+id = "messages"
+display_name = "Telegram messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
 
-[product_adapter.inbound.capabilities]
-flags = ["inbound_messages", "external_final_reply_push", "delivery_status_reporting"]
-
-[[product_adapter.inbound.required_credentials]]
-handle = "telegram_bot_token"
-
-[[product_adapter.inbound.required_credentials]]
-handle = "telegram_webhook_secret"
-
-[[product_adapter.inbound.egress]]
-host = "api.telegram.org"
-credential_handle = "telegram_bot_token"
-
-[[product_adapter.inbound.host_ingress]]
-credential_handles = ["telegram_webhook_secret"]
-
-[product_adapter.inbound.host_ingress.descriptor]
-route_id = "telegram.updates"
+[channel.ingress]
+route_suffix = "updates"
 method = "post"
-route_pattern = "/webhooks/extensions/telegram/updates"
+body_limit_bytes = 1048576
 
-[product_adapter.inbound.host_ingress.descriptor.policy]
-listener_class = "public_webhook"
-auth = { type = "required", schemes = ["webhook_signature"] }
-scope_source = "host_resolved"
-body_limit = { type = "limited", max_bytes = 1048576 }
-rate_limit = { type = "limited", scope = "global", max_requests = 12000, window_seconds = 60 }
-cors = "not_applicable"
-websocket_origin = "not_applicable"
-streaming = "none"
-audit = "public_callback"
-effect_path = { type = "product_workflow" }
+[channel.ingress.verification]
+kind = "shared_secret_header"
+secret_handle = "telegram_webhook_secret"
+header = "X-Telegram-Bot-Api-Secret-Token"
+
+[channel.config]
+fields = [
+  { handle = "telegram_bot_token", label = "Bot token", secret = true },
+  { handle = "telegram_webhook_secret", label = "Webhook secret token", secret = true },
+  { handle = "telegram_webhook_url", label = "Public webhook URL", secret = false },
+  # The bot's public @username (without the @): fills the pairing deep link
+  # `https://t.me/{bot_username}?start={code}`. The setup-provisioning hook
+  # autofills it from `getMe`; until then an admin may set it manually and
+  # the pairing panel falls back to code-only presentation when unset.
+  { handle = "bot_username", label = "Bot username", secret = false },
+]
+
+[[channel.egress]]
+scheme = "https"
+host = "api.telegram.org"
+methods = ["post"]
+credential_handle = "telegram_bot_token"
+# The Bot API carries the token in the URL path (`/bot<token>/method`); the
+# adapter writes the `{telegram_bot_token}` placeholder and the host
+# substitutes the secret — token bytes never reach the adapter.
+injection = { type = "path_placeholder", placeholder = "telegram_bot_token" }
+# `setWebhook` takes the webhook shared secret as the `secret_token` JSON
+# body field (the value Telegram echoes on every delivery, verified by the
+# `shared_secret_header` ingress recipe above). The adapter opts in by
+# naming the handle; the host resolves it and inserts the VALUE at the
+# declared pointer — secret bytes never reach the adapter.
+body_credentials = [
+  { handle = "telegram_webhook_secret", pointer = "/secret_token" },
+]
+
+[channel.presentation]
+supports_markdown = false
+supports_threads = true
+max_message_chars = 4096

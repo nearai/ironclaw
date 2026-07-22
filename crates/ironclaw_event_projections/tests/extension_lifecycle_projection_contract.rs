@@ -42,6 +42,7 @@ async fn extension_lifecycle_projects_metadata_only_from_durable_audit_log() {
             EXTENSION_MANIFEST_WITH_RAW_SENTINELS,
             ManifestSource::InstalledLocal,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .unwrap(),
         VirtualPath::new("/system/extensions/echo").unwrap(),
@@ -236,7 +237,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/extension_raw_asset_sentinel_3022.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "echo.say"
 description = "Echo safely"
 effects = ["dispatch_capability"]
@@ -245,3 +252,14 @@ visibility = "model"
 input_schema_ref = "schemas/echo/extension_raw_schema_sentinel_3022.input.v1.json"
 output_schema_ref = "schemas/echo/extension_raw_schema_sentinel_3022.output.v1.json"
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

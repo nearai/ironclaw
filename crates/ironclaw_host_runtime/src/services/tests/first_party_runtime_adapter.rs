@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    DispatchError, ExtensionId, ResourceEstimate, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, UserId,
+    DispatchError, ExtensionId, ResourceEstimate, RuntimeCredentialAuthRequirement,
+    RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, UserId, VendorId,
 };
 use serde_json::json;
 
@@ -272,7 +272,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
 #[tokio::test]
 async fn first_party_adapter_forwards_credential_requirements_from_auth_required_handler() {
     let requirement = RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        provider: VendorId::new("google").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         },

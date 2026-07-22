@@ -1,4 +1,3 @@
-// arch-exempt: large_file, mechanical InMemoryOutboundStateStore -> FilesystemOutboundStateStore<InMemoryBackend> §4.3 store consolidation, no logic change, plan #6168
 use std::{
     collections::BTreeMap,
     sync::{Arc, RwLock},
@@ -7,28 +6,108 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
+use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     OutboundError, WriteCommunicationPreferenceRequest,
 };
 use ironclaw_product_workflow::{
     OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    WebUiAuthenticatedCaller,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 
-// The provider port + entry shape channel hosts implement live in
-// `ironclaw_channel_host` (a host crate cannot depend on composition);
-// re-imported here so the registries and facade below keep their one
-// canonical composition-internal path.
-pub(crate) use ironclaw_channel_host::outbound_targets::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-    OutboundDeliveryTargetRegistrationOutcome,
-};
+/// The `(tenant, user)` an outbound delivery-target entry belongs to.
+///
+/// Providers stamp this with the identity of the resource they resolved — the
+/// route's subject user, the DM target's provisioned user — so the aggregating
+/// registry can drop any entry that does not belong to the querying caller.
+/// Populating it from the resolved resource (not merely echoing the caller) is
+/// what makes registry scoping a genuine defense-in-depth layer: a provider
+/// that fails to filter by caller yields an owner that no longer matches the
+/// caller, so the registry drops the leaked entry regardless.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutboundDeliveryTargetOwner {
+    pub(crate) tenant_id: TenantId,
+    pub(crate) user_id: UserId,
+}
+
+impl OutboundDeliveryTargetOwner {
+    pub(crate) fn new(tenant_id: TenantId, user_id: UserId) -> Self {
+        Self { tenant_id, user_id }
+    }
+
+    /// The owner scope for the authenticated caller. Only static test fixtures
+    /// that intentionally answer whichever caller asks claim ownership this way
+    /// (real providers derive the owner from the resolved resource), so this is
+    /// a test-only constructor.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn for_caller(caller: &WebUiAuthenticatedCaller) -> Self {
+        Self {
+            tenant_id: caller.tenant_id.clone(),
+            user_id: caller.user_id.clone(),
+        }
+    }
+
+    /// Whether this owner is the querying caller's `(tenant, user)`.
+    pub(crate) fn matches_caller(&self, caller: &WebUiAuthenticatedCaller) -> bool {
+        self.tenant_id == caller.tenant_id && self.user_id == caller.user_id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OutboundDeliveryTargetEntry {
+    pub(crate) summary: RebornOutboundDeliveryTargetSummary,
+    pub(crate) capabilities: RebornOutboundDeliveryTargetCapabilities,
+    pub(crate) reply_target_binding_ref: ReplyTargetBindingRef,
+    /// The `(tenant, user)` this entry belongs to. The aggregating registry
+    /// drops any fanned-out entry whose owner does not match the querying
+    /// caller, so cross-caller isolation is structural rather than a
+    /// per-provider convention.
+    pub(crate) owner: OutboundDeliveryTargetOwner,
+}
+
+#[async_trait]
+pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
+    async fn list_outbound_delivery_targets(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError>;
+
+    async fn resolve_outbound_delivery_target(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target_id: &RebornOutboundDeliveryTargetId,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        Ok(self
+            .list_outbound_delivery_targets(caller)
+            .await?
+            .into_iter()
+            .find(|entry| {
+                entry.capabilities.final_replies
+                    && entry.summary.target_id.as_str() == target_id.as_str()
+            }))
+    }
+
+    async fn resolve_reply_target_binding(
+        &self,
+        caller: &WebUiAuthenticatedCaller,
+        target: &ReplyTargetBindingRef,
+    ) -> Result<Option<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        Ok(self
+            .list_outbound_delivery_targets(caller)
+            .await?
+            .into_iter()
+            .find(|entry| {
+                entry.capabilities.final_replies
+                    && entry.reply_target_binding_ref.as_str() == target.as_str()
+            }))
+    }
+}
 
 /// Caller-ownership predicate the aggregating registry applies to every
 /// fanned-out entry.
@@ -68,6 +147,12 @@ impl OutboundDeliveryTargetRegistry {
 
 pub(crate) struct MutableOutboundDeliveryTargetRegistry {
     providers: RwLock<BTreeMap<String, Arc<dyn OutboundDeliveryTargetProvider>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutboundDeliveryTargetRegistrationOutcome {
+    Registered,
+    Replaced,
 }
 
 impl std::fmt::Debug for MutableOutboundDeliveryTargetRegistry {
@@ -117,23 +202,6 @@ impl MutableOutboundDeliveryTargetRegistry {
             None => OutboundDeliveryTargetRegistrationOutcome::Registered,
         };
         Ok(outcome)
-    }
-
-    pub(crate) fn contains_provider_key(
-        &self,
-        provider_key: &str,
-    ) -> Result<bool, RebornServicesError> {
-        self.providers
-            .read()
-            .map(|providers| providers.contains_key(provider_key))
-            .map_err(|error| {
-                tracing::debug!(
-                    target = "ironclaw::reborn::outbound_preferences",
-                    error = ?error,
-                    "outbound target registry read lock failed"
-                );
-                outbound_target_registry_error()
-            })
     }
 
     fn providers(
@@ -491,12 +559,10 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use ironclaw_host_api::{TenantId, UserId};
-    use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
     use ironclaw_outbound::{
         CommunicationModality, CommunicationPreferenceRepository, CommunicationPreferenceVersion,
         DeliveryDefaultScope, VersionedCommunicationPreferenceRecord,
     };
-    use ironclaw_product_workflow::RebornOutboundDeliveryTargetCapabilities;
 
     use super::*;
 
@@ -742,7 +808,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_preferences_projects_stored_final_target_for_authenticated_user() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         provider.insert(
             "user-alpha",
@@ -787,7 +854,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_preferences_returns_none_when_stored_target_not_in_provider() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         seed_record(
             store.as_ref(),
@@ -827,7 +895,8 @@ mod tests {
 
     #[tokio::test]
     async fn set_preferences_validates_target_id_before_writing_reply_target() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         provider.insert(
             "user-alpha",
@@ -967,7 +1036,8 @@ mod tests {
 
     #[tokio::test]
     async fn set_preferences_with_none_target_on_new_user_creates_empty_record() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         let facade = RebornOutboundPreferencesFacade::new(store.clone(), provider);
 
@@ -1003,7 +1073,8 @@ mod tests {
 
     #[tokio::test]
     async fn target_provider_errors_are_propagated_by_get_set_and_list() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         seed_record(
             store.as_ref(),
             "tenant-alpha",
@@ -1039,7 +1110,8 @@ mod tests {
 
     #[tokio::test]
     async fn clear_preferences_preserves_non_final_slots() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         seed_record(
             store.as_ref(),
@@ -1106,7 +1178,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_targets_is_scoped_to_caller_and_final_reply_capability() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let provider = Arc::new(FakeTargetProvider::default());
         provider.insert(
             "user-alpha",
@@ -1134,7 +1207,8 @@ mod tests {
 
     #[tokio::test]
     async fn preference_facade_uses_authority_resolver_not_public_target_list_for_write_and_read() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let provider = Arc::new(ResolvingOnlyTargetProvider {
             entry: target_entry("slack-alpha", "reply:slack-alpha", true),
         });
@@ -1196,7 +1270,8 @@ mod tests {
 
     #[tokio::test]
     async fn target_registry_aggregates_channel_neutral_providers_for_default_selection() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let slack_provider = Arc::new(FakeTargetProvider::default());
         slack_provider.insert(
             "user-alpha",
@@ -1267,7 +1342,8 @@ mod tests {
 
     #[tokio::test]
     async fn target_registry_filters_non_final_reply_resolver_results() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         let registry = Arc::new(OutboundDeliveryTargetRegistry::new(vec![Arc::new(
             ResolvingOnlyTargetProvider {
                 entry: target_entry("slack-progress", "reply:slack-progress", false),
@@ -1468,7 +1544,8 @@ mod tests {
 
     #[tokio::test]
     async fn target_registry_propagates_resolver_failure_for_get_and_set() {
-        let store = Arc::new(in_memory_backed_outbound_state_store());
+        let store =
+            Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
         seed_record(
             store.as_ref(),
             "tenant-alpha",

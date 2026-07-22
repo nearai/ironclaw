@@ -1,8 +1,7 @@
 use ironclaw_product_workflow::{
-    LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleSearchExtensionSummary,
-    ProductWorkflowError,
+    LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductWorkflowError,
 };
 use thiserror::Error;
 
@@ -65,7 +64,7 @@ pub fn render_reborn_extension_lifecycle_response(
     );
     push_line(
         &mut output,
-        format_args!("phase: {}", phase_label(response.phase)),
+        format_args!("phase: {}", response.phase.as_str()),
     );
     if let Some(package_ref) = &response.package_ref {
         push_line(
@@ -160,23 +159,6 @@ fn render_string_array(output: &mut String, items: &[String], label: &str) {
     }
 }
 
-fn phase_label(phase: LifecyclePhase) -> &'static str {
-    match phase {
-        LifecyclePhase::Discovered => "discovered",
-        LifecyclePhase::Installing => "installing",
-        LifecyclePhase::Installed => "installed",
-        LifecyclePhase::Configured => "configured",
-        LifecyclePhase::Activating => "activating",
-        LifecyclePhase::Active => "active",
-        LifecyclePhase::Disabled => "disabled",
-        LifecyclePhase::UpgradeRequired => "upgrade_required",
-        LifecyclePhase::Failed => "failed",
-        LifecyclePhase::Removing => "removing",
-        LifecyclePhase::Removed => "removed",
-        LifecyclePhase::UnsupportedOrLegacy => "unsupported_or_legacy",
-    }
-}
-
 fn extension_source_label(source: LifecycleExtensionSource) -> &'static str {
     match source {
         LifecycleExtensionSource::HostBundled => "host_bundled",
@@ -199,7 +181,9 @@ mod tests {
     use ironclaw_auth::{
         AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     };
-    use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
+    use ironclaw_host_api::{
+        AgentId, InstallationState, InvocationId, ResourceScope, TenantId, UserId,
+    };
     use ironclaw_product_workflow::LifecycleExtensionSummary;
     use secrecy::SecretString;
 
@@ -283,7 +267,7 @@ mod tests {
         .await
         .expect("activate uses product-auth credentials");
 
-        assert_eq!(activate.phase, LifecyclePhase::Active);
+        assert_eq!(activate.phase, InstallationState::Active);
         let Some(LifecycleProductPayload::ExtensionActivate {
             activated,
             visible_capability_ids,
@@ -309,7 +293,7 @@ mod tests {
     fn human_renderer_escapes_terminal_control_characters() {
         let response = LifecycleProductResponse {
             package_ref: None,
-            phase: LifecyclePhase::Discovered,
+            phase: InstallationState::Installed,
             blockers: Vec::new(),
             message: None,
             payload: Some(LifecycleProductPayload::ExtensionSearch {
@@ -328,6 +312,9 @@ mod tests {
                         runtime_kind:
                             ironclaw_product_workflow::LifecycleExtensionRuntimeKind::WasmTool,
                         surface_kinds: Vec::new(),
+                        channel_directions: None,
+                        channel_connection: None,
+                        channel_presentation: None,
                         visible_capability_ids: Vec::new(),
                         visible_read_only_capability_ids: Vec::new(),
                         credential_requirements: Vec::new(),

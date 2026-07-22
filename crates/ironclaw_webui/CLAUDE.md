@@ -13,7 +13,7 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
    composes the full `Router` and layers the fixed middleware stack; owns the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   Slack / OpenAI-compat mounts.
+   feature-gated OpenAI-compat mounts.
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`) — `serve_webui_v2` binds the listener and
    runs `axum::serve`; the `Env`/`Session`/`Oidc` authenticators, the
@@ -42,7 +42,7 @@ composition's facade). Enforced by `ironclaw_architecture`
 | `WebUiV2State` | Handler state: the `RebornServicesApi` facade + `SseCapacity` + route options. |
 | `WebUiV2HttpError` / `WebUiV2HttpErrorBody` | The only path handlers return HTTP errors through — keeps the redacted-error vocabulary intact. |
 | `webui_v2_app(bundle, config) -> WebuiV2App` | Compose composition's `RebornWebuiBundle` + a host `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
-| `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth, and the Slack setup/route slots). |
+| `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth). |
 | `WebuiAuthenticator` trait / `WebuiAuthentication` | Host-auth vocabulary the bearer middleware resolves each token through. |
 
 Middleware modules (`src/webui_*.rs`) layer in a fixed order —
@@ -91,7 +91,6 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
 | `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductWorkflow` |
-| `webui.v2.list_connectable_channels` | GET | `/api/webchat/v2/channels/connectable` | — | `ProjectionOnly` |
 | `webui.v2.list/install/import/activate/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductWorkflow` |
 | `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductWorkflow` |
 | `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductWorkflow` |
@@ -301,9 +300,6 @@ composition):
   `tests/auth_route_contract.rs` — middleware stack (security headers, body/rate
   limits, bearer auth) over the composed `webui_v2_app`.
 - `tests/serve_loop.rs` — listener bind + graceful shutdown.
-- `tests/slack_host_beta_webui_v2.rs` — Slack channel-route /
-  connectable surfaces composed into `webui_v2_app` (relocated here because
-  `webui_v2_app` lives in this crate).
 
 **Host authentication:**
 

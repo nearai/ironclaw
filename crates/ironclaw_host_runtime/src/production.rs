@@ -1905,8 +1905,8 @@ mod tests {
     use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
     use ironclaw_host_api::{
         CapabilityId, DispatchFailureKind, ExtensionId, HostPortCatalog,
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-        RuntimeDispatchErrorKind, SecretHandle, VirtualPath,
+        RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, SecretHandle, VendorId,
+        VirtualPath,
     };
 
     fn cap() -> CapabilityId {
@@ -1923,7 +1923,7 @@ mod tests {
 
     fn auth_requirement(scopes: &[&str]) -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+            provider: VendorId::new("notion").unwrap(),
             setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
             },
@@ -1982,7 +1982,7 @@ mod tests {
         // the runner reloaded and rendered the wrong authentication flow.
         use ironclaw_host_api::RuntimeCredentialAccountSetup as Setup;
         let requirement_with = |setup: Setup| RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+            provider: VendorId::new("notion").unwrap(),
             setup,
             requester_extension: ExtensionId::new("notion").unwrap(),
             provider_scopes: vec!["read".to_string()],
@@ -2038,7 +2038,7 @@ mod tests {
         // `provider_scopes` `["a,b"]` vs `["a", "b"]`.
         let provider_scopes_gate = |scopes: Vec<String>| {
             let requirement = RuntimeCredentialAuthRequirement {
-                provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
+                provider: VendorId::new("notion").unwrap(),
                 setup: Setup::ManualToken,
                 requester_extension: ExtensionId::new("notion").unwrap(),
                 provider_scopes: scopes,
@@ -2574,6 +2574,7 @@ mod tests {
             manifest_toml,
             ManifestSource::InstalledLocal,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest must parse");
         let cap_id = manifest.capabilities[0].id.clone();
@@ -2608,7 +2609,13 @@ runner = "sandboxed_process"
 command = "echo"
 args = []
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability", "use_secret"]
@@ -2618,7 +2625,7 @@ input_schema_ref = "schemas/test/input.v1.json"
 output_schema_ref = "schemas/test/output.v1.json"
 prompt_doc_ref = "prompts/test.md"
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "script_api_token"
 source = { type = "secret_handle" }
 audience = { scheme = "https", host_pattern = "api.example.com" }
@@ -2679,7 +2686,13 @@ runner = "sandboxed_process"
 command = "echo"
 args = []
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability", "use_secret"]
@@ -2689,7 +2702,7 @@ input_schema_ref = "schemas/test/input.v1.json"
 output_schema_ref = "schemas/test/output.v1.json"
 prompt_doc_ref = "prompts/test.md"
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "optional_api_token"
 source = { type = "secret_handle" }
 audience = { scheme = "https", host_pattern = "api.example.com" }
@@ -2732,7 +2745,13 @@ runner = "sandboxed_process"
 command = "echo"
 args = []
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability", "use_secret"]
@@ -2742,7 +2761,7 @@ input_schema_ref = "schemas/test/input.v1.json"
 output_schema_ref = "schemas/test/output.v1.json"
 prompt_doc_ref = "prompts/test.md"
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "github_runtime_token"
 source = { type = "product_auth_account", provider = "github" }
 audience = { scheme = "https", host_pattern = "api.github.com" }
@@ -2866,5 +2885,16 @@ required = true
             }
             other => panic!("expected Unavailable, got {other:?}"),
         }
+    }
+
+    fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+        let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                    .expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
     }
 }

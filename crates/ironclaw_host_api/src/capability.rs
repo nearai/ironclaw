@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
     CapabilityGrantId, CapabilityId, ExtensionId, InvocationOrigin, MountView, NetworkPolicy,
     NetworkTargetPattern, Principal, ResourceCeiling, ResourceProfile,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement, RuntimeCredentialTarget,
-    RuntimeKind, SecretHandle, Timestamp, TrustClass,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialTarget, RuntimeKind, SecretHandle,
+    Timestamp, TrustClass, VendorId,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -215,7 +215,7 @@ pub enum RuntimeCredentialRequirementSource {
     #[default]
     SecretHandle,
     ProductAuthAccount {
-        provider: RuntimeCredentialAccountProviderId,
+        provider: VendorId,
         #[serde(default)]
         setup: RuntimeCredentialAccountSetup,
     },
@@ -229,7 +229,7 @@ pub enum RuntimeCredentialAccountSetup {
     #[serde(rename = "oauth")]
     OAuth { scopes: Vec<String> },
     /// Channel pairing: the user links an external account by consuming a
-    /// host-issued code on the external side (e.g. Telegram deep-link
+    /// host-issued code on the external side (e.g. a messenger deep-link
     /// `/start <code>`). No credential account is minted — satisfaction is
     /// re-derived from the channel's binding store when the parked run
     /// re-checks its requirements. Unlike the retired Slack `channel_pairing`

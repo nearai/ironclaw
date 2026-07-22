@@ -22,7 +22,7 @@ async fn resolver_uses_latest_duplicate_user_reusable_account() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -65,7 +65,7 @@ async fn resolver_resolves_google_capability_labeled_duplicates() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[gmail_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("gmail").unwrap(),
@@ -102,7 +102,7 @@ async fn resolver_does_not_auto_select_mixed_reusable_and_extension_owned_accoun
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[google_scope.as_str().to_string()],
             requester_extension: &requester,
@@ -139,7 +139,7 @@ async fn resolver_does_not_auto_select_mixed_reusable_and_shared_admin_accounts(
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[google_scope.as_str().to_string()],
             requester_extension: &requester,

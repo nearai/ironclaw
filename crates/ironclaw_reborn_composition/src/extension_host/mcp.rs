@@ -193,8 +193,8 @@ mod tests {
     use ironclaw_host_api::{
         CapabilityId, CapabilityProfileSchemaRef, ExtensionId, InvocationId, NetworkMethod,
         NetworkScheme, NetworkTargetPattern, PermissionMode, ProjectId, ResourceScope,
-        RuntimeCredentialAccountProviderId, RuntimeCredentialRequirementSource,
-        RuntimeCredentialTarget, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+        RuntimeCredentialRequirementSource, RuntimeCredentialTarget, SecretHandle, TenantId,
+        TrustClass, UserId, VendorId, VirtualPath,
     };
 
     use super::*;
@@ -498,6 +498,7 @@ mod tests {
                             url: Some(url.to_string()),
                         },
                         host_apis: Vec::new(),
+                        host_api_surfaces: Vec::new(),
                         hooks: Vec::new(),
                         capabilities: vec![ironclaw_extensions::CapabilityManifest {
                             id: CapabilityId::new(capability_id).unwrap(),
@@ -514,10 +515,12 @@ mod tests {
                                 "schemas/notion/notion-search.input.v1.json",
                             )
                             .unwrap(),
-                            output_schema_ref: CapabilityProfileSchemaRef::new(
-                                "schemas/notion/notion-search.output.v1.json",
-                            )
-                            .unwrap(),
+                            output_schema_ref: Some(
+                                CapabilityProfileSchemaRef::new(
+                                    "schemas/notion/notion-search.output.v1.json",
+                                )
+                                .unwrap(),
+                            ),
                             prompt_doc_ref: None,
                             required_host_ports: Vec::new(),
                             runtime_credentials: vec![
@@ -525,10 +528,7 @@ mod tests {
                                     handle: SecretHandle::new(credential_handle).unwrap(),
                                     source:
                                         RuntimeCredentialRequirementSource::ProductAuthAccount {
-                                            provider: RuntimeCredentialAccountProviderId::new(
-                                                provider,
-                                            )
-                                            .unwrap(),
+                                            provider: VendorId::new(provider).unwrap(),
                                             setup: Default::default(),
                                         },
                                     provider_scopes: Vec::new(),

@@ -1748,7 +1748,7 @@ fn runtime_credential_auth_requirement_defaults_setup_and_round_trips_oauth() {
     assert_eq!(parsed.setup, RuntimeCredentialAccountSetup::ManualToken);
 
     let oauth = RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        provider: VendorId::new("google").unwrap(),
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         },
@@ -1791,7 +1791,7 @@ fn dispatch_error_auth_required_debug_redacts_required_secrets() {
         "zero redaction count must appear; got: {debug_empty}"
     );
     let requirement = RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        provider: VendorId::new("google").unwrap(),
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         },

@@ -13,72 +13,6 @@ use crate::{
     ids::AuthProviderId, scope::AuthProductScope, scope_matches,
 };
 
-/// Redacted fingerprint of the exact secret handles committed by an OAuth
-/// callback. Lifecycle compensation compares this value before revoking an
-/// account, so metadata-only account updates do not suppress cleanup while a
-/// later reconnect or token refresh remains protected from a stale callback.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct CredentialSecretFingerprint(String);
-
-impl CredentialSecretFingerprint {
-    pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
-        let value = value.into();
-        if value.len() != 64
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(AuthProductError::invalid_request(
-                "credential secret fingerprint must be 64 lowercase hexadecimal characters",
-            ));
-        }
-        Ok(Self(value))
-    }
-
-    pub fn from_handles(
-        access_secret: Option<&SecretHandle>,
-        refresh_secret: Option<&SecretHandle>,
-    ) -> Self {
-        // Secret handles are opaque identifiers rather than secret values, but
-        // only their digest belongs in an auth-flow record. Length-prefixing
-        // makes the two optional fields unambiguous.
-        let access = access_secret.map(SecretHandle::as_str).unwrap_or_default();
-        let refresh = refresh_secret.map(SecretHandle::as_str).unwrap_or_default();
-        let material = format!("{}:{access}{}:{refresh}", access.len(), refresh.len());
-        // `sha256_hex` is canonical lowercase hex by contract.
-        Self(ironclaw_common::hashing::sha256_hex(material.as_bytes()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> String {
-        self.0
-    }
-}
-
-impl AsRef<str> for CredentialSecretFingerprint {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl TryFrom<String> for CredentialSecretFingerprint {
-    type Error = AuthProductError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<CredentialSecretFingerprint> for String {
-    fn from(value: CredentialSecretFingerprint) -> Self {
-        value.into_inner()
-    }
-}
-
 /// Credential account status projected to product surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,13 +86,6 @@ impl fmt::Debug for CredentialAccount {
 }
 
 impl CredentialAccount {
-    pub fn secret_fingerprint(&self) -> CredentialSecretFingerprint {
-        CredentialSecretFingerprint::from_handles(
-            self.access_secret.as_ref(),
-            self.refresh_secret.as_ref(),
-        )
-    }
-
     pub fn projection(&self) -> CredentialAccountProjection {
         let secret_handle_count =
             self.access_secret.iter().count() + self.refresh_secret.iter().count();
@@ -1154,33 +1081,6 @@ mod tests {
     };
     use chrono::Utc;
     use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
-
-    #[test]
-    fn credential_secret_fingerprint_deserialization_requires_canonical_sha256_hex() {
-        for invalid in [
-            "".to_string(),
-            "a".repeat(63),
-            "a".repeat(65),
-            "g".repeat(64),
-            "A".repeat(64),
-        ] {
-            let wire = serde_json::to_string(&invalid).expect("serialize test input");
-            assert!(
-                serde_json::from_str::<CredentialSecretFingerprint>(&wire).is_err(),
-                "invalid persisted fingerprint must be rejected: {invalid}"
-            );
-        }
-
-        let canonical = "0123456789abcdef".repeat(4);
-        let parsed: CredentialSecretFingerprint = serde_json::from_str(
-            &serde_json::to_string(&canonical).expect("serialize canonical fingerprint"),
-        )
-        .expect("canonical fingerprint");
-        assert_eq!(parsed.as_str(), canonical);
-        assert_eq!(parsed.as_ref(), canonical);
-        assert_eq!(parsed.clone().into_inner(), canonical);
-        assert_eq!(String::from(parsed), canonical);
-    }
 
     /// Build a minimal CredentialAccount using the same idiom as domain.rs tests.
     fn make_account(scope: AuthProductScope) -> CredentialAccount {

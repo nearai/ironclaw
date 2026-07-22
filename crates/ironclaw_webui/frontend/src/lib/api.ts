@@ -627,7 +627,7 @@ export function cancelRun({
 
 // --- Gate resolution ---
 
-// `resolution` is one of "approved" | "denied" | "credential_provided" | "cancelled".
+// `resolution` is one of "approved" | "declined" | "credential_provided".
 // `always` is only meaningful when `resolution === "approved"`.
 // `credentialRef` is only meaningful when `resolution === "credential_provided"`.
 export function resolveGate({

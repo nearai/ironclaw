@@ -184,22 +184,6 @@ impl AuthFlowManager for RecordingFlowManager {
         Err(AuthProductError::BackendUnavailable)
     }
 
-    async fn claim_continuation_dispatch(
-        &self,
-        _scope: &AuthProductScope,
-        _input: ironclaw_auth::AuthContinuationDispatchClaimInput,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        Err(AuthProductError::BackendUnavailable)
-    }
-
-    async fn settle_continuation_dispatch(
-        &self,
-        _scope: &AuthProductScope,
-        _input: ironclaw_auth::AuthContinuationDispatchSettlementInput,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        Err(AuthProductError::BackendUnavailable)
-    }
-
     async fn cancel_flow(
         &self,
         scope: &AuthProductScope,
@@ -243,6 +227,15 @@ impl AuthFlowManager for RecordingFlowManager {
         record.continuation_emitted_at = Some(emitted_at);
         record.updated_at = emitted_at;
         Ok(record.clone())
+    }
+
+    async fn fail_completed_continuation(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _error: ironclaw_auth::AuthErrorCode,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("auth interaction contract tests do not fail completed continuations")
     }
 }
 
@@ -563,9 +556,9 @@ async fn list_pending_auth_projects_challenges_to_minimal_safe_views() {
     assert!(!serialized.contains("secret_handle_count"));
 }
 
-/// The pending-auth projection must honor `expires_at` (RFC 6819 §5.1.5.3). A
-/// non-terminal flow whose TTL has already passed — but which no background
-/// sweep has transitioned to `Expired` yet — must not read as a live
+/// A2a · The pending-auth projection must honor `expires_at` (RFC 6819
+/// §5.1.5.3). A non-terminal flow whose TTL has already passed — but which no
+/// background sweep has transitioned to `Expired` yet — must not read as a live
 /// authenticating interaction. Only the still-live flow is listed.
 #[tokio::test]
 async fn list_pending_auth_omits_flow_past_its_expiry() {
@@ -1814,7 +1807,6 @@ fn auth_flow(
             gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
         },
         credential_account_id,
-        credential_secret_fingerprint: None,
         update_binding: Option::<CredentialAccountUpdateBinding>::None,
         opaque_state_hash: None,
         pkce_verifier_hash: None,

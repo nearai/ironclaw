@@ -73,6 +73,18 @@ pub use trigger_management::{
 };
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
+
+/// The registry-lane provider allowlist once activated extension dispatch
+/// resolves from the extension host's active snapshot: only the synthetic
+/// built-in package keeps resolving through the registry.
+pub(crate) fn builtin_provider_allowlist() -> std::collections::BTreeSet<ExtensionId> {
+    let mut allowlist = std::collections::BTreeSet::new();
+    if let Ok(builtin) = ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER) {
+        allowlist.insert(builtin);
+    }
+    allowlist
+}
+
 pub const READ_FILE_CAPABILITY_ID: &str = "builtin.read_file";
 pub const WRITE_FILE_CAPABILITY_ID: &str = "builtin.write_file";
 pub const LIST_DIR_CAPABILITY_ID: &str = "builtin.list_dir";
@@ -167,6 +179,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                 service: "builtin".to_string(),
             },
             host_apis: Vec::new(),
+            host_api_surfaces: Vec::new(),
             capabilities: {
                 let mut capabilities = vec![
                     echo::manifest()?,
@@ -456,9 +469,9 @@ fn first_party_capability_manifest(
         input_schema_ref: CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.input.v1.json"
         ))?,
-        output_schema_ref: CapabilityProfileSchemaRef::new(format!(
+        output_schema_ref: Some(CapabilityProfileSchemaRef::new(format!(
             "schemas/builtin/{schema_name}.output.v1.json"
-        ))?,
+        ))?),
         prompt_doc_ref: None,
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),

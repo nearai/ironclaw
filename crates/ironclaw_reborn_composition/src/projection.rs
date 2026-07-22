@@ -45,11 +45,11 @@ mod display_preview;
 mod live_progress;
 mod runtime_replay;
 mod turn_events;
-use crate::AuthChallengeProvider;
 use display_preview::{
     CapabilityDisplayPreviewResolution, CapabilityDisplayPreviewSource,
     NoopCapabilityDisplayPreviewSource,
 };
+use ironclaw_product_workflow::AuthChallengeProvider;
 use live_progress::{
     LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
 };
@@ -59,6 +59,8 @@ use runtime_replay::{
     DeliveredRuntimePayload, RuntimePayloadCandidate, RuntimePayloadResolution, RuntimePayloads,
     replay_payload_candidates, snapshot_payload_candidates,
 };
+// Only the Slack delivery path (feature-gated) consumes this re-export.
+pub(crate) use turn_events::approval_prompt_context_view;
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventDrain,
     TurnEventPayload, turn_status_wire,

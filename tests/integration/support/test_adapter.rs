@@ -1,26 +1,44 @@
-use async_trait::async_trait;
+//! Test inbound-injection for the integration harness.
+//!
+//! `RebornTestIngress` builds verified [`ProductInboundEnvelope`]s directly on
+//! the LIVE product-workflow inbound contract: it constructs a
+//! [`ParsedProductInbound`] and stamps it with a host-verified
+//! [`TrustedInboundContext`] via
+//! [`ProductInboundEnvelope::from_trusted_parse`] — the same path the
+//! production `ChannelAdapter` ingress bridge takes
+//! (`ironclaw_reborn_composition::extension_host::extension_ingress`).
+//!
+//! Ported in P7b (DEL-5): the retired `ProductAdapter` trait's `parse_inbound`
+//! used to produce the parsed value here. The harness never needed the trait —
+//! only the LIVE envelope it wrapped — so the parsed inbound is now built
+//! directly. Coverage that exercised the retired trait's own `parse_inbound` /
+//! `render_outbound` moved to the `ChannelAdapter` conformance suite
+//! (`ironclaw_product_adapters::test_support::run_channel_adapter_conformance`);
+//! see that PR's DEL-5 notes.
+
 use chrono::Utc;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ApprovalDecision, ApprovalResolutionPayload, AuthRequirement,
-    AuthResolutionPayload, AuthResolutionResult, DeliveryStatus, ExternalActorRef,
-    ExternalConversationRef, ExternalEventId, OutboundDeliverySink, ParsedProductInbound,
-    ProductAdapter, ProductAdapterCapabilities, ProductAdapterError, ProductAdapterHealth,
-    ProductAdapterId, ProductInboundEnvelope, ProductInboundPayload, ProductOutboundEnvelope,
-    ProductRenderOutcome, ProductSurfaceKind, ProductTriggerReason, ProjectionCursor,
-    ProjectionSubscriptionPayload, ProtocolAuthEvidence, ProtocolAuthFailure, ProtocolHttpEgress,
-    TrustedInboundContext, UserMessagePayload,
+    AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
+    ExternalEventId, ParsedProductInbound, ProductAdapterError, ProductAdapterId,
+    ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason, ProjectionCursor,
+    ProjectionSubscriptionPayload, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
 };
-use serde::{Deserialize, Serialize};
 
+/// Builds verified inbound envelopes for the integration harness.
+///
+/// Holds only the host-stamped identity (`adapter_id` / `installation_id`); the
+/// envelopes it produces flow through the same
+/// [`TrustedInboundContext::from_verified_evidence`] +
+/// [`ProductInboundEnvelope::from_trusted_parse`] path as the production
+/// `ChannelAdapter` ingress bridge, so nothing here forges trusted context.
 #[derive(Debug, Clone)]
-pub struct RebornTestProductAdapter {
+pub struct RebornTestIngress {
     adapter_id: ProductAdapterId,
     installation_id: AdapterInstallationId,
-    capabilities: ProductAdapterCapabilities,
-    auth_requirement: AuthRequirement,
 }
 
-impl RebornTestProductAdapter {
+impl RebornTestIngress {
     pub fn new(
         adapter_id: impl Into<String>,
         installation_id: impl Into<String>,
@@ -28,219 +46,50 @@ impl RebornTestProductAdapter {
         Ok(Self {
             adapter_id: ProductAdapterId::new(adapter_id.into())?,
             installation_id: AdapterInstallationId::new(installation_id.into())?,
-            capabilities: ProductAdapterCapabilities::external_channel_default(),
-            auth_requirement: AuthRequirement::BearerToken,
         })
     }
 
-    pub fn text_payload(
-        event_id: &str,
-        user_id: &str,
-        thread_id: &str,
-        text: &str,
-    ) -> Result<Vec<u8>, ProductAdapterError> {
-        Self::text_payload_with_trigger(
-            event_id,
-            user_id,
-            thread_id,
-            text,
-            ProductTriggerReason::DirectChat,
-        )
-    }
-
-    pub fn text_payload_with_trigger(
-        event_id: &str,
-        user_id: &str,
-        thread_id: &str,
-        text: &str,
-        trigger: ProductTriggerReason,
-    ) -> Result<Vec<u8>, ProductAdapterError> {
-        serde_json::to_vec(&RebornTestInboundPayload {
-            kind: RebornTestInboundKind::UserMessage,
-            event_id,
-            user_id,
-            thread_id,
-            text: Some(text),
-            trigger: Some(trigger),
-            thread_id_hint: None,
-            after_cursor: None,
-        })
-        .map_err(|error| ProductAdapterError::MalformedInboundPayload {
-            reason: ironclaw_product_adapters::RedactedString::new(error.to_string()),
-        })
-    }
-
-    pub fn subscription_payload(
-        event_id: &str,
-        user_id: &str,
-        thread_id: &str,
-        thread_id_hint: Option<&str>,
-        after_cursor: Option<ProjectionCursor>,
-    ) -> Result<Vec<u8>, ProductAdapterError> {
-        serde_json::to_vec(&RebornTestInboundPayload {
-            kind: RebornTestInboundKind::SubscriptionRequest,
-            event_id,
-            user_id,
-            thread_id,
-            text: None,
-            trigger: None,
-            thread_id_hint,
-            after_cursor,
-        })
-        .map_err(|error| ProductAdapterError::MalformedInboundPayload {
-            reason: ironclaw_product_adapters::RedactedString::new(error.to_string()),
-        })
-    }
-}
-
-#[async_trait]
-impl ProductAdapter for RebornTestProductAdapter {
-    fn adapter_id(&self) -> &ProductAdapterId {
+    pub fn adapter_id(&self) -> &ProductAdapterId {
         &self.adapter_id
     }
 
-    fn installation_id(&self) -> &AdapterInstallationId {
+    pub fn installation_id(&self) -> &AdapterInstallationId {
         &self.installation_id
     }
 
-    fn surface_kind(&self) -> ProductSurfaceKind {
-        ProductSurfaceKind::ExternalChannel
-    }
-
-    fn capabilities(&self) -> &ProductAdapterCapabilities {
-        &self.capabilities
-    }
-
-    fn auth_requirement(&self) -> &AuthRequirement {
-        &self.auth_requirement
-    }
-
-    fn parse_inbound(
-        &self,
-        raw_payload: &[u8],
-        auth_evidence: &ProtocolAuthEvidence,
+    /// Directly construct the adapter-shaped `ParsedProductInbound` a real
+    /// adapter would hand the host, using the harness's stable synthetic actor
+    /// (`reborn_test_user` / `user_id`) and conversation (`thread_id`).
+    fn parsed_inbound(
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        payload: ProductInboundPayload,
     ) -> Result<ParsedProductInbound, ProductAdapterError> {
-        if !auth_evidence.is_verified() {
-            return Err(ProductAdapterError::Authentication(
-                auth_evidence
-                    .failure()
-                    .cloned()
-                    .unwrap_or(ProtocolAuthFailure::Missing),
-            ));
-        }
-        let payload: OwnedRebornTestInboundPayload =
-            serde_json::from_slice(raw_payload).map_err(|error| {
-                ProductAdapterError::MalformedInboundPayload {
-                    reason: ironclaw_product_adapters::RedactedString::new(error.to_string()),
-                }
-            })?;
-        let claim = auth_evidence
-            .claim()
-            .ok_or(ProductAdapterError::Authentication(
-                ProtocolAuthFailure::Missing,
-            ))?;
-        if claim.subject() != payload.user_id {
-            return Err(ProductAdapterError::Authentication(
-                ProtocolAuthFailure::Other {
-                    detail: ironclaw_product_adapters::RedactedString::new(
-                        "verified subject does not match inbound actor",
-                    ),
-                },
-            ));
-        }
-        let inbound_payload = match payload.kind {
-            RebornTestInboundKind::UserMessage => {
-                ProductInboundPayload::UserMessage(UserMessagePayload::new(
-                    payload
-                        .text
-                        .ok_or_else(|| ProductAdapterError::MalformedInboundPayload {
-                            reason: ironclaw_product_adapters::RedactedString::new(
-                                "user message payload missing text",
-                            ),
-                        })?,
-                    Vec::new(),
-                    payload.trigger.ok_or_else(|| {
-                        ProductAdapterError::MalformedInboundPayload {
-                            reason: ironclaw_product_adapters::RedactedString::new(
-                                "user message payload missing trigger",
-                            ),
-                        }
-                    })?,
-                )?)
-            }
-            RebornTestInboundKind::SubscriptionRequest => {
-                ProductInboundPayload::SubscriptionRequest(ProjectionSubscriptionPayload::new(
-                    payload.thread_id_hint,
-                    payload.after_cursor,
-                )?)
-            }
-        };
         ParsedProductInbound::new(
-            ExternalEventId::new(payload.event_id)?,
-            ExternalActorRef::new(
-                "reborn_test_user",
-                payload.user_id.clone(),
-                Some(payload.user_id),
-            )?,
-            ExternalConversationRef::new(None, payload.thread_id, None, None)?,
-            inbound_payload,
+            ExternalEventId::new(event_id)?,
+            ExternalActorRef::new("reborn_test_user", user_id, Some(user_id.to_string()))?,
+            ExternalConversationRef::new(None, thread_id.to_string(), None, None)?,
+            payload,
         )
     }
 
-    async fn render_outbound(
+    /// The shared trusted-context wrapper: stamps host-verified evidence for
+    /// `user_id` and wraps a directly-built [`ParsedProductInbound`] into a
+    /// [`ProductInboundEnvelope`] exactly as the production ingress bridge does.
+    fn envelope_from_parsed(
         &self,
-        envelope: ProductOutboundEnvelope,
-        _egress: &dyn ProtocolHttpEgress,
-        delivery_sink: &dyn OutboundDeliverySink,
-    ) -> Result<ProductRenderOutcome, ProductAdapterError> {
-        if envelope.adapter_id != self.adapter_id {
-            return Err(ProductAdapterError::InvalidIdentifier {
-                kind: "envelope.adapter_id",
-                reason: format!(
-                    "envelope adapter_id `{}` does not match this adapter `{}`",
-                    envelope.adapter_id.as_str(),
-                    self.adapter_id.as_str(),
-                ),
-            });
-        }
-        if envelope.installation_id != self.installation_id {
-            return Err(ProductAdapterError::InvalidIdentifier {
-                kind: "envelope.installation_id",
-                reason: format!(
-                    "envelope installation_id `{}` does not match this installation `{}`",
-                    envelope.installation_id.as_str(),
-                    self.installation_id.as_str(),
-                ),
-            });
-        }
-
-        delivery_sink
-            .record(DeliveryStatus::Delivered {
-                attempt_id: envelope.delivery_attempt_id,
-                target: envelope.target.reply_target_binding_ref,
-                run_id: None,
-            })
-            .await;
-        Ok(ProductRenderOutcome::DeliveryRecorded)
-    }
-
-    fn health(&self) -> ProductAdapterHealth {
-        ProductAdapterHealth::Healthy
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct RebornTestIngress {
-    adapter: RebornTestProductAdapter,
-}
-
-impl RebornTestIngress {
-    pub fn new(adapter: RebornTestProductAdapter) -> Self {
-        Self { adapter }
-    }
-
-    pub fn adapter(&self) -> &RebornTestProductAdapter {
-        &self.adapter
+        user_id: &str,
+        parsed: ParsedProductInbound,
+    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, user_id);
+        let context = TrustedInboundContext::from_verified_evidence(
+            self.adapter_id.clone(),
+            self.installation_id.clone(),
+            Utc::now(),
+            &evidence,
+        )?;
+        ProductInboundEnvelope::from_trusted_parse(context, parsed)
     }
 
     pub fn verified_text_envelope(
@@ -267,18 +116,13 @@ impl RebornTestIngress {
         text: &str,
         trigger: ProductTriggerReason,
     ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
-        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, user_id);
-        let raw = RebornTestProductAdapter::text_payload_with_trigger(
-            event_id, user_id, thread_id, text, trigger,
-        )?;
-        let parsed = self.adapter.parse_inbound(&raw, &evidence)?;
-        let context = TrustedInboundContext::from_verified_evidence(
-            self.adapter.adapter_id().clone(),
-            self.adapter.installation_id().clone(),
-            Utc::now(),
-            &evidence,
-        )?;
-        ProductInboundEnvelope::from_trusted_parse(context, parsed)
+        let payload = ProductInboundPayload::UserMessage(UserMessagePayload::new(
+            text.to_string(),
+            Vec::new(),
+            trigger,
+        )?);
+        let parsed = Self::parsed_inbound(event_id, user_id, thread_id, payload)?;
+        self.envelope_from_parsed(user_id, parsed)
     }
 
     pub fn verified_subscription_envelope(
@@ -289,69 +133,17 @@ impl RebornTestIngress {
         thread_id_hint: Option<&str>,
         after_cursor: Option<ProjectionCursor>,
     ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
-        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, user_id);
-        let raw = RebornTestProductAdapter::subscription_payload(
-            event_id,
-            user_id,
-            thread_id,
-            thread_id_hint,
-            after_cursor,
-        )?;
-        let parsed = self.adapter.parse_inbound(&raw, &evidence)?;
-        let context = TrustedInboundContext::from_verified_evidence(
-            self.adapter.adapter_id().clone(),
-            self.adapter.installation_id().clone(),
-            Utc::now(),
-            &evidence,
-        )?;
-        ProductInboundEnvelope::from_trusted_parse(context, parsed)
-    }
-
-    pub fn failed_auth_payload(
-        &self,
-        raw_payload: &[u8],
-    ) -> Result<ParsedProductInbound, ProductAdapterError> {
-        let evidence = ProtocolAuthEvidence::failed(ProtocolAuthFailure::Missing);
-        self.adapter.parse_inbound(raw_payload, &evidence)
-    }
-
-    /// A verified `submit_inbound` envelope wrapping an already-built
-    /// resolution payload. Shared by
-    /// [`verified_approval_resolution_envelope`](Self::verified_approval_resolution_envelope)
-    /// and
-    /// [`verified_auth_resolution_envelope`](Self::verified_auth_resolution_envelope),
-    /// which differ only in which `ProductInboundPayload` variant they pass.
-    fn verified_resolution_envelope(
-        &self,
-        event_id: &str,
-        user_id: &str,
-        thread_id: &str,
-        payload: ProductInboundPayload,
-    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
-        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, user_id);
-        let context = TrustedInboundContext::from_verified_evidence(
-            self.adapter.adapter_id().clone(),
-            self.adapter.installation_id().clone(),
-            Utc::now(),
-            &evidence,
-        )?;
-        let parsed = ParsedProductInbound::new(
-            ExternalEventId::new(event_id)?,
-            ExternalActorRef::new("reborn_test_user", user_id, Some(user_id.to_string()))?,
-            ExternalConversationRef::new(None, thread_id.to_string(), None, None)?,
-            payload,
-        )?;
-        ProductInboundEnvelope::from_trusted_parse(context, parsed)
+        let payload =
+            ProductInboundPayload::SubscriptionRequest(ProjectionSubscriptionPayload::new(
+                thread_id_hint.map(|hint| hint.to_string()),
+                after_cursor,
+            )?);
+        let parsed = Self::parsed_inbound(event_id, user_id, thread_id, payload)?;
+        self.envelope_from_parsed(user_id, parsed)
     }
 
     /// A verified `ApprovalResolution` envelope for `submit_inbound`, the real
-    /// dispatch arm a product adapter's "approve"/"deny" reply hits.
-    /// `ApprovalResolution` has no wire-format representation in
-    /// `RebornTestProductAdapter`'s JSON payload enum (it only carries
-    /// `UserMessage`/`SubscriptionRequest`), so this builds the
-    /// `ParsedProductInbound` directly instead of round-tripping through
-    /// `parse_inbound` — matching the adapter-shaped value a real adapter would
-    /// hand `submit_inbound`.
+    /// dispatch arm an adapter's "approve"/"deny" reply hits.
     pub fn verified_approval_resolution_envelope(
         &self,
         event_id: &str,
@@ -360,20 +152,15 @@ impl RebornTestIngress {
         gate_ref: &str,
         decision: ApprovalDecision,
     ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
-        self.verified_resolution_envelope(
-            event_id,
-            user_id,
-            thread_id,
-            ProductInboundPayload::ApprovalResolution(ApprovalResolutionPayload::new(
-                gate_ref, decision,
-            )?),
-        )
+        let payload = ProductInboundPayload::ApprovalResolution(ApprovalResolutionPayload::new(
+            gate_ref, decision,
+        )?);
+        let parsed = Self::parsed_inbound(event_id, user_id, thread_id, payload)?;
+        self.envelope_from_parsed(user_id, parsed)
     }
 
     /// A verified `AuthResolution` envelope for `submit_inbound`, the real
-    /// dispatch arm a product adapter's auth-gate reply hits. See
-    /// [`verified_approval_resolution_envelope`](Self::verified_approval_resolution_envelope)
-    /// for why this builds the `ParsedProductInbound` directly.
+    /// dispatch arm an adapter's auth-gate reply hits.
     pub fn verified_auth_resolution_envelope(
         &self,
         event_id: &str,
@@ -382,54 +169,11 @@ impl RebornTestIngress {
         auth_request_ref: &str,
         result: AuthResolutionResult,
     ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
-        self.verified_resolution_envelope(
-            event_id,
-            user_id,
-            thread_id,
-            ProductInboundPayload::AuthResolution(AuthResolutionPayload::new(
-                auth_request_ref,
-                result,
-            )?),
-        )
+        let payload = ProductInboundPayload::AuthResolution(AuthResolutionPayload::new(
+            auth_request_ref,
+            result,
+        )?);
+        let parsed = Self::parsed_inbound(event_id, user_id, thread_id, payload)?;
+        self.envelope_from_parsed(user_id, parsed)
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RebornTestInboundKind {
-    UserMessage,
-    SubscriptionRequest,
-}
-
-fn default_inbound_kind() -> RebornTestInboundKind {
-    RebornTestInboundKind::UserMessage
-}
-
-#[derive(Debug, Serialize)]
-struct RebornTestInboundPayload<'a> {
-    kind: RebornTestInboundKind,
-    event_id: &'a str,
-    user_id: &'a str,
-    thread_id: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    trigger: Option<ProductTriggerReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thread_id_hint: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    after_cursor: Option<ProjectionCursor>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OwnedRebornTestInboundPayload {
-    #[serde(default = "default_inbound_kind")]
-    kind: RebornTestInboundKind,
-    event_id: String,
-    user_id: String,
-    thread_id: String,
-    text: Option<String>,
-    trigger: Option<ProductTriggerReason>,
-    thread_id_hint: Option<String>,
-    after_cursor: Option<ProjectionCursor>,
 }

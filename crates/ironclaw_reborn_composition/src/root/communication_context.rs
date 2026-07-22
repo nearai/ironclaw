@@ -1,9 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
+use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState};
 use ironclaw_product_workflow::{
-    LifecycleExtensionSurfaceKind, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductSurfaceContext,
-    OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
+    RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::{
     run_profile::{
@@ -182,12 +183,13 @@ async fn fetch_communication_context(
             let channels: Vec<ConnectedChannelSummary> = extensions
                 .into_iter()
                 .filter(|ext| {
-                    extension_is_channel_surface(ext) && ext.phase == LifecyclePhase::Active
+                    extension_is_channel_surface(ext) && ext.phase == InstallationState::Active
                 })
                 .map(|ext| ConnectedChannelSummary {
                     name: ext.summary.name.clone(),
                     authenticated: true,
                     active: true,
+                    presentation: ext.summary.channel_presentation.clone(),
                 })
                 .collect();
             ConnectedChannelsState::Known(channels)
@@ -220,7 +222,7 @@ fn extension_is_channel_surface(
     extension
         .summary
         .surface_kinds
-        .contains(&LifecycleExtensionSurfaceKind::ExternalChannel)
+        .contains(&CapabilitySurfaceKind::Channel)
 }
 
 #[cfg(test)]
@@ -228,13 +230,15 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+    use ironclaw_host_api::{
+        AgentId, CapabilitySurfaceKind, InstallationState, ProjectId, TenantId, UserId,
+    };
     use ironclaw_product_workflow::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
-        LifecycleExtensionSurfaceKind, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-        LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-        LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-        OutboundPreferencesProductFacade, ProductWorkflowError, RebornOutboundDeliveryTargetId,
+        LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
+        LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+        LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
+        ProductWorkflowError, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
         RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
         RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
@@ -353,7 +357,7 @@ mod tests {
             _action: LifecycleProductAction,
         ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
             Ok(LifecycleProductResponse {
-                phase: LifecyclePhase::Active,
+                phase: InstallationState::Active,
                 package_ref: None,
                 blockers: Vec::new(),
                 message: None,
@@ -388,7 +392,7 @@ mod tests {
         ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
             let count = self.extensions.len();
             Ok(LifecycleProductResponse {
-                phase: LifecyclePhase::Active,
+                phase: InstallationState::Active,
                 package_ref: None,
                 blockers: Vec::new(),
                 message: None,
@@ -445,13 +449,16 @@ mod tests {
                 description: "channel extension".to_string(),
                 source: LifecycleExtensionSource::HostBundled,
                 runtime_kind: LifecycleExtensionRuntimeKind::FirstParty,
-                surface_kinds: vec![LifecycleExtensionSurfaceKind::ExternalChannel],
+                surface_kinds: vec![CapabilitySurfaceKind::Channel],
+                channel_directions: None,
+                channel_connection: None,
+                channel_presentation: None,
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements: Vec::new(),
                 onboarding: None,
             },
-            phase: LifecyclePhase::Active,
+            phase: InstallationState::Active,
             install_scope: None,
         }
     }
@@ -467,19 +474,22 @@ mod tests {
                 source: LifecycleExtensionSource::HostBundled,
                 runtime_kind: LifecycleExtensionRuntimeKind::WasmTool,
                 surface_kinds: Vec::new(),
+                channel_directions: None,
+                channel_connection: None,
+                channel_presentation: None,
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements: Vec::new(),
                 onboarding: None,
             },
-            phase: LifecyclePhase::Active,
+            phase: InstallationState::Active,
             install_scope: None,
         }
     }
 
     fn inactive_channel_extension(name: &str) -> LifecycleInstalledExtensionSummary {
         let mut ext = channel_extension(name);
-        ext.phase = LifecyclePhase::Installed;
+        ext.phase = InstallationState::Installed;
         ext
     }
 
@@ -673,10 +683,17 @@ mod tests {
     async fn channel_extensions_are_classified_as_connected_channels() {
         // Only active channel-surface extensions count: telegram (active channel)
         // is included; github (non-channel) and slack (inactive channel) are not.
+        // The telegram summary also carries a declared presentation (OUT-11).
+        let mut telegram = channel_extension("telegram");
+        telegram.summary.channel_presentation = Some(ironclaw_host_api::ChannelPresentation {
+            supports_markdown: true,
+            supports_threads: false,
+            max_message_chars: Some(4096),
+        });
         let provider = RuntimeCommunicationContextProvider::new(Arc::new(NoneSetPreferencesFacade))
             .with_lifecycle_facade(Arc::new(ChannelListLifecycleFacade {
                 extensions: vec![
-                    channel_extension("telegram"),
+                    telegram,
                     non_channel_extension("github"),
                     inactive_channel_extension("slack"),
                 ],
@@ -686,16 +703,26 @@ mod tests {
             .resolve(false)
             .await
             .expect("context");
-        let names: Vec<String> = match ctx.connected_channels {
-            ConnectedChannelsState::Known(channels) => {
-                channels.into_iter().map(|c| c.name).collect()
-            }
+        let channels = match ctx.connected_channels {
+            ConnectedChannelsState::Known(channels) => channels,
             other => panic!("expected Known channels, got {other:?}"),
         };
+        let names: Vec<String> = channels.iter().map(|c| c.name.clone()).collect();
         assert_eq!(
             names,
             vec!["telegram".to_string()],
             "only active channel-surface extensions are reported as connected"
+        );
+        // OUT-11: the channel's declared presentation flows through the provider
+        // onto the connected-channel summary that prompt construction renders.
+        assert_eq!(
+            channels[0].presentation,
+            Some(ironclaw_host_api::ChannelPresentation {
+                supports_markdown: true,
+                supports_threads: false,
+                max_message_chars: Some(4096),
+            }),
+            "the channel's declared presentation reaches the connected-channel summary"
         );
     }
 

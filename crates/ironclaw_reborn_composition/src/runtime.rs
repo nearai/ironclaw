@@ -94,7 +94,6 @@ use ironclaw_turns::{
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
 
-#[cfg(any(test, feature = "test-support"))]
 use ironclaw_host_runtime::HostRuntime;
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 use ironclaw_outbound::CommunicationPreferenceRepository;
@@ -112,6 +111,10 @@ use crate::builtin_capability_policy::{BuiltinCapabilityPolicy, builtin_capabili
 use crate::deployment::{DeploymentConfig, TrafficPolicy};
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::extension_host::lifecycle::RebornLocalSkillManagementPort;
+use crate::extension_host::{
+    admin_configuration::ComposedAdminConfigurationService,
+    available_extensions::AdminConfigurationCatalogUse,
+};
 #[cfg(any(test, feature = "test-support"))]
 use crate::factory::ComposedCapabilityLeaseStore;
 use crate::factory::{
@@ -120,13 +123,15 @@ use crate::factory::{
     builtin_extension_registry, filesystem_reborn_identity_store,
 };
 #[cfg(any(test, feature = "test-support"))]
+use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
+#[cfg(any(test, feature = "test-support"))]
 use crate::outbound::outbound_preferences::{
     OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
 };
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
-    OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome,
-    RebornOutboundPreferencesFacade, outbound_delivery_synthetic_provider,
+    OutboundDeliveryTargetProvider, RebornOutboundPreferencesFacade,
+    outbound_delivery_synthetic_provider,
 };
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
@@ -243,7 +248,6 @@ struct RuntimeStoreParts {
     /// `SnapshotActiveRunLookup` identically, so the poller-launch block no
     /// longer reaches into the concrete local substrate for it.
     turn_run_snapshot_source: Arc<dyn TurnRunSnapshotSource>,
-    legacy_webui_identity_substrate_db: Option<Arc<libsql::Database>>,
     admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
     project_service: Arc<dyn ironclaw_product_workflow::ProjectService>,
     trigger_conversation_services: Option<RebornFilesystemConversationServices>,
@@ -325,7 +329,6 @@ fn runtime_store_parts(
         subagent_await_edge_evidence,
         trigger_repository,
         turn_run_snapshot_source: turn_state as Arc<dyn TurnRunSnapshotSource>,
-        legacy_webui_identity_substrate_db: services.legacy_webui_identity_substrate_db.clone(),
         admin_secret_provisioner,
         project_service,
         trigger_conversation_services: services.trigger_conversation_services.clone(),
@@ -545,26 +548,19 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
     }
 }
 
-/// Per-host keys for [`RebornRuntime::add_trigger_post_submit_hook`]: one
-/// triggered-run delivery hook per channel host, deduplicated by key.
-const SLACK_TRIGGER_POST_SUBMIT_HOOK_KEY: &str = "slack-host-beta";
-pub(crate) const TELEGRAM_TRIGGER_POST_SUBMIT_HOOK_KEY: &str = "telegram-host-beta";
-
 /// Started, running Reborn agent runtime.
 ///
 /// `RebornRuntime` is the single user-facing handle returned by
 /// [`build_reborn_runtime`]. Downstream code never reaches into the substrate
 /// or worker machinery: it talks to the runtime through task-level methods.
 pub struct RebornRuntime {
-    #[cfg(any(test, feature = "test-support"))]
-    pub(crate) host_runtime: Option<Arc<dyn HostRuntime>>,
+    pub(crate) host_runtime: Arc<dyn HostRuntime>,
     pub(crate) product_auth: Option<Arc<RebornProductAuthServices>>,
     pub(crate) readiness: RebornReadiness,
     pub(crate) skill_management: Option<Arc<RebornLocalSkillManagementPort>>,
     pub(crate) extension_lifecycle_surface_context: Option<LifecycleProductSurfaceContext>,
     pub(crate) secret_store: Arc<dyn SecretStore>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    pub(crate) legacy_webui_identity_substrate_db: Option<Arc<libsql::Database>>,
     pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ironclaw_product_workflow::ProjectService>,
     pub(crate) trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
@@ -606,20 +602,40 @@ pub struct RebornRuntime {
     pub(crate) in_memory_budget_event_sink:
         Option<Arc<ironclaw_resources::InMemoryBudgetEventSink>>,
     pub(crate) outbound_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
-    pub(crate) outbound_state: Option<Arc<dyn ironclaw_outbound::OutboundStateStore>>,
-    pub(crate) delivered_gate_routes:
-        Option<Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>>,
     pub(crate) triggered_run_delivery:
         Option<Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>>,
-    pub(crate) host_state_filesystem: Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>>,
-    pub(crate) telegram_host_state_filesystem: Option<Arc<ScopedFilesystem<dyn RootFilesystem>>>,
-    pub(crate) host_runtime_http_egress:
-        Option<ironclaw_host_runtime::HostRuntimeHttpEgressPort>,
-    pub(crate) channel_connection_facade_slot:
-        Option<Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>>,
+    pub(crate) channel_connection_facade_slot: Option<
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>,
+    >,
+    pub(crate) channel_config:
+        Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
+    pub(crate) admin_configuration: Option<Arc<ComposedAdminConfigurationService>>,
+    pub(crate) admin_configuration_uses: Option<Arc<Vec<AdminConfigurationCatalogUse>>>,
+    pub(crate) channel_identity_store:
+        Option<Arc<crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore>>,
+    pub(crate) channel_dm_target_store:
+        Option<Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>>,
+    pub(crate) extension_ingress:
+        Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
+    pub(crate) channel_pairing:
+        Option<Arc<crate::extension_host::channel_pairing::ChannelPairingRegistry>>,
+    pub(crate) channel_delivery_resolver:
+        Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     #[cfg(test)]
     pub(crate) turn_state_store: Arc<dyn RuntimeTurnStateStore>,
+    /// Generic channel host assembly (extension-runtime P6 S2): the
+    /// per-extension inbound-channel reconcile loop over the generic host's
+    /// active snapshot. `None` when the composition path has no generic
+    /// host. Never read after construction — held purely so the reconcile
+    /// loop lives exactly as long as the runtime (dropping the `Arc` ends
+    /// the loop).
+    #[allow(
+        dead_code,
+        reason = "owned so the reconcile loop lives with the runtime"
+    )]
+    channel_host_assembly:
+        Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>>,
     /// Turn-state row-store flusher, kept so graceful `shutdown` can drain the
     /// write-behind durable tail (awaiting the acks of non-critical transitions
     /// that committed at memory speed) so a planned restart recovers in-flight
@@ -631,23 +647,10 @@ pub struct RebornRuntime {
     thread_scope: ThreadScope,
     turn_scheduler: RuntimeTurnScheduler,
     trigger_poller_handle: Option<TriggerPollerRuntimeHandle>,
-    credential_refresh_worker_handle:
-        Option<crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerRuntimeHandle>,
+    credential_refresh_worker_handle: Option<ironclaw_auth::KeepaliveSweepHandle>,
     trace_flush_worker: crate::observability::trace_capture::TraceQueueFlushWorkerHandle,
     skill_learning_extraction_tasks:
         Option<Arc<crate::extension_host::skill_learning::SkillLearningExtractionTasks>>,
-    /// Late-binding slot shared with the poller's `PostSubmitHookWrappedSubmitter`.
-    /// `add_trigger_post_submit_hook` (and the Slack-named `set_` wrapper)
-    /// fills this after `build_reborn_runtime` returns.
-    /// `None` when the trigger poller is not enabled.
-    post_submit_hook_slot:
-        Option<Arc<std::sync::OnceLock<Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>>>>,
-    /// Composite installed into `post_submit_hook_slot` on the first
-    /// `add_trigger_post_submit_hook` call so multiple channel hosts (Slack +
-    /// Telegram) can each register a triggered-run delivery hook while the
-    /// poller keeps its single-`OnceLock` consumer. `None` iff the slot is.
-    post_submit_hook_composite:
-        Option<Arc<ironclaw_channel_delivery::CompositePostSubmitDeliveryHook>>,
     #[cfg(any(test, feature = "test-support"))]
     trigger_conversation_pairing:
         Option<Arc<dyn ironclaw_conversations::ConversationActorPairingService>>,
@@ -811,14 +814,12 @@ type ComposedSkillExecutionAdapter =
 struct TriggerPollerServices {
     materializer: Arc<dyn ironclaw_triggers::TriggerPromptMaterializer>,
     trusted_submitter: Arc<dyn ironclaw_triggers::TrustedTriggerFireSubmitter>,
-    /// Late-binding slot for the post-submit hook. Created here and shared with
-    /// the poller wrapper; filled later by
-    /// `RebornRuntime::add_trigger_post_submit_hook` so channel host mounts
-    /// (`build_slack_host_beta_mounts`, `build_telegram_host_runtime_mounts` —
-    /// called after runtime build) can wire their hooks without restarting the
-    /// poller.
-    post_submit_hook_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>>>,
+    /// Late-binding slot for the post-submit hook. Created here and shared
+    /// with the poller wrapper; filled by the composition root (the generic
+    /// triggered-delivery hook) without restarting the poller.
+    post_submit_hook_slot: Arc<
+        std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
+    >,
     /// Test-support handle on the SAME conversation services instance the
     /// poller-side materializer/submitter use, so integration tests can call
     /// the production `pair_external_actor` API to seed the trigger
@@ -1227,119 +1228,15 @@ fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWork
     }
 }
 
-/// Fold legacy pre-#4381 WebUI `user_identities` rows into the canonical
-/// identity store. The old store wrote those rows into the same libSQL
-/// substrate; reading that SQL table is a substrate-level concern handled
-/// here in the host layer (not the identity crate), then each row is bound
-/// into the filesystem-backed store so an existing SSO user keeps their
-/// `UserId` across upgrade. Idempotent (bind re-points to the same user) and
-/// a no-op when the legacy table is absent (fresh installs).
-///
-/// Reads the legacy libSQL table directly, so it needs this crate's `libsql`
-/// feature.
-async fn fold_legacy_webui_identities<R>(
-    db: &libsql::Database,
-    tenant_id: &TenantId,
-    store: &R,
-) -> Result<(), ironclaw_reborn_identity::RebornIdentityError>
-where
-    R: ironclaw_reborn_identity::RebornIdentityResolver + ?Sized,
-{
-    use ironclaw_reborn_identity::{
-        ExternalSubjectId, ProviderKind, RebornIdentityError, ResolveExternalIdentity, SurfaceKind,
-    };
-
-    fn backend(error: libsql::Error) -> RebornIdentityError {
-        RebornIdentityError::Backend(error.to_string())
-    }
-    fn invalid_key(error: ironclaw_reborn_identity::IdentityKeyError) -> RebornIdentityError {
-        RebornIdentityError::Backend(error.to_string())
-    }
-
-    let conn = db.connect().map_err(backend)?;
-    // Scope the existence-check cursor so it is dropped (read lock released)
-    // before any write; a lingering open cursor would block the
-    // filesystem-backed writes below with `database is locked`.
-    let legacy_table_exists = {
-        let mut table = conn
-            .query(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'user_identities'",
-                (),
-            )
-            .await
-            .map_err(backend)?;
-        table.next().await.map_err(backend)?.is_some()
-    };
-    if !legacy_table_exists {
-        return Ok(());
-    }
-
-    // Drain the read cursor fully BEFORE writing: the store's writes go
-    // through a different libSQL connection on the same file, and an open
-    // read cursor here would block them with `database is locked`.
-    //
-    // Carry the verified-email fields too: the legacy WebUI store recorded
-    // `email` / `email_verified`, and dropping them on migration would leave
-    // the canonical verified-email index unseeded. A migrated Google user
-    // would keep their id for the same provider/subject, but a later GitHub
-    // login with the same verified email would find no index and mint a
-    // second user — a permanent split. `adopt_migrated_identity` preserves
-    // both the user id and the verified-email linkage.
-    //
-    // This intentionally GRANDFATHERS each row's `email_verified` as recorded
-    // under the policy in force when the row was written; the one-time fold
-    // does NOT re-validate the legacy email against the CURRENT operator
-    // allowlist. That is safe because admission is enforced per login, not
-    // per index: every live SSO login is gated by `WebuiUserDirectory` against
-    // the current allowed-email-domains BEFORE the resolver is consulted, so a
-    // grandfathered index for a domain the operator has since removed is never
-    // reached (the login is rejected at admission). Re-gating the migration on
-    // the current allowlist would need the allowlist plumbed into this
-    // substrate-level fold; admission already bounds exploitability, so the
-    // migration faithfully preserves prior verified-email links instead.
-    let mut legacy = Vec::new();
-    let mut rows = conn
-        .query(
-            "SELECT provider, provider_user_id, user_id, email, email_verified \
-             FROM user_identities",
-            (),
-        )
-        .await
-        .map_err(backend)?;
-    while let Some(row) = rows.next().await.map_err(backend)? {
-        let provider: String = row.get(0).map_err(backend)?;
-        let subject: String = row.get(1).map_err(backend)?;
-        let user: String = row.get(2).map_err(backend)?;
-        let email: Option<String> = row.get(3).map_err(backend)?;
-        // Legacy column is an INTEGER (0/1); read as i64 so a NULL or odd
-        // encoding fails loud rather than silently coercing to unverified.
-        let email_verified: i64 = row.get(4).map_err(backend)?;
-        legacy.push((provider, subject, user, email, email_verified != 0));
-    }
-    drop(rows);
-    drop(conn);
-
-    for (provider, subject, user, email, email_verified) in legacy {
-        let identity = ResolveExternalIdentity {
-            tenant_id: tenant_id.clone(),
-            surface_kind: SurfaceKind::Oauth,
-            provider_kind: ProviderKind::new(provider).map_err(invalid_key)?,
-            provider_instance_id: None,
-            external_subject_id: ExternalSubjectId::new(subject).map_err(invalid_key)?,
-            email,
-            email_verified,
-            display_name: None,
-        };
-        let user_id = UserId::new(user)
-            .map_err(|error| RebornIdentityError::InvalidUserId(error.to_string()))?;
-        store.adopt_migrated_identity(identity, &user_id).await?;
-    }
-    Ok(())
-}
-
 impl RebornRuntime {
     pub fn readiness(&self) -> &RebornReadiness {
         &self.readiness
+    }
+
+    pub fn extension_ingress_parts(
+        &self,
+    ) -> Option<crate::extension_host::extension_ingress::ExtensionIngressParts> {
+        self.extension_ingress.clone()
     }
 
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
@@ -1353,7 +1250,7 @@ impl RebornRuntime {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn host_runtime_for_test(&self) -> Option<Arc<dyn HostRuntime>> {
-        self.host_runtime.as_ref().map(Arc::clone)
+        Some(Arc::clone(&self.host_runtime))
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1510,15 +1407,16 @@ impl RebornRuntime {
     }
 
     #[cfg(feature = "test-support")]
-    pub fn publish_bundled_extension_for_test(
+    pub async fn publish_bundled_extension_for_test(
         &self,
         package: &ironclaw_extensions::ExtensionPackage,
+        resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
     ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
         Some(
             self.extension_management
                 .as_ref()?
-                .active_extensions_for_test()
-                .publish(package),
+                .publish_bundled_package_for_test(package, resolved)
+                .await,
         )
     }
 
@@ -1622,13 +1520,16 @@ impl RebornRuntime {
         self.system_extensions_lifecycle_mounts = None;
         self.in_memory_budget_event_sink = None;
         self.outbound_preferences = None;
-        self.outbound_state = None;
-        self.delivered_gate_routes = None;
         self.triggered_run_delivery = None;
-        self.host_state_filesystem = None;
-        self.telegram_host_state_filesystem = None;
-        self.host_runtime_http_egress = None;
         self.channel_connection_facade_slot = None;
+        self.channel_config = None;
+        self.admin_configuration = None;
+        self.admin_configuration_uses = None;
+        self.channel_identity_store = None;
+        self.channel_dm_target_store = None;
+        self.extension_ingress = None;
+        self.channel_pairing = None;
+        self.channel_delivery_resolver = None;
         self.outbound_delivery_target_registry = None;
     }
 
@@ -1757,14 +1658,14 @@ impl RebornRuntime {
     }
 
     /// Open the SSO/admin identity resolver over the host-owned identity substrate.
-    /// `None` only when the runtime has no configured runtime store graph, so
+    /// `None` only when the runtime has no durable identity substrate, so
     /// callers fail closed instead of synthesizing a second identity store. The
-    /// selected graph builds the canonical filesystem-backed identity store;
-    /// local libSQL graphs additionally expose the one-time legacy WebUI identity
-    /// fold hook. See #5013.
+    /// selected deployment substrate builds the canonical filesystem-backed
+    /// identity store; libSQL graphs additionally expose the one-time legacy
+    /// WebUI identity fold hook. See #5013.
     pub async fn open_reborn_identity_resolver(
         &self,
-        tenant_id: &TenantId,
+        _tenant_id: &TenantId,
     ) -> Option<
         Result<
             Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>,
@@ -1778,12 +1679,6 @@ impl RebornRuntime {
             self.thread_scope.agent_id.clone(),
             self.thread_scope.project_id.clone(),
         );
-        if let Some(identity_substrate_db) = self.legacy_webui_identity_substrate_db.as_ref()
-            && let Err(err) =
-                fold_legacy_webui_identities(identity_substrate_db, tenant_id, store.as_ref()).await
-        {
-            return Some(Err(err));
-        }
         Some(Ok(store))
     }
 
@@ -1876,18 +1771,106 @@ impl RebornRuntime {
         self.webui_turn_coordinator()
     }
 
-    pub(crate) fn auth_challenge_provider(&self) -> Option<Arc<dyn crate::AuthChallengeProvider>> {
-        self.product_auth
-            .as_ref()
-            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+    /// The generic post-OAuth channel-identity binding config for this
+    /// deployment (extension-runtime §5.5): channel extensions bind through
+    /// generic discovery over the durable installation store; bindings
+    /// persist in the generic channel-identity store; post-bind DM-target
+    /// provisioning opens the caller's direct conversation through the
+    /// extension's own adapter. `None` when the composed runtime carries no
+    /// durable channel-identity storage.
+    /// The bearer-authed generic pairing route mount (`WebGeneratedCode`
+    /// channels), when the composed runtime built any pairing service.
+    pub fn channel_pairing_route_mount(
+        &self,
+    ) -> Option<crate::webui::route_mounts::ProtectedRouteMount> {
+        self.channel_pairing.as_ref().map(|registry| {
+            crate::extension_host::channel_pairing_serve::channel_pairing_route_mount(
+                std::sync::Arc::clone(registry),
+            )
+        })
     }
 
-    pub(crate) fn blocked_auth_flow_canceller(
+    pub fn channel_identity_binding_config(
         &self,
-    ) -> Option<Arc<dyn crate::BlockedAuthFlowCanceller>> {
-        self.product_auth
+    ) -> Option<crate::extension_host::channel_identity::ChannelIdentityBindingConfig> {
+        let identity_store = self.channel_identity_store.clone()?;
+        let installation_store = self
+            .extension_management
             .as_ref()
-            .and_then(|product_auth| product_auth.as_blocked_auth_flow_canceller())
+            .map(|management| management.installation_store_handle());
+        let snapshot_updates = self
+            .extension_management
+            .as_ref()
+            .and_then(|management| management.generic_host())
+            .map(|host| host.snapshot_watch().subscribe());
+        let post_bind_factory = match (
+            self.channel_delivery_resolver.clone(),
+            self.channel_dm_target_store.clone(),
+            snapshot_updates,
+        ) {
+            (Some(delivery), Some(store), Some(snapshot_updates)) => Some(Arc::new(
+                crate::extension_host::channel_dm_provisioning::ChannelDmTargetProvisioning::new(
+                    delivery,
+                    store,
+                    snapshot_updates,
+                ),
+            )
+                as Arc<
+                    dyn crate::extension_host::channel_identity::ChannelIdentityPostBindFactory,
+                >),
+            _ => None,
+        };
+        Some(
+            crate::extension_host::channel_identity::ChannelIdentityBindingConfig {
+                tenant_id: self.thread_scope.tenant_id.clone(),
+                installation_store,
+                channel_config: self.channel_config.clone(),
+                binding_store: Arc::clone(&identity_store)
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
+                rollback_store: identity_store
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+                post_bind_factory,
+                overrides: Vec::new(),
+            },
+        )
+    }
+
+    /// The generic per-user channel-connection facade over the same generic
+    /// stores (discovery from the installation store; connected = an
+    /// identity binding under the extension's installation prefix;
+    /// disconnect clears bindings, vendor credentials, and the provisioned
+    /// DM target). `None` when the composed runtime carries no durable
+    /// channel-identity storage.
+    pub(crate) fn generic_channel_connection_facade(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>> {
+        let identity_store = self.channel_identity_store.clone()?;
+        let installation_store = self
+            .extension_management
+            .as_ref()
+            .map(|management| management.installation_store_handle());
+        let credential_cleanup = self.product_auth.clone().map(|services| {
+            services as Arc<dyn crate::extension_host::channel_connection::ChannelCredentialCleanup>
+        });
+        let account_status_reader = self.product_auth.clone().map(|services| {
+            services
+                as Arc<dyn crate::extension_host::channel_connection::ChannelAccountStatusReader>
+        });
+        Some(Arc::new(
+            crate::extension_host::channel_connection::GenericChannelConnectionFacade::new(
+                self.thread_scope.tenant_id.clone(),
+                Vec::new(),
+                installation_store,
+                Arc::clone(&identity_store)
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
+                identity_store
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+                credential_cleanup,
+                account_status_reader,
+                self.channel_dm_target_store.clone(),
+                self.channel_pairing.clone(),
+            ),
+        ))
     }
 
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
@@ -1914,6 +1897,7 @@ impl RebornRuntime {
             })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn register_outbound_delivery_target_provider(
         &self,
         provider_key: impl Into<String>,
@@ -1964,113 +1948,6 @@ impl RebornRuntime {
             }),
         )
         .map(|_| ())
-    }
-
-    pub(crate) fn outbound_delivery_target_provider_key_registered(
-        &self,
-        provider_key: &str,
-    ) -> Result<bool, RebornRuntimeError> {
-        let Some(registry) = self.outbound_delivery_target_registry.as_ref() else {
-            return Err(RebornRuntimeError::InvalidArgument {
-                reason: "outbound delivery target registry unavailable for this runtime"
-                    .to_string(),
-            });
-        };
-        registry
-            .contains_provider_key(provider_key)
-            .map_err(|error| RebornRuntimeError::InvalidArgument {
-                reason: format!("outbound delivery target provider lookup failed: {error}"),
-            })
-    }
-    /// Wire the Slack triggered-run delivery hook into the already-spawned
-    /// trigger poller. Must be called after [`build_reborn_runtime`] returns
-    /// and after the hook itself is constructed (e.g. inside
-    /// [`crate::slack::slack_host_beta::build_slack_host_beta_mounts`]).
-    /// Thin wrapper over [`Self::add_trigger_post_submit_hook`] under the
-    /// fixed Slack host key, preserving the original single-slot semantics:
-    /// idempotent (a second call is silently ignored, never double-registers),
-    /// `false` when the trigger poller is not enabled or the Slack hook is
-    /// already wired, `true` on first successful set.
-    pub fn set_trigger_post_submit_hook(
-        &self,
-        hook: Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>,
-    ) -> bool {
-        self.add_trigger_post_submit_hook(SLACK_TRIGGER_POST_SUBMIT_HOOK_KEY, hook)
-    }
-
-    /// Append a channel host's triggered-run delivery hook to the trigger
-    /// poller's post-submit fan-out. The poller consumes one `OnceLock` slot;
-    /// the first add installs a
-    /// [`ironclaw_channel_delivery::CompositePostSubmitDeliveryHook`] into
-    /// it (append-then-install, so the poller's buffered-settlement drain never
-    /// observes an empty composite) and later adds append to that composite.
-    ///
-    /// `hook_key` is a per-host constant (one hook per channel host): adding
-    /// under an existing key is rejected — the duplicate hook is dropped and
-    /// `false` is returned — so a host whose mounts are built twice never
-    /// double-delivers. Returns `false` when the trigger poller is not enabled,
-    /// `true` when the hook was appended.
-    pub(crate) fn add_trigger_post_submit_hook(
-        &self,
-        hook_key: &str,
-        hook: Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>,
-    ) -> bool {
-        let (Some(slot), Some(composite)) = (
-            self.post_submit_hook_slot.as_ref(),
-            self.post_submit_hook_composite.as_ref(),
-        ) else {
-            tracing::debug!(
-                hook_key,
-                "add_trigger_post_submit_hook: trigger poller not enabled, ignoring"
-            );
-            return false;
-        };
-        if !composite.add(hook_key, hook) {
-            tracing::debug!(
-                hook_key,
-                "add_trigger_post_submit_hook: hook key already registered, ignoring (idempotent)"
-            );
-            return false;
-        }
-        // First add installs the composite; later installs are the idempotent
-        // Err arm of OnceLock::set (the composite already carries every hook).
-        let _ = slot.set(
-            Arc::clone(composite) as Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>
-        );
-        true
-    }
-
-    pub(crate) fn trigger_post_submit_hook_is_set(&self) -> bool {
-        self.post_submit_hook_slot
-            .as_ref()
-            .is_some_and(|slot| slot.get().is_some())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn trigger_post_submit_hook_for_test(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>> {
-        self.post_submit_hook_slot
-            .as_ref()
-            .and_then(|slot| slot.get().cloned())
-    }
-
-    /// Wire the per-caller channel-connection facade into the already-built
-    /// extension-lifecycle capability handler. Must be called after
-    /// [`build_reborn_runtime`] returns and after the facade is constructed
-    /// (e.g. inside the Slack host-beta WebUI composition). Idempotent: a second
-    /// call is silently ignored. Returns `false` when the local-runtime slot is
-    /// unavailable or already occupied, `true` on first successful set. Shares
-    /// the same `OnceLock` the handler reads
-    /// (`RebornRuntimeSurfaces::channel_connection_facade_slot`).
-    pub(crate) fn set_channel_connection_facade(
-        &self,
-        facade: Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>,
-    ) -> bool {
-        let Some(slot) = self.channel_connection_facade_slot.as_ref() else {
-            return false;
-        };
-        slot.set(facade).is_ok()
     }
 
     #[cfg(test)]
@@ -2719,9 +2596,7 @@ impl RebornRuntime {
         }
         if let Some(credential_refresh_worker) = self.credential_refresh_worker_handle {
             credential_refresh_worker
-                .shutdown(
-                    crate::product_auth::credentials::credential_refresh_worker::CREDENTIAL_REFRESH_WORKER_SHUTDOWN_TIMEOUT,
-                )
+                .shutdown(ironclaw_auth::KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT)
                 .await;
         }
         self.trace_flush_worker.shutdown().await;
@@ -3398,7 +3273,6 @@ pub async fn build_reborn_runtime(
         subagent_await_edge_evidence,
         trigger_repository,
         turn_run_snapshot_source,
-        legacy_webui_identity_substrate_db,
         admin_secret_provisioner,
         project_service,
         trigger_conversation_services,
@@ -4084,6 +3958,94 @@ pub async fn build_reborn_runtime(
         } else {
             projection_services
         };
+
+    // Generic channel host assembly (extension-runtime P6 S2): reconcile
+    // per-extension inbound-channel registrations from the generic host's
+    // active snapshot for EVERY composed runtime with a generic host. The
+    // run-delivery observer half follows the delivery coordinator's
+    // availability (no coordinator -> ingress-only registrations).
+    let channel_host_assembly = {
+        let approval_context = runtime_surfaces.map(|runtime_surfaces| {
+            Arc::new(
+                crate::extension_host::run_delivery_ports::ProjectionApprovalPromptContextSource::new(
+                    runtime_surfaces.approval_requests.clone()
+                        as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
+                ),
+            ) as Arc<dyn ironclaw_product_workflow::ApprovalPromptContextSource>
+        });
+        let blocked_auth_prompts = Some(Arc::new(
+            crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource::new(
+                services.product_auth.as_auth_challenge_provider(),
+            ),
+        )
+            as Arc<dyn ironclaw_product_workflow::BlockedAuthPromptSource>);
+        let auth_flow_cancel = services.product_auth.as_blocked_auth_flow_canceller();
+        services.start_channel_host_assembly(crate::factory::ChannelHostAssemblyWiring {
+            thread_service: Arc::clone(&thread_service),
+            turn_coordinator: Arc::clone(&planned_turn_coordinator),
+            approval_interaction: Some(Arc::clone(&approval_interaction_service)),
+            auth_interaction: Some(Arc::clone(&auth_interaction_service)),
+            identity: crate::extension_host::channel_host::ChannelHostIdentity {
+                tenant_id: thread_scope.tenant_id.clone(),
+                agent_id: thread_scope.agent_id.clone(),
+                project_id: thread_scope.project_id.clone(),
+                operator_user_id: actor_user_id.clone(),
+            },
+            approval_context,
+            blocked_auth_prompts,
+            auth_flow_cancel,
+            run_delivery_settings: ironclaw_product_workflow::RunDeliverySettings::default(),
+        })
+    };
+
+    // The binary-assembled channel-extension extras (extension-runtime
+    // DEL-7): gate-reply classifiers + preference-target codecs registered
+    // on the assembly for every supplied channel binding.
+    if let Some(assembly) = channel_host_assembly.as_ref() {
+        for binding in &services.channel_extension_bindings {
+            assembly
+                .register_extras(
+                    &binding.extension_id,
+                    crate::extension_host::channel_host::ChannelExtras {
+                        classifier: binding.inbound_payload_classifier.clone(),
+                        preference_target_codec: binding.preference_target_codec.clone(),
+                        subject_route_resolver: None,
+                        storage_roots: None,
+                    },
+                )
+                .await;
+        }
+    }
+
+    // Generic outbound-delivery targets (extension-runtime P6): one provider
+    // over the assembly's vendor codecs, the `[channel.config]` routing
+    // values, and the generic DM-target store serves every active channel
+    // extension.
+    if let (Some(registry), Some(assembly), Some(local_runtime)) = (
+        outbound_delivery_target_registry.as_ref(),
+        channel_host_assembly.as_ref(),
+        runtime_surfaces,
+    ) && let (Some(channel_config), Some(dm_targets)) = (
+        local_runtime.channel_config.clone(),
+        local_runtime.channel_dm_target_store.clone(),
+    ) {
+        crate::extension_host::channel_outbound_targets::register_generic_channel_outbound_targets(
+            registry,
+            crate::extension_host::channel_outbound_targets::GenericChannelOutboundTargetDeps {
+                watch: assembly.snapshot_watch(),
+                assembly: Arc::clone(assembly),
+                channel_config,
+                dm_targets,
+                identity:
+                    crate::extension_host::channel_outbound_targets::ChannelOutboundTargetIdentity {
+                        tenant_id: thread_scope.tenant_id.clone(),
+                        agent_id: thread_scope.agent_id.clone(),
+                        project_id: thread_scope.project_id.clone(),
+                    },
+            },
+        );
+    }
+
     // `trigger_poller_handle`, `post_submit_hook_slot`, and the test-support
     // `trigger_conversation_pairing_value` are produced atomically inside
     // a single `if trigger_poller.enabled` expression. Avoid a
@@ -4092,10 +4054,9 @@ pub async fn build_reborn_runtime(
     // per branch and Rust's borrow checker prevents reads before init.
     let trigger_poller_handle: Option<TriggerPollerRuntimeHandle>;
     let runtime_post_submit_hook_slot: Option<
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_channel_delivery::PostSubmitDeliveryHook>>>,
-    >;
-    let runtime_post_submit_hook_composite: Option<
-        Arc<ironclaw_channel_delivery::CompositePostSubmitDeliveryHook>,
+        Arc<
+            std::sync::OnceLock<Arc<dyn crate::automation::trigger_poller::PostSubmitDeliveryHook>>,
+        >,
     >;
     #[cfg(any(test, feature = "test-support"))]
     let trigger_conversation_pairing_value: Option<
@@ -4198,12 +4159,7 @@ pub async fn build_reborn_runtime(
                 Some(Arc::clone(&trigger_poller_services.pairing_service));
         }
         let hook_slot = Arc::clone(&trigger_poller_services.post_submit_hook_slot);
-        {
-            runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
-            runtime_post_submit_hook_composite = Some(Arc::new(
-                ironclaw_channel_delivery::CompositePostSubmitDeliveryHook::default(),
-            ));
-        }
+        runtime_post_submit_hook_slot = Some(Arc::clone(&hook_slot));
         trigger_poller_handle = spawn_trigger_poller(
             trigger_poller,
             TriggerPollerCompositionDeps {
@@ -4219,36 +4175,59 @@ pub async fn build_reborn_runtime(
         })?;
     } else {
         trigger_poller_handle = None;
-        {
-            runtime_post_submit_hook_slot = None;
-            runtime_post_submit_hook_composite = None;
-        }
+        runtime_post_submit_hook_slot = None;
         #[cfg(any(test, feature = "test-support"))]
         {
             trigger_conversation_pairing_value = None;
         }
     }
+
+    // Generic triggered-run delivery (extension-runtime P6): one hook routes
+    // each settled trigger fire to the owning channel extension's driver via
+    // the assembly's vendor codecs.
+    if let (Some(slot), Some(assembly), Some(runtime_surfaces)) = (
+        runtime_post_submit_hook_slot.as_ref(),
+        channel_host_assembly.as_ref(),
+        runtime_surfaces,
+    ) {
+        let generic_trigger_hook: Arc<
+            dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
+        > = Arc::new(
+            crate::extension_host::channel_triggered_delivery::GenericTriggeredRunDeliveryHook::new(
+                Arc::clone(assembly),
+                Arc::clone(&runtime_surfaces.triggered_run_delivery),
+                Arc::clone(&runtime_surfaces.outbound_preferences),
+            ),
+        );
+        if slot.set(generic_trigger_hook).is_err() {
+            tracing::debug!(
+                "generic triggered-run delivery hook slot was already occupied; keeping the first hook"
+            );
+        }
+    }
+
     let scheduler_notifier = composition.scheduler_handle.wake_notifier();
 
-    // Spawn the background Google OAuth credential keepalive worker (B4).
-    // The factory reports whether the durable worker dependencies are ready.
-    // Local-dev and override paths are `Absent` and skip the worker; production
-    // paths provide the candidate source, leader lock, and refresh port together
-    // as `CredentialRefreshWorkerReady::Ready`. The `enabled` policy flag still
-    // gates the actual spawn inside `spawn_credential_refresh_worker`.
+    // Spawn the engine-owned credential keepalive sweep (B4;
+    // `ironclaw_auth::keepalive`). The factory reports whether the durable
+    // candidate source, recipe data, leader lock, and refresh port are ready
+    // together. Local-dev and override paths report `Absent`; the `enabled`
+    // policy flag still gates the actual spawn inside `spawn_keepalive_sweep`.
     let credential_refresh_worker_handle = match std::mem::replace(
         &mut services.credential_refresh_worker,
         crate::factory::CredentialRefreshWorkerReady::Absent,
     ) {
         crate::factory::CredentialRefreshWorkerReady::Ready {
             candidate_source,
+            recipes,
             leader_lock,
             refresh_port,
-        } => crate::product_auth::credentials::credential_refresh_worker::spawn_credential_refresh_worker(
+        } => ironclaw_auth::spawn_keepalive_sweep(
             credential_refresh,
-            crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerDeps {
-                candidate_source,
-                refresh_port,
+            ironclaw_auth::KeepaliveSweepDeps {
+                candidates: candidate_source,
+                recipes,
+                refresh: refresh_port as std::sync::Arc<dyn ironclaw_auth::KeepaliveRefreshPort>,
                 leader_lock: std::sync::Arc::new(leader_lock),
             },
         ),
@@ -4300,9 +4279,8 @@ pub async fn build_reborn_runtime(
         }
     }
 
-    Ok(RebornRuntime {
-        #[cfg(any(test, feature = "test-support"))]
-        host_runtime: Some(services.host_runtime.clone()),
+    let runtime = RebornRuntime {
+        host_runtime: services.host_runtime.clone(),
         product_auth: Some(services.product_auth.clone()),
         readiness: services.readiness.clone(),
         skill_management: Some(services.skill_management.clone()),
@@ -4310,7 +4288,6 @@ pub async fn build_reborn_runtime(
             .map(|rt| rt.extension_lifecycle_surface_context.clone()),
         secret_store: services.secret_store(),
         scoped_filesystem,
-        legacy_webui_identity_substrate_db,
         admin_secret_provisioner,
         project_service,
         trigger_repository: trigger_repository.clone().ok_or(
@@ -4362,19 +4339,25 @@ pub async fn build_reborn_runtime(
         in_memory_budget_event_sink: runtime_surfaces
             .map(|rt| Arc::clone(&rt.in_memory_budget_event_sink)),
         outbound_preferences: runtime_surfaces.map(|rt| Arc::clone(&rt.outbound_preferences)),
-        outbound_state: runtime_surfaces.map(|rt| Arc::clone(&rt.outbound_state)),
-        delivered_gate_routes: runtime_surfaces.map(|rt| Arc::clone(&rt.delivered_gate_routes)),
         triggered_run_delivery: runtime_surfaces.map(|rt| Arc::clone(&rt.triggered_run_delivery)),
-        host_state_filesystem: runtime_surfaces.map(|rt| Arc::clone(&rt.host_state_filesystem)),
-        telegram_host_state_filesystem: runtime_surfaces
-            .map(|rt| Arc::clone(&rt.telegram_host_state_filesystem)),
-        host_runtime_http_egress: runtime_surfaces
-            .and_then(|rt| rt.host_runtime_http_egress.clone()),
         channel_connection_facade_slot: runtime_surfaces
-            .map(|rt| Arc::clone(&rt.channel_connection_facade_slot)),
+            .map(|rt| Arc::clone(&rt.channel_disconnect_slot)),
+        channel_config: runtime_surfaces.and_then(|rt| rt.channel_config.as_ref().map(Arc::clone)),
+        admin_configuration: runtime_surfaces
+            .and_then(|rt| rt.admin_configuration.as_ref().map(Arc::clone)),
+        admin_configuration_uses: runtime_surfaces
+            .map(|rt| Arc::clone(&rt.admin_configuration_uses)),
+        channel_identity_store: runtime_surfaces
+            .and_then(|rt| rt.channel_identity_store.as_ref().map(Arc::clone)),
+        channel_dm_target_store: runtime_surfaces
+            .and_then(|rt| rt.channel_dm_target_store.as_ref().map(Arc::clone)),
+        extension_ingress: services.extension_ingress.clone(),
+        channel_pairing: services.channel_pairing.clone(),
+        channel_delivery_resolver: services.channel_delivery_resolver.clone(),
         turn_coordinator,
         #[cfg(test)]
         turn_state_store: Arc::clone(&turn_state_store),
+        channel_host_assembly,
         turn_state_flush,
         turn_run_snapshot_source,
         turn_tree_store: turn_state_store,
@@ -4385,8 +4368,6 @@ pub async fn build_reborn_runtime(
         credential_refresh_worker_handle,
         trace_flush_worker,
         skill_learning_extraction_tasks,
-        post_submit_hook_slot: runtime_post_submit_hook_slot,
-        post_submit_hook_composite: runtime_post_submit_hook_composite,
         #[cfg(any(test, feature = "test-support"))]
         trigger_conversation_pairing: trigger_conversation_pairing_value,
         outbound_delivery_target_registry,
@@ -4412,7 +4393,23 @@ pub async fn build_reborn_runtime(
         skill_execution_adapter,
         boot,
         llm_reload,
-    })
+    };
+    // Fill the composition's late-bound channel-connection facade slot (§6.4)
+    // now the runtime's serving tenant is known: extension removal
+    // (`RebornLocalExtensionManagementPort::remove`) disconnects the caller's
+    // channel identity through this facade, and the identity-binding write
+    // hook is only reachable from runtime-backed compositions — so filling
+    // here keeps "wherever a binding can be written, removal disconnects it".
+    // First write wins by `OnceLock` contract: a test bundle that filled the
+    // slot before the runtime was built keeps its facade (same stores, same
+    // durable state), so the discarded `set` result is deliberate.
+    if let (Some(slot), Some(channel_connection)) = (
+        runtime.channel_connection_facade_slot.as_ref(),
+        runtime.generic_channel_connection_facade(),
+    ) {
+        let _ = slot.set(channel_connection);
+    }
+    Ok(runtime)
 }
 
 /// Thin wrapper over

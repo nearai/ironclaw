@@ -91,6 +91,13 @@ impl ScriptedOAuthTokenEgress {
         Self::build(200, body)
     }
 
+    /// Build a scripted egress that returns `200` with an arbitrary JSON
+    /// body — for token responses carrying vendor identity claims that the
+    /// recipe's `identity` pointers extract.
+    pub fn with_json_body(body: &serde_json::Value) -> Self {
+        Self::build(200, body.to_string().into_bytes())
+    }
+
     /// Build a scripted egress that returns `status` with a minimal
     /// `{"error":"<error_code>"}` body — for example, `(400, "invalid_grant")`
     /// to simulate an OAuth provider permanently revoking a refresh token.
@@ -133,6 +140,23 @@ impl ScriptedOAuthTokenEgress {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
+    }
+
+    /// The form parameter NAMES of every captured token-exchange request, in
+    /// order. Names only — values may carry authorization codes, PKCE
+    /// verifiers, or client secrets and are never exposed. Tests use this to
+    /// pin which protocol parameters crossed the egress.
+    pub fn captured_form_param_names(&self) -> Vec<Vec<String>> {
+        self.captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|request| {
+                url::form_urlencoded::parse(&request.body)
+                    .map(|(name, _)| name.into_owned())
+                    .collect()
+            })
+            .collect()
     }
 
     /// The OAuth `grant_type` of every captured token-exchange request, in order.
@@ -228,17 +252,68 @@ impl ironclaw_host_api::RuntimeHttpEgress for ScriptedOAuthTokenEgress {
     }
 }
 
-/// Noop capability-obligation handler: permits every OAuth egress obligation.
+/// Build a recipe-driven [`ironclaw_auth::AuthEngine`] over the scripted
+/// egress for one synthetic test vendor.
+fn engine_provider_client_for_test(
+    vendor: &str,
+    scopes: &[&str],
+    token_endpoint: &str,
+    egress: Arc<ScriptedOAuthTokenEgress>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+) -> Arc<ironclaw_auth::AuthEngine> {
+    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
+        "method": "oauth2_code",
+        "display_name": format!("{vendor} account"),
+        "authorization_endpoint": "https://oauth.test.example.com/authorize",
+        "token_endpoint": token_endpoint,
+        "scopes": scopes,
+        "client_credentials": { "client_id_handle": format!("{vendor}_oauth_client_id") },
+        "token_response": {
+            "access_token": "/access_token",
+            "refresh_token": "/refresh_token",
+            "expires_in": "/expires_in",
+            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+        },
+        // Test vendors declare a 7-day idle lifetime so sweep tests exercise
+        // the engine keepalive path (accounts become due at half-life).
+        "refresh": { "keepalive_idle_seconds": 604_800 },
+    }))
+    .expect("test vendor recipe parses");
+    Arc::new(ironclaw_auth::AuthEngine::new(
+        ironclaw_auth::AuthEngineDeps {
+            recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
+                ironclaw_auth::ResolvedVendorAuthRecipe {
+                    vendor: vendor.to_string(),
+                    recipe,
+                    token_exchange_resource: None,
+                },
+            ])),
+            client_credentials: Arc::new(TestStaticClientCredentials),
+            egress: egress as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+            secret_store,
+            callback_base: ironclaw_auth::EngineCallbackBase::new(
+                "https://localhost/api/reborn/product-auth/oauth",
+            )
+            .expect("test callback base"),
+            dcr_client_name: "Ironclaw test".to_string(),
+        },
+    ))
+}
+
 #[derive(Debug)]
-struct TestNoopObligationHandler;
+struct TestStaticClientCredentials;
 
 #[async_trait]
-impl ironclaw_capabilities::CapabilityObligationHandler for TestNoopObligationHandler {
-    async fn satisfy(
+impl ironclaw_auth::EngineClientCredentialsSource for TestStaticClientCredentials {
+    async fn resolve(
         &self,
-        _request: ironclaw_capabilities::CapabilityObligationRequest<'_>,
-    ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
-        Ok(())
+        _vendor: &str,
+        _credentials: &ironclaw_host_api::RecipeClientCredentials,
+    ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, ironclaw_auth::AuthProductError> {
+        Ok(ironclaw_auth::EngineOAuthClientMaterial {
+            client_id: ironclaw_auth::OAuthClientId::new("test-client-id")?,
+            client_secret: None,
+        })
     }
 }
 
@@ -247,10 +322,17 @@ impl ironclaw_capabilities::CapabilityObligationHandler for TestNoopObligationHa
 struct TestNoopContinuationDispatcher;
 
 #[async_trait]
-impl ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher
+impl crate::product_auth::api::auth::RebornAuthContinuationDispatcher
     for TestNoopContinuationDispatcher
 {
     async fn dispatch_auth_continuation(
+        &self,
+        _event: ironclaw_auth::AuthContinuationEvent,
+    ) -> Result<(), ironclaw_auth::AuthProductError> {
+        Ok(())
+    }
+
+    async fn dispatch_canceled_auth_continuation(
         &self,
         _event: ironclaw_auth::AuthContinuationEvent,
     ) -> Result<(), ironclaw_auth::AuthProductError> {
@@ -269,6 +351,10 @@ pub struct OAuthProductAuthTestBundle {
     /// Scripted egress — inspect after `handle_oauth_callback` to verify
     /// the token-exchange HTTP call happened.
     pub egress: Arc<ScriptedOAuthTokenEgress>,
+    /// The engine's recipe data (synthetic test vendors declare a 7-day
+    /// keepalive lifetime); `sweep_for_refresh` resolves idle thresholds
+    /// through this, exactly like the production sweep.
+    pub keepalive_recipes: Arc<dyn ironclaw_auth::AuthRecipeResolver>,
 }
 
 /// Shared infrastructure preamble for OAuth product-auth test bundles.
@@ -288,7 +374,7 @@ struct OAuthProductAuthInfra {
 /// the durable `FilesystemAuthProductServices`. The two callers
 /// (`build_oauth_product_auth_for_test` and
 /// `build_google_oauth_product_auth_for_test`) differ only in the egress
-/// constructor, the `HostOAuthProviderSpec` fields, and the optional
+/// constructor (the scripted token-response body) and the optional
 /// `.with_provider_client()` call.
 fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
@@ -349,48 +435,168 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
         "test-access-token-abc123",
     ));
 
-    // Real OAuth provider client wired to the scripted egress.
-    // token_endpoint must be HTTPS to pass HostOAuthProviderClient's guard;
+    // The recipe-driven auth engine wired to the scripted egress.
+    // The token endpoint must be HTTPS to pass the engine's endpoint guard;
     // ScriptedOAuthTokenEgress ignores the actual URL.
-    let spec = crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec {
-        provider_id: "test-oauth-provider",
-        capability_id: "builtin.oauth.test",
-        token_endpoint: "https://oauth.test.example.com/token",
-        secret_handle_prefix: "test-oauth",
-        resource: None,
-        exchange_scope_policy:
-            crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
-        token_response_shape:
-            crate::product_auth::oauth::oauth_provider_client::TokenResponseShape::Standard,
-    };
-    let provider_client =
-        crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient::new(
-            spec,
-            Arc::clone(&egress) as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
-            Arc::clone(&secret_store),
-            Arc::new(TestNoopObligationHandler),
-            ironclaw_auth::OAuthClientId::new("test-client-id").unwrap(),
-            ironclaw_auth::OAuthRedirectUri::new("https://localhost/oauth/callback").unwrap(),
-        )
-        .expect("test OAuth provider client must build");
+    let engine = engine_provider_client_for_test(
+        "test-oauth-provider",
+        &["test.readonly"],
+        "https://oauth.test.example.com/token",
+        Arc::clone(&egress),
+        Arc::clone(&secret_store),
+    );
 
     let services = Arc::new(crate::RebornProductAuthServices::new(
         durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
         durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
         durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
         durable.clone() as Arc<dyn ironclaw_auth::CredentialAccountService>,
-        Arc::new(provider_client) as Arc<dyn ironclaw_auth::AuthProviderClient>,
+        Arc::clone(&engine) as Arc<dyn ironclaw_auth::AuthProviderClient>,
         durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
         Arc::new(TestNoopContinuationDispatcher),
     ));
 
-    OAuthProductAuthTestBundle { services, egress }
+    let keepalive_recipes = Arc::clone(engine.recipes());
+    OAuthProductAuthTestBundle {
+        services,
+        egress,
+        keepalive_recipes,
+    }
+}
+
+/// Construct the same engine-backed bundle as [`build_oauth_product_auth_for_test`]
+/// with the durable flow/account store persisted on a real libSQL-backed root
+/// filesystem instead of the in-memory backend — the second persistence leg
+/// for the auth engine (checklist AUTH-15).
+pub async fn build_oauth_product_auth_for_test_on_libsql(
+    db_path: &std::path::Path,
+) -> OAuthProductAuthTestBundle {
+    use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_secrets::FilesystemSecretStore;
+
+    let db = Arc::new(
+        libsql::Builder::new_local(db_path.display().to_string())
+            .build()
+            .await
+            .expect("build libsql database for oauth bundle"),
+    );
+    let root = Arc::new(LibSqlRootFilesystem::new(db));
+    root.run_migrations()
+        .await
+        .expect("libsql filesystem migrations");
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets").expect("mount alias"),
+        VirtualPath::new("/tenants/test-tenant/users/test-user/secrets").expect("virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped_fs: Arc<ScopedFilesystem<LibSqlRootFilesystem>> =
+        Arc::new(ScopedFilesystem::with_fixed_view(root, mounts));
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
+        Arc::new(FilesystemSecretStore::ephemeral());
+    let durable = Arc::new(
+        crate::product_auth::durable::FilesystemAuthProductServices::new(
+            Arc::clone(&scoped_fs),
+            Arc::clone(&secret_store),
+        ),
+    );
+    let egress = Arc::new(ScriptedOAuthTokenEgress::with_access_token(
+        "test-access-token-abc123",
+    ));
+    let engine = engine_provider_client_for_test(
+        "test-oauth-provider",
+        &["test.readonly"],
+        "https://oauth.test.example.com/token",
+        Arc::clone(&egress),
+        Arc::clone(&secret_store),
+    );
+    let services = Arc::new(crate::RebornProductAuthServices::new(
+        durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
+        durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialAccountService>,
+        Arc::clone(&engine) as Arc<dyn ironclaw_auth::AuthProviderClient>,
+        durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
+        Arc::new(TestNoopContinuationDispatcher),
+    ));
+    let keepalive_recipes = Arc::clone(engine.recipes());
+    OAuthProductAuthTestBundle {
+        services,
+        egress,
+        keepalive_recipes,
+    }
+}
+
+/// The same engine-backed bundle as [`build_oauth_product_auth_for_test`] with
+/// the durable flow/account store persisted on a caller-supplied real root
+/// filesystem — the both-DB persistence leg for the auth engine (checklist
+/// AUTH-15; REL-3: a Postgres skip is a failure). Generic over the backend so
+/// composition test-support does not need a concrete-backend feature enabled
+/// through the `ironclaw` dependency: the caller (which already links
+/// `ironclaw_filesystem/postgres`) builds and migrates the root filesystem and
+/// passes it here. There is no root-generic bundle builder otherwise (the
+/// shared `build_oauth_product_auth_infra` is `InMemoryBackend`-hardcoded), and
+/// the OAuth product-auth bundle is built outside the harness's storage
+/// composite, so the harness's `StorageMode::Postgres` cannot construct it
+/// (correction A: this is the sanctioned thin composition-tier addition).
+pub async fn build_oauth_product_auth_for_test_on_root<F>(
+    root: Arc<F>,
+) -> OAuthProductAuthTestBundle
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+{
+    use ironclaw_filesystem::ScopedFilesystem;
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    use ironclaw_secrets::FilesystemSecretStore;
+
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets").expect("mount alias"),
+        VirtualPath::new("/tenants/test-tenant/users/test-user/secrets").expect("virtual path"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped_fs: Arc<ScopedFilesystem<F>> =
+        Arc::new(ScopedFilesystem::with_fixed_view(root, mounts));
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
+        Arc::new(FilesystemSecretStore::ephemeral());
+    let durable = Arc::new(
+        crate::product_auth::durable::FilesystemAuthProductServices::new(
+            Arc::clone(&scoped_fs),
+            Arc::clone(&secret_store),
+        ),
+    );
+    let egress = Arc::new(ScriptedOAuthTokenEgress::with_access_token(
+        "test-access-token-abc123",
+    ));
+    let engine = engine_provider_client_for_test(
+        "test-oauth-provider",
+        &["test.readonly"],
+        "https://oauth.test.example.com/token",
+        Arc::clone(&egress),
+        Arc::clone(&secret_store),
+    );
+    let services = Arc::new(crate::RebornProductAuthServices::new(
+        durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
+        durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialAccountService>,
+        Arc::clone(&engine) as Arc<dyn ironclaw_auth::AuthProviderClient>,
+        durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
+        Arc::new(TestNoopContinuationDispatcher),
+    ));
+    let keepalive_recipes = Arc::clone(engine.recipes());
+    OAuthProductAuthTestBundle {
+        services,
+        egress,
+        keepalive_recipes,
+    }
 }
 
 // ─── Slice 8: OAuth credential-refresh sweep test support ────────────────────
 //
 // `FixedCandidateSource` and `OAuthProductAuthTestBundle::sweep_for_refresh`
-// together let a test drive `credential_refresh_worker::sweep_once` with:
+// together let a test drive the engine-owned `keepalive::sweep_once` with:
 //   • a pre-seeded list of accounts (bypasses the filesystem walk)
 //   • a frozen `now` instant (controls the idle-cutoff comparison)
 //   • the real `ProviderBackedCredentialAccountService` refresh path
@@ -403,18 +609,19 @@ pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
 // through `ProviderBackedCredentialAccountService` instead of returning
 // `BackendUnavailable`.
 
-/// Fixed candidate source for credential-refresh sweep tests (slice 8).
+/// Fixed candidate source for credential-keepalive sweep tests (slice 8).
 ///
-/// Returns a caller-supplied list of accounts from `list_refresh_candidates`,
-/// bypassing the `FilesystemAuthProductServices` filesystem walk. This lets a
-/// test inject a real `CredentialAccount` (read back after an OAuth connect
-/// flow) directly into `sweep_once` without needing the full tenant-path
-/// enumeration to work in an in-memory backend.
+/// Returns a caller-supplied list of accounts from
+/// `list_keepalive_candidates`, bypassing the `FilesystemAuthProductServices`
+/// filesystem walk. This lets a test inject a real `CredentialAccount` (read
+/// back after an OAuth connect flow) directly into the engine's `sweep_once`
+/// without needing the full tenant-path enumeration to work in an in-memory
+/// backend.
 ///
 // TODO(follow-up): add a LibSql-backed sweep test that drives the real
-// `FilesystemCredentialRefreshCandidateSource` enumeration. `FixedCandidateSource`
-// bypasses the tenant-path filesystem walk because this bundle's fixed view
-// mounts only `/secrets` (no tenant tree to enumerate). The refresh path itself
+// durable candidate enumeration. `FixedCandidateSource` bypasses the
+// tenant-path filesystem walk because this bundle's fixed view mounts only
+// `/secrets` (no tenant tree to enumerate). The refresh path itself
 // (`sweep_once` -> `refresh_account` -> provider client -> egress -> status
 // write-back) is already covered here at full fidelity; only candidate
 // enumeration is stubbed.
@@ -423,57 +630,49 @@ struct FixedCandidateSource {
 }
 
 #[async_trait]
-impl crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshCandidateSource
-    for FixedCandidateSource
-{
-    async fn list_refresh_candidates(&self) -> Vec<ironclaw_auth::CredentialAccount> {
+impl ironclaw_auth::KeepaliveCandidateSource for FixedCandidateSource {
+    async fn list_keepalive_candidates(&self) -> Vec<ironclaw_auth::CredentialAccount> {
         self.candidates.clone()
     }
 }
 
 impl OAuthProductAuthTestBundle {
-    /// Run one credential-refresh sweep tick with a fixed account list and a
-    /// frozen clock.
+    /// Run one credential-keepalive sweep tick with a fixed account list and
+    /// a frozen clock.
     ///
-    /// This exercises the production `sweep_once` path — `select_idle_candidates`
-    /// (idle-threshold + cap), `CredentialRefreshRequest` construction,
+    /// This exercises the engine-owned `sweep_once` path — recipe-threshold
+    /// gating (the test vendor declares a 7-day keepalive lifetime; accounts
+    /// become due at half-life), due selection + cap,
+    /// `CredentialRefreshRequest` construction,
     /// `RebornProductAuthServices::refresh_credential_account` →
-    /// `ProviderBackedCredentialAccountService::refresh_account` →
-    /// `HostOAuthProviderClient::refresh_token` → scripted HTTP egress — without
-    /// needing a real filesystem walk or a Postgres leader lock.
+    /// `ProviderBackedCredentialAccountService::refresh_account` → engine
+    /// `refresh_token` → scripted HTTP egress — without needing a real
+    /// filesystem walk or a Postgres leader lock.
     ///
     /// # Arguments
     ///
     /// * `candidates` — `CredentialAccount` records to feed into the sweep.
     ///   Obtain these by calling `services.credential_account_service().get_account()`
     ///   after a successful OAuth connect flow so the handles are real.
-    /// * `settings` — pass `CredentialRefreshSettings::enabled()` to enable the
-    ///   sweep with the default 2-day idle threshold and cap of 5.
-    /// * `now` — frozen instant. Pass `Utc::now() + Duration::days(3)` to make a
-    ///   just-created account appear idle; pass `Utc::now()` (or any time within
-    ///   the threshold) to verify no refresh is triggered.
+    /// * `settings` — pass `KeepaliveSweepSettings::enabled()` (cap of 5).
+    /// * `now` — frozen instant. Pass `Utc::now() + Duration::days(4)` to put
+    ///   a just-created account past the test vendor's 3.5-day half-life;
+    ///   pass `Utc::now()` (or anything under the half-life) to verify no
+    ///   refresh is triggered.
     pub async fn sweep_for_refresh(
         &self,
         candidates: Vec<ironclaw_auth::CredentialAccount>,
-        settings: crate::runtime_input::CredentialRefreshSettings,
+        settings: ironclaw_auth::KeepaliveSweepSettings,
         now: chrono::DateTime<chrono::Utc>,
     ) {
-        use crate::product_auth::credentials::credential_refresh_worker::{
-            CredentialRefreshWorkerDeps, sweep_once,
-        };
+        use ironclaw_auth::keepalive::sweep_once;
         use tokio_util::sync::CancellationToken;
 
-        let candidate_source = std::sync::Arc::new(FixedCandidateSource { candidates });
-
-        // Build an always-leader lock: no Postgres pool needed for tests.
-        let leader_lock = std::sync::Arc::new(
-            crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None),
-        );
-
-        let deps = CredentialRefreshWorkerDeps {
-            candidate_source,
-            refresh_port: std::sync::Arc::clone(&self.services),
-            leader_lock,
+        let deps = ironclaw_auth::KeepaliveSweepDeps {
+            candidates: std::sync::Arc::new(FixedCandidateSource { candidates }),
+            recipes: std::sync::Arc::clone(&self.keepalive_recipes),
+            refresh: std::sync::Arc::clone(&self.services) as _,
+            leader_lock: std::sync::Arc::new(ironclaw_auth::AlwaysLeaderKeepaliveLock),
         };
         let cancel = CancellationToken::new();
         sweep_once(&deps, &settings, &cancel, now).await;
@@ -508,30 +707,17 @@ pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle 
         "test-google-refresh-token",
     ));
 
-    // Google OAuth spec: provider_id must be "google" for
-    // HostOAuthProviderClient::refresh_token to accept the request.
-    let spec = crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec {
-        provider_id: "google",
-        capability_id: "builtin.oauth.google",
-        token_endpoint: "https://oauth2.googleapis.com/token",
-        secret_handle_prefix: "google",
-        resource: None,
-        exchange_scope_policy:
-            crate::product_auth::oauth::oauth_provider_client::ExchangeScopePolicy::FallbackToRequested,
-        token_response_shape:
-            crate::product_auth::oauth::oauth_provider_client::TokenResponseShape::Standard,
-    };
-    let provider_client: Arc<dyn ironclaw_auth::AuthProviderClient> = Arc::new(
-        crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient::new(
-            spec,
-            Arc::clone(&egress) as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
-            Arc::clone(&secret_store),
-            Arc::new(TestNoopObligationHandler),
-            ironclaw_auth::OAuthClientId::new("test-client-id").unwrap(),
-            ironclaw_auth::OAuthRedirectUri::new("https://localhost/oauth/callback").unwrap(),
-        )
-        .expect("google test OAuth provider client must build"),
+    // The vendor id must be "google" so the engine resolves the same recipe
+    // the refresh path requests; the recipe is synthetic test data.
+    let engine = engine_provider_client_for_test(
+        "google",
+        &["email"],
+        "https://oauth2.googleapis.com/token",
+        Arc::clone(&egress),
+        Arc::clone(&secret_store),
     );
+    let keepalive_recipes = Arc::clone(engine.recipes());
+    let provider_client: Arc<dyn ironclaw_auth::AuthProviderClient> = engine;
 
     // Build services then wrap credential_account_service with
     // ProviderBackedCredentialAccountService via with_provider_client() so
@@ -550,5 +736,120 @@ pub fn build_google_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle 
         .with_provider_client(provider_client),
     );
 
-    OAuthProductAuthTestBundle { services, egress }
+    OAuthProductAuthTestBundle {
+        services,
+        egress,
+        keepalive_recipes,
+    }
+}
+
+// ─── Generic channel-identity binding test support (extension-runtime P6) ────
+
+/// Build the same recipe-driven engine as [`build_oauth_product_auth_for_test`]
+/// with an `[auth.*.identity]` extraction section (subject/team/app pointers
+/// over the token response body).
+fn engine_provider_client_with_identity_for_test(
+    vendor: &str,
+    scopes: &[&str],
+    egress: Arc<ScriptedOAuthTokenEgress>,
+    secret_store: Arc<dyn ironclaw_secrets::SecretStore>,
+) -> Arc<ironclaw_auth::AuthEngine> {
+    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
+        "method": "oauth2_code",
+        "display_name": format!("{vendor} account"),
+        "authorization_endpoint": "https://oauth.test.example.com/authorize",
+        "token_endpoint": "https://oauth.test.example.com/token",
+        "scopes": scopes,
+        "client_credentials": { "client_id_handle": format!("{vendor}_oauth_client_id") },
+        "token_response": {
+            "access_token": "/access_token",
+            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+        },
+        "identity": {
+            "account_id": "/authed_user/id",
+            "team_id": "/team/id",
+            "app_id": "/app_id"
+        },
+    }))
+    .expect("identity test vendor recipe parses");
+    Arc::new(ironclaw_auth::AuthEngine::new(
+        ironclaw_auth::AuthEngineDeps {
+            recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
+                ironclaw_auth::ResolvedVendorAuthRecipe {
+                    vendor: vendor.to_string(),
+                    recipe,
+                    token_exchange_resource: None,
+                },
+            ])),
+            client_credentials: Arc::new(TestStaticClientCredentials),
+            egress: egress as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
+            secret_store,
+            callback_base: ironclaw_auth::EngineCallbackBase::new(
+                "https://localhost/api/reborn/product-auth/oauth",
+            )
+            .expect("test callback base"),
+            dcr_client_name: "Ironclaw test".to_string(),
+        },
+    ))
+}
+
+/// [`build_oauth_product_auth_for_test`] with a vendor recipe that declares
+/// identity extraction and a scripted token body carrying the claims —
+/// the fixture chain for tests that drive the generic post-OAuth channel
+/// identity binding.
+pub fn build_oauth_product_auth_with_identity_for_test(
+    vendor: &str,
+    token_body: &serde_json::Value,
+) -> OAuthProductAuthTestBundle {
+    let OAuthProductAuthInfra {
+        secret_store,
+        durable,
+    } = build_oauth_product_auth_infra();
+    let egress = Arc::new(ScriptedOAuthTokenEgress::with_json_body(token_body));
+    let engine = engine_provider_client_with_identity_for_test(
+        vendor,
+        &["test.readonly"],
+        Arc::clone(&egress),
+        Arc::clone(&secret_store),
+    );
+    let services = Arc::new(crate::RebornProductAuthServices::new(
+        durable.clone() as Arc<dyn ironclaw_auth::AuthFlowManager>,
+        durable.clone() as Arc<dyn ironclaw_auth::AuthInteractionService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialSetupService>,
+        durable.clone() as Arc<dyn ironclaw_auth::CredentialAccountService>,
+        Arc::clone(&engine) as Arc<dyn ironclaw_auth::AuthProviderClient>,
+        durable as Arc<dyn ironclaw_auth::SecretCleanupService>,
+        Arc::new(TestNoopContinuationDispatcher),
+    ));
+    let keepalive_recipes = Arc::clone(engine.recipes());
+    OAuthProductAuthTestBundle {
+        services,
+        egress,
+        keepalive_recipes,
+    }
+}
+
+/// Drive `handle_oauth_callback` WITH the generic channel-identity binding
+/// hook — the exact post-exchange seam the production product-auth route
+/// installs (`WebuiServeConfig::with_channel_identity_binding`) — so
+/// integration tests can prove a channel extension's OAuth connect writes
+/// an identity binding through the generic hook.
+pub async fn handle_oauth_callback_with_channel_identity_binding_for_test(
+    services: &crate::RebornProductAuthServices,
+    request: crate::RebornOAuthCallbackRequest,
+    binding: &crate::ChannelIdentityBindingConfig,
+) -> Result<crate::RebornOAuthCallbackResponse, crate::RebornOAuthCallbackError> {
+    let provider = match &request.outcome {
+        crate::RebornOAuthCallbackOutcome::Authorized { provider_request } => {
+            provider_request.provider.as_str().to_string()
+        }
+        _ => String::new(),
+    };
+    let factory = crate::extension_host::channel_identity::channel_identity_binding_hook_factory(
+        binding.clone(),
+    );
+    let check = factory(&provider, &request.scope);
+    services
+        .handle_oauth_callback_with_optional_provider_identity_check(request, check)
+        .await
 }

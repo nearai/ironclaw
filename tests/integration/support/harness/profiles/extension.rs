@@ -2,15 +2,13 @@
 
 use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
-    CredentialOwnership, NewCredentialAccount, ProviderScope, SLACK_PERSONAL_PROVIDER_ID,
+    CredentialOwnership, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_host_api::{
     AgentId, InvocationId, MountView, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 
 use std::sync::Arc;
-
-use ironclaw_network::NetworkHttpEgress;
 
 use super::super::super::extension_surface::{
     BUNDLED_EXTENSION_CAPABILITY_IDS, EXTENSION_LIFECYCLE_CAPABILITY_IDS,
@@ -43,11 +41,15 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
     capability_ids.extend(capability_ids_from_strs(BUNDLED_EXTENSION_CAPABILITY_IDS)?);
     // Hermetic guard: without a test egress, `build_local_runtime` defaults to
     // a REAL `ReqwestNetworkTransport`, and this profile's scenarios dispatch a
-    // bundled extension capability post-activation, which crosses HTTP.
-    let network_egress: Arc<dyn NetworkHttpEgress> =
-        Arc::new(RecordingNetworkHttpEgress::with_body(
+    // bundled extension capability post-activation, which crosses HTTP. The
+    // typed recorder is retained so tests can assert on the recorded wire
+    // (`captured_network_requests`).
+    let network_egress = Arc::new(
+        RecordingNetworkHttpEgress::with_body(
             br#"{"ok":true,"channels":[],"messages":[],"resultSizeEstimate":0,"response_metadata":{"next_cursor":""}}"#.to_vec(),
-        ));
+        )
+        .with_vendor_router(Arc::new(hosted_mcp_discovery_fixture_response)),
+    );
     Ok(ToolsProfile {
         capability_ids,
         effect_kinds: local_dev_all_effects(),
@@ -57,13 +59,53 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
                 true,
             )?),
         )
+        .with_durable_capability_io()
         .with_seed_extension_credentials()
-        .with_network_http_egress_for_test(network_egress),
+        .with_recording_network_egress(network_egress),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(bundled_extension_provider_trust()?),
         auto_approve_default: Some(true),
         ..ToolsProfile::new("reborn-e2e-extension-lifecycle-tools", user_id)?
     })
+}
+
+/// Hermetic hosted-MCP handshake for lifecycle scenarios that need a real
+/// post-auth activation. The production path still performs the complete
+/// initialize -> initialized -> tools/list exchange through mediated network
+/// egress; only the external server response is replaced here.
+fn hosted_mcp_discovery_fixture_response(
+    request: &ironclaw_network::NetworkHttpRequest,
+) -> Option<(u16, Vec<u8>)> {
+    let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+    let method = body.get("method")?.as_str()?;
+    let result = match method {
+        "initialize" => serde_json::json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "extension-lifecycle-test", "version": "1.0.0"}
+        }),
+        "notifications/initialized" => serde_json::json!({}),
+        "tools/list" => serde_json::json!({
+            "tools": [{
+                "name": "live-search",
+                "description": "Hermetic hosted MCP search tool",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                },
+                "annotations": {"readOnlyHint": true}
+            }]
+        }),
+        _ => return None,
+    };
+    let response = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": body.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        "result": result,
+    }))
+    .ok()?;
+    Some((200, response))
 }
 
 /// [`extension_lifecycle_tools_profile`], plus a composition-time Google
@@ -121,7 +163,14 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/visprobe.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "visprobe.search"
 description = "Model-visible probe capability"
 effects = ["network"]
@@ -130,7 +179,8 @@ visibility = "model"
 input_schema_ref = "schemas/search.input.json"
 output_schema_ref = "schemas/search.output.json"
 
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "visprobe.audit"
 description = "Host-internal probe capability"
 effects = ["network", "external_write"]
@@ -140,16 +190,25 @@ input_schema_ref = "schemas/audit.input.json"
 output_schema_ref = "schemas/audit.output.json"
 "#;
 
-fn visibility_probe_package() -> HarnessResult<ironclaw_extensions::ExtensionPackage> {
-    let manifest = ironclaw_extensions::ExtensionManifest::parse(
+fn visibility_probe_package() -> HarnessResult<(
+    ironclaw_extensions::ExtensionPackage,
+    ironclaw_extensions::ResolvedExtensionManifest,
+)> {
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         VISIBILITY_PROBE_MANIFEST,
         ironclaw_extensions::ManifestSource::HostBundled,
         &ironclaw_host_api::host_port::HostPortCatalog::empty(),
+        None,
+        &capability_provider_contracts(),
     )?;
-    Ok(ironclaw_extensions::ExtensionPackage::from_manifest(
-        manifest,
-        ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?,
-    )?)
+    let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())?;
+    Ok((
+        ironclaw_extensions::ExtensionPackage::from_manifest(
+            manifest,
+            ironclaw_host_api::VirtualPath::new("/system/extensions/visprobe")?,
+        )?,
+        record.resolved().clone(),
+    ))
 }
 
 /// Harness for the HostInternal surface-hiding probe: the fixture package is
@@ -158,7 +217,7 @@ fn visibility_probe_package() -> HarnessResult<ironclaw_extensions::ExtensionPac
 /// the ONLY thing that can keep `visprobe.audit` off the model surface is the
 /// registry-level visibility filter, not grant absence or non-publication.
 pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsProfile> {
-    let package = visibility_probe_package()?;
+    let (package, resolved) = visibility_probe_package()?;
     Ok(ToolsProfile {
         capability_ids: capability_ids_from_strs(&[
             VISIBILITY_PROBE_MODEL_CAPABILITY_ID,
@@ -171,7 +230,7 @@ pub(crate) fn extension_visibility_probe_tools_profile() -> HarnessResult<ToolsP
                 true,
             )?),
         )
-        .with_activated_bundled_extension(package),
+        .with_activated_bundled_extension_resolved(package, resolved),
         network_policy_override: Some(wildcard_test_policy()),
         provider_trust_override: Some(vec![(
             ironclaw_host_api::ExtensionId::new("visprobe")?,
@@ -290,7 +349,7 @@ fn extension_lifecycle_credential_seeds() -> &'static [ExtensionLifecycleCredent
             scopes: &[],
         },
         ExtensionLifecycleCredentialSeed {
-            provider: SLACK_PERSONAL_PROVIDER_ID,
+            provider: "slack",
             label: "qa slack",
             secret_handle: "qa_slack_personal_access",
             scopes: &[
@@ -308,4 +367,463 @@ fn extension_lifecycle_credential_seeds() -> &'static [ExtensionLifecycleCredent
             ],
         },
     ]
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}
+
+// ── Invented-vendor fixture (extension-runtime P2, overview §8) ─────────────
+
+/// The fixture's native `runtime.service` id, from
+/// `tests/fixtures/extensions/acme-messenger/manifest.toml`.
+pub(crate) const ACME_FIXTURE_SERVICE: &str = "acme-messenger.extension/v1";
+pub(crate) const ACME_SEND_NOTE_CAPABILITY_ID: &str = "acme-messenger.send_note";
+
+fn acme_fixture_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/extensions/acme-messenger")
+}
+
+/// The binary-assembled native factory for the fixture: binds the tool
+/// adapter (routes `send_note`) plus the scripted channel adapter the
+/// binding rule requires for the declared `[channel]`.
+struct AcmeFixtureFactory;
+
+impl ironclaw_extension_host::NativeExtensionFactory for AcmeFixtureFactory {
+    fn service(&self) -> &str {
+        ACME_FIXTURE_SERVICE
+    }
+
+    fn load(
+        &self,
+        _ctx: &ironclaw_extension_host::LoadContext,
+    ) -> Result<
+        Box<dyn ironclaw_extension_host::ExtensionEntrypoint>,
+        ironclaw_extension_host::BindError,
+    > {
+        Ok(Box::new(AcmeFixtureEntrypoint))
+    }
+}
+
+struct AcmeFixtureEntrypoint;
+
+impl ironclaw_extension_host::ExtensionEntrypoint for AcmeFixtureEntrypoint {
+    fn bind(
+        &self,
+        _ctx: ironclaw_extension_host::BindContext,
+    ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
+    {
+        Ok(ironclaw_extension_host::ExtensionBindings {
+            tools: Some(Arc::new(AcmeFixtureToolAdapter)),
+            channel: Some(Arc::new(AcmeFixtureChannelAdapter)),
+        })
+    }
+}
+
+/// The fixture's REAL channel adapter: pure protocol parsing of the invented
+/// vendor's wire shape for the generic ingress router (extension-runtime P4).
+///
+/// Wire shape: `{"type":"message","event_id":..,"conversation":..,"user":..,
+/// "text":..}` normalizes to one message; `{"type":"challenge",
+/// "challenge":..}` echoes the challenge; any other authenticated payload is
+/// an ignored no-op.
+pub(crate) struct AcmeFixtureChannelAdapter;
+
+#[async_trait::async_trait]
+impl ironclaw_product_adapters::ChannelAdapter for AcmeFixtureChannelAdapter {
+    fn inbound(
+        &self,
+        request: ironclaw_product_adapters::VerifiedInbound<'_>,
+    ) -> Result<ironclaw_product_adapters::InboundOutcome, ironclaw_product_adapters::ChannelError>
+    {
+        use ironclaw_product_adapters::{
+            ChannelError, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+            ImmediateResponse, InboundOutcome, NormalizedInboundMessage, ProductTriggerReason,
+        };
+        let parse = |reason: String| ChannelError::Parse { reason };
+        let value: serde_json::Value =
+            serde_json::from_slice(request.body).map_err(|error| parse(error.to_string()))?;
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("challenge") => {
+                let challenge = value
+                    .get("challenge")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| parse("missing challenge".to_string()))?;
+                Ok(InboundOutcome::Respond(ImmediateResponse {
+                    status: 200,
+                    content_type: Some("text/plain".to_string()),
+                    body: challenge.as_bytes().to_vec(),
+                }))
+            }
+            Some("message") => {
+                let field = |name: &str| {
+                    value
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .ok_or_else(|| parse(format!("missing {name}")))
+                };
+                Ok(InboundOutcome::Messages(vec![NormalizedInboundMessage {
+                    actor: ExternalActorRef::new("acme_user", field("user")?, None::<&str>)
+                        .map_err(|error| parse(error.to_string()))?,
+                    conversation: ExternalConversationRef::new(
+                        None,
+                        field("conversation")?,
+                        None,
+                        None,
+                    )
+                    .map_err(|error| parse(error.to_string()))?,
+                    event_id: ExternalEventId::new(field("event_id")?)
+                        .map_err(|error| parse(error.to_string()))?,
+                    text: field("text")?,
+                    trigger: ProductTriggerReason::DirectChat,
+                    attachments: Vec::new(),
+                    reply_context: Some(b"acme-reply-route".to_vec()),
+                }]))
+            }
+            _ => Ok(InboundOutcome::Ignore),
+        }
+    }
+
+    /// Minimal real outbound: one vendor POST per text part. Proves the
+    /// generic delivery path (coordinator → adapter → restricted egress)
+    /// needs no real product, and gives the conformance suite a deliverable
+    /// fixture.
+    async fn deliver(
+        &self,
+        envelope: ironclaw_product_adapters::OutboundEnvelope,
+        egress: &dyn ironclaw_host_api::RestrictedEgress,
+    ) -> Result<ironclaw_product_adapters::DeliveryReport, ironclaw_product_adapters::ChannelError>
+    {
+        use ironclaw_product_adapters::{ChannelError, OutboundPart, PartDeliveryOutcome};
+        if envelope.parts.is_empty() {
+            return Err(ChannelError::Render {
+                reason: "outbound envelope carries no parts".to_string(),
+            });
+        }
+        let mut parts = Vec::new();
+        for part in &envelope.parts {
+            let outcome = match part {
+                OutboundPart::Text(text) => {
+                    let body = serde_json::json!({
+                        "conversation": envelope.target.conversation.conversation_id(),
+                        "text": text,
+                    });
+                    let response = egress
+                        .send(ironclaw_host_api::RestrictedEgressRequest {
+                            method: ironclaw_host_api::NetworkMethod::Post,
+                            url: "https://api.acme.example/messages".to_string(),
+                            headers: vec![(
+                                "content-type".to_string(),
+                                "application/json".to_string(),
+                            )],
+                            body: serde_json::to_vec(&body).ok(),
+                            credential: None,
+                            body_credentials: Vec::new(),
+                        })
+                        .await;
+                    match response {
+                        Ok(response) if (200..300).contains(&response.status) => {
+                            PartDeliveryOutcome::Sent {
+                                vendor_message_ref: None,
+                            }
+                        }
+                        Ok(response) => PartDeliveryOutcome::Permanent {
+                            reason: format!("acme vendor returned status {}", response.status),
+                        },
+                        Err(error) => PartDeliveryOutcome::Retryable {
+                            reason: error.to_string(),
+                        },
+                    }
+                }
+                _ => PartDeliveryOutcome::Permanent {
+                    reason: "the acme fixture delivers text parts only".to_string(),
+                },
+            };
+            let sent = matches!(outcome, PartDeliveryOutcome::Sent { .. });
+            parts.push(outcome);
+            if !sent {
+                break;
+            }
+        }
+        Ok(ironclaw_product_adapters::DeliveryReport { parts })
+    }
+}
+
+struct AcmeFixtureToolAdapter;
+
+#[async_trait::async_trait]
+impl ironclaw_host_api::ToolAdapter for AcmeFixtureToolAdapter {
+    async fn invoke(
+        &self,
+        call: ironclaw_host_api::ToolCall,
+        _ports: &ironclaw_host_api::ToolPorts<'_>,
+    ) -> Result<ironclaw_host_api::ToolResult, ironclaw_host_api::ToolError> {
+        match call.capability_id.as_str() {
+            ACME_SEND_NOTE_CAPABILITY_ID => {
+                let text = call
+                    .input
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let output =
+                    serde_json::json!({"delivered": true, "note_id": "note-1", "text": text});
+                let output_bytes = serde_json::to_vec(&output)
+                    .map(|bytes| bytes.len() as u64)
+                    .unwrap_or_default();
+                Ok(ironclaw_host_api::ToolResult {
+                    output,
+                    display_preview: None,
+                    output_bytes,
+                })
+            }
+            _ => Err(ironclaw_host_api::ToolError::Failed {
+                kind: ironclaw_host_api::RuntimeDispatchErrorKind::UndeclaredCapability,
+                safe_summary: None,
+                model_visible_cause: None,
+            }),
+        }
+    }
+}
+
+/// The extension-lifecycle profile extended with the invented-vendor fixture:
+/// its assets copied into the storage root pre-build (the catalog discovers
+/// them), its native factory assembled into the composition input, its tool
+/// granted, and its provider trusted — the acme lifecycle then runs through
+/// the REAL facade (install → activate → dispatch-from-snapshot → remove).
+pub(crate) fn extension_runtime_acme_tools_profile() -> HarnessResult<ToolsProfile> {
+    let mut profile = extension_lifecycle_tools_profile()?;
+    profile
+        .capability_ids
+        .push(ironclaw_host_api::CapabilityId::new(
+            ACME_SEND_NOTE_CAPABILITY_ID,
+        )?);
+    // The real Slack package's five tools (TOOL-7 drives them through the
+    // generic dispatcher post-activation).
+    for slack_tool in [
+        "slack.search_messages",
+        "slack.list_conversations",
+        "slack.get_conversation_history",
+        "slack.get_user_info",
+        "slack.send_message",
+    ] {
+        profile
+            .capability_ids
+            .push(ironclaw_host_api::CapabilityId::new(slack_tool)?);
+    }
+    if let Some(trust) = profile.provider_trust_override.as_mut() {
+        trust.push((
+            ironclaw_host_api::ExtensionId::new("acme-messenger")?,
+            local_dev_all_effects(),
+        ));
+        trust.push((
+            ironclaw_host_api::ExtensionId::new("slack")?,
+            local_dev_all_effects(),
+        ));
+    }
+    profile.options = profile
+        .options
+        .with_fixture_extension_dir(acme_fixture_dir(), "acme-messenger")
+        .with_native_extension_factory(Arc::new(AcmeFixtureFactory));
+    Ok(profile)
+}
+
+pub(crate) async fn extension_runtime_acme_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
+    extension_runtime_acme_tools_profile()?.build().await
+}
+
+// ── Delivery-proof profile (extension-runtime P5, §5.4 / DEL-10) ───────────
+
+/// The bundled telegram manifest's `runtime.service` id — the same native
+/// binding the binary assembles (`ironclaw_reborn_cli::runtime::native_extensions`).
+pub(crate) const TELEGRAM_FIXTURE_SERVICE: &str = "telegram.extension/v1";
+
+/// Native factory for the bundled telegram package: binds the REAL
+/// `TelegramChannelAdapter` as its channel surface, exactly like the binary
+/// assembly in `crates/ironclaw_reborn_cli/src/runtime/native_extensions.rs`
+/// (mirrored here because the integration harness composes its own runtime
+/// and cannot depend on the CLI crate).
+struct TelegramFixtureFactory;
+
+impl ironclaw_extension_host::NativeExtensionFactory for TelegramFixtureFactory {
+    fn service(&self) -> &str {
+        TELEGRAM_FIXTURE_SERVICE
+    }
+
+    fn load(
+        &self,
+        _ctx: &ironclaw_extension_host::LoadContext,
+    ) -> Result<
+        Box<dyn ironclaw_extension_host::ExtensionEntrypoint>,
+        ironclaw_extension_host::BindError,
+    > {
+        Ok(Box::new(TelegramFixtureEntrypoint))
+    }
+}
+
+struct TelegramFixtureEntrypoint;
+
+impl ironclaw_extension_host::ExtensionEntrypoint for TelegramFixtureEntrypoint {
+    fn bind(
+        &self,
+        _ctx: ironclaw_extension_host::BindContext,
+    ) -> Result<ironclaw_extension_host::ExtensionBindings, ironclaw_extension_host::BindError>
+    {
+        Ok(ironclaw_extension_host::ExtensionBindings {
+            tools: None,
+            channel: Some(Arc::new(
+                ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+            )),
+        })
+    }
+}
+
+/// Vendor-shaped scripted responses for the delivery proofs: the Slack Web
+/// API and the Telegram Bot API answer their happy-path bodies (the adapters
+/// parse these for vendor message refs), everything else falls back to the
+/// profile's default recorder body.
+fn delivery_vendor_router(
+    request: &ironclaw_network::NetworkHttpRequest,
+) -> Option<(u16, Vec<u8>)> {
+    if request.url.ends_with("/api/chat.postMessage") {
+        let channel = serde_json::from_slice::<serde_json::Value>(&request.body)
+            .ok()
+            .and_then(|body| {
+                body.get("channel")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "D0000000000".to_string());
+        let body = serde_json::json!({
+            "ok": true,
+            "channel": channel,
+            "ts": "1710000200.000001",
+        });
+        return Some((200, serde_json::to_vec(&body).ok()?));
+    }
+    if request.url.ends_with("/api/conversations.open") {
+        return Some((
+            200,
+            br#"{"ok":true,"channel":{"id":"D0000000000"}}"#.to_vec(),
+        ));
+    }
+    if request.url.contains("api.telegram.org") {
+        let body: &[u8] = if request.url.ends_with("/sendMessage") {
+            br#"{"ok":true,"result":{"message_id":4242}}"#
+        } else {
+            // setWebhook / deleteWebhook and friends return a bool result.
+            br#"{"ok":true,"result":true}"#
+        };
+        return Some((200, body.to_vec()));
+    }
+    None
+}
+
+/// The acme runtime profile extended for the §5.4 delivery proofs: the
+/// bundled telegram package's native channel factory is assembled (DEL-10
+/// activates the REAL bundled manifest through the generic host), telegram's
+/// provider is trusted, and the recording network egress answers
+/// vendor-shaped bodies so the real adapters can parse delivery responses.
+pub(crate) fn extension_delivery_tools_profile() -> HarnessResult<ToolsProfile> {
+    let mut profile = extension_runtime_acme_tools_profile()?;
+    if let Some(trust) = profile.provider_trust_override.as_mut() {
+        trust.push((
+            ironclaw_host_api::ExtensionId::new("telegram")?,
+            local_dev_all_effects(),
+        ));
+    }
+    let network_egress = Arc::new(
+        RecordingNetworkHttpEgress::with_body(br#"{"ok":true}"#.to_vec())
+            .with_vendor_router(Arc::new(delivery_vendor_router)),
+    );
+    profile.options = profile
+        .options
+        .with_native_extension_factory(Arc::new(TelegramFixtureFactory))
+        .with_account_setup_descriptor(telegram_account_setup_descriptor())
+        .with_channel_extension_binding(slack_channel_extension_binding())
+        .with_channel_extension_binding(telegram_channel_extension_binding())
+        .with_recording_network_egress(network_egress);
+    Ok(profile)
+}
+
+/// Slack's channel-adapter binding, mirrored from the binary assembly
+/// (`ironclaw_reborn_cli::runtime::native_extensions::bundled_channel_extension_bindings`)
+/// the same way [`TelegramFixtureFactory`] mirrors the native factory: the
+/// harness composes its own runtime and cannot depend on the CLI crate.
+/// Slack's WASM-runtime package cannot ride a native factory, so without
+/// this binding composition serves its `[channel]` surface with the
+/// transitional `HostServedChannelBridge`, which rejects every verified
+/// inbound request.
+fn slack_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
+    ironclaw_reborn_composition::ChannelExtensionBinding {
+        extension_id: "slack".to_string(),
+        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        inbound_payload_classifier: Some(Arc::new(|message| {
+            ironclaw_slack_extension::classify_interaction_resolution(
+                &message.text,
+                message.trigger,
+            )
+        })),
+        preference_target_codec: Some(Arc::new(
+            ironclaw_slack_extension::SlackPreferenceTargetCodec,
+        )),
+    }
+}
+
+fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelExtensionBinding {
+    ironclaw_reborn_composition::ChannelExtensionBinding {
+        extension_id: "telegram".to_string(),
+        adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
+        inbound_payload_classifier: None,
+        preference_target_codec: None,
+    }
+}
+
+/// Telegram's account-setup declaration, mirrored from the binary assembly
+/// (`ironclaw_reborn_cli::runtime::account_setups`) the same way
+/// [`TelegramFixtureFactory`] mirrors the native factory: the harness
+/// composes its own runtime and cannot depend on the CLI crate.
+fn telegram_account_setup_descriptor() -> ironclaw_product_workflow::ExtensionAccountSetupDescriptor
+{
+    let extension_id = ironclaw_host_api::ExtensionId::new("telegram").expect("extension id");
+    let connection_requirement = ironclaw_product_workflow::ChannelConnectionRequirement {
+        channel: "telegram".to_string(),
+        display_name: "Telegram".to_string(),
+        strategy: ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode,
+        instructions: "Pair your Telegram account from the pairing panel.".to_string(),
+        input_placeholder: String::new(),
+        submit_label: "Open pairing".to_string(),
+        error_message: "Telegram pairing failed. Get a fresh code and try again.".to_string(),
+    };
+    let connection_notices = ironclaw_product_workflow::ChannelConnectionNoticePolicy::generic(
+        &connection_requirement.display_name,
+    );
+    ironclaw_product_workflow::ExtensionAccountSetupDescriptor {
+        extension_id: extension_id.clone(),
+        auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
+            provider: ironclaw_host_api::VendorId::new("telegram").expect("provider id"),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
+            requester_extension: extension_id,
+            provider_scopes: Vec::new(),
+        },
+        connection_requirement,
+        connection_notices,
+        activation_success_message:
+            "Telegram is installed as an inbound entrypoint; pair via the pairing panel."
+                .to_string(),
+        pairing_deep_link_template: Some("https://t.me/{bot_username}?start={code}".to_string()),
+    }
+}
+
+pub(crate) async fn extension_delivery_tools() -> HarnessResult<HostRuntimeCapabilityHarness> {
+    extension_delivery_tools_profile()?.build().await
 }

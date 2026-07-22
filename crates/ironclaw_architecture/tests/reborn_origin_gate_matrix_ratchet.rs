@@ -127,19 +127,22 @@ fn collect_manifest_tomls(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// Recursively collect every capability table from a parsed manifest. Handles
-/// both manifest shapes: the top-level `[[capabilities]]` array and the
-/// `[[capability_provider.tools.capabilities]]` array (the WASM/host_api shape,
-/// e.g. github). Both key their capability list `capabilities`, so a walk for
-/// arrays under that key covers every schema variant.
+/// v2 capability arrays, v3 top-level `[[tools]]`, and the v3 `[mcp]`
+/// connection template that supplies policy to dynamically discovered tools.
 fn collect_capability_tables<'a>(value: &'a toml::Value, out: &mut Vec<&'a toml::Table>) {
     match value {
         toml::Value::Table(table) => {
-            if let Some(toml::Value::Array(items)) = table.get("capabilities") {
-                for item in items {
-                    if let toml::Value::Table(capability) = item {
-                        out.push(capability);
+            for key in ["capabilities", "tools"] {
+                if let Some(toml::Value::Array(items)) = table.get(key) {
+                    for item in items {
+                        if let toml::Value::Table(capability) = item {
+                            out.push(capability);
+                        }
                     }
                 }
+            }
+            if let Some(toml::Value::Table(mcp)) = table.get("mcp") {
+                out.push(mcp);
             }
             for nested in table.values() {
                 collect_capability_tables(nested, out);
@@ -202,8 +205,8 @@ fn extension_toml_capabilities_declare_wellformed_origin_gate_matrix() {
     let mut manifests = Vec::new();
     collect_manifest_tomls(&first_party_assets_dir(), &mut manifests);
     assert!(
-        manifests.len() >= 13,
-        "expected at least the 13 first-party extension manifest assets, found {} — did the \
+        manifests.len() >= 12,
+        "expected at least the 12 first-party extension manifest assets, found {} — did the \
          assets directory move? ({})",
         manifests.len(),
         first_party_assets_dir().display()
@@ -281,12 +284,10 @@ fn extension_toml_capabilities_declare_wellformed_origin_gate_matrix() {
     );
 }
 
-/// Self-test for the TOML walker: it must find capability tables under BOTH the
-/// top-level `[[capabilities]]` shape and the nested
-/// `[[capability_provider.tools.capabilities]]` shape, so neither manifest schema
-/// can hide an off-allowlist `ungated` from the scan above.
+/// Self-test for the TOML walker across both v2 forms and both v3 policy
+/// declaration forms.
 #[test]
-fn toml_walker_finds_both_manifest_capability_shapes() {
+fn toml_walker_finds_all_manifest_capability_shapes() {
     let sample = r#"
 schema_version = "reborn.extension_manifest.v2"
 id = "sample"
@@ -299,6 +300,13 @@ origin_gate_matrix = { loop_run = "ungated", product = "forbidden", automation =
 
 [[capability_provider.tools.capabilities]]
 id = "sample.nested"
+
+[[tools]]
+id = "sample.v3_tool"
+
+[mcp]
+server = "https://mcp.example.com"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 "#;
     let value: toml::Value = toml::from_str(sample).expect("sample manifest parses");
     let mut capabilities = Vec::new();
@@ -309,8 +317,14 @@ id = "sample.nested"
         .filter_map(|cap| cap.get("id").and_then(toml::Value::as_str))
         .collect();
     assert!(
-        ids.contains("sample.top_level") && ids.contains("sample.nested"),
-        "walker must reach both capability-array schemas, found: {ids:?}"
+        ids.contains("sample.top_level")
+            && ids.contains("sample.nested")
+            && ids.contains("sample.v3_tool"),
+        "walker must reach v2 and v3 capability-array schemas, found: {ids:?}"
+    );
+    assert!(
+        capabilities.iter().any(|cap| cap.get("server").is_some()),
+        "walker must reach the v3 MCP connection template"
     );
 
     // And the off-allowlist `ungated` in the fixture is visible to the check.

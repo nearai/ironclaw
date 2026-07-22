@@ -4172,3 +4172,4 @@ impl LlmProvider for RecordingLlmProvider {
         })
     }
 }
+// arch-exempt: large_file, LLM gateway contract coverage remains centralized, plan #6175
