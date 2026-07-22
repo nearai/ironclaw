@@ -164,7 +164,7 @@ async fn build_admin_harness_from(
         store: session_store.clone(),
     });
 
-    let input = RebornRuntimeInput::from_services(build_input)
+    let input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),

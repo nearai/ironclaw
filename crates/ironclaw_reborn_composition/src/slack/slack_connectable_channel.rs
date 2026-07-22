@@ -62,7 +62,7 @@ pub(crate) fn slack_webui_composition(
             reason: "outbound delivery target providers require local runtime services".to_string(),
         });
     }
-    let personal_credential_cleanup = runtime.services().product_auth.clone().map(|services| {
+    let personal_credential_cleanup = runtime.product_auth.clone().map(|services| {
         services as Arc<dyn crate::slack::slack_channel_connection::SlackPersonalCredentialCleanup>
     });
     let connectable = slack_mounts.and_then(|mounts| {
@@ -288,7 +288,7 @@ mod tests {
     async fn slack_mounts_inject_channel_admin_action_into_webui_facade() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(
+            RebornRuntimeInput::from_build_input(
                 RebornBuildInput::local_dev("slack-webui-owner", root.path().join("local-dev"))
                     .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
             )
@@ -341,7 +341,7 @@ mod tests {
     {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(
+            RebornRuntimeInput::from_build_input(
                 RebornBuildInput::local_dev("slack-webui-owner", root.path().join("local-dev"))
                     .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
             )
@@ -387,7 +387,7 @@ mod tests {
     async fn slack_mounts_hide_channel_admin_action_from_non_operator_callers() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(
+            RebornRuntimeInput::from_build_input(
                 RebornBuildInput::local_dev("slack-webui-owner", root.path().join("local-dev"))
                     .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
             )
@@ -434,7 +434,7 @@ mod tests {
     async fn slack_mounts_hide_channel_admin_action_from_cross_tenant_operator_user() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(
+            RebornRuntimeInput::from_build_input(
                 RebornBuildInput::local_dev("slack-webui-owner", root.path().join("local-dev"))
                     .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
             )
@@ -481,7 +481,7 @@ mod tests {
     async fn slack_mounts_without_operator_action_advertise_personal_oauth_only() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(
+            RebornRuntimeInput::from_build_input(
                 RebornBuildInput::local_dev("slack-webui-owner", root.path().join("local-dev"))
                     .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
             )

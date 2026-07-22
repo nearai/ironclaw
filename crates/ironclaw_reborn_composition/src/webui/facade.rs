@@ -178,14 +178,12 @@ pub(crate) struct AutomationBacking {
     pub(crate) snapshot_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
 }
 
-/// Resolves the [`AutomationBacking`] pair from the runtime store graph selected
-/// by the composition build. Returns `None` when no runtime graph is present.
-pub(crate) fn automation_backing(services: &crate::RebornServices) -> Option<AutomationBacking> {
-    let graph = services.runtime_store_graph()?;
-    Some(AutomationBacking {
-        repository: graph.trigger_repository(),
-        snapshot_source: graph.turn_run_snapshot_source(),
-    })
+/// Resolves the [`AutomationBacking`] pair from the runtime-owned stores.
+pub(crate) fn automation_backing(runtime: &RebornRuntime) -> AutomationBacking {
+    AutomationBacking {
+        repository: Arc::clone(&runtime.trigger_repository),
+        snapshot_source: Arc::clone(&runtime.turn_run_snapshot_source),
+    }
 }
 
 /// Compose the WebUI-facing product facade from an already-built Reborn runtime.
@@ -208,8 +206,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     channel_connection: Option<Arc<dyn ChannelConnectionFacade>>,
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    let services = runtime.services();
-    if services.runtime_surfaces.is_some()
+    if runtime.outbound_preferences.is_some()
         && let Some(provider) = runtime.outbound_delivery_target_provider()
     {
         outbound_delivery_target_providers.push(provider);
@@ -292,20 +289,32 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             },
         );
     }
-    if let Some(runtime_surfaces) = &services.runtime_surfaces {
+    if let (
+        Some(tool_permission_overrides),
+        Some(auto_approve_settings),
+        Some(persistent_approval_policies),
+        Some(extension_registry),
+        Some(skill_management),
+    ) = (
+        runtime.tool_permission_overrides.as_ref(),
+        runtime.auto_approve_settings.as_ref(),
+        runtime.persistent_approval_policies.as_ref(),
+        runtime.extension_registry.as_ref(),
+        runtime.skill_management.as_ref(),
+    ) {
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-            runtime_surfaces.tool_permission_overrides.clone();
+            tool_permission_overrides.clone();
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-            runtime_surfaces.auto_approve_settings.clone();
+            auto_approve_settings.clone();
         let persistent_approval_policies: Arc<
             dyn ironclaw_approvals::PersistentApprovalPolicyStore,
-        > = runtime_surfaces.persistent_approval_policies.clone();
-        let tool_registry = runtime_surfaces
+        > = persistent_approval_policies.clone();
+        let tool_registry = runtime
             .shared_extension_registry
             .clone()
             .unwrap_or_else(|| {
                 Arc::new(SharedExtensionRegistry::new(
-                    runtime_surfaces.extension_registry.as_ref().clone(),
+                    extension_registry.as_ref().clone(),
                 ))
             });
         let synthetic_operator_tools = if outbound_delivery_target_providers.is_empty() {
@@ -331,27 +340,26 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             Arc::new(ActiveRegistryOperatorToolCatalog::new(
                 tool_registry,
                 synthetic_operator_tools,
-                runtime_surfaces.extension_management.clone(),
+                runtime.extension_management.clone(),
             )),
         );
-        let mut lifecycle_facade =
-            RebornLocalLifecycleFacade::new(runtime_surfaces.skill_management.clone());
-        if let Some(extension_management) = &runtime_surfaces.extension_management {
+        let mut lifecycle_facade = RebornLocalLifecycleFacade::new(Arc::clone(skill_management));
+        if let Some(extension_management) = &runtime.extension_management {
             lifecycle_facade =
                 lifecycle_facade.with_extension_management(extension_management.clone());
         }
-        if let Some(runtime_http_egress) = &runtime_surfaces.runtime_http_egress {
+        if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
         }
-        if let Some(product_auth) = &services.product_auth {
+        if let Some(product_auth) = &runtime.product_auth {
             lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(
                 product_auth.runtime_credential_account_selection_service(),
             );
         }
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
-    if let Some(skill_management) = &services.skill_management {
+    if let Some(skill_management) = &runtime.skill_management {
         // Share the activation selector's live master switch so a Settings
         // toggle here changes the next turn's selection. Only the local-dev
         // runtime builds a selector that reads this flag, so it is wired only
@@ -359,31 +367,25 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         // assembly, which has no flag-reading selector), the facade gets `None`
         // and the toggle reports unavailable rather than silently writing to an
         // orphan flag that controls nothing.
-        let auto_activate_flag = services
-            .runtime_surfaces
-            .as_ref()
-            .map(|runtime_surfaces| Arc::clone(&runtime_surfaces.skill_auto_activate_learned));
+        let auto_activate_flag = runtime.skill_auto_activate_learned.clone();
         api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
             Arc::clone(skill_management),
             auto_activate_flag,
         )));
     }
-    if let Some(product_auth) = &services.product_auth {
+    if let Some(product_auth) = &runtime.product_auth {
         api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
             Arc::clone(product_auth),
         )));
     }
-    if let Some(backing) = automation_backing(services) {
-        let active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> = Arc::new(
-            crate::automation::trigger_poller::SnapshotActiveRunLookup::new(
-                backing.snapshot_source,
-            ),
-        );
-        api = api.with_automation_product_facade(Arc::new(
-            RebornAutomationProductFacade::new(backing.repository, active_run_lookup)
-                .with_scheduler_enabled(services.readiness.workers.trigger_poller),
-        ));
-    }
+    let backing = automation_backing(runtime);
+    let active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> = Arc::new(
+        crate::automation::trigger_poller::SnapshotActiveRunLookup::new(backing.snapshot_source),
+    );
+    api = api.with_automation_product_facade(Arc::new(
+        RebornAutomationProductFacade::new(backing.repository, active_run_lookup)
+            .with_scheduler_enabled(runtime.readiness.workers.trigger_poller),
+    ));
     // First-class projects + membership (ACL). Built once per runtime over the
     // scoped substrate — local-dev from `runtime_surfaces`, production-shaped from
     // the production store graph — via the shared `reborn_project_service`
@@ -391,9 +393,9 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     if let Some(project_service) = runtime.reborn_project_service() {
         api = api.with_project_service(project_service);
     }
-    if let Some(runtime_surfaces) = &services.runtime_surfaces {
+    if let Some(outbound_preferences) = &runtime.outbound_preferences {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
-            Arc::clone(&runtime_surfaces.outbound_preferences),
+            Arc::clone(outbound_preferences),
             Arc::new(OutboundDeliveryTargetRegistry::new(
                 outbound_delivery_target_providers,
             )),
@@ -411,15 +413,15 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     }
     api = api.with_event_stream(event_stream.unwrap_or_else(|| runtime.webui_event_stream()));
     api = api.with_operator_status_service(Arc::new(ReadinessOperatorStatusService::new(
-        services.readiness.clone(),
+        runtime.readiness.clone(),
     )));
     api = api.with_operator_logs_service(crate::operator_log_buffer());
-    if let Some(runtime_surfaces) = &services.runtime_surfaces {
+    if let Some(owner_user_id) = &runtime.owner_user_id {
         let webui_boot_config = runtime.webui_boot_config();
         api = api.with_operator_service_lifecycle_service(Arc::new(
             RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
-                runtime_surfaces.owner_user_id.clone(),
+                owner_user_id.clone(),
                 webui_boot_config,
             ),
         ));
@@ -441,8 +443,8 @@ pub(crate) fn build_webui_services_with_connectable_channels(
 
     Ok(RebornWebuiBundle {
         api: Arc::new(api),
-        product_auth: services.product_auth.clone(),
-        readiness: services.readiness.clone(),
+        product_auth: runtime.product_auth.clone(),
+        readiness: runtime.readiness.clone(),
     })
 }
 
@@ -456,7 +458,7 @@ pub(crate) fn build_llm_config_service(
     runtime: &RebornRuntime,
 ) -> Option<Arc<dyn ironclaw_product_workflow::LlmConfigService>> {
     let boot = runtime.webui_boot_config()?;
-    let keys = crate::LlmKeyStore::new(runtime.services().secret_store());
+    let keys = crate::LlmKeyStore::new(runtime.secret_store());
     let mut llm_config = crate::RebornLlmConfigService::new(boot.clone(), keys);
     if let Some(reload) = runtime.webui_llm_reload_trigger() {
         llm_config = llm_config.with_reload_trigger(reload);

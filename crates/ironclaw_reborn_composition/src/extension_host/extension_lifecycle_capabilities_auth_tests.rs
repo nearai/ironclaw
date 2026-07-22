@@ -14,16 +14,14 @@ use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPo
 use crate::extension_host::extension_lifecycle_capabilities::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
 };
+use crate::factory::{RebornRuntimeSubstrate, build_runtime_substrate};
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest;
-use crate::{
-    RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
-    RebornServices, build_reborn_services,
-};
+use crate::{RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 
 #[tokio::test]
 async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
         "3eee560a-7fe5-474c-965a-67cb69df3d04",
         dir.path().join("local-dev"),
     ))
@@ -51,7 +49,7 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
     .expect("install succeeds");
 
     let auth_scope = AuthProductScope::new(auth_scope_resource.clone(), AuthSurface::Callback);
-    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let product_auth = services.product_auth.as_ref();
     let challenge = product_auth
         .request_manual_token_setup(RebornManualTokenSetupRequest {
             scope: auth_scope.clone(),
@@ -121,14 +119,14 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
 
 /// W4-MCP-SSO-WIRING (#5439 class): the NEAR AI MCP host-managed credential
 /// fallback (`HostManagedCredentialFallbackRule`) must actually reach the
-/// runtime-credential-selection path `build_reborn_services` wires up — not
+/// runtime-credential-selection path `build_runtime_substrate` wires up — not
 /// just the private rule/selector types the crate's other unit tests exercise
 /// directly. Before #5439, the bootstrapped NEAR AI MCP API key was resolvable
 /// only under the boot-owner's own scope; a Google-SSO user in the SAME
 /// tenant/agent/project with no NEAR AI token of their own was prompted for
 /// one instead of transparently sharing the host-managed key.
 ///
-/// Drives ONLY the composition's public surface: `build_reborn_services` (the
+/// Drives ONLY the composition's public surface: `build_runtime_substrate` (the
 /// local-dev path always derives `nearai_mcp_host_managed_scope` from the
 /// boot owner — see `local_dev_nearai_mcp_owner_scope` in `factory.rs` — so no
 /// live NEAR AI config injection is needed to prove the wiring) and
@@ -150,13 +148,13 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
 async fn local_dev_nearai_runtime_selection_falls_back_to_host_managed_account_for_sso_user() {
     let dir = tempfile::tempdir().expect("tempdir");
     let owner_id = "3eee560a-7fe5-474c-965a-67cb69df3d04";
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
         owner_id,
         dir.path().join("local-dev"),
     ))
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let product_auth = services.product_auth.as_ref();
     let nearai_provider = AuthProviderId::new("nearai").expect("provider"); // safety: static test provider id is valid.
     let nearai_extension = ExtensionId::new("nearai").expect("extension"); // safety: static test extension id is valid.
 
@@ -258,7 +256,7 @@ async fn local_dev_nearai_runtime_selection_falls_back_to_host_managed_account_f
 }
 
 async fn invoke_json_with_context(
-    services: &RebornServices,
+    services: &RebornRuntimeSubstrate,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
@@ -273,7 +271,7 @@ async fn invoke_json_with_context(
 }
 
 async fn invoke_outcome_with_context(
-    services: &RebornServices,
+    services: &RebornRuntimeSubstrate,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,

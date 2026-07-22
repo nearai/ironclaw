@@ -1743,18 +1743,20 @@ slack_user_id = "U123"
             "http://127.0.0.1:3000",
         )
         .expect("notion dcr wiring");
-        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
-            .await
-            .expect("reborn services build");
+        let runtime = ironclaw_reborn_composition::build_reborn_runtime(
+            ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(services_input),
+        )
+        .await
+        .expect("reborn runtime builds");
 
         assert!(
-            services
-                .product_auth
-                .as_ref()
+            runtime
+                .product_auth_for_test()
                 .and_then(|product_auth| product_auth.as_auth_challenge_provider())
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[tokio::test]
@@ -1771,18 +1773,20 @@ slack_user_id = "U123"
             .expect("canonical callback origin"),
         )
         .expect("notion dcr wiring");
-        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
-            .await
-            .expect("reborn services build");
+        let runtime = ironclaw_reborn_composition::build_reborn_runtime(
+            ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(services_input),
+        )
+        .await
+        .expect("reborn runtime builds");
 
         assert!(
-            services
-                .product_auth
-                .as_ref()
+            runtime
+                .product_auth_for_test()
                 .and_then(|product_auth| product_auth.as_auth_challenge_provider())
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[tokio::test]
@@ -1810,18 +1814,20 @@ slack_user_id = "U123"
             &callback_origin,
         )
         .expect("notion dcr wiring");
-        let services = ironclaw_reborn_composition::build_reborn_services(services_input)
-            .await
-            .expect("reborn services build");
+        let runtime = ironclaw_reborn_composition::build_reborn_runtime(
+            ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(services_input),
+        )
+        .await
+        .expect("reborn runtime builds");
 
         assert!(
-            services
-                .product_auth
-                .as_ref()
+            runtime
+                .product_auth_for_test()
                 .and_then(|product_auth| product_auth.as_auth_challenge_provider())
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
+        runtime.shutdown().await.expect("runtime shutdown");
     }
 
     #[test]

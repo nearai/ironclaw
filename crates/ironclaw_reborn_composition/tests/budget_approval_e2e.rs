@@ -122,7 +122,7 @@ async fn build_runtime_with_pause_inducing_setup(
     root: std::path::PathBuf,
 ) -> (RebornRuntime, Arc<BudgetTestGateway>) {
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 5, 5));
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev(format!("{tag}-owner"), root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )

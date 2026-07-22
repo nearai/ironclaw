@@ -141,7 +141,7 @@ mod tests {
     /// it here mirrors the operator having flipped it on before letting the
     /// agent run tools.
     async fn enable_global_auto_approve_for_run(
-        services: &crate::RebornServices,
+        services: &crate::factory::RebornRuntimeSubstrate,
         run_context: &LoopRunContext,
         user_id: &UserId,
     ) {
@@ -514,7 +514,7 @@ mod tests {
     #[tokio::test]
     async fn extension_remove_tool_discloses_generic_unpair_disconnect_semantics() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(
+        let services = crate::factory::build_runtime_substrate(
             crate::RebornBuildInput::local_dev_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "extension-remove-generic-unpair-tool-copy",
@@ -638,7 +638,7 @@ mod tests {
             None,
         )
         .expect("valid test google oauth client config");
-        let services = crate::build_reborn_services(
+        let services = crate::factory::build_runtime_substrate(
             crate::RebornBuildInput::local_dev_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 owner,
@@ -682,7 +682,7 @@ mod tests {
     }
 
     async fn install_gsuite_extensions(
-        services: &crate::RebornServices,
+        services: &crate::factory::RebornRuntimeSubstrate,
         extension_state: GsuiteExtensionState,
     ) {
         let runtime_surfaces = services
@@ -1343,13 +1343,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_continues_exactly_where_first_look_preview_truncated() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-result-read-continuation",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -1688,13 +1688,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_chunk_does_not_persist_a_new_durable_record() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-result-read-no-amplification",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -2217,7 +2217,7 @@ mod tests {
     async fn local_dev_skill_activate_tool_loads_selected_skill_context() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-skill-activate-owner",
             storage_root.clone(),
         ))
@@ -2236,7 +2236,7 @@ mod tests {
             ),
         )
         .expect("skill file");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -2385,7 +2385,7 @@ mod tests {
     async fn capability_wiring_with_skill_activation_source_exposes_skill_activate_capability() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-skill-activate-wiring-owner",
             storage_root.clone(),
         ))
@@ -2439,7 +2439,7 @@ mod tests {
     async fn local_dev_external_tools_are_advertised_as_provider_tool_names() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-external-tool-owner",
             storage_root,
         ))
@@ -2449,7 +2449,7 @@ mod tests {
             .runtime_surfaces
             .as_ref()
             .expect("local runtime substrate");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let run_context = run_context("external-tool-provider-name").await;
         let catalog = Arc::new(ironclaw_turns::InMemoryExternalToolCatalog::new());
         catalog
@@ -2549,13 +2549,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_project_create_tool_persists_project_visible_to_owner() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-project-create-owner",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -2700,13 +2700,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_tool_returns_only_requested_thread_scoped_chunk() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-result-read-owner",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -3090,13 +3090,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_rejects_malformed_arguments_matrix() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-result-read-validation-owner",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -3438,13 +3438,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_result_read_denies_cross_thread_reference_access() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-result-read-cross-thread-owner",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -3613,13 +3613,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_outbound_delivery_targets_list_and_target_set_use_provider() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-outbound-delivery-owner",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -4337,7 +4337,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_yolo_outbound_delivery_target_set_bypasses_approval_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(
+        let services = crate::factory::build_runtime_substrate(
             crate::RebornBuildInput::local_dev(
                 "local-yolo-outbound-delivery-owner",
                 dir.path().join("local-dev"),
@@ -4526,13 +4526,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_outbound_delivery_capabilities_hidden_without_provider_facade() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-no-outbound-provider-owner",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services.host_runtime.clone().expect("host runtime");
+        let runtime = services.host_runtime.clone();
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -4636,7 +4636,7 @@ mod tests {
             .to_string_lossy()
             .into_owned();
 
-        let services = crate::build_reborn_services(
+        let services = crate::factory::build_runtime_substrate(
             crate::RebornBuildInput::local_dev_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "local-dev-yolo-host-owner",
@@ -4650,7 +4650,7 @@ mod tests {
         )
         .await
         .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
-        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime = services.host_runtime.clone(); // safety: test-only assertion in #[cfg(test)] module.
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -4893,7 +4893,7 @@ mod tests {
     async fn local_dev_capability_port_skill_install_writes_user_skill_root() {
         let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only setup in #[cfg(test)] module.
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(
+        let services = crate::factory::build_runtime_substrate(
             crate::RebornBuildInput::local_dev_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "local-dev-skill-port-owner",
@@ -4903,7 +4903,7 @@ mod tests {
         )
         .await
         .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
-        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime = services.host_runtime.clone(); // safety: test-only assertion in #[cfg(test)] module.
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -5019,13 +5019,13 @@ mod tests {
             .expect("canonical workspace root")
             .to_string_lossy()
             .into_owned();
-        let services = crate::build_reborn_services(
+        let services = crate::factory::build_runtime_substrate(
             crate::RebornBuildInput::local_dev("local-dev-no-host-owner", storage_root)
                 .with_local_dev_workspace_root(workspace_root.clone()),
         )
         .await
         .expect("local-dev services build"); // safety: test-only assertion in #[cfg(test)] module.
-        let runtime = services.host_runtime.clone().expect("host runtime"); // safety: test-only assertion in #[cfg(test)] module.
+        let runtime = services.host_runtime.clone(); // safety: test-only assertion in #[cfg(test)] module.
         let runtime_surfaces = services
             .runtime_surfaces
             .as_ref()
@@ -5176,10 +5176,9 @@ mod tests {
         let storage_root = dir.path().join("local-dev");
         let owner_id = "local-dev-github-surface-owner";
         {
-            let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
-                owner_id,
-                storage_root.clone(),
-            ))
+            let services = crate::factory::build_runtime_substrate(
+                crate::RebornBuildInput::local_dev(owner_id, storage_root.clone()),
+            )
             .await
             .expect("local-dev services build");
             let runtime_surfaces = services
@@ -5219,7 +5218,7 @@ mod tests {
                 .expect("activate github extension");
         }
 
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             owner_id,
             storage_root,
         ))
@@ -5248,7 +5247,7 @@ mod tests {
     async fn local_dev_capability_port_refreshes_extensions_after_activation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-live-github-surface-owner",
             storage_root,
         ))
@@ -5366,7 +5365,7 @@ mod tests {
     #[tokio::test]
     async fn local_dev_capability_port_extension_search_reads_system_catalog() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
+        let services = crate::factory::build_runtime_substrate(crate::RebornBuildInput::local_dev(
             "local-dev-extension-search-owner",
             dir.path().join("local-dev"),
         ))
@@ -5441,7 +5440,7 @@ mod tests {
     async fn register_does_not_rebuild_surface_mid_response() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = crate::build_reborn_services(
+        let services = crate::factory::build_runtime_substrate(
             crate::RebornBuildInput::local_dev_with_profile(
                 crate::RebornCompositionProfile::LocalDevYolo,
                 "local-dev-mid-response-owner",

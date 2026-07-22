@@ -140,7 +140,7 @@ impl ExtensionManagementTestHandle {
 
 /// Reads the same `runtime_surfaces.extension_management` handle production's
 /// `capability_wiring` reads (`runtime/local_dev.rs:132-133`) off a built
-/// `RebornServices`, for wiring
+/// `RebornRuntimeSubstrate`, for wiring
 /// [`RefreshingCapabilityPortTestParts::extension_management`].
 /// `None` when the services were built without a local-dev runtime (mirrors
 /// `local_dev_active_extension_authority_for_test`'s `None`-propagation
@@ -151,13 +151,9 @@ impl ExtensionManagementTestHandle {
 /// field `None` for the same no-op surface.
 #[cfg(feature = "test-support")]
 pub fn build_extension_management_for_test(
-    services: &crate::RebornServices,
+    runtime: &crate::RebornRuntime,
 ) -> Option<ExtensionManagementTestHandle> {
-    let extension_management = services
-        .runtime_surfaces
-        .as_ref()?
-        .extension_management
-        .clone()?;
+    let extension_management = runtime.extension_management.clone()?;
     Some(ExtensionManagementTestHandle {
         extension_management,
     })

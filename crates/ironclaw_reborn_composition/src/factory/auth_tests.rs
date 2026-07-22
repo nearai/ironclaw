@@ -177,17 +177,14 @@ impl RuntimeHttpEgress for RecordingOAuthEgress {
 #[tokio::test]
 async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-auth-owner", dir.path().join("local-dev"))
             .with_product_auth_ports(in_memory_product_auth_ports()),
     )
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let turn_coordinator = services
-        .turn_coordinator
-        .as_ref()
-        .expect("turn coordinator");
+    let product_auth = &services.product_auth;
+    let turn_coordinator = &services.turn_coordinator;
     let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
     let scope = turn_scope();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
@@ -304,7 +301,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
 #[tokio::test]
 async fn local_dev_google_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-google-oauth-owner", dir.path().join("local-dev"))
             .with_google_oauth_backend(OAuthClientConfig {
                 client_id: OAuthClientId::new("google-client-123").expect("client id"),
@@ -316,7 +313,7 @@ async fn local_dev_google_oauth_backend_builds_with_host_provider_config() {
     )
     .await
     .expect("local-dev services build");
-    assert!(services.product_auth.is_some());
+    let _ = &services.product_auth;
     assert!(
         services.local_dev_wasm_runtime_credential_provider_captured,
         "local-dev WASM runtime must capture the product-auth credential provider"
@@ -332,7 +329,7 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
             .await
             .expect("build libsql database"),
     );
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::libsql(
             RebornCompositionProfile::Production,
             "production-google-oauth-owner",
@@ -366,7 +363,7 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
     .await
     .expect("production services build");
 
-    assert!(services.product_auth.is_some());
+    let _ = &services.product_auth;
     assert!(
         services.local_dev_wasm_runtime_credential_provider_captured,
         "production WASM runtime must capture the product-auth credential provider"
@@ -382,7 +379,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
             .await
             .expect("build libsql database"),
     );
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::libsql(
             RebornCompositionProfile::Production,
             "production-auth-fanout-owner",
@@ -409,14 +406,9 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     )
     .await
     .expect("production services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let turn_coordinator = services
-        .turn_coordinator
-        .as_ref()
-        .expect("turn coordinator");
-    let graph = services
-        .runtime_store_graph()
-        .expect("production runtime store graph");
+    let product_auth = &services.product_auth;
+    let turn_coordinator = &services.turn_coordinator;
+    let turn_state = &services.turn_state;
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let first_scope = turn_scope();
     let second_scope = TurnScope::new_with_owner(
@@ -428,7 +420,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     );
     let first_run = submit_and_block_provider_auth_run(
         turn_coordinator.as_ref(),
-        graph.turn_state.as_ref(),
+        turn_state.as_ref(),
         first_scope.clone(),
         actor.clone(),
         "first",
@@ -438,7 +430,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     .await;
     let second_run = submit_and_block_provider_auth_run(
         turn_coordinator.as_ref(),
-        graph.turn_state.as_ref(),
+        turn_state.as_ref(),
         second_scope.clone(),
         actor.clone(),
         "second",
@@ -475,7 +467,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
 #[tokio::test]
 async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-notion-oauth-owner", dir.path().join("local-dev"))
             .with_google_oauth_backend(OAuthClientConfig {
                 client_id: OAuthClientId::new("google-client-123").expect("client id"),
@@ -494,13 +486,13 @@ async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
     )
     .await
     .expect("local-dev services build");
-    assert!(services.product_auth.is_some());
+    let _ = &services.product_auth;
 }
 
 #[tokio::test]
 async fn local_dev_notion_dcr_oauth_backend_builds_and_wires_registry() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev(
             "local-dev-notion-dcr-oauth-owner",
             dir.path().join("local-dev"),
@@ -511,13 +503,9 @@ async fn local_dev_notion_dcr_oauth_backend_builds_and_wires_registry() {
     .await
     .expect("local-dev services build");
 
-    assert!(services.product_auth.is_some());
+    let _ = &services.product_auth;
     assert!(
-        services
-            .product_auth
-            .as_ref()
-            .and_then(|product_auth| product_auth.as_auth_challenge_provider())
-            .is_some(),
+        services.product_auth.as_auth_challenge_provider().is_some(),
         "DCR-backed product auth must expose the challenge provider projection path"
     );
 }
@@ -575,7 +563,7 @@ async fn oauth_callback_exchanges_notion_through_reborn_product_auth_boundary() 
 #[tokio::test]
 async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev(
             "local-dev-google-oauth-secret-owner",
             dir.path().join("local-dev"),
@@ -590,23 +578,20 @@ async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() 
     )
     .await
     .expect("local-dev services build");
-    assert!(services.product_auth.is_some());
+    let _ = &services.product_auth;
 }
 
 #[tokio::test]
 async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-auth-stale-owner", dir.path().join("local-dev"))
             .with_product_auth_ports(in_memory_product_auth_ports()),
     )
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let turn_coordinator = services
-        .turn_coordinator
-        .as_ref()
-        .expect("turn coordinator");
+    let product_auth = &services.product_auth;
+    let turn_coordinator = &services.turn_coordinator;
     let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
     let scope = turn_scope();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
@@ -641,7 +626,7 @@ async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
 #[tokio::test]
 async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extension() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev(
             "local-dev-auth-lifecycle-owner",
             dir.path().join("local-dev"),
@@ -650,7 +635,7 @@ async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extens
     )
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let product_auth = &services.product_auth;
     let extension_management = services
         .runtime_surfaces
         .as_ref()
@@ -704,7 +689,7 @@ async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extens
 #[tokio::test]
 async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev(
             "local-dev-slack-auth-lifecycle-owner",
             dir.path().join("local-dev"),
@@ -727,11 +712,8 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
     )
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let turn_coordinator = services
-        .turn_coordinator
-        .as_ref()
-        .expect("turn coordinator");
+    let product_auth = &services.product_auth;
+    let turn_coordinator = &services.turn_coordinator;
     let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
     let extension_management = services
         .runtime_surfaces
@@ -833,7 +815,7 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
 #[tokio::test]
 async fn failed_lifecycle_activation_is_not_projected_as_completed_oauth() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev(
             "local-dev-auth-lifecycle-failure-owner",
             dir.path().join("local-dev"),
@@ -842,7 +824,7 @@ async fn failed_lifecycle_activation_is_not_projected_as_completed_oauth() {
     )
     .await
     .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let product_auth = &services.product_auth;
     let auth_scope = auth_scope_for_turn(
         &turn_scope(),
         &TurnActor::new(UserId::new("alice").unwrap()),

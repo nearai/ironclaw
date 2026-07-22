@@ -145,7 +145,7 @@ async fn build_production_runtime_with_poller(
             .expect("libsql db"),
     );
 
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::libsql(
             RebornCompositionProfile::Production,
             USER,

@@ -340,7 +340,7 @@ impl ExtensionInstallationStore for OwnerReadFailingStore {
 #[tokio::test]
 async fn build_webui_services_wires_lifecycle_owner_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let input = crate::RebornRuntimeInput::from_services(
+    let input = crate::RebornRuntimeInput::from_build_input(
         crate::RebornBuildInput::local_dev("runtime-owner", dir.path().join("local-dev"))
             .with_runtime_policy(
                 crate::local_dev_runtime_policy().expect("local-dev policy resolves"),

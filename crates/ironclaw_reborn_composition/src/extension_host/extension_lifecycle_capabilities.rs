@@ -428,7 +428,8 @@ mod tests {
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
     use super::*;
-    use crate::{OAuthClientConfig, RebornBuildInput, RebornServices, build_reborn_services};
+    use crate::factory::{RebornRuntimeSubstrate, build_runtime_substrate};
+    use crate::{OAuthClientConfig, RebornBuildInput};
     use ironclaw_product_workflow::{
         ChannelConnectionFacade, RebornServicesError, WebUiAuthenticatedCaller,
     };
@@ -601,16 +602,13 @@ mod tests {
     #[tokio::test]
     async fn local_dev_agent_surface_exposes_extension_lifecycle_tools() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(RebornBuildInput::local_dev(
             "extension-tools-surface-owner",
             dir.path().join("local-dev"),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services
-            .host_runtime
-            .as_ref()
-            .expect("host runtime composed");
+        let runtime = services.host_runtime.as_ref();
 
         let surface = runtime
             .visible_capabilities(visible_request(EXTENSION_LIFECYCLE_CAPABILITY_IDS))
@@ -692,16 +690,13 @@ mod tests {
     async fn local_dev_extension_lifecycle_tools_manage_visible_extension_surface() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(RebornBuildInput::local_dev(
             "extension-tools-owner",
             storage_root.clone(),
         ))
         .await
         .expect("local-dev services build");
-        let runtime = services
-            .host_runtime
-            .as_ref()
-            .expect("host runtime composed");
+        let runtime = services.host_runtime.as_ref();
         let extension_management = services
             .runtime_surfaces
             .as_ref()
@@ -877,7 +872,7 @@ mod tests {
             remove_context.resource_scope.project_id.clone(),
         );
         let runtime = crate::build_reborn_runtime(
-            crate::RebornRuntimeInput::from_services(
+            crate::RebornRuntimeInput::from_build_input(
                 RebornBuildInput::local_dev(
                     "extension-tools-remove-slack-owner",
                     storage_root.clone(),
@@ -940,7 +935,7 @@ mod tests {
         retry_remove_context.authenticated_actor_user_id =
             remove_context.authenticated_actor_user_id.clone();
         let remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
-            runtime.services(),
+            &runtime,
             EXTENSION_REMOVE_CAPABILITY_ID,
             remove_context,
             serde_json::json!({"extension_id": "slack"}),
@@ -953,7 +948,7 @@ mod tests {
             "tool removal deletes the package"
         );
         let retry_remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
-            runtime.services(),
+            &runtime,
             EXTENSION_REMOVE_CAPABILITY_ID,
             retry_remove_context,
             serde_json::json!({"extension_id": "slack"}),
@@ -1039,7 +1034,7 @@ credential_handle = "channel_ext_token"
             remove_context.resource_scope.project_id.clone(),
         );
         let runtime = crate::build_reborn_runtime(
-            crate::RebornRuntimeInput::from_services(
+            crate::RebornRuntimeInput::from_build_input(
                 RebornBuildInput::local_dev(
                     "extension-tools-remove-generic-channel-owner",
                     storage_root.clone(),
@@ -1080,7 +1075,6 @@ credential_handle = "channel_ext_token"
         let installation_id =
             ExtensionInstallationId::new("channel-ext").expect("valid installation id");
         let installation_store = runtime
-            .services()
             .extension_installation_store_for_test()
             .expect("live extension installation store");
 
@@ -1121,7 +1115,7 @@ credential_handle = "channel_ext_token"
             .await
             .expect("WebUI reinstall succeeds");
         let remove = crate::approval_test_support::invoke_json_with_local_dev_approval(
-            runtime.services(),
+            &runtime,
             EXTENSION_REMOVE_CAPABILITY_ID,
             remove_context,
             serde_json::json!({"extension_id": "channel-ext"}),
@@ -1171,7 +1165,7 @@ credential_handle = "channel_ext_token"
     async fn extension_remove_fails_closed_without_authenticated_actor_for_personal_cleanup() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(RebornBuildInput::local_dev(
             "extension-tools-remove-missing-actor",
             storage_root.clone(),
         ))
@@ -1230,7 +1224,7 @@ credential_handle = "channel_ext_token"
         // Removing an extension whose credential provider it exclusively owns must
         // revoke that credential so re-activation raises the auth gate again.
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(RebornBuildInput::local_dev(
             "extension-tools-remove-revoke-owner",
             dir.path().join("local-dev"),
         ))
@@ -1293,7 +1287,7 @@ credential_handle = "channel_ext_token"
         // share the `google` provider; removing Gmail must leave the Google
         // credential intact so Calendar keeps working.
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(
+        let services = build_runtime_substrate(
             RebornBuildInput::local_dev(
                 "extension-tools-remove-shared-owner",
                 dir.path().join("local-dev"),
@@ -1365,7 +1359,7 @@ credential_handle = "channel_ext_token"
     #[tokio::test]
     async fn local_dev_extension_activate_returns_auth_gate_for_missing_extension_credentials() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(RebornBuildInput::local_dev(
             "extension-tools-auth-gate-owner",
             dir.path().join("local-dev"),
         ))
@@ -1433,7 +1427,7 @@ credential_handle = "channel_ext_token"
     #[tokio::test]
     async fn local_dev_extension_search_distinguishes_configured_from_active() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(RebornBuildInput::local_dev(
             "extension-tools-active-search-owner",
             dir.path().join("local-dev"),
         ))
@@ -1588,7 +1582,7 @@ credential_handle = "channel_ext_token"
     #[tokio::test]
     async fn local_dev_extension_activate_returns_auth_gate_when_account_lacks_required_scope() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(
+        let services = build_runtime_substrate(
             RebornBuildInput::local_dev(
                 "extension-tools-scope-gate-owner",
                 dir.path().join("local-dev"),
@@ -1655,7 +1649,7 @@ credential_handle = "channel_ext_token"
     #[tokio::test]
     async fn local_dev_extension_activate_coalesces_gmail_oauth_scopes_into_one_auth_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(
+        let services = build_runtime_substrate(
             RebornBuildInput::local_dev(
                 "extension-tools-gmail-scope-union-owner",
                 dir.path().join("local-dev"),
@@ -1722,7 +1716,7 @@ credential_handle = "channel_ext_token"
     #[tokio::test]
     async fn local_dev_extension_activate_maps_corrupt_configured_account_to_backend() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(RebornBuildInput::local_dev(
             "extension-tools-corrupt-auth-owner",
             dir.path().join("local-dev"),
         ))
@@ -1773,7 +1767,7 @@ credential_handle = "channel_ext_token"
     async fn local_dev_extension_activate_routes_hosted_mcp_discovery_through_runtime_egress() {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(RebornBuildInput::local_dev(
             "extension-tools-hosted-mcp-owner",
             storage_root.clone(),
         ))
@@ -1819,7 +1813,7 @@ credential_handle = "channel_ext_token"
     #[tokio::test]
     async fn local_dev_extension_lifecycle_tool_lists_all_and_rejects_malformed_inputs() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let services = build_reborn_services(RebornBuildInput::local_dev(
+        let services = build_runtime_substrate(RebornBuildInput::local_dev(
             "extension-tools-invalid-owner",
             dir.path().join("local-dev"),
         ))
@@ -1868,7 +1862,7 @@ credential_handle = "channel_ext_token"
     }
 
     async fn invoke_json(
-        services: &RebornServices,
+        services: &RebornRuntimeSubstrate,
         capability_id: &str,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, RuntimeFailureKind> {
@@ -1882,7 +1876,7 @@ credential_handle = "channel_ext_token"
     }
 
     async fn invoke_outcome(
-        services: &RebornServices,
+        services: &RebornRuntimeSubstrate,
         capability_id: &str,
         input: serde_json::Value,
     ) -> RuntimeCapabilityOutcome {
@@ -1896,7 +1890,7 @@ credential_handle = "channel_ext_token"
     }
 
     async fn seed_configured_account(
-        services: &RebornServices,
+        services: &RebornRuntimeSubstrate,
         scope: &ResourceScope,
         provider: &str,
     ) {
@@ -1904,7 +1898,7 @@ credential_handle = "channel_ext_token"
     }
 
     async fn seed_configured_account_with_scopes(
-        services: &RebornServices,
+        services: &RebornRuntimeSubstrate,
         scope: &ResourceScope,
         provider: &str,
         scopes: &[&str],
@@ -1913,7 +1907,6 @@ credential_handle = "channel_ext_token"
         services
             .product_auth
             .as_ref()
-            .expect("product auth")
             .credential_account_service()
             .create_account(NewCredentialAccount {
                 scope: AuthProductScope::credential_owner(scope, AuthSurface::Api),

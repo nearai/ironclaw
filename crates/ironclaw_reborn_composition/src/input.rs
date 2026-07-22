@@ -280,7 +280,7 @@ impl RebornBuildInput {
     /// supplies one built where the operator's yolo disclosure is known). This
     /// exists so tests can construct a deliberately mismatched
     /// deployment/storage pairing and drive the fail-closed guard in
-    /// `build_reborn_services` — production behaviour, reached through a
+    /// `build_runtime_substrate` — production behaviour, reached through a
     /// pairing production rejects.
     #[cfg(test)]
     pub(crate) fn with_deployment(mut self, deployment: DeploymentConfig) -> Self {

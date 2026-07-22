@@ -11,7 +11,7 @@
 //! `RebornIntegrationGroup`'s real runs execute against its own
 //! `shared.turn_store` (`FilesystemTurnStateRowStore<HarnessTurnBackend>`,
 //! built by `build_default_planned_runtime`) — a DIFFERENT store than the one
-//! assembled by `build_reborn_services`. This module replaces a hardcoded
+//! assembled by `build_runtime_substrate`. This module replaces a hardcoded
 //! concrete field type with a trait-object snapshot source; every real
 //! turn-state implementation remains the same `FilesystemTurnStateRowStore<F>`
 //! over the configured filesystem backend.

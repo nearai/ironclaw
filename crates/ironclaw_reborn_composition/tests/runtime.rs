@@ -50,7 +50,7 @@ async fn runtime_composition_test_guard() -> tokio::sync::MutexGuard<'static, ()
 #[tokio::test]
 async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
     let input =
-        RebornRuntimeInput::from_services(RebornBuildInput::disabled("runtime-disabled-owner"));
+        RebornRuntimeInput::from_build_input(RebornBuildInput::disabled("runtime-disabled-owner"));
 
     let error = match build_reborn_runtime(input).await {
         Ok(_) => panic!("disabled profile is not a runnable REPL runtime"),
@@ -72,7 +72,7 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
             .await
             .unwrap(),
     );
-    let input = RebornRuntimeInput::from_services(RebornBuildInput::libsql(
+    let input = RebornRuntimeInput::from_build_input(RebornBuildInput::libsql(
         ironclaw_reborn_composition::RebornCompositionProfile::MigrationDryRun,
         "runtime-migration-dry-run-owner",
         db,
@@ -102,7 +102,7 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
 #[tokio::test]
 async fn runtime_requires_resolved_runtime_policy_for_local_dev() {
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
+    let input = RebornRuntimeInput::from_build_input(RebornBuildInput::local_dev(
         "runtime-policy-owner",
         root.path().join("local-dev"),
     ));
@@ -125,7 +125,7 @@ async fn hosted_single_tenant_volume_builds_live_runtime() {
     // "unsupported runtime profile checked above" unreachable arm.
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         local_runtime_build_input_with_options(
             RebornCompositionProfile::HostedSingleTenantVolume,
             "runtime-hosted-volume-owner",
@@ -156,7 +156,7 @@ async fn hosted_single_tenant_volume_builds_live_runtime() {
 async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev("runtime-test-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
@@ -264,7 +264,7 @@ impl HostManagedModelGateway for AlwaysReplyGateway {
 async fn inmemory_turn_state_row_store_serves_turn_and_drains_on_shutdown() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev("wb-durable-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
@@ -313,7 +313,7 @@ async fn inmemory_turn_state_row_store_serves_turn_and_drains_on_shutdown() {
 async fn send_user_message_with_cancellation_cancels_submitted_run() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev("runtime-cancel-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
@@ -365,7 +365,7 @@ async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
     )
     .unwrap();
     std::fs::write(skill_root.join("references/policy.md"), "filesystem policy").unwrap();
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev("runtime-skill-execution-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
@@ -469,7 +469,7 @@ async fn build_reborn_runtime_wires_third_party_hooks_when_enabled() {
     )
     .unwrap();
 
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev("runtime-hooks-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )
@@ -564,7 +564,7 @@ fn skill_md(name: &str, keyword: &str, prompt: &str) -> String {
 /// Caller-level config-wiring test: `build_reborn_runtime` correctly threads
 /// `TurnRunnerSettings::max_concurrent_runs_per_user` into the turn-state store.
 ///
-/// Exercises the full `build_reborn_runtime` → `build_reborn_services` →
+/// Exercises the full `build_reborn_runtime` →
 /// `FilesystemTurnStateRowStore::with_limits` wiring path so that a mis-wired or
 /// accidentally-dropped limit is caught at the composition boundary, not just in
 /// unit tests that hand-construct the store.
@@ -590,7 +590,7 @@ async fn build_reborn_runtime_wires_per_user_cap_from_turn_runner_settings() {
     use std::num::NonZeroU32;
 
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev("cap-wiring-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
@@ -664,7 +664,7 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
     use std::num::NonZeroUsize;
 
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev("multi-worker-guard-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
@@ -709,7 +709,7 @@ async fn multi_worker_runtime_does_not_raise_worker_stopped_while_workers_are_al
 async fn local_dev_test_support_interaction_service_accessors_build_real_services() {
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev(
             "test-support-accessors-owner",
             root.path().join("local-dev"),
@@ -729,19 +729,13 @@ async fn local_dev_test_support_interaction_service_accessors_build_real_service
     );
 
     let runtime = build_reborn_runtime(input).await.unwrap();
-    let turn_coordinator = runtime
-        .services()
-        .turn_coordinator
-        .clone()
-        .expect("local-dev runtime should wire a turn coordinator");
+    let turn_coordinator = runtime.turn_coordinator_for_test();
 
     let approval_interaction_service = runtime
-        .services()
         .local_dev_approval_interaction_service_for_test(turn_coordinator.clone())
         .expect("local-dev capability policy and grantee resolver should construct cleanly")
         .expect("local-dev runtime should support the approval interaction test accessor");
     let auth_interaction_service = runtime
-        .services()
         .local_dev_auth_interaction_service_for_test(turn_coordinator)
         .expect("local-dev runtime should support the auth interaction test accessor");
 
@@ -922,7 +916,7 @@ async fn local_dev_test_support_interaction_services_use_supplied_turn_coordinat
     let _guard = runtime_composition_test_guard().await;
     let root = tempfile::tempdir().unwrap();
     let tag = "coordinator-spy";
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev(format!("{tag}-owner"), root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy()),
     )
@@ -945,7 +939,6 @@ async fn local_dev_test_support_interaction_services_use_supplied_turn_coordinat
     // `write_filesystem` capabilities instead of gating them. Disable it here
     // so the scripted write actually parks on `BlockedApproval`.
     runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test")
         .set(AutoApproveSettingInput {
@@ -964,16 +957,11 @@ async fn local_dev_test_support_interaction_services_use_supplied_turn_coordinat
         .await
         .expect("disable auto-approve for the coordinator-spy scope");
 
-    let inner_coordinator = runtime
-        .services()
-        .turn_coordinator
-        .clone()
-        .expect("local-dev runtime should wire a turn coordinator");
+    let inner_coordinator = runtime.turn_coordinator_for_test();
     let spy = Arc::new(SpyTurnCoordinator::new(inner_coordinator));
     let spy_dyn: Arc<dyn TurnCoordinator> = spy.clone();
 
     let approval_interaction_service = runtime
-        .services()
         .local_dev_approval_interaction_service_for_test(spy_dyn)
         .expect("local-dev capability policy and grantee resolver should construct cleanly")
         .expect("local-dev runtime should support the approval interaction test accessor");

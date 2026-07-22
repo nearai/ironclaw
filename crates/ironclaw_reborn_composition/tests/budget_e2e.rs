@@ -117,7 +117,7 @@ fn build_input(
     gateway: Arc<BudgetTestGateway>,
     cost_table: Arc<dyn ModelCostTable>,
 ) -> RebornRuntimeInput {
-    RebornRuntimeInput::from_services(
+    RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev(format!("{tenant}-owner"), owner_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )

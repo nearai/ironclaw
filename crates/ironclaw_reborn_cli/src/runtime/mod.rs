@@ -539,7 +539,7 @@ pub(crate) fn build_runtime_input_with_options(
     let slack_personal_lazy_slot = runtime_services.slack_personal_lazy_slot.clone();
 
     #[allow(unused_mut)]
-    let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
+    let mut runtime_input = RebornRuntimeInput::from_build_input(runtime_services.services_input)
         .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
         .with_trigger_poller_settings(trigger_poller_settings(
             runtime_services.config_file.as_ref(),

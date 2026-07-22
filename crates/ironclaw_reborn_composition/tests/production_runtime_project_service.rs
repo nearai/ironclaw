@@ -88,7 +88,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
             .expect("libsql db"),
     );
 
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::libsql(
             RebornCompositionProfile::Production,
             OWNER,

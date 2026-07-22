@@ -1,9 +1,10 @@
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
-    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornRuntimeProfileOptions,
-    RebornWorkerReadiness, build_reborn_services, hosted_single_tenant_volume_runtime_policy,
-    local_dev_yolo_runtime_policy, local_runtime_build_input_with_options,
+    RebornReadinessDiagnosticStatus, RebornReadinessState, RebornRuntime, RebornRuntimeInput,
+    RebornRuntimeProfileOptions, RebornWorkerReadiness, build_reborn_runtime,
+    hosted_single_tenant_volume_runtime_policy, local_dev_yolo_runtime_policy,
+    local_runtime_build_input_with_options,
 };
 
 use ironclaw_host_api::runtime_policy::{FilesystemBackendKind, RuntimeProfile, SecretMode};
@@ -13,6 +14,12 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_runtime_policy::ResolveError;
 use serde_json::json;
+
+async fn build_runtime_for_test(input: RebornBuildInput) -> RebornRuntime {
+    build_reborn_runtime(RebornRuntimeInput::from_build_input(input))
+        .await
+        .expect("runtime should build")
+}
 
 #[test]
 fn profile_parse_accepts_kebab_and_snake_case() {
@@ -446,41 +453,41 @@ async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnost
         Default::default(),
     )
     .unwrap();
-    let services = build_reborn_services(input).await.unwrap();
+    let runtime = build_runtime_for_test(input).await;
+    let readiness = runtime.readiness();
 
     assert_eq!(
-        services.readiness.profile,
+        readiness.profile,
         RebornCompositionProfile::HostedSingleTenantVolume
     );
     assert_eq!(
-        services.readiness.state,
+        readiness.state,
         RebornReadinessState::HostedSingleTenantVolumePreviewValidated
     );
     assert_eq!(
-        services.readiness.diagnostics,
+        readiness.diagnostics,
         vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()]
     );
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
 async fn local_dev_factory_readiness_includes_non_production_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let runtime = build_runtime_for_test(RebornBuildInput::local_dev(
         "readiness-contract-owner",
         dir.path().to_path_buf(),
     ))
-    .await
-    .unwrap();
+    .await;
+    let readiness = runtime.readiness();
 
+    assert_eq!(readiness.profile, RebornCompositionProfile::LocalDev);
+    assert_eq!(readiness.state, RebornReadinessState::DevOnly);
     assert_eq!(
-        services.readiness.profile,
-        RebornCompositionProfile::LocalDev
-    );
-    assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
-    assert_eq!(
-        services.readiness.diagnostics,
+        readiness.diagnostics,
         vec![RebornReadinessDiagnostic::local_dev()]
     );
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -496,17 +503,16 @@ async fn local_dev_yolo_factory_readiness_includes_non_production_diagnostic() {
     )
     .unwrap()
     .with_local_dev_confirmed_host_home_root(dir.path().to_path_buf());
-    let services = build_reborn_services(input).await.unwrap();
+    let runtime = build_runtime_for_test(input).await;
+    let readiness = runtime.readiness();
 
+    assert_eq!(readiness.profile, RebornCompositionProfile::LocalDevYolo);
+    assert_eq!(readiness.state, RebornReadinessState::DevOnly);
     assert_eq!(
-        services.readiness.profile,
-        RebornCompositionProfile::LocalDevYolo
-    );
-    assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
-    assert_eq!(
-        services.readiness.diagnostics,
+        readiness.diagnostics,
         vec![RebornReadinessDiagnostic::local_dev_yolo()]
     );
+    runtime.shutdown().await.unwrap();
 }
 
 #[test]

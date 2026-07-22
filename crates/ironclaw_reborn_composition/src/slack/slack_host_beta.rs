@@ -640,7 +640,13 @@ impl SlackPersonalUserBinder for ProvisioningSlackPersonalUserBinder {
 
 #[derive(Clone)]
 struct SlackHostBetaRuntimeParts {
-    runtime_surfaces: Arc<crate::factory::RebornRuntimeSurfaces>,
+    host_state_filesystem:
+        Arc<ironclaw_filesystem::ScopedFilesystem<ironclaw_filesystem::CompositeRootFilesystem>>,
+    host_runtime_http_egress: ironclaw_host_runtime::HostRuntimeHttpEgressPort,
+    outbound_state: Arc<dyn OutboundStateStore>,
+    delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
+    outbound_preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
+    approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
@@ -651,19 +657,48 @@ struct SlackHostBetaRuntimeParts {
 
 impl SlackHostBetaRuntimeParts {
     fn from_runtime(runtime: &RebornRuntime) -> Result<Self, SlackHostBetaBuildError> {
-        let runtime_surfaces = runtime
-            .services()
-            .runtime_surfaces
-            .as_ref()
-            .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+        let delivered_gate_routes = Arc::clone(
+            runtime
+                .delivered_gate_routes
+                .as_ref()
+                .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?,
+        );
         let approval_interaction_service: Arc<dyn ApprovalInteractionService> = Arc::new(
             crate::delivered_gate_routing::DeliveredGateRoutingApprovalService::new(
                 runtime.webui_approval_interaction_service(),
-                Arc::clone(&runtime_surfaces.delivered_gate_routes),
+                Arc::clone(&delivered_gate_routes),
             ),
         );
         Ok(Self {
-            runtime_surfaces: Arc::clone(runtime_surfaces),
+            host_state_filesystem: Arc::clone(
+                runtime
+                    .host_state_filesystem
+                    .as_ref()
+                    .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?,
+            ),
+            host_runtime_http_egress: runtime
+                .host_runtime_http_egress
+                .clone()
+                .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?,
+            outbound_state: Arc::clone(
+                runtime
+                    .outbound_state
+                    .as_ref()
+                    .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?,
+            ),
+            delivered_gate_routes,
+            outbound_preferences: Arc::clone(
+                runtime
+                    .outbound_preferences
+                    .as_ref()
+                    .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?,
+            ),
+            approval_requests: Arc::clone(
+                runtime
+                    .approval_requests
+                    .as_ref()
+                    .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?,
+            ) as Arc<dyn ironclaw_run_state::ApprovalRequestStore>,
             thread_service: runtime.webui_thread_service(),
             turn_coordinator: runtime.webui_turn_coordinator(),
             approval_interaction_service,
@@ -719,12 +754,10 @@ fn build_triggered_run_delivery_hook_from_parts(
         auth_requirement: slack_request_signature_auth_requirement(),
     }));
     let egress = slack_protocol_egress_from_parts(parts, config, token_handle)?;
-    let outbound_store: Arc<dyn OutboundStateStore> =
-        Arc::clone(&parts.runtime_surfaces.outbound_state);
-    let route_store: Arc<dyn DeliveredGateRouteStore> =
-        Arc::clone(&parts.runtime_surfaces.delivered_gate_routes);
+    let outbound_store: Arc<dyn OutboundStateStore> = Arc::clone(&parts.outbound_state);
+    let route_store: Arc<dyn DeliveredGateRouteStore> = Arc::clone(&parts.delivered_gate_routes);
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
-        Arc::clone(&parts.runtime_surfaces.outbound_preferences);
+        Arc::clone(&parts.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let binding_service: Arc<dyn ConversationBindingService> =
         Arc::new(NoopConversationBindingService);
@@ -741,15 +774,14 @@ fn build_triggered_run_delivery_hook_from_parts(
         delivery_sink,
         auth_challenges: parts.auth_challenge_provider.clone(),
         auth_flow_canceller: parts.auth_flow_canceller.clone(),
-        approval_requests: Some(Arc::clone(&parts.runtime_surfaces.approval_requests)
-            as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
+        approval_requests: Some(Arc::clone(&parts.approval_requests)),
     };
     // Per-trigger delivery target resolution runs over the same durable Slack
     // host state (channel routes + personal DM targets) the outbound target
     // surface publishes ids from, so an id selected at trigger_create time
     // resolves at fire time or fails closed.
     let host_state = Arc::new(FilesystemSlackHostState::new(
-        Arc::clone(&parts.runtime_surfaces.host_state_filesystem),
+        Arc::clone(&parts.host_state_filesystem),
         config.tenant_id.clone(),
         config.user_id.clone(),
         config.agent_id.clone(),
@@ -799,13 +831,14 @@ pub fn build_slack_host_beta_mounts(
     ) {
         return Err(SlackHostBetaBuildError::TenantAppSelectorRequired);
     }
-    let runtime_surfaces = runtime
-        .services()
-        .runtime_surfaces
-        .as_ref()
-        .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?;
+    let host_state_filesystem = Arc::clone(
+        runtime
+            .host_state_filesystem
+            .as_ref()
+            .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?,
+    );
     let state = Arc::new(FilesystemSlackHostState::new(
-        Arc::clone(&runtime_surfaces.host_state_filesystem),
+        Arc::clone(&host_state_filesystem),
         config.tenant_id.clone(),
         config.user_id.clone(),
         config.agent_id.clone(),
@@ -897,8 +930,12 @@ pub fn build_slack_host_beta_mounts(
     // is idempotent: a second call (if this function is called more than once)
     // is silently ignored.
     {
-        let delivery_store: Arc<dyn TriggeredRunDeliveryStore> =
-            Arc::clone(&runtime_surfaces.triggered_run_delivery);
+        let delivery_store: Arc<dyn TriggeredRunDeliveryStore> = Arc::clone(
+            runtime
+                .triggered_run_delivery
+                .as_ref()
+                .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?,
+        );
         match build_triggered_run_delivery_hook(runtime, &config, delivery_store) {
             Ok(hook) => {
                 let hook_set = runtime.set_trigger_post_submit_hook(hook);
@@ -1138,14 +1175,13 @@ fn build_slack_installation_record_with_resolvers(
         Arc::clone(&parts.thread_service),
         Arc::clone(&parts.turn_coordinator),
     ));
-    let route_store: Arc<dyn DeliveredGateRouteStore> =
-        Arc::clone(&parts.runtime_surfaces.delivered_gate_routes);
+    let route_store: Arc<dyn DeliveredGateRouteStore> = Arc::clone(&parts.delivered_gate_routes);
     let workflow = Arc::new(
         DefaultProductWorkflow::new(
             inbound,
             Arc::new(
                 RebornFilesystemIdempotencyLedger::new(
-                    Arc::clone(&parts.runtime_surfaces.host_state_filesystem),
+                    Arc::clone(&parts.host_state_filesystem),
                     slack_egress_scope_template(&config),
                 )
                 .with_settled_entry_limit(
@@ -1183,10 +1219,9 @@ fn build_slack_installation_record_with_resolvers(
     ));
 
     let egress = slack_protocol_egress_from_parts(parts, &config, token_handle)?;
-    let outbound_store: Arc<dyn OutboundStateStore> =
-        Arc::clone(&parts.runtime_surfaces.outbound_state);
+    let outbound_store: Arc<dyn OutboundStateStore> = Arc::clone(&parts.outbound_state);
     let preferences: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
-        Arc::clone(&parts.runtime_surfaces.outbound_preferences);
+        Arc::clone(&parts.outbound_preferences);
     let delivery_sink: Arc<dyn OutboundDeliverySink> = Arc::new(NoopSlackDeliverySink);
     let observer = Arc::new(FinalReplyDeliveryObserver::with_settings(
         FinalReplyDeliveryServices {
@@ -1202,8 +1237,7 @@ fn build_slack_installation_record_with_resolvers(
             delivery_sink,
             auth_challenges: parts.auth_challenge_provider.clone(),
             auth_flow_canceller: parts.auth_flow_canceller.clone(),
-            approval_requests: Some(Arc::clone(&parts.runtime_surfaces.approval_requests)
-                as Arc<dyn ironclaw_run_state::ApprovalRequestStore>),
+            approval_requests: Some(Arc::clone(&parts.approval_requests)),
         },
         FinalReplyDeliverySettings::default(),
     ));
@@ -1244,13 +1278,8 @@ fn slack_protocol_egress_from_parts(
     config: &SlackHostBetaConfig,
     token_handle: EgressCredentialHandle,
 ) -> Result<Arc<dyn ProtocolHttpEgress>, SlackHostBetaBuildError> {
-    let host_egress = parts
-        .runtime_surfaces
-        .host_runtime_http_egress
-        .clone()
-        .ok_or(SlackHostBetaBuildError::RuntimeHttpEgressUnavailable)?;
     Ok(Arc::new(SlackProtocolHttpEgress::new(
-        host_egress,
+        parts.host_runtime_http_egress.clone(),
         Arc::new(StaticSlackEgressCredentialProvider::new(
             token_handle.clone(),
             config.bot_token.expose_secret().to_string(),
@@ -1740,7 +1769,7 @@ mod tests {
     async fn build_slack_host_beta_mounts_exposes_events_and_oauth_binding_only() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(
+            RebornRuntimeInput::from_build_input(
                 RebornBuildInput::local_dev("slack-host-beta-owner", root.path().join("local-dev"))
                     .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
             )
@@ -3239,7 +3268,7 @@ mod tests {
     async fn build_slack_host_beta_mounts_rejects_team_only_selector_for_oauth_binding() {
         let root = tempfile::tempdir().expect("tempdir");
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(
+            RebornRuntimeInput::from_build_input(
                 RebornBuildInput::local_dev("slack-host-beta-owner", root.path().join("local-dev"))
                     .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
             )
@@ -3477,13 +3506,13 @@ mod tests {
         runtime: &RebornRuntime,
         config: &SlackHostBetaConfig,
     ) -> Arc<dyn SlackPersonalDmTargetStore> {
-        let runtime_surfaces = runtime
-            .services()
-            .runtime_surfaces
-            .as_ref()
-            .expect("local runtime");
         Arc::new(FilesystemSlackHostState::new(
-            Arc::clone(&runtime_surfaces.host_state_filesystem),
+            Arc::clone(
+                runtime
+                    .host_state_filesystem
+                    .as_ref()
+                    .expect("local runtime host state filesystem"),
+            ),
             config.tenant_id.clone(),
             config.user_id.clone(),
             config.agent_id.clone(),
@@ -3570,7 +3599,7 @@ mod tests {
             build_input = build_input.with_host_runtime_http_egress_for_test(host_egress);
         }
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(build_input)
+            RebornRuntimeInput::from_build_input(build_input)
                 .with_identity(RebornRuntimeIdentity {
                     tenant_id: TENANT.to_string(),
                     agent_id: AGENT.to_string(),
@@ -4155,7 +4184,7 @@ mod tests {
         let build_input = RebornBuildInput::local_dev(USER, root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy().expect("local policy"));
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(build_input)
+            RebornRuntimeInput::from_build_input(build_input)
                 .with_identity(RebornRuntimeIdentity {
                     tenant_id: TENANT.to_string(),
                     agent_id: AGENT.to_string(),
@@ -4318,14 +4347,13 @@ mod tests {
         }
 
         // Read delivery records from the unified outbound store that the
-        // production hook writes through.  `runtime_surfaces` is `pub(crate)`
-        // — accessible here because this test lives in the same crate.
-        let runtime_surfaces = runtime
-            .services()
-            .runtime_surfaces
-            .as_ref()
-            .expect("local-dev runtime has runtime_surfaces services");
-        let delivery_store = Arc::clone(&runtime_surfaces.triggered_run_delivery);
+        // production hook writes through.
+        let delivery_store = Arc::clone(
+            runtime
+                .triggered_run_delivery
+                .as_ref()
+                .expect("local-dev runtime has triggered-run delivery store"),
+        );
 
         // Poll for the delivery record.  The driver spawns a background task;
         // the `NoDefaultConfigured` fast-path normally completes well within
@@ -4380,19 +4408,17 @@ mod tests {
 
         let (runtime, _tmp) = runtime_with_trigger_poller().await;
 
-        let runtime_surfaces = runtime
-            .services()
-            .runtime_surfaces
-            .as_ref()
-            .expect("local-dev runtime has runtime_surfaces services");
-
         // Build the delivery driver via the production entry point.
         // `build_triggered_run_delivery_hook` now returns the concrete
         // `Arc<TriggeredRunDeliveryDriver>` directly, so we can inspect
         // `communication_preferences_for_test` through the same code path
         // that the production call site uses.
-        let delivery_store: Arc<dyn TriggeredRunDeliveryStore> =
-            Arc::clone(&runtime_surfaces.triggered_run_delivery);
+        let delivery_store: Arc<dyn TriggeredRunDeliveryStore> = Arc::clone(
+            runtime
+                .triggered_run_delivery
+                .as_ref()
+                .expect("local-dev runtime has triggered-run delivery store"),
+        );
         let driver = build_triggered_run_delivery_hook(&runtime, &config(), delivery_store)
             .expect("build_triggered_run_delivery_hook should succeed");
 
@@ -4405,7 +4431,12 @@ mod tests {
         // will produce a different pointer pair and this assertion fails.
         let driver_store = driver.communication_preferences_for_test();
         let facade_store: Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository> =
-            Arc::clone(&runtime_surfaces.outbound_preferences);
+            Arc::clone(
+                runtime
+                    .outbound_preferences
+                    .as_ref()
+                    .expect("local-dev runtime has outbound preferences"),
+            );
         assert!(
             Arc::ptr_eq(&driver_store, &facade_store),
             "build_triggered_run_delivery_hook (production entry point) wired a DIFFERENT \

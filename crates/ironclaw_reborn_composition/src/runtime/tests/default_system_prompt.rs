@@ -187,7 +187,7 @@ fn runtime_input(
     requests: Arc<StdMutex<Vec<HostManagedModelRequest>>>,
 ) -> RebornRuntimeInput {
     let gateway = Arc::new(RecordingGateway { requests });
-    RebornRuntimeInput::from_services(
+    RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev("runtime-system-prompt-owner", storage_root)
             .with_runtime_policy(local_dev_runtime_policy()),
     )

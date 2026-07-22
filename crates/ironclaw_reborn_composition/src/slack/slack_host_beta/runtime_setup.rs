@@ -69,7 +69,7 @@ pub(super) async fn build_runtime_mounts(
 ) -> Result<SlackHostBetaMounts, SlackHostBetaBuildError> {
     let parts = Arc::new(SlackHostBetaRuntimeParts::from_runtime(runtime)?);
     let state = Arc::new(FilesystemSlackHostState::new(
-        Arc::clone(&parts.runtime_surfaces.host_state_filesystem),
+        Arc::clone(&parts.host_state_filesystem),
         config.tenant_id.clone(),
         config.operator_user_id.clone(),
         config.agent_id.clone(),
@@ -82,7 +82,7 @@ pub(super) async fn build_runtime_mounts(
         config.project_id.clone(),
         config.operator_user_id.clone(),
         setup_store,
-        runtime.services().secret_store(),
+        runtime.secret_store(),
     ));
     let token_handle = slack_bot_token_handle()?;
     let binding_store: Arc<dyn RebornUserIdentityBindingStore> = state.clone();
@@ -96,15 +96,13 @@ pub(super) async fn build_runtime_mounts(
     // (libSQL / Postgres / local disk) is a property of the host-state
     // root filesystem, shared with the idempotency ledger.
     let conversation_services = Arc::new(
-        RebornFilesystemConversationServices::new(Arc::clone(
-            &parts.runtime_surfaces.host_state_filesystem,
-        ))
-        .await
-        .map_err(
-            |error| SlackHostBetaBuildError::ConversationStoreUnavailable {
-                reason: error.to_string(),
-            },
-        )?,
+        RebornFilesystemConversationServices::new(Arc::clone(&parts.host_state_filesystem))
+            .await
+            .map_err(
+                |error| SlackHostBetaBuildError::ConversationStoreUnavailable {
+                    reason: error.to_string(),
+                },
+            )?,
     );
     let conversation_actor_pairings: Arc<
         dyn ironclaw_conversations::ConversationActorPairingService,
@@ -144,7 +142,7 @@ pub(super) async fn build_runtime_mounts(
         Arc::clone(&channel_route_store),
         Arc::clone(&setup_service),
     );
-    if let Some(extension_management) = &parts.runtime_surfaces.extension_management {
+    if let Some(extension_management) = &runtime.extension_management {
         channel_routes = channel_routes.with_setup_activation(Arc::new(
             DynamicSlackChannelSetupActivation::new(Arc::clone(extension_management)),
         ));
@@ -188,8 +186,12 @@ pub(super) async fn build_runtime_mounts(
             }
         }
     }
-    let delivery_store: Arc<dyn TriggeredRunDeliveryStore> =
-        Arc::clone(&parts.runtime_surfaces.triggered_run_delivery);
+    let delivery_store: Arc<dyn TriggeredRunDeliveryStore> = Arc::clone(
+        runtime
+            .triggered_run_delivery
+            .as_ref()
+            .ok_or(SlackHostBetaBuildError::DurableHostStateUnavailable)?,
+    );
     let trigger_delivery_hook: Arc<dyn PostSubmitDeliveryHook> =
         Arc::new(DynamicSlackTriggeredRunDeliveryHook::new(
             Arc::clone(&parts),

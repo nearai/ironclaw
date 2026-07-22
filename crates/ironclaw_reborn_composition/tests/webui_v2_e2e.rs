@@ -694,7 +694,7 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     if let Some(google_oauth_backend) = google_oauth_backend {
         build_input = build_input.with_google_oauth_backend(google_oauth_backend);
     }
-    let input = RebornRuntimeInput::from_services(build_input)
+    let input = RebornRuntimeInput::from_build_input(build_input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -713,7 +713,6 @@ async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     // scripted tool calls complete instead of parking on the per-tool approval
     // gate (which would otherwise leave the turn without an assistant reply).
     runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test")
         .set(ironclaw_approvals::AutoApproveSettingInput {
@@ -758,7 +757,7 @@ async fn build_two_user_harness(
 ) -> Harness {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("local-dev");
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev(USER, storage_root).with_runtime_policy(policy),
     )
     .with_identity(RebornRuntimeIdentity {
@@ -775,7 +774,6 @@ async fn build_two_user_harness(
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test")
         .set(ironclaw_approvals::AutoApproveSettingInput {
@@ -1541,9 +1539,7 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
     let harness = build_harness().await;
     let product_auth = harness
         .runtime
-        .services()
-        .product_auth
-        .as_ref()
+        .product_auth_for_test()
         .expect("local-dev runtime wires product auth");
     product_auth
         .credential_account_service()
@@ -1915,7 +1911,7 @@ mod operator_llm_config {
         let boot = RebornBootConfig::new(home, RebornProfile::LocalDev);
 
         let gateway = Arc::new(ToolCallingGateway::default());
-        let input = RebornRuntimeInput::from_services(
+        let input = RebornRuntimeInput::from_build_input(
             RebornBuildInput::local_dev(USER, storage_root)
                 .with_runtime_policy(local_dev_effective_policy()),
         )

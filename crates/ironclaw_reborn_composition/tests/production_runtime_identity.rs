@@ -92,7 +92,7 @@ async fn production_runtime_wires_identity_resolver_and_isolates_tenants() {
             .expect("libsql db"),
     );
 
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::libsql(
             RebornCompositionProfile::Production,
             "prod-identity-owner",

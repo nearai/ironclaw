@@ -83,7 +83,7 @@ impl RebornReadinessDiagnostic {
 /// Which runtime substrate a deployment assembles.
 ///
 /// Replaces the `requires_production_shape` / `uses_local_runtime_substrate`
-/// profile predicates as the value `build_reborn_services` dispatches on: a
+/// profile predicates as the value `build_runtime_substrate` dispatches on: a
 /// deployment selects a substrate, it does not *have a mode that implies one*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSubstrate {

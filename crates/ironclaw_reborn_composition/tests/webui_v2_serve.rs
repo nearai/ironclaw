@@ -3269,7 +3269,7 @@ async fn telegram_public_mount_enforces_descriptor_body_limit_and_404s_path_prob
     };
 
     let root = tempfile::tempdir().expect("tempdir");
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev("tg-serve-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy().expect("local policy")),
     )

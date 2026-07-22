@@ -70,7 +70,7 @@ async fn production_runtime_webui_serves_automations_without_local_runtime() {
             .expect("libsql db"),
     );
 
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::libsql(
             RebornCompositionProfile::Production,
             "runtime-automation-prod-owner",

@@ -558,7 +558,7 @@ impl RebornRuntimeInput {
     /// provided — there is no in-memory-only fallback at this layer because
     /// the substrate decisions (local-dev root, libsql handle, etc.) belong
     /// to the caller, not the assembly.
-    pub fn from_services(services: RebornBuildInput) -> Self {
+    pub fn from_build_input(services: RebornBuildInput) -> Self {
         Self {
             services: Some(services),
             llm: None,

@@ -41,13 +41,13 @@ use ironclaw_turns::{
 };
 
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
+use crate::factory::RebornRuntimeSubstrate;
 use crate::local_dev_authorization::{
     StoreApprovalSettingsProvider, local_dev_effects_require_approval,
 };
 use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use crate::profile_approval_authorization::ApprovalSettingsProvider;
 use crate::{
-    RebornServices,
     projection::{CapabilityDisplayPreviewResult, CapabilityDisplayPreviewStore},
     runtime::ComposedSelectableSkillContextSource,
 };
@@ -96,7 +96,7 @@ pub(super) struct CapabilityPortWiring {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn capability_wiring(
-    services: &RebornServices,
+    services: &RebornRuntimeSubstrate,
     thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
     policy: Arc<BuiltinCapabilityPolicy>,
@@ -106,7 +106,7 @@ pub(super) fn capability_wiring(
     outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>>,
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> Option<CapabilityPortWiring> {
-    let runtime = services.host_runtime.clone()?;
+    let runtime = services.host_runtime.clone();
     let runtime_surfaces = services.runtime_surfaces.as_ref()?;
     let workspace_mounts = runtime_surfaces.workspace_mounts.clone();
     let memory_mounts = runtime_surfaces.memory_mounts.clone();

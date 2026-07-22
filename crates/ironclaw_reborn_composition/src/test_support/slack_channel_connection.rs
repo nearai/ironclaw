@@ -26,7 +26,7 @@ use std::sync::Arc;
 use ironclaw_host_api::{AgentId, TenantId, UserId};
 use ironclaw_product_workflow::{ChannelConnectionFacade, WebUiAuthenticatedCaller};
 
-use crate::factory::RebornServices;
+use crate::runtime::RebornRuntime;
 use crate::slack::slack_actor_identity::SLACK_IDENTITY_PROVIDER;
 use crate::slack::slack_channel_connection::{
     SlackChannelConnectionFacadeTestParts, SlackPersonalCredentialCleanup,
@@ -86,11 +86,11 @@ pub struct SlackChannelConnectionTestBundle {
 /// be the one extension-removal cleanup dispatches to, so a test composing
 /// twice must find out immediately.
 pub fn build_slack_channel_connection_for_test(
-    services: &RebornServices,
+    runtime: &RebornRuntime,
     config: SlackChannelConnectionTestConfig,
 ) -> Result<SlackChannelConnectionTestBundle, String> {
-    let runtime_surfaces = services
-        .runtime_surfaces
+    let host_state_filesystem = runtime
+        .host_state_filesystem
         .as_ref()
         .ok_or("slack channel-connection test support requires a local-dev runtime")?;
     let tenant_id = TenantId::new(config.tenant_id).map_err(|error| error.to_string())?;
@@ -106,7 +106,7 @@ pub fn build_slack_channel_connection_for_test(
     // (`slack_host_beta.rs`), over the SAME `host_state_filesystem` the
     // production Slack host uses.
     let state = Arc::new(FilesystemSlackHostState::new(
-        Arc::clone(&runtime_surfaces.host_state_filesystem),
+        Arc::clone(host_state_filesystem),
         tenant_id.clone(),
         host_user_id.clone(),
         agent_id.clone(),
@@ -130,7 +130,7 @@ pub fn build_slack_channel_connection_for_test(
     // Mirrors `build_webui_services_with_slack_host_beta_mounts`: the caller's
     // `slack_personal` credential is revoked through the same product-auth
     // lifecycle cleanup production disconnect uses.
-    let personal_credential_cleanup = services
+    let personal_credential_cleanup = runtime
         .product_auth
         .clone()
         .map(|auth| auth as Arc<dyn SlackPersonalCredentialCleanup>);
@@ -149,8 +149,11 @@ pub fn build_slack_channel_connection_for_test(
             personal_dm_target_store: state,
             personal_credential_cleanup,
         });
-    if runtime_surfaces
+    let channel_connection_facade_slot = runtime
         .channel_connection_facade_slot
+        .as_ref()
+        .ok_or("slack channel-connection test support requires a channel facade slot")?;
+    if channel_connection_facade_slot
         .set(Arc::clone(&facade))
         .is_err()
     {
@@ -222,7 +225,7 @@ impl SlackChannelConnectionTestBundle {
     /// live runtime's in-memory handles. This is the integration-tier
     /// approximation of a process restart: it proves the durable binding is
     /// reconstructible the way production reconstructs it on boot
-    /// (`build_reborn_services` → `local_dev_slack_host_state_filesystem` →
+    /// (`build_runtime_substrate` → `local_dev_slack_host_state_filesystem` →
     /// Slack host-state mounts). Results come back in `user_ids` order; the
     /// single reopen means a positive probe and its non-vacuity control read
     /// the same reconstructed store. Tests only.

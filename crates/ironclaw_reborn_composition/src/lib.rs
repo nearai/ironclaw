@@ -2,11 +2,8 @@
 
 //! Reborn composition root.
 //!
-//! Two entry points:
+//! Main entry point:
 //!
-//! - [`build_reborn_services`] — substrate/product facades (host runtime,
-//!   turn coordinator, product auth). Useful when an outer harness wires the loop
-//!   drivers / turn-runner itself (e.g. v1 `AppBuilder`).
 //! - [`build_reborn_runtime`] — full runtime assembly: substrate + loop
 //!   driver registry + LLM model gateway + turn-runner worker, spawned
 //!   as one unit. This is the single entry
@@ -79,12 +76,12 @@ pub use factory::AttachmentTestSupport;
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
+pub use factory::builtin_first_party_trust_policy;
 #[cfg(feature = "migration-support")]
 pub use factory::extension_installation_store_for_migration;
 pub use factory::local_dev_db_path;
 pub use factory::open_local_dev_secret_store;
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
-pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
 pub use ironclaw_auth::GoogleOAuthRouteConfig;

@@ -21,12 +21,12 @@ use ironclaw_loop_host::{
 use ironclaw_product_workflow::{
     AuthInteractionRejectionKind, ListPendingAuthInteractionsRequest, ProductWorkflowError,
 };
-use ironclaw_turns::runner::{BlockRunRequest, ClaimRunRequest, TurnRunTransitionPort};
+use ironclaw_turns::runner::{BlockRunRequest, ClaimRunRequest};
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, GateRef, IdempotencyKey,
     InMemoryRunProfileResolver, LoopCheckpointStateRef, ReplyTargetBindingRef, RunProfileRequest,
     SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
-    TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore,
+    TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope,
 };
 
 use crate::input::RebornBuildInput;
@@ -115,7 +115,6 @@ async fn local_dev_runtime_auth_interactions_are_unavailable_without_flow_record
     .expect("runtime builds");
     assert!(
         runtime
-            .services
             .product_auth
             .as_ref()
             .expect("product auth")
@@ -162,7 +161,7 @@ async fn build_runtime(
         services = services.with_product_auth_ports(ports);
     }
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(services)
+        RebornRuntimeInput::from_build_input(services)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: format!("{owner}-tenant"),
                 agent_id: format!("{owner}-agent"),
@@ -188,15 +187,10 @@ async fn submit_and_block_auth_run(
     gate_ref: &GateRef,
     credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 ) -> TurnRunId {
-    let runtime_surfaces = runtime
-        .services
-        .runtime_surfaces
-        .as_ref()
-        .expect("local runtime");
     let admission = AllowAllTurnAdmissionPolicy;
     let profiles = InMemoryRunProfileResolver::default();
-    let submit = runtime_surfaces
-        .turn_state
+    let submit = runtime
+        .turn_state_store
         .submit_turn(
             SubmitTurnRequest {
                 requested_model: None,
@@ -228,8 +222,8 @@ async fn submit_and_block_auth_run(
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
-    runtime_surfaces
-        .turn_state
+    runtime
+        .turn_state_store
         .claim_next_run(ClaimRunRequest {
             runner_id,
             lease_token,
@@ -238,8 +232,8 @@ async fn submit_and_block_auth_run(
         .await
         .expect("claim run")
         .expect("queued run exists");
-    runtime_surfaces
-        .turn_state
+    runtime
+        .turn_state_store
         .block_run(BlockRunRequest {
             run_id,
             runner_id,
@@ -265,7 +259,6 @@ async fn create_auth_flow(
     gate_ref: &GateRef,
 ) {
     runtime
-        .services
         .product_auth
         .as_ref()
         .expect("product auth")

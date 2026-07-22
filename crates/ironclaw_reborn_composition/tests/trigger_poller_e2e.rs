@@ -403,7 +403,7 @@ async fn build_runtime_with<G: HostManagedModelGateway + 'static>(
     .expect("local-yolo runtime input")
     .with_local_dev_confirmed_host_home_root(host_home_root);
 
-    let input = RebornRuntimeInput::from_services(input)
+    let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -441,7 +441,7 @@ async fn build_runtime_with_tool_disclosure<G: HostManagedModelGateway + 'static
     .expect("local-yolo runtime input")
     .with_local_dev_confirmed_host_home_root(host_home_root);
 
-    let input = RebornRuntimeInput::from_services(input)
+    let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: TENANT.to_string(),
             agent_id: AGENT.to_string(),
@@ -462,7 +462,6 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
     // same tenant/user) exercise the dispatch path instead of stopping at the
     // per-tool approval gate.
     let auto_approve = runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("local-dev exposes auto-approve settings for test");
     let auto_approve_scope = trigger_management_execution_context().resource_scope;
@@ -476,9 +475,7 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
         .expect("enable global auto-approve for trigger management dispatch");
 
     let host_runtime = runtime
-        .services()
-        .host_runtime
-        .as_deref()
+        .host_runtime_for_test()
         .expect("runtime exposes host runtime");
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(

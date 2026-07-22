@@ -54,7 +54,7 @@ async fn telegram_runtime_with(
     customize: impl FnOnce(RebornRuntimeInput) -> RebornRuntimeInput,
 ) -> (crate::RebornRuntime, tempfile::TempDir) {
     let root = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture
-    let input = RebornRuntimeInput::from_services(
+    let input = RebornRuntimeInput::from_build_input(
         RebornBuildInput::local_dev("telegram-host-owner", root.path().join("local-dev"))
             .with_runtime_policy(local_dev_runtime_policy().expect("local policy")), // safety: test-only fixture
     )
@@ -246,11 +246,9 @@ async fn unconfigured_dynamic_trigger_hook_records_terminal_skipped_outcome() {
         .expect("unconfigured hook persists terminal outcome");
 
     let record = runtime
-        .services()
-        .runtime_surfaces
-        .as_ref()
-        .expect("local runtime")
         .triggered_run_delivery
+        .as_ref()
+        .expect("local runtime triggered-run delivery store")
         .load_triggered_run_delivery(run_id)
         .await
         .expect("outcome lookup")

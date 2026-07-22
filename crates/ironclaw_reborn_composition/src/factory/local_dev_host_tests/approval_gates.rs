@@ -30,7 +30,7 @@ use crate::approval_test_support::disable_global_auto_approve;
 #[tokio::test]
 async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one_shot_lease() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-approval-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
@@ -40,10 +40,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime"); // safety: test-only service fixture invariant.
+    let host_runtime = services.host_runtime.as_ref(); // safety: test-only service fixture invariant.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: constant capability id.
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo approved"});
@@ -103,7 +100,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
     let process_port = Arc::new(ironclaw_host_runtime::TenantSandboxProcessPort::new(
         transport.clone(),
     ));
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("sandbox-port-owner", dir.path().join("local-dev"))
             .with_runtime_policy(tenant_sandbox_process_policy())
             .with_runtime_process_binding(RebornRuntimeProcessBinding::tenant_sandbox(
@@ -116,7 +113,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
-    let host_runtime = services.host_runtime.as_ref().expect("host runtime");
+    let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo composed sandbox", "timeout": 9});
@@ -166,7 +163,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-approval-owner",
@@ -181,10 +178,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime");
+    let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
     let context = shell_execution_context(
         "local-dev-yolo-approval-owner",
@@ -218,7 +212,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
 #[tokio::test]
 async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-auto-approve-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
@@ -228,10 +222,7 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime");
+    let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
     let context = shell_execution_context(
         "local-dev-auto-approve-owner",
@@ -275,7 +266,7 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
     // never written → defaults ON) has an eligible tool auto-approved at
     // dispatch, with no approval gate. No disable call — the default must carry.
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only fixture setup.
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-echo-default-on", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
@@ -285,10 +276,7 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime"); // safety: test-only service fixture invariant.
+    let host_runtime = services.host_runtime.as_ref(); // safety: test-only service fixture invariant.
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability"); // safety: constant capability id.
     let context =
         echo_spawn_execution_context("local-dev-echo-default-on", "thread-echo-default-on");
@@ -317,7 +305,7 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
 #[tokio::test]
 async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-echo-default-ask", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
@@ -327,10 +315,7 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime");
+    let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
     let context = echo_spawn_execution_context("local-dev-echo-default-ask", "thread-echo-ask");
     disable_global_auto_approve(runtime_surfaces, &context).await;
@@ -361,7 +346,7 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
 #[tokio::test]
 async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-echo-ask-resume", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
@@ -371,10 +356,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime");
+    let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"message": "hello ask-each-time"});
@@ -487,7 +469,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
 #[tokio::test]
 async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-echo-legacy-grant", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
@@ -497,10 +479,7 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime");
+    let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
     let context =
         echo_spawn_execution_context("local-dev-echo-legacy-grant", "thread-echo-legacy-grant");
@@ -552,7 +531,7 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
 #[tokio::test]
 async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev(
             "local-dev-echo-settings-allow",
             dir.path().join("local-dev"),
@@ -565,10 +544,7 @@ async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime");
+    let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
     let context = echo_spawn_execution_context(
         "local-dev-echo-settings-allow",
@@ -623,7 +599,7 @@ async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
 #[tokio::test]
 async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev(
             "local-dev-settings-allow-owner",
             dir.path().join("local-dev"),
@@ -636,10 +612,7 @@ async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime");
+    let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
     let context = shell_execution_context(
         "local-dev-settings-allow-owner",
@@ -696,7 +669,7 @@ async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let host_home = dir.path().join("home");
     std::fs::create_dir_all(&host_home).expect("host home root");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-yolo-ask-owner",
@@ -711,10 +684,7 @@ async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime");
+    let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
     let context = shell_execution_context("local-dev-yolo-ask-owner", "thread-local-yolo-ask");
 
@@ -781,7 +751,7 @@ impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTranspor
 #[tokio::test]
 async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-deny-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
@@ -791,7 +761,7 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
-    let host_runtime = services.host_runtime.as_ref().expect("host runtime");
+    let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo denied"});
@@ -1009,7 +979,7 @@ fn local_dev_minimal_enterprise_policy() -> ironclaw_host_api::runtime_policy::E
 #[tokio::test]
 async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve_is_off() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-minimal-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_minimal_policy()),
     )
@@ -1019,10 +989,7 @@ async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
+    let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
     let context = shell_execution_context("local-dev-minimal-owner", "thread-minimal-approval");
     disable_global_auto_approve(runtime_surfaces, &context).await;
@@ -1051,7 +1018,7 @@ async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve
 #[tokio::test]
 async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("ent-minimal-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_minimal_enterprise_policy()),
     )
@@ -1061,10 +1028,7 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
+    let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
     let context = shell_execution_context("ent-minimal-owner", "thread-ent-minimal");
     disable_global_auto_approve(runtime_surfaces, &context).await;
@@ -1096,7 +1060,7 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
 #[tokio::test]
 async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev(
             "local-dev-spawn-approval-owner",
             dir.path().join("local-dev"),
@@ -1109,10 +1073,7 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
+    let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo spawn-approved"});
@@ -1174,7 +1135,7 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
 #[tokio::test]
 async fn local_dev_ask_destructive_spawn_dispatch_only_capability_requires_approval() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-echo-spawn-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
@@ -1184,10 +1145,7 @@ async fn local_dev_ask_destructive_spawn_dispatch_only_capability_requires_appro
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
+    let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability"); // safety: test-only helper in #[cfg(test)] module.
     let context = echo_spawn_execution_context("local-dev-echo-spawn-owner", "thread-echo-spawn");
     disable_global_auto_approve(runtime_surfaces, &context).await;
@@ -1263,16 +1221,13 @@ fn echo_dispatch_allowed_effects() -> Vec<EffectKind> {
 #[tokio::test]
 async fn local_dev_ungranted_capability_returns_denied_not_approval_gate() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-deny-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
     .await
     .expect("local-dev services build"); // safety: test-only helper in #[cfg(test)] module.
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
+    let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     // Context grants only shell; apply_patch is not in the grant set.
     let context = shell_execution_context("local-dev-deny-owner", "thread-deny-passthrough");
     let capability_id =
@@ -1298,7 +1253,7 @@ async fn local_dev_ungranted_capability_returns_denied_not_approval_gate() {
 #[tokio::test]
 async fn local_dev_one_shot_lease_regates_on_second_invocation() {
     let dir = tempfile::tempdir().expect("tempdir"); // safety: test-only helper in #[cfg(test)] module.
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev("local-dev-regate-owner", dir.path().join("local-dev"))
             .with_runtime_policy(local_dev_policy()),
     )
@@ -1308,10 +1263,7 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
         .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
-    let host_runtime = services
-        .host_runtime
-        .as_ref()
-        .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
+    let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo regate"});

@@ -74,7 +74,7 @@ async fn production_turn_state_store_uses_row_layout() {
 }
 
 #[test]
-fn build_reborn_services_uses_filesystem_resource_governor() {
+fn build_runtime_substrate_uses_filesystem_resource_governor() {
     let dir = tempfile::tempdir().expect("tempdir");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -82,7 +82,7 @@ fn build_reborn_services_uses_filesystem_resource_governor() {
         .expect("tokio runtime");
 
     let services = runtime
-        .block_on(build_reborn_services(RebornBuildInput::local_dev(
+        .block_on(build_runtime_substrate(RebornBuildInput::local_dev(
             "resource-governor-enabled-env-owner",
             dir.path().join("local-dev"),
         )))
@@ -365,7 +365,7 @@ async fn pair_trigger_creator_maps_pairing_failure_to_sanitized_backend_error() 
 async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntimeSurfaces> {
     let local_dev_root = tempfile::tempdir().expect("tempdir");
     let owner_user_id = "pairing-owner";
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
         owner_user_id,
         local_dev_root.path().join("local-dev"),
     ))
@@ -500,19 +500,19 @@ async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backe
 #[tokio::test]
 async fn local_dev_services_include_repl_runtime_substrate() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
         "local-dev-substrate-owner",
         dir.path().join("local-dev"),
     ))
     .await
     .expect("local-dev services build");
 
-    assert!(services.host_runtime.is_some());
-    assert!(services.turn_coordinator.is_some());
-    assert!(services.product_auth.is_some());
+    let _ = &services.host_runtime;
+    let _ = &services.turn_coordinator;
+    let _ = &services.product_auth;
     assert!(services.runtime_surfaces.is_some());
-    assert!(services.runtime_store_graph().is_some());
-    assert!(services.runtime_surfaces.is_some());
+    let _ = &services.scoped_filesystem;
+    let _ = &services.turn_state;
     assert!(
         services
             .runtime_surfaces
@@ -538,7 +538,7 @@ async fn hosted_single_tenant_rejects_local_dev_storage_input() {
         false,
     ));
 
-    let error = match build_reborn_services(input).await {
+    let error = match build_runtime_substrate(input).await {
         Ok(_) => {
             panic!("hosted single-tenant must use hosted single-tenant Postgres storage")
         }
@@ -556,7 +556,7 @@ async fn hosted_single_tenant_rejects_local_dev_storage_input() {
 #[tokio::test]
 async fn local_dev_memory_first_party_tools_use_mounted_memory_root() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
         "local-dev-memory-owner",
         dir.path().join("local-dev"),
     ))
@@ -610,7 +610,7 @@ async fn local_dev_memory_documents_persist_across_rebuilds() {
     let owner = "local-dev-durable-memory-owner";
 
     let services =
-        build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+        build_runtime_substrate(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
             .await
             .expect("first local-dev services build");
     invoke_json(
@@ -627,9 +627,10 @@ async fn local_dev_memory_documents_persist_across_rebuilds() {
     .expect("memory_write should persist through the libsql /memory root");
     drop(services);
 
-    let rebuilt = build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
-        .await
-        .expect("rebuilt local-dev services");
+    let rebuilt =
+        build_runtime_substrate(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+            .await
+            .expect("rebuilt local-dev services");
 
     let tree = invoke_json(
         &rebuilt,
@@ -665,10 +666,10 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     let local_dev_root = dir.path().join("local-dev");
     let owner = "local-dev-durable-auth-owner";
     let services =
-        build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+        build_runtime_substrate(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
             .await
             .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
+    let product_auth = &services.product_auth;
     let scope = AuthProductScope::new(
         ResourceScope::local_default(UserId::new(owner).unwrap(), InvocationId::new()).unwrap(),
         AuthSurface::Callback,
@@ -710,10 +711,11 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
         "local-dev default product-auth must create durable SecretStore-backed handles"
     );
 
-    let rebuilt = build_reborn_services(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
-        .await
-        .expect("local-dev services rebuild");
-    let rebuilt_product_auth = rebuilt.product_auth.as_ref().expect("product auth");
+    let rebuilt =
+        build_runtime_substrate(RebornBuildInput::local_dev(owner, local_dev_root.clone()))
+            .await
+            .expect("local-dev services rebuild");
+    let rebuilt_product_auth = rebuilt.product_auth.as_ref();
     let rebuilt_account = rebuilt_product_auth
         .credential_account_service()
         .get_account(ironclaw_auth::CredentialAccountLookupRequest::new(
@@ -1122,7 +1124,7 @@ async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root(
 #[tokio::test]
 async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
         "local-dev-gsuite-owner",
         dir.path().join("local-dev"),
     ))
@@ -1184,7 +1186,6 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     services
         .product_auth
         .as_ref()
-        .expect("product auth")
         .credential_account_service()
         .create_account(NewCredentialAccount {
             scope: auth_scope,
@@ -1245,7 +1246,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
 #[tokio::test]
 async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-notion-mcp-owner",
@@ -1295,7 +1296,6 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
     let outcome = services
         .host_runtime
         .as_ref()
-        .expect("host runtime")
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             CapabilityId::new("notion.notion-search").unwrap(),
@@ -1314,7 +1314,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
 #[tokio::test]
 async fn local_dev_web_access_installs_activates_and_dispatches_through_host_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::local_dev_with_profile(
             RebornCompositionProfile::LocalDevYolo,
             "local-dev-web-access-owner",
@@ -1352,7 +1352,6 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
     let outcome = services
         .host_runtime
         .as_ref()
-        .expect("host runtime")
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
             CapabilityId::new("web-access.search").unwrap(),
@@ -1491,7 +1490,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     let owner = UserId::new("configured-owner").expect("owner");
     let tenant = TenantId::new("configured-tenant").expect("tenant");
     let agent = ironclaw_host_api::AgentId::new("configured-agent").expect("agent");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::libsql(
             RebornCompositionProfile::Production,
             owner.as_str(),
@@ -1519,9 +1518,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     .await
     .expect("production libsql services build");
 
-    let graph = services
-        .runtime_store_graph()
-        .expect("production runtime store graph");
+    let turn_state = &services.turn_state;
     assert!(services.runtime_surfaces.is_none());
     let scope = ironclaw_turns::TurnScope::new_with_owner(
         tenant,
@@ -1553,7 +1550,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         product_context: None,
     };
     ironclaw_turns::TurnStateStore::submit_turn(
-        graph.turn_state.as_ref(),
+        turn_state.as_ref(),
         submit,
         &ironclaw_turns::AllowAllTurnAdmissionPolicy,
         &InMemoryRunProfileResolver::default(),
@@ -1598,7 +1595,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     );
     let assertion_filesystem = LibSqlRootFilesystem::new(Arc::clone(&db));
     let owner = UserId::new("default-owner").expect("owner");
-    let services = build_reborn_services(
+    let services = build_runtime_substrate(
         RebornBuildInput::libsql(
             RebornCompositionProfile::Production,
             owner.as_str(),
@@ -1625,9 +1622,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     .await
     .expect("production libsql services build");
 
-    let graph = services
-        .runtime_store_graph()
-        .expect("production runtime store graph");
+    let turn_state = &services.turn_state;
     let default_path =
         VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/rows/v1/deltas/log")
             .expect("default turn-state row delta log path");
@@ -1666,7 +1661,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         product_context: None,
     };
     ironclaw_turns::TurnStateStore::submit_turn(
-        graph.turn_state.as_ref(),
+        turn_state.as_ref(),
         submit,
         &ironclaw_turns::AllowAllTurnAdmissionPolicy,
         &InMemoryRunProfileResolver::default(),
@@ -1716,7 +1711,7 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
             .expect("build libsql database"),
     );
 
-    let result = build_reborn_services(
+    let result = build_runtime_substrate(
         RebornBuildInput::libsql(
             RebornCompositionProfile::Production,
             "",
@@ -1752,7 +1747,7 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
 async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let owner = "local-dev-nearai-mcp-owner";
-    let services = build_reborn_services(nearai_bootstrap_input_with_base(
+    let services = build_runtime_substrate(nearai_bootstrap_input_with_base(
         owner,
         dir.path().join("local-dev"),
         "https://nearai-db.example.test:9443/v1",
@@ -1814,7 +1809,6 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     let accounts = services
         .product_auth
         .as_ref()
-        .expect("product auth")
         .credential_account_record_source()
         .accounts_for_owner(&auth_scope)
         .await
@@ -1833,13 +1827,9 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     let resolver = ProductAuthRuntimeCredentialResolver::new_with_refresh(
         services
             .product_auth
-            .as_ref()
-            .expect("product auth")
             .runtime_credential_account_selection_service(),
         services
             .product_auth
-            .as_ref()
-            .expect("product auth")
             .runtime_credential_account_refresh_service(),
     );
     let sso_scope = ResourceScope {
@@ -1876,13 +1866,12 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
         AuthSurface::Api,
     );
 
-    let first = build_reborn_services(nearai_bootstrap_input(owner, root, "nearai-first-key"))
+    let first = build_runtime_substrate(nearai_bootstrap_input(owner, root, "nearai-first-key"))
         .await
         .expect("first local-dev services build");
     let first_account = first
         .product_auth
         .as_ref()
-        .expect("product auth")
         .credential_account_record_source()
         .accounts_for_owner(&auth_scope)
         .await
@@ -1905,7 +1894,7 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
             )
             .expect("valid NEAR AI MCP bootstrap config"),
         ),
-        first.product_auth.as_ref().expect("product auth"),
+        &first.product_auth,
         extension_management,
         auth_scope.resource.clone(),
     )
@@ -1917,8 +1906,6 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
     );
     let accounts = first
         .product_auth
-        .as_ref()
-        .expect("product auth")
         .credential_account_record_source()
         .accounts_for_owner(&auth_scope)
         .await
@@ -1948,7 +1935,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
-    let services = build_reborn_services(nearai_bootstrap_input(
+    let services = build_runtime_substrate(nearai_bootstrap_input(
         owner,
         dir.path().join("local-dev"),
         "nearai-test-key",
@@ -1983,7 +1970,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
             )
             .expect("valid NEAR AI MCP bootstrap config"),
         ),
-        services.product_auth.as_ref().expect("product auth"),
+        &services.product_auth,
         extension_management,
         local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
             .expect("NEAR AI MCP owner scope"),
@@ -2022,7 +2009,7 @@ async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
         secrecy::SecretString::from("nearai-test-key"),
     )
     .expect("config shape");
-    let error = build_reborn_services(
+    let error = build_runtime_substrate(
         RebornBuildInput::local_dev(
             "local-dev-nearai-mcp-invalid-owner",
             dir.path().join("local-dev"),
@@ -2068,7 +2055,7 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
     let thread_id = ironclaw_host_api::ThreadId::new("persisted-thread").unwrap();
 
     let services =
-        build_reborn_services(RebornBuildInput::local_dev("persist-owner", root.clone()))
+        build_runtime_substrate(RebornBuildInput::local_dev("persist-owner", root.clone()))
             .await
             .expect("first local-dev services build");
     services
@@ -2087,9 +2074,10 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
         .expect("persist thread");
     drop(services);
 
-    let rebuilt = build_reborn_services(RebornBuildInput::local_dev("persist-owner", root.clone()))
-        .await
-        .expect("rebuilt local-dev services");
+    let rebuilt =
+        build_runtime_substrate(RebornBuildInput::local_dev("persist-owner", root.clone()))
+            .await
+            .expect("rebuilt local-dev services");
     let history = rebuilt
         .runtime_surfaces
         .as_ref()
@@ -2117,7 +2105,7 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
     std::fs::create_dir_all(marker_path.parent().expect("marker parent"))
         .expect("marker directory");
     std::fs::write(&marker_path, "done").expect("marker file");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
         "local-dev-marker-workspace-owner",
         storage_root,
     ))
@@ -2159,7 +2147,7 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
 async fn local_dev_skill_management_invokes_through_first_party_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
         "local-dev-skill-tools-owner",
         storage_root.clone(),
     ))
@@ -2220,7 +2208,7 @@ async fn local_dev_skill_management_invokes_through_first_party_runtime() {
 async fn local_dev_workspace_mounts_do_not_authorize_skill_writes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let storage_root = dir.path().join("local-dev");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
         "local-dev-workspace-skill-boundary-owner",
         storage_root.clone(),
     ))
@@ -2396,18 +2384,6 @@ fn production_skill_management_mounts_use_production_namespace() {
 }
 
 #[test]
-fn disabled_services_do_not_include_repl_runtime_substrate() {
-    let services = RebornServices::disabled();
-
-    assert!(services.host_runtime.is_none());
-    assert!(services.turn_coordinator.is_none());
-    assert!(services.product_auth.is_none());
-    assert!(services.runtime_surfaces.is_none());
-    assert!(services.runtime_store_graph().is_none());
-    assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
-}
-
-#[test]
 fn production_readiness_reflects_product_auth_presence() {
     let without_auth = readiness_for(RebornCompositionProfile::Production, true, true, false);
     assert_eq!(
@@ -2456,7 +2432,7 @@ fn readiness_for_profile_diagnostics_cover_cutover_states() {
 }
 
 async fn invoke_json(
-    services: &RebornServices,
+    services: &RebornRuntimeSubstrate,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
@@ -2731,7 +2707,7 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 #[tokio::test]
 async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(RebornBuildInput::local_dev(
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
         "outbound-store-alloc-owner",
         dir.path().join("local-dev"),
     ))
