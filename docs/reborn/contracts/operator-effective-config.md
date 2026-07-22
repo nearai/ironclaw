@@ -16,6 +16,12 @@ The first implementation slice should expose the LLM default route through the e
 
 ## ProductSurface mutation path
 
+Operator config reads are descriptor-backed ProductSurface query views:
+`operator_config_list` for the full projection and `operator_config_key` for a
+single key. The legacy `list_operator_config` and `get_operator_config_key`
+facade methods are compatibility wrappers over those same query paths while
+`RebornServicesApi` shrinks toward §5.2.
+
 The global approval toggle `agent.auto_approve_tools` is supported as a boolean
 operator config key. Its WebUI route still returns the typed operator config
 projection, but the write itself must dispatch through `ProductSurface::invoke`

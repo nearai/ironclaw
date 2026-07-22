@@ -54,22 +54,23 @@ use ironclaw_product_workflow::{
     ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_STATUS_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
-    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
-    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornExtensionSurface,
-    RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_STATUS_VIEW, OperatorLogsService,
+    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
+    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
+    ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
+    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAddMemberRequest,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
+    RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
     RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
     RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
     RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
@@ -9640,6 +9641,46 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
             .is_none(),
         "default must clear the settings-page persistent always-allow policy"
     );
+}
+
+#[tokio::test]
+async fn operator_config_reads_are_available_as_product_views() {
+    let services = services_with_operator_approval_config();
+
+    let list_page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("operator config list view");
+    let list: RebornOperatorConfigListResponse =
+        serde_json::from_value(list_page.payload).expect("operator config list payload");
+    assert_eq!(
+        operator_config_entry_value(&list, "agent.auto_approve_tools"),
+        &json!(true)
+    );
+
+    let key_page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: OPERATOR_CONFIG_KEY_VIEW.id.to_string(),
+                params: json!({ "key": "tool.tool.alpha" }),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("operator config key view");
+    let key: RebornOperatorConfigGetResponse =
+        serde_json::from_value(key_page.payload).expect("operator config key payload");
+    assert_eq!(key.entry.key, "tool.tool.alpha");
+    assert_eq!(key.entry.value["state"], "always_allow");
+    assert_eq!(key.entry.value["effective_source"], "global");
 }
 
 #[tokio::test]

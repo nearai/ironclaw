@@ -29,22 +29,23 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     FsMount, LOGS_VIEW, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
-    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_DIAGNOSTICS_VIEW,
-    OPERATOR_LOGS_VIEW, OPERATOR_STATUS_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind,
-    ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_STATUS_VIEW,
+    ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat,
+    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -718,6 +719,41 @@ impl RebornServicesApi for StubServices {
                         RebornOperatorArea::Logs,
                     ))
                     .expect("operator logs payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
+                *self.list_operator_config_calls.lock().expect("lock") += 1;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornOperatorConfigListResponse {
+                        entries: self.operator_config_entries.lock().expect("lock").clone(),
+                        precedence: vec!["default".to_string()],
+                        diagnostics: Vec::new(),
+                    })
+                    .expect("operator config list payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_CONFIG_KEY_VIEW.id => {
+                let key = query.params["key"]
+                    .as_str()
+                    .expect("operator config key param")
+                    .to_string();
+                self.get_operator_config_key_calls
+                    .lock()
+                    .expect("lock")
+                    .push(key.clone());
+                let entry = self
+                    .operator_config_entries
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .find(|entry| entry.key == key)
+                    .cloned()
+                    .unwrap_or_else(|| operator_config_entry(key, serde_json::json!("configured")));
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornOperatorConfigGetResponse { entry })
+                        .expect("operator config key payload"),
                     next_cursor: None,
                 })
             }
@@ -3661,6 +3697,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .iter()
         .map(|query| query.view_id.clone())
         .collect();
+    assert!(view_ids.contains(&OPERATOR_CONFIG_LIST_VIEW.id.to_string()));
     assert!(view_ids.contains(&OPERATOR_DIAGNOSTICS_VIEW.id.to_string()));
     assert!(view_ids.contains(&OPERATOR_STATUS_VIEW.id.to_string()));
     assert!(view_ids.contains(&OPERATOR_LOGS_VIEW.id.to_string()));

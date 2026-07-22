@@ -80,6 +80,7 @@ mod lifecycle_setup;
 mod llm_config;
 mod log_views;
 mod operator_command_views;
+mod operator_config_views;
 mod project_fs;
 mod projects;
 mod run_artifact;
@@ -129,6 +130,7 @@ pub use llm_config::{
 };
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
 pub use operator_command_views::{OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_STATUS_VIEW};
+pub use operator_config_views::{OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
@@ -3681,34 +3683,17 @@ where
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
-        let Some(config) = &self.operator_approval_config else {
-            return Ok(operator_config_not_wired_response());
-        };
-        let scope = caller_resource_scope(&caller);
-        let mut entries = vec![auto_approve_config_entry(config, &scope).await?];
-        let tools = config
-            .tool_catalog
-            .list_operator_tools(&scope.user_id)
-            .await;
-        let tool_context = operator_tool_permission_context(config, &scope, &tools).await?;
-        entries.extend(
-            try_join_all(
-                tools
-                    .iter()
-                    .map(|tool| tool_config_entry_with_context(&tool_context, tool)),
+        let page = self
+            .query(
+                caller,
+                RebornViewQuery {
+                    view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
+                    params: serde_json::json!({}),
+                    cursor: None,
+                },
             )
-            .await?,
-        );
-        Ok(RebornOperatorConfigListResponse {
-            entries,
-            precedence: vec![
-                "locked".to_string(),
-                "override".to_string(),
-                "global".to_string(),
-                "default".to_string(),
-            ],
-            diagnostics: Vec::new(),
-        })
+            .await?;
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
     }
 
     async fn get_operator_config_key(
@@ -3716,20 +3701,17 @@ where
         caller: WebUiAuthenticatedCaller,
         key: String,
     ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        let Some(config) = &self.operator_approval_config else {
-            let _ = (caller, key);
-            return Err(RebornServicesError::service_unavailable(false));
-        };
-        let scope = caller_resource_scope(&caller);
-        let entry = if key == AUTO_APPROVE_CONFIG_KEY {
-            auto_approve_config_entry(config, &scope).await?
-        } else if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id, &scope.user_id).await?;
-            tool_config_entry(config, &scope, &tool).await?
-        } else {
-            return Err(operator_config_unknown_key_error("key"));
-        };
-        Ok(RebornOperatorConfigGetResponse { entry })
+        let page = self
+            .query(
+                caller,
+                RebornViewQuery {
+                    view_id: OPERATOR_CONFIG_KEY_VIEW.id.to_string(),
+                    params: serde_json::json!({ "key": key }),
+                    cursor: None,
+                },
+            )
+            .await?;
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
     }
 
     async fn set_operator_config_key(
@@ -4167,6 +4149,27 @@ where
                 let artifact = self.build_run_artifact(caller, request).await?;
                 let payload =
                     serde_json::to_value(artifact).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
+                operator_command_views::parse_empty_operator_view_params(query.params)?;
+                let response = self.build_operator_config_list_view(caller).await?;
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_CONFIG_KEY_VIEW.id => {
+                let response = self
+                    .build_operator_config_key_view(caller, query.params)
+                    .await?;
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
                 Ok(RebornViewPage {
                     payload,
                     next_cursor: None,
