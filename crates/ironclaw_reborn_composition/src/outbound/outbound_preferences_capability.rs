@@ -8,8 +8,8 @@ use ironclaw_extensions::{
     CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionPackage,
 };
 use ironclaw_host_api::{
-    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, PermissionMode,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    CapabilityId, CapabilityProfileSchemaRef, EffectKind, HostApiError, OriginGateMatrix,
+    PermissionMode, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -64,6 +64,7 @@ fn manifest() -> Result<CapabilityManifest, ExtensionError> {
                 .set_output_bytes(64 * 1024),
             hard_ceiling: None,
         }),
+        origin_gate_matrix: Some(OriginGateMatrix::product_consent_only()),
     })
 }
 
