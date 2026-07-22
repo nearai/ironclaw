@@ -45,10 +45,10 @@ use crate::extension_host::channel_host::GenericChannelHostAssembly;
 use crate::extension_host::channel_subject_routes::{
     handle_declares_field, shared_channel_admission_handles,
 };
-use crate::outbound::outbound_preferences::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+use crate::outbound::{
+    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
+    OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
 };
-use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
 
 /// The deployment identity every encoded binding ref carries (the same
 /// identity the assembly binds per-extension workflows under).

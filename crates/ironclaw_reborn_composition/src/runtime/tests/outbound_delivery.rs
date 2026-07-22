@@ -19,10 +19,10 @@ use ironclaw_turns::{
 
 use crate::RebornCompositionProfile;
 use crate::input::RebornBuildInput;
-use crate::outbound::outbound_preferences::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+use crate::outbound::{
+    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetRegistrationOutcome,
 };
-use crate::outbound::{OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistrationOutcome};
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
 
 use super::build_reborn_runtime;

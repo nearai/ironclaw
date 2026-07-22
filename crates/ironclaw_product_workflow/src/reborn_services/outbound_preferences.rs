@@ -3,6 +3,14 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+use super::{
+    OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
+};
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::future::try_join_all;
@@ -10,14 +18,6 @@ use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_outbound::{
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     OutboundError, WriteCommunicationPreferenceRequest,
-};
-use ironclaw_product_workflow::{
-    OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 
@@ -31,13 +31,13 @@ use ironclaw_turns::ReplyTargetBindingRef;
 /// that fails to filter by caller yields an owner that no longer matches the
 /// caller, so the registry drops the leaked entry regardless.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OutboundDeliveryTargetOwner {
-    pub(crate) tenant_id: TenantId,
-    pub(crate) user_id: UserId,
+pub struct OutboundDeliveryTargetOwner {
+    pub tenant_id: TenantId,
+    pub user_id: UserId,
 }
 
 impl OutboundDeliveryTargetOwner {
-    pub(crate) fn new(tenant_id: TenantId, user_id: UserId) -> Self {
+    pub fn new(tenant_id: TenantId, user_id: UserId) -> Self {
         Self { tenant_id, user_id }
     }
 
@@ -46,7 +46,7 @@ impl OutboundDeliveryTargetOwner {
     /// (real providers derive the owner from the resolved resource), so this is
     /// a test-only constructor.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn for_caller(caller: &WebUiAuthenticatedCaller) -> Self {
+    pub fn for_caller(caller: &WebUiAuthenticatedCaller) -> Self {
         Self {
             tenant_id: caller.tenant_id.clone(),
             user_id: caller.user_id.clone(),
@@ -54,25 +54,25 @@ impl OutboundDeliveryTargetOwner {
     }
 
     /// Whether this owner is the querying caller's `(tenant, user)`.
-    pub(crate) fn matches_caller(&self, caller: &WebUiAuthenticatedCaller) -> bool {
+    pub fn matches_caller(&self, caller: &WebUiAuthenticatedCaller) -> bool {
         self.tenant_id == caller.tenant_id && self.user_id == caller.user_id
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OutboundDeliveryTargetEntry {
-    pub(crate) summary: RebornOutboundDeliveryTargetSummary,
-    pub(crate) capabilities: RebornOutboundDeliveryTargetCapabilities,
-    pub(crate) reply_target_binding_ref: ReplyTargetBindingRef,
+pub struct OutboundDeliveryTargetEntry {
+    pub summary: RebornOutboundDeliveryTargetSummary,
+    pub capabilities: RebornOutboundDeliveryTargetCapabilities,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
     /// The `(tenant, user)` this entry belongs to. The aggregating registry
     /// drops any fanned-out entry whose owner does not match the querying
     /// caller, so cross-caller isolation is structural rather than a
     /// per-provider convention.
-    pub(crate) owner: OutboundDeliveryTargetOwner,
+    pub owner: OutboundDeliveryTargetOwner,
 }
 
 #[async_trait]
-pub(crate) trait OutboundDeliveryTargetProvider: Send + Sync {
+pub trait OutboundDeliveryTargetProvider: Send + Sync {
     async fn list_outbound_delivery_targets(
         &self,
         caller: &WebUiAuthenticatedCaller,
@@ -126,7 +126,7 @@ fn entry_owned_by_caller(
     entry.owner.matches_caller(caller)
 }
 
-pub(crate) struct OutboundDeliveryTargetRegistry {
+pub struct OutboundDeliveryTargetRegistry {
     providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 }
 
@@ -140,17 +140,17 @@ impl std::fmt::Debug for OutboundDeliveryTargetRegistry {
 }
 
 impl OutboundDeliveryTargetRegistry {
-    pub(crate) fn new(providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>) -> Self {
+    pub fn new(providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>) -> Self {
         Self { providers }
     }
 }
 
-pub(crate) struct MutableOutboundDeliveryTargetRegistry {
+pub struct MutableOutboundDeliveryTargetRegistry {
     providers: RwLock<BTreeMap<String, Arc<dyn OutboundDeliveryTargetProvider>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OutboundDeliveryTargetRegistrationOutcome {
+pub enum OutboundDeliveryTargetRegistrationOutcome {
     Registered,
     Replaced,
 }
@@ -184,7 +184,7 @@ impl Default for MutableOutboundDeliveryTargetRegistry {
 }
 
 impl MutableOutboundDeliveryTargetRegistry {
-    pub(crate) fn register_provider(
+    pub fn register_provider(
         &self,
         provider_key: impl Into<String>,
         provider: Arc<dyn OutboundDeliveryTargetProvider>,
@@ -311,7 +311,7 @@ impl OutboundDeliveryTargetProvider for OutboundDeliveryTargetRegistry {
     }
 }
 
-pub(crate) struct RebornOutboundPreferencesFacade {
+pub struct RebornOutboundPreferencesFacade {
     preferences: Arc<dyn CommunicationPreferenceRepository>,
     targets: Arc<dyn OutboundDeliveryTargetProvider>,
 }
@@ -327,7 +327,7 @@ impl std::fmt::Debug for RebornOutboundPreferencesFacade {
 }
 
 impl RebornOutboundPreferencesFacade {
-    pub(crate) fn new(
+    pub fn new(
         preferences: Arc<dyn CommunicationPreferenceRepository>,
         targets: Arc<dyn OutboundDeliveryTargetProvider>,
     ) -> Self {

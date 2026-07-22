@@ -230,10 +230,10 @@ impl ConversationActorPairingService for FailingConversationActorPairingService 
 /// closed as `DeliveryTargetInvalid`.
 #[tokio::test]
 async fn trigger_delivery_target_validation_resolves_through_the_outbound_registry() {
-    use crate::outbound::outbound_preferences::{
-        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+    use crate::outbound::{
+        MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
+        OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
     };
-    use crate::outbound::{MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetProvider};
     use ironclaw_product_workflow::{
         RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetSummary, RebornServicesError, WebUiAuthenticatedCaller,

@@ -82,6 +82,7 @@ mod llm_config;
 mod log_views;
 mod operator_command_views;
 mod operator_config_views;
+mod outbound_preferences;
 mod outbound_views;
 mod project_fs;
 mod projects;
@@ -144,6 +145,12 @@ pub use operator_command_views::{
 };
 pub use operator_config_views::{
     OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
+};
+pub use outbound_preferences::{
+    MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
+    OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
+    OutboundDeliveryTargetRegistrationOutcome, OutboundDeliveryTargetRegistry,
+    RebornOutboundPreferencesFacade,
 };
 pub use outbound_views::{OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW};
 pub use project_fs::{

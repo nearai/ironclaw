@@ -105,15 +105,13 @@ use crate::deployment::{DeploymentConfig, RuntimeSubstrate, TrafficPolicy};
 use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
-#[cfg(any(test, feature = "test-support"))]
-use crate::outbound::outbound_preferences::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
-};
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
     OutboundDeliveryTargetProvider, RebornOutboundPreferencesFacade,
     outbound_delivery_synthetic_provider,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::outbound::{OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner};
 use crate::projection::{RebornProjectionServices, build_reborn_projection_services};
 use crate::root::default_system_prompt::DefaultSystemPromptIdentitySource;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
