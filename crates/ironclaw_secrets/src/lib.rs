@@ -21,8 +21,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 pub use crypto::{
-    SecretsCrypto, credential_account_aad, credential_session_aad, filesystem_secret_aad,
-    secret_record_aad, validate_master_key_material,
+    SecretsCrypto, chain_key_aad, credential_account_aad, credential_session_aad, filesystem_secret_aad, secret_record_aad, validate_master_key_material,
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InvocationId, NetworkMethod, ProjectId, ResourceScope,
