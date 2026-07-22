@@ -46,9 +46,14 @@ capture env \
 assert_exit_code "E1: non-group lane execution exits 0" 0 "${CAP_RC}"
 
 e1_timeout_args="$(cat "${e1_timeout_log}")"
-assert_contains "E1: arbitrary manifest target reaches cargo llvm-cov" \
-  "${e1_timeout_args}" "$(printf -- '--test\nmanifest_named_target')"
-assert_contains "E1: conventional integration target still reaches cargo llvm-cov" \
-  "${e1_timeout_args}" "$(printf -- '--test\nreborn_integration_alpha')"
+assert_contains "E1: selected targets reach cargo llvm-cov" \
+  "${e1_timeout_args}" "$(printf -- 'cargo\nllvm-cov')"
+e1_selected_targets="$(awk '
+  take_next { print; take_next=0; next }
+  $0 == "--test" { take_next=1 }
+' "${e1_timeout_log}")"
+assert_eq "E1: complete non-group target list reaches cargo exactly once" \
+  "$(printf -- 'manifest_named_target\nreborn_integration_alpha')" \
+  "${e1_selected_targets}"
 assert_not_contains "E1: group target stays out of the non-group lane" \
-  "${e1_timeout_args}" "reborn_group_bar"
+  "${e1_selected_targets}" "reborn_group_bar"
