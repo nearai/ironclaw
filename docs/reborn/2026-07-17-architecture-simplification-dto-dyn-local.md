@@ -85,6 +85,18 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   retaining hidden-automation-thread filtering and notification approval
   shaping behind the view builder; probe and login starts remain explicit
   follow-ups because they need typed command result payloads.
+- **r10** 2026-07-22 — implementation approach recorded for declaring
+  ProductSurface APIs without adding macro machinery: keep the raw
+  `ProductSurface::invoke`/`query` conduits JSON-shaped, but declare product
+  APIs as typed `ProductView<Params, Output>` and `ProductCapabilityDescriptor`
+  constants. The descriptor helpers own view query construction, payload decode,
+  serializable command input conversion, and capability-id parsing. This keeps
+  capability mappings lightweight for simple API-only commands, avoids one
+  bespoke struct or macro arm per route, and still leaves every product action
+  auditable as an explicit descriptor declaration. Duplicate skill write
+  methods were removed from the composition WebUI skill facade after those
+  writes moved to first-party capabilities; the facade now serves only skill
+  reads used by ProductSurface views.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any

@@ -16,10 +16,9 @@ use ironclaw_product_workflow::{
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
     ProductWorkflowError, RebornAutomationHoldReason, RebornAutomationRecentRunStatus,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornListThreadsResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornViewQuery,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, THREADS_VIEW,
-    WebUiAuthenticatedCaller, WebUiListThreadsRequest, approval_gate_ref,
+    RebornListThreadsResponse, RebornServices, RebornServicesApi, RebornServicesErrorCode,
+    RebornServicesErrorKind, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    THREADS_VIEW, WebUiAuthenticatedCaller, WebUiListThreadsRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
@@ -756,20 +755,20 @@ async fn notification_thread_list_discovers_pending_approval_from_real_run_histo
     let response = services
         .query(
             webui_caller(&c),
-            RebornViewQuery {
-                view_id: THREADS_VIEW.id.to_string(),
-                params: serde_json::to_value(WebUiListThreadsRequest {
-                    needs_approval: true,
-                    ..WebUiListThreadsRequest::default()
-                })
+            THREADS_VIEW
+                .query(
+                    WebUiListThreadsRequest {
+                        needs_approval: true,
+                        ..WebUiListThreadsRequest::default()
+                    },
+                    None,
+                )
                 .expect("thread list params"),
-                cursor: None,
-            },
         )
         .await
         .expect("list approval notification threads");
-    let response: RebornListThreadsResponse = serde_json::from_value(response.payload)
-        .map_err(RebornServicesError::internal_from)
+    let response: RebornListThreadsResponse = THREADS_VIEW
+        .decode_page(response)
         .expect("thread list payload");
 
     assert_eq!(

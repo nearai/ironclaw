@@ -91,8 +91,8 @@ mod types;
 mod views;
 
 pub use admin_configuration::{
-    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW,
-    RebornAdminConfigurationField, RebornAdminConfigurationGroup,
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
+    ADMIN_CONFIGURATION_VIEW, RebornAdminConfigurationField, RebornAdminConfigurationGroup,
     RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
 };
 use admin_users::{
@@ -196,7 +196,7 @@ pub use types::{
     RebornTimelineResponse, RebornVendorAuthAccounts,
 };
 pub use views::{
-    RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
+    ProductView, RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
     UnavailableRebornViewProvider,
 };
 
@@ -209,29 +209,57 @@ const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
 const TOOL_CONFIG_PREFIX: &str = "tool.";
 pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
     "builtin.operator_config_set_auto_approve";
+pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID);
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
+pub const OUTBOUND_PREFERENCES_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID);
 pub const LLM_PROVIDER_UPSERT_CAPABILITY_ID: &str = "builtin.llm_provider_upsert";
+pub const LLM_PROVIDER_UPSERT_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_PROVIDER_UPSERT_CAPABILITY_ID);
 pub const LLM_PROVIDER_DELETE_CAPABILITY_ID: &str = "builtin.llm_provider_delete";
+pub const LLM_PROVIDER_DELETE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_PROVIDER_DELETE_CAPABILITY_ID);
 pub const LLM_ACTIVE_SET_CAPABILITY_ID: &str = "builtin.llm_active_set";
+pub const LLM_ACTIVE_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(LLM_ACTIVE_SET_CAPABILITY_ID);
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
+pub const EXTENSION_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_INSTALL_CAPABILITY_ID);
 pub const EXTENSION_IMPORT_CAPABILITY_ID: &str = "builtin.extension_import";
+pub const EXTENSION_IMPORT_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_IMPORT_CAPABILITY_ID);
 pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
+pub const EXTENSION_ACTIVATE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_ACTIVATE_CAPABILITY_ID);
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
+pub const EXTENSION_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_REMOVE_CAPABILITY_ID);
 pub const EXTENSION_SETUP_SUBMIT_CAPABILITY_ID: &str = "builtin.extension_setup_submit";
-pub const THREADS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "threads",
-    paginated: true,
-};
-pub const AUTOMATIONS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "automations",
-    paginated: false,
-};
+pub const EXTENSION_SETUP_SUBMIT_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID);
+pub const THREADS_VIEW: ProductView<WebUiListThreadsRequest, RebornListThreadsResponse> =
+    ProductView::paginated("threads");
+pub const AUTOMATIONS_VIEW: ProductView<
+    WebUiListAutomationsRequest,
+    RebornListAutomationsResponse,
+> = ProductView::unpaginated("automations");
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
+pub const SKILL_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(SKILL_INSTALL_CAPABILITY_ID);
 pub const SKILL_UPDATE_CAPABILITY_ID: &str = "builtin.skill_update";
+pub const SKILL_UPDATE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(SKILL_UPDATE_CAPABILITY_ID);
 pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
+pub const SKILL_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(SKILL_REMOVE_CAPABILITY_ID);
 pub const SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID: &str = "builtin.skill_auto_activate_set";
+pub const SKILL_AUTO_ACTIVATE_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID);
 pub const SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID: &str =
     "builtin.skill_auto_activate_learned_set";
+pub const SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID);
 pub const SKILLS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "skills",
     paginated: false,
@@ -523,66 +551,12 @@ pub trait SkillsProductFacade: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    async fn install_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, content);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     async fn read_skill_content(
         &self,
         caller: WebUiAuthenticatedCaller,
         name: String,
     ) -> Result<RebornSkillContentResponse, RebornServicesError> {
         let _ = (caller, name);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn update_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, content);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn remove_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Toggle a skill's automatic activation. Disabling keeps the skill
-    /// invokable via an explicit `/name` mention but excludes it from criteria
-    /// (keyword/regex) selection.
-    async fn set_skill_auto_activate(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, enabled);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Toggle the global default criteria-based skill auto-activation master
-    /// switch. Disabling leaves skills invokable via an explicit `/name`
-    /// mention but turns off keyword/criteria auto-activation for all skills.
-    async fn set_auto_activate_learned(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, enabled);
         Err(RebornServicesError::service_unavailable(false))
     }
 }
@@ -2464,6 +2438,43 @@ pub trait ProductSurface: RebornServicesApi {}
 
 impl<T> ProductSurface for T where T: RebornServicesApi + ?Sized {}
 
+/// ProductSurface command descriptor.
+///
+/// Capability declarations stay as one stable id plus origin/policy metadata
+/// elsewhere; inputs remain ordinary serializable values so simple API-only
+/// mappings do not require one request struct per capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProductCapabilityDescriptor {
+    pub id: &'static str,
+}
+
+impl ProductCapabilityDescriptor {
+    pub const fn api_only(id: &'static str) -> Self {
+        Self { id }
+    }
+
+    pub fn capability_id(&self) -> Result<CapabilityId, RebornServicesError> {
+        CapabilityId::new(self.id).map_err(RebornServicesError::internal_from)
+    }
+
+    pub async fn invoke_on<T, S>(
+        &self,
+        surface: &S,
+        caller: WebUiAuthenticatedCaller,
+        input: T,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError>
+    where
+        T: Serialize,
+        S: ProductSurface + ?Sized,
+    {
+        let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
+        surface
+            .invoke(caller, self.capability_id()?, input, activity_id)
+            .await
+    }
+}
+
 /// Lands inbound attachment bytes into durable, agent-accessible storage and
 /// returns the transcript references to persist on the user message.
 ///
@@ -2784,18 +2795,16 @@ where
     async fn invoke_json_capability<T>(
         &self,
         caller: WebUiAuthenticatedCaller,
-        capability_id: &str,
+        capability: ProductCapabilityDescriptor,
         input: T,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError>
     where
         T: Serialize,
     {
-        let capability =
-            CapabilityId::new(capability_id).map_err(RebornServicesError::internal_from)?;
         let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
         self.product_capability_invoker
-            .invoke(caller, capability, input, activity_id)
+            .invoke(caller, capability.capability_id()?, input, activity_id)
             .await
     }
 
@@ -3502,7 +3511,7 @@ where
             let resolution = self
                 .invoke_json_capability(
                     caller.clone(),
-                    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+                    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
                     serde_json::json!({ "enabled": enabled }),
                     ActivityId::new(),
                 )

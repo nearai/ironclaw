@@ -62,42 +62,42 @@ use ironclaw_product_workflow::{
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, OperatorLogsService,
-    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
-    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
-    ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionListResponse, RebornExtensionOnboardingState,
-    RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
-    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
-    RebornServiceLifecycleState, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
+    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
+    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
+    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
+    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
+    RebornExtensionOnboardingState, RebornExtensionSurface, RebornFsListRequest,
+    RebornGetProjectRequest, RebornGetRunStateRequest, RebornListAutomationsResponse,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
+    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
+    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornRunArtifact,
+    RebornRunArtifactRequest, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewQuery, ResolveApprovalInteractionRequest,
+    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
     SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService, THREADS_VIEW,
@@ -2571,6 +2571,45 @@ async fn create_thread_without_proposed_project_keeps_caller_scope() {
         record.scope.project_id.as_ref().map(|id| id.as_str()),
         Some("project-alpha"),
         "without a proposed project the caller's scope is unchanged"
+    );
+}
+
+#[test]
+fn product_surface_descriptor_helpers_keep_view_and_capability_declarations_typed() {
+    let query = THREADS_VIEW
+        .query(
+            WebUiListThreadsRequest::default()
+                .set_limit(25)
+                .set_needs_approval(true),
+            Some("cursor-1".to_string()),
+        )
+        .expect("thread query");
+
+    assert_eq!(query.view_id, THREADS_VIEW.id);
+    assert_eq!(query.params["limit"], 25);
+    assert_eq!(query.params["needs_approval"], true);
+    assert_eq!(query.cursor.as_deref(), Some("cursor-1"));
+    assert!(THREADS_VIEW.descriptor().paginated);
+
+    let response = THREADS_VIEW
+        .decode_page(RebornViewPage {
+            payload: serde_json::to_value(RebornListThreadsResponse {
+                threads: Vec::new(),
+                next_cursor: Some("cursor-2".to_string()),
+            })
+            .expect("thread response payload"),
+            next_cursor: Some("cursor-2".to_string()),
+        })
+        .expect("typed thread response");
+
+    assert!(response.threads.is_empty());
+    assert_eq!(response.next_cursor.as_deref(), Some("cursor-2"));
+    assert_eq!(
+        OUTBOUND_PREFERENCES_SET_CAPABILITY
+            .capability_id()
+            .expect("capability id")
+            .as_str(),
+        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
     );
 }
 
@@ -9645,17 +9684,9 @@ async fn query_automations<S: RebornServicesApi + ?Sized>(
     request: WebUiListAutomationsRequest,
 ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
     let page = services
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: AUTOMATIONS_VIEW.id.to_string(),
-                params: serde_json::to_value(request)
-                    .map_err(RebornServicesError::internal_from)?,
-                cursor: None,
-            },
-        )
+        .query(caller, AUTOMATIONS_VIEW.query(request, None)?)
         .await?;
-    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+    AUTOMATIONS_VIEW.decode_page(page)
 }
 
 async fn query_threads<S: RebornServicesApi + ?Sized>(
@@ -9665,17 +9696,9 @@ async fn query_threads<S: RebornServicesApi + ?Sized>(
 ) -> Result<RebornListThreadsResponse, RebornServicesError> {
     let cursor = request.cursor.take();
     let page = services
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: THREADS_VIEW.id.to_string(),
-                params: serde_json::to_value(request)
-                    .map_err(RebornServicesError::internal_from)?,
-                cursor,
-            },
-        )
+        .query(caller, THREADS_VIEW.query(request, cursor)?)
         .await?;
-    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+    THREADS_VIEW.decode_page(page)
 }
 
 async fn query_extensions<S: RebornServicesApi + ?Sized>(

@@ -30,18 +30,18 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW, AUTOMATIONS_VIEW,
-    CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
-    EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
-    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
-    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, AUTOMATIONS_VIEW,
+    CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_IMPORT_CAPABILITY,
+    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
+    LLM_ACTIVE_SET_CAPABILITY, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY,
+    LLM_PROVIDER_UPSERT_CAPABILITY, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
     NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
     OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductOutboundEnvelope,
-    ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, ProductCapabilityDescriptor,
+    ProductOutboundEnvelope, ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
     RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
     RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
     RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
@@ -70,9 +70,9 @@ use ironclaw_product_workflow::{
     RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
+    RebornUpdateProjectRequest, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
+    SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
     SettingsToolPermissionState, THREADS_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
     WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
@@ -82,9 +82,7 @@ use ironclaw_product_workflow::{
 };
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::{
-    ActivityId, Blocked, CapabilityId, FailureKind, Resolution, SecretHandle, UserId,
-};
+use ironclaw_host_api::{ActivityId, Blocked, FailureKind, Resolution, SecretHandle, UserId};
 use uuid::Uuid;
 
 use crate::webui_v2::error::WebUiV2HttpError;
@@ -1283,20 +1281,9 @@ pub async fn list_threads(
         needs_approval: query.needs_approval,
     };
     let cursor = request.cursor.take();
-    let page = state
-        .services()
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: THREADS_VIEW.id.to_string(),
-                params: serde_json::to_value(request)
-                    .map_err(RebornServicesError::internal_from)?,
-                cursor,
-            },
-        )
+    let response = THREADS_VIEW
+        .query_on(state.services().as_ref(), caller, request, cursor)
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1331,20 +1318,9 @@ pub async fn list_automations(
         run_limit: query.run_limit,
         include_completed: query.include_completed,
     };
-    let page = state
-        .services()
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: AUTOMATIONS_VIEW.id.to_string(),
-                params: serde_json::to_value(request)
-                    .map_err(RebornServicesError::internal_from)?,
-                cursor: None,
-            },
-        )
+    let response = AUTOMATIONS_VIEW
+        .query_on(state.services().as_ref(), caller, request, None)
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1543,7 +1519,7 @@ pub async fn set_outbound_preferences(
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
-        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+        OUTBOUND_PREFERENCES_SET_CAPABILITY,
         body,
         ActivityId::new(),
     )
@@ -1714,7 +1690,7 @@ pub async fn install_skill(
     let resolution = invoke_product_capability(
         state.services(),
         caller,
-        SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_INSTALL_CAPABILITY,
         serde_json::json!({
             "name": name.clone(),
             "content": body.content,
@@ -1761,7 +1737,7 @@ pub async fn update_skill(
     let resolution = invoke_product_capability(
         state.services(),
         caller,
-        SKILL_UPDATE_CAPABILITY_ID,
+        SKILL_UPDATE_CAPABILITY,
         serde_json::json!({
             "name": name.clone(),
             "content": body.content,
@@ -1785,7 +1761,7 @@ pub async fn remove_skill(
     let resolution = invoke_product_capability(
         state.services(),
         caller,
-        SKILL_REMOVE_CAPABILITY_ID,
+        SKILL_REMOVE_CAPABILITY,
         serde_json::json!({ "name": name.clone() }),
         ActivityId::new(),
     )
@@ -1808,7 +1784,7 @@ pub async fn set_skill_auto_activate(
     let resolution = invoke_product_capability(
         state.services(),
         caller,
-        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
         serde_json::json!({
             "name": name.clone(),
             "enabled": enabled,
@@ -1837,7 +1813,7 @@ pub async fn set_auto_activate_learned(
     let resolution = invoke_product_capability(
         state.services(),
         caller,
-        SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+        SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
         serde_json::json!({ "enabled": enabled }),
         ActivityId::new(),
     )
@@ -1934,7 +1910,7 @@ pub async fn install_extension(
     let resolution = invoke_product_capability(
         state.services(),
         caller,
-        EXTENSION_INSTALL_CAPABILITY_ID,
+        EXTENSION_INSTALL_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
         ActivityId::new(),
     )
@@ -1958,7 +1934,7 @@ pub async fn import_extension(
     let resolution = invoke_product_capability(
         state.services(),
         caller,
-        EXTENSION_IMPORT_CAPABILITY_ID,
+        EXTENSION_IMPORT_CAPABILITY,
         serde_json::json!({ "bundle_base64": STANDARD.encode(body.as_ref()) }),
         ActivityId::new(),
     )
@@ -1981,7 +1957,7 @@ pub async fn activate_extension(
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
-        EXTENSION_ACTIVATE_CAPABILITY_ID,
+        EXTENSION_ACTIVATE_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
         ActivityId::new(),
     )
@@ -2004,7 +1980,7 @@ pub async fn remove_extension(
     let resolution = invoke_product_capability(
         state.services(),
         caller,
-        EXTENSION_REMOVE_CAPABILITY_ID,
+        EXTENSION_REMOVE_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
         ActivityId::new(),
     )
@@ -2201,7 +2177,7 @@ pub async fn setup_extension(
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
-        EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
+        EXTENSION_SETUP_SUBMIT_CAPABILITY,
         input,
         ActivityId::new(),
     )
@@ -2296,7 +2272,7 @@ pub async fn replace_extension_admin_configuration(
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
-        ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
+        ADMIN_CONFIGURATION_REPLACE_CAPABILITY,
         ReplaceExtensionAdminConfigurationInput {
             group_id: path.group_id.clone(),
             values: body.values,
@@ -2348,18 +2324,15 @@ pub async fn replace_extension_admin_configuration(
 async fn invoke_product_capability<T>(
     services: &std::sync::Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
-    capability_id: &str,
+    capability: ProductCapabilityDescriptor,
     input: T,
     activity_id: ActivityId,
 ) -> Result<Resolution, RebornServicesError>
 where
     T: Serialize,
 {
-    let capability =
-        CapabilityId::new(capability_id).map_err(RebornServicesError::internal_from)?;
-    let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
-    services
-        .invoke(caller, capability, input, activity_id)
+    capability
+        .invoke_on(services.as_ref(), caller, input, activity_id)
         .await
 }
 
@@ -3031,7 +3004,7 @@ pub async fn upsert_llm_provider(
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
-        LLM_PROVIDER_UPSERT_CAPABILITY_ID,
+        LLM_PROVIDER_UPSERT_CAPABILITY,
         body,
         ActivityId::new(),
     )
@@ -3052,7 +3025,7 @@ pub async fn delete_llm_provider(
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
-        LLM_PROVIDER_DELETE_CAPABILITY_ID,
+        LLM_PROVIDER_DELETE_CAPABILITY,
         serde_json::json!({ "provider_id": provider_id }),
         ActivityId::new(),
     )
@@ -3073,7 +3046,7 @@ pub async fn set_active_llm(
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
-        LLM_ACTIVE_SET_CAPABILITY_ID,
+        LLM_ACTIVE_SET_CAPABILITY,
         body,
         ActivityId::new(),
     )

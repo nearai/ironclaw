@@ -15,9 +15,9 @@ use ironclaw_product_workflow::{
     RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
     RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices as ProductRebornServices,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, SkillsProductFacade, WebUiAuthenticatedCaller,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel, SkillsProductFacade,
+    WebUiAuthenticatedCaller,
 };
 
 use ironclaw_triggers::TriggerRepository;
@@ -43,9 +43,6 @@ use crate::{
         ProjectScopedFilesystemReader,
     },
 };
-
-static SKILL_CONTENT_SAFETY: std::sync::LazyLock<ironclaw_safety::Sanitizer> =
-    std::sync::LazyLock::new(ironclaw_safety::Sanitizer::new);
 
 #[derive(Clone)]
 struct ActiveRegistryOperatorToolCatalog {
@@ -537,10 +534,9 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 struct LocalSkillsProductFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     // The skill activation selector's live master switch (see
-    // `RebornRuntimeSubstrate::skill_auto_activate_learned`); writing it here
-    // changes the next turn's selection without a runtime rebuild. `None` when no
-    // flag-reading selector is wired (the production assembly) — the toggle then
-    // reports unavailable instead of writing to a flag nothing reads.
+    // `RebornRuntimeSubstrate::skill_auto_activate_learned`). The read facade
+    // reports it for the skills view; writes go through the first-party
+    // `builtin.skill_auto_activate_learned_set` capability.
     //
     // Process-global by design: this is a single-operator local-dev switch, so it
     // is intentionally not scoped per caller. A future multi-user surface would
@@ -600,26 +596,6 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         })
     }
 
-    async fn install_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let scope = caller_skill_scope(caller);
-        let content = content.ok_or_else(invalid_skill_request)?;
-        validate_skill_content_safety(&content)?;
-        let installed = self
-            .skill_management
-            .install_for_scope(scope, Some(&name), &content)
-            .await
-            .map_err(map_skill_management_error)?;
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!("Skill '{}' installed", installed.name),
-        })
-    }
-
     async fn read_skill_content(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -634,105 +610,6 @@ impl SkillsProductFacade for LocalSkillsProductFacade {
         Ok(RebornSkillContentResponse {
             name: content.name,
             content: content.content,
-        })
-    }
-
-    async fn update_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let scope = caller_skill_scope(caller);
-        validate_skill_content_safety(&content)?;
-        let updated = self
-            .skill_management
-            .update_for_scope(scope, &name, &content)
-            .await
-            .map_err(map_skill_management_error)?;
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!("Skill '{}' updated", updated.name),
-        })
-    }
-
-    async fn remove_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let scope = caller_skill_scope(caller);
-        let removed = self
-            .skill_management
-            .remove_for_scope(scope, &name)
-            .await
-            .map_err(map_skill_management_error)?;
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!("Skill '{}' removed", removed.name),
-        })
-    }
-
-    async fn set_skill_auto_activate(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let scope = caller_skill_scope(caller);
-        let current = self
-            .skill_management
-            .read_content_for_scope(scope.clone(), &name)
-            .await
-            .map_err(map_skill_management_error)?;
-        let updated = ironclaw_skills::set_skill_auto_activate(&current.content, enabled);
-        // The toggled document is trusted prompt text loaded into the next run,
-        // so re-scan it before persisting (parity with install/update).
-        validate_skill_content_safety(&updated)?;
-        // dispatch-exempt: caller-scoped operator skill metadata write,
-        // not an in-turn tool call.
-        let result = self
-            .skill_management
-            .update_for_scope(scope, &name, &updated)
-            .await
-            .map_err(map_skill_management_error)?;
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!(
-                "Skill '{}' auto-activation {}",
-                result.name,
-                if enabled { "enabled" } else { "disabled" }
-            ),
-        })
-    }
-
-    async fn set_auto_activate_learned(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        // Fail closed when no flag-reading selector is wired (production
-        // assembly): better to tell the operator the control is unavailable than
-        // to silently accept a write that changes nothing. When a selector is
-        // wired (local-dev), it reads this flag every turn, so the store alone
-        // makes the change take effect on the next message — no runtime rebuild.
-        let Some(flag) = self.auto_activate_learned.as_ref() else {
-            return Err(RebornServicesError {
-                code: RebornServicesErrorCode::Unavailable,
-                kind: RebornServicesErrorKind::ServiceUnavailable,
-                status_code: 503,
-                retryable: false,
-                field: None,
-                validation_code: None,
-            });
-        };
-        flag.store(enabled, Ordering::Relaxed);
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!(
-                "Default skill auto-activation {}",
-                if enabled { "enabled" } else { "disabled" }
-            ),
         })
     }
 }
@@ -838,18 +715,6 @@ fn map_skill_management_error(error: RebornLocalSkillManagementError) -> RebornS
             | ironclaw_skills::SkillManagementErrorKind::InvalidSkill => invalid_skill_request(),
         },
     }
-}
-
-fn validate_skill_content_safety(content: &str) -> Result<(), RebornServicesError> {
-    ironclaw_safety::validate_trusted_trigger_prompt(&*SKILL_CONTENT_SAFETY, content).map_err(
-        |error| {
-            tracing::warn!(
-                reason = error.reason(),
-                "skill content rejected by safety scan"
-            );
-            invalid_skill_request()
-        },
-    )
 }
 
 fn invalid_skill_request() -> RebornServicesError {
