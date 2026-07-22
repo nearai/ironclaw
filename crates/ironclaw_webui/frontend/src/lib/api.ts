@@ -568,7 +568,12 @@ export async function fetchAttachmentDataUrl(path) {
 // `EventSource` cannot set request headers, so the token rides as a
 // query param. The composition middleware accepts `?token=` for this
 // route specifically (in-scope "SSE query-token exception" from #3886).
-export function openEventStream({ threadId, afterCursor } = {}) {
+export function openEventStream({
+  threadId,
+  afterCursor,
+  connectionId,
+  connectionGeneration,
+} = {}) {
   const url = new URL(
     `${V2_BASE}/threads/${encodeURIComponent(threadId)}/events`,
     window.location.origin,
@@ -576,6 +581,10 @@ export function openEventStream({ threadId, afterCursor } = {}) {
   const token = readStoredToken();
   if (token) url.searchParams.set("token", token);
   if (afterCursor) url.searchParams.set("after_cursor", afterCursor);
+  if (connectionId) url.searchParams.set("connection_id", connectionId);
+  if (connectionGeneration != null) {
+    url.searchParams.set("connection_generation", String(connectionGeneration));
+  }
   return new EventSource(url.toString());
 }
 

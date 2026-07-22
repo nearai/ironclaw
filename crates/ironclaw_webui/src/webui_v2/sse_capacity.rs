@@ -15,9 +15,11 @@
 //! [`RateLimitPolicy`]: ironclaw_host_api::ingress::RateLimitPolicy
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{TenantId, UserId};
+use tokio::sync::watch;
 
 /// Default concurrent SSE streams per (tenant, user). Sized to cover a
 /// normal browser tab plus brief reconnect overlap; sustained abuse hits
@@ -69,11 +71,26 @@ struct CallerState {
 
 #[derive(Debug)]
 pub(crate) struct SseCapacity {
-    state: Mutex<HashMap<CallerKey, CallerState>>,
+    state: Mutex<CapacityState>,
     max_per_caller: usize,
+    next_generation: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct CapacityState {
+    callers: HashMap<CallerKey, CallerState>,
+    named_slots: HashMap<(CallerKey, String), NamedSlot>,
+}
+
+#[derive(Debug)]
+struct NamedSlot {
+    generation: u64,
+    client_generation: Option<u64>,
+    cancel: watch::Sender<bool>,
 }
 
 /// Outcome of [`SseCapacity::try_acquire`].
+#[derive(Debug)]
 pub(crate) enum SseCapacityOutcome {
     /// A concurrency slot was reserved. Hold the guard for the stream's
     /// lifetime; dropping it releases the slot.
@@ -83,13 +100,17 @@ pub(crate) enum SseCapacityOutcome {
     /// `enforce_rate_limit`'s request-volume charge — see
     /// [`REJECTION_REFUND_LIMIT`].
     Rejected { refundable: bool },
+    /// A delayed request from an older route generation arrived after its
+    /// replacement. It must not cancel or displace the current stream.
+    StaleGeneration,
 }
 
 impl SseCapacity {
     pub(crate) fn new(max_per_caller: usize) -> Self {
         Self {
-            state: Mutex::new(HashMap::new()),
+            state: Mutex::new(CapacityState::default()),
             max_per_caller,
+            next_generation: AtomicU64::new(1),
         }
     }
 
@@ -102,29 +123,69 @@ impl SseCapacity {
         self: &Arc<Self>,
         tenant_id: &TenantId,
         user_id: &UserId,
+        connection_id: Option<&str>,
     ) -> SseCapacityOutcome {
-        // A configured cap of 0 (SSE disabled) is not special-cased: with
-        // `open` starting at 0, `entry.open >= self.max_per_caller` is
-        // immediately true, so cap-zero callers fall straight into the
-        // same saturated-rejection branch below and get the same
-        // `rejected_streak` / `REJECTION_REFUND_LIMIT` bookkeeping as any
-        // other saturated caller. An earlier version special-cased
-        // `max_per_caller == 0` with an early return before this
-        // bookkeeping ran, which meant every cap-zero rejection was
-        // reported refundable forever — see [`REJECTION_REFUND_LIMIT`]'s
-        // doc comment. Cap-zero callers can never successfully acquire
-        // (the `open >= max_per_caller` check never lets them through), so
-        // their per-caller entry is never released and its
-        // `rejected_streak` accumulates for the life of the process; that
-        // is the intended trade-off to keep this rejection path free of
-        // free 429s, and no production profile configures a cap of 0
-        // today.
+        match self.try_acquire_ordered(tenant_id, user_id, connection_id, None) {
+            SseCapacityOutcome::StaleGeneration => {
+                SseCapacityOutcome::Rejected { refundable: false }
+            }
+            outcome => outcome,
+        }
+    }
+
+    /// Reserve a slot using the browser tab's monotonically increasing stream
+    /// generation. A delayed request from an older route must not cancel the
+    /// newer route merely because it reached the server later.
+    pub(crate) fn try_acquire_ordered(
+        self: &Arc<Self>,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        connection_id: Option<&str>,
+        client_generation: Option<u64>,
+    ) -> SseCapacityOutcome {
         let key = CallerKey {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
         };
         let mut state = lock_state(&self.state);
-        let entry = state.entry(key.clone()).or_default();
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        if let Some(connection_id) = connection_id {
+            let named_key = (key.clone(), connection_id.to_string());
+            if let Some(previous) = state.named_slots.get(&named_key) {
+                match (client_generation, previous.client_generation) {
+                    (Some(incoming), Some(current)) if incoming < current => {
+                        return SseCapacityOutcome::StaleGeneration;
+                    }
+                    (None, Some(_)) => return SseCapacityOutcome::StaleGeneration,
+                    _ => {}
+                }
+                let _ = previous.cancel.send(true);
+                let (cancel, cancellation) = watch::channel(false);
+                state.named_slots.insert(
+                    named_key,
+                    NamedSlot {
+                        generation,
+                        client_generation,
+                        cancel,
+                    },
+                );
+                state
+                    .callers
+                    .entry(key.clone())
+                    .or_default()
+                    .rejected_streak = 0;
+                return SseCapacityOutcome::Acquired(SseSlot {
+                    capacity: Arc::clone(self),
+                    key,
+                    connection_id: Some(connection_id.to_string()),
+                    generation,
+                    cancellation: Some(cancellation),
+                });
+            }
+        }
+        // A configured cap of 0 follows the same rejection-streak accounting
+        // as ordinary saturation so it cannot receive unlimited refunds.
+        let entry = state.callers.entry(key.clone()).or_default();
         if entry.open >= self.max_per_caller {
             entry.rejected_streak = entry.rejected_streak.saturating_add(1);
             let refundable = entry.rejected_streak <= REJECTION_REFUND_LIMIT;
@@ -132,22 +193,48 @@ impl SseCapacity {
         }
         entry.open += 1;
         entry.rejected_streak = 0;
+        let (connection_id, cancellation) = if let Some(connection_id) = connection_id {
+            let (cancel, cancellation) = watch::channel(false);
+            state.named_slots.insert(
+                (key.clone(), connection_id.to_string()),
+                NamedSlot {
+                    generation,
+                    client_generation,
+                    cancel,
+                },
+            );
+            (Some(connection_id.to_string()), Some(cancellation))
+        } else {
+            (None, None)
+        };
         SseCapacityOutcome::Acquired(SseSlot {
             capacity: Arc::clone(self),
             key,
+            connection_id,
+            generation,
+            cancellation,
         })
     }
 
-    fn release(&self, key: &CallerKey) {
+    fn release(&self, key: &CallerKey, connection_id: Option<&str>, generation: u64) {
         let mut state = lock_state(&self.state);
-        if let Some(entry) = state.get_mut(key) {
+        if let Some(connection_id) = connection_id {
+            let named_key = (key.clone(), connection_id.to_string());
+            let is_current = state
+                .named_slots
+                .get(&named_key)
+                .is_some_and(|slot| slot.generation == generation);
+            if !is_current {
+                return;
+            }
+            state.named_slots.remove(&named_key);
+        }
+        if let Some(entry) = state.callers.get_mut(key) {
             entry.open = entry.open.saturating_sub(1);
             if entry.open == 0 {
-                // No slots left — drop the whole entry (including any
-                // stale `rejected_streak`) rather than let it linger
-                // unbounded. The caller is no longer saturated, so the
-                // next attempt succeeds and starts a fresh streak anyway.
-                state.remove(key);
+                // No slots left — drop the whole entry (including any stale
+                // rejection streak). The next saturation episode starts clean.
+                state.callers.remove(key);
             }
         }
     }
@@ -159,12 +246,11 @@ impl SseCapacity {
             user_id: user_id.clone(),
         };
         let state = lock_state(&self.state);
-        state.get(&key).map(|entry| entry.open).unwrap_or(0)
+        state.callers.get(&key).map(|entry| entry.open).unwrap_or(0)
     }
 }
 
-/// Acquire the slot-count map without ever panicking on a poisoned
-/// mutex.
+/// Acquire the capacity registry without ever panicking on a poisoned mutex.
 ///
 /// `SseSlot::drop` calls `SseCapacity::release`, so if any code path on
 /// this lock had previously panicked while holding the guard, an
@@ -173,16 +259,12 @@ impl SseCapacity {
 /// aborts — which is exactly the failure mode we never want for a
 /// per-connection cleanup hook.
 ///
-/// Recovering with `into_inner()` is safe here because the only data
-/// behind the lock is a `HashMap<CallerKey, usize>` and every critical
-/// section is a few lines of straight-line code that mutates a single
-/// counter — there is no compound invariant for a mid-mutation panic to
-/// break. The worst case is a single caller's count being off by one,
-/// which `SSE_MAX_LIFETIME`-driven slot recycling self-heals within
-/// minutes.
-fn lock_state(
-    mutex: &Mutex<HashMap<CallerKey, CallerState>>,
-) -> std::sync::MutexGuard<'_, HashMap<CallerKey, CallerState>> {
+/// Recovering with `into_inner()` is preferable to aborting the process. The
+/// critical sections update only the caller counter and its corresponding
+/// named-slot entry, without invoking user code. In the unlikely event that a
+/// panic leaves those values out of sync, `SSE_MAX_LIFETIME`-driven slot
+/// recycling bounds the impact.
+fn lock_state(mutex: &Mutex<CapacityState>) -> std::sync::MutexGuard<'_, CapacityState> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -197,11 +279,40 @@ fn lock_state(
 pub(crate) struct SseSlot {
     capacity: Arc<SseCapacity>,
     key: CallerKey,
+    connection_id: Option<String>,
+    generation: u64,
+    cancellation: Option<watch::Receiver<bool>>,
+}
+
+impl SseSlot {
+    pub(crate) async fn cancelled(&mut self) {
+        let Some(cancellation) = self.cancellation.as_mut() else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        if *cancellation.borrow() {
+            return;
+        }
+        while cancellation.changed().await.is_ok() {
+            if *cancellation.borrow() {
+                return;
+            }
+        }
+        std::future::pending::<()>().await;
+    }
+
+    #[cfg(test)]
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancellation| *cancellation.borrow())
+    }
 }
 
 impl Drop for SseSlot {
     fn drop(&mut self) {
-        self.capacity.release(&self.key);
+        self.capacity
+            .release(&self.key, self.connection_id.as_deref(), self.generation);
     }
 }
 
@@ -210,13 +321,13 @@ impl SseCapacityOutcome {
     fn acquired(self) -> Option<SseSlot> {
         match self {
             SseCapacityOutcome::Acquired(slot) => Some(slot),
-            SseCapacityOutcome::Rejected { .. } => None,
+            SseCapacityOutcome::Rejected { .. } | SseCapacityOutcome::StaleGeneration => None,
         }
     }
 
     fn rejected_refundable(&self) -> Option<bool> {
         match self {
-            SseCapacityOutcome::Acquired(_) => None,
+            SseCapacityOutcome::Acquired(_) | SseCapacityOutcome::StaleGeneration => None,
             SseCapacityOutcome::Rejected { refundable } => Some(*refundable),
         }
     }
@@ -239,22 +350,24 @@ mod tests {
         let cap = Arc::new(SseCapacity::new(2));
         let alice = user("alice");
         let s1 = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .acquired()
             .expect("first slot");
         let s2 = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .acquired()
             .expect("second slot");
         assert!(
-            cap.try_acquire(&tenant(), &alice).acquired().is_none(),
+            cap.try_acquire(&tenant(), &alice, None)
+                .acquired()
+                .is_none(),
             "third slot must be refused"
         );
         assert_eq!(cap.open_count(&tenant(), &alice), 2);
         drop(s1);
         // After release, a new slot is available again.
         let s3 = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .acquired()
             .expect("slot after release");
         drop(s2);
@@ -275,7 +388,11 @@ mod tests {
         // check in `try_acquire`.
         let cap = Arc::new(SseCapacity::new(0));
         let alice = user("alice");
-        assert!(cap.try_acquire(&tenant(), &alice).acquired().is_none());
+        assert!(
+            cap.try_acquire(&tenant(), &alice, None)
+                .acquired()
+                .is_none()
+        );
         assert_eq!(
             cap.open_count(&tenant(), &alice),
             0,
@@ -295,7 +412,7 @@ mod tests {
         let cap = Arc::new(SseCapacity::new(2));
         let alice = user("alice");
         let slot = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .acquired()
             .expect("first slot");
 
@@ -328,7 +445,7 @@ mod tests {
         // rather than panic; this is the call-site that runs on every
         // new SSE open.
         let recovered = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .acquired()
             .expect("try_acquire must recover from a poisoned lock");
         drop(recovered);
@@ -340,12 +457,19 @@ mod tests {
         let alice = user("alice");
         let bob = user("bob");
         let _alice_slot = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .acquired()
             .expect("alice");
-        let _bob_slot = cap.try_acquire(&tenant(), &bob).acquired().expect("bob");
-        assert!(cap.try_acquire(&tenant(), &alice).acquired().is_none());
-        assert!(cap.try_acquire(&tenant(), &bob).acquired().is_none());
+        let _bob_slot = cap
+            .try_acquire(&tenant(), &bob, None)
+            .acquired()
+            .expect("bob");
+        assert!(
+            cap.try_acquire(&tenant(), &alice, None)
+                .acquired()
+                .is_none()
+        );
+        assert!(cap.try_acquire(&tenant(), &bob, None).acquired().is_none());
     }
 
     /// Regression for PR #6592 review comment ("Saturated SSE callers can
@@ -359,14 +483,14 @@ mod tests {
         let cap = Arc::new(SseCapacity::new(1));
         let alice = user("alice");
         let _held = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .acquired()
             .expect("first slot saturates the cap of 1");
 
         // The first REJECTION_REFUND_LIMIT consecutive rejections while
         // saturated are all refundable.
         for attempt in 1..=REJECTION_REFUND_LIMIT {
-            let outcome = cap.try_acquire(&tenant(), &alice);
+            let outcome = cap.try_acquire(&tenant(), &alice, None);
             assert_eq!(
                 outcome.rejected_refundable(),
                 Some(true),
@@ -379,7 +503,7 @@ mod tests {
         // request, or a saturated caller could hammer this endpoint
         // forever for free.
         for attempt in 1..=3 {
-            let outcome = cap.try_acquire(&tenant(), &alice);
+            let outcome = cap.try_acquire(&tenant(), &alice, None);
             assert_eq!(
                 outcome.rejected_refundable(),
                 Some(false),
@@ -403,7 +527,7 @@ mod tests {
         // The first REJECTION_REFUND_LIMIT consecutive rejections while
         // saturated (cap=0 is always saturated) are all refundable.
         for attempt in 1..=REJECTION_REFUND_LIMIT {
-            let outcome = cap.try_acquire(&tenant(), &alice);
+            let outcome = cap.try_acquire(&tenant(), &alice, None);
             assert_eq!(
                 outcome.rejected_refundable(),
                 Some(true),
@@ -416,7 +540,7 @@ mod tests {
         // request, or a caller could hammer a cap-zero (SSE disabled)
         // endpoint forever for free.
         for attempt in 1..=3 {
-            let outcome = cap.try_acquire(&tenant(), &alice);
+            let outcome = cap.try_acquire(&tenant(), &alice, None);
             assert_eq!(
                 outcome.rejected_refundable(),
                 Some(false),
@@ -434,16 +558,17 @@ mod tests {
         let cap = Arc::new(SseCapacity::new(1));
         let alice = user("alice");
         let first = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .acquired()
             .expect("first slot");
 
         // Burn through the whole refund budget while saturated.
         for _ in 0..=REJECTION_REFUND_LIMIT {
-            cap.try_acquire(&tenant(), &alice);
+            cap.try_acquire(&tenant(), &alice, None);
         }
         assert_eq!(
-            cap.try_acquire(&tenant(), &alice).rejected_refundable(),
+            cap.try_acquire(&tenant(), &alice, None)
+                .rejected_refundable(),
             Some(false),
             "streak must be exhausted before the reset"
         );
@@ -452,16 +577,77 @@ mod tests {
         // saturated, so this succeeds and resets the streak.
         drop(first);
         let _second = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .acquired()
             .expect("slot available again after release");
 
         // A fresh rejection right after re-saturating must be refundable
         // again — the earlier streak must not carry over.
         assert_eq!(
-            cap.try_acquire(&tenant(), &alice).rejected_refundable(),
+            cap.try_acquire(&tenant(), &alice, None)
+                .rejected_refundable(),
             Some(true),
             "a fresh saturation episode must start with a clean streak"
         );
+    }
+
+    #[test]
+    fn named_slot_replaces_its_prior_generation_without_consuming_capacity() {
+        let cap = Arc::new(SseCapacity::new(1));
+        let alice = user("alice");
+        let first = cap
+            .try_acquire(&tenant(), &alice, Some("browser-tab"))
+            .acquired()
+            .expect("first named slot");
+        let replacement = cap
+            .try_acquire(&tenant(), &alice, Some("browser-tab"))
+            .acquired()
+            .expect("same browser tab replaces its stale stream");
+
+        assert!(first.is_cancelled(), "the prior stream must be cancelled");
+        assert!(!replacement.is_cancelled());
+        assert_eq!(cap.open_count(&tenant(), &alice), 1);
+        assert!(
+            cap.try_acquire(&tenant(), &alice, Some("different-tab"))
+                .acquired()
+                .is_none(),
+            "a different browser tab still respects the per-caller cap"
+        );
+
+        drop(first);
+        assert_eq!(
+            cap.open_count(&tenant(), &alice),
+            1,
+            "dropping the superseded generation must not release the replacement"
+        );
+        drop(replacement);
+        assert_eq!(cap.open_count(&tenant(), &alice), 0);
+    }
+
+    #[test]
+    fn ordered_named_slot_rejects_a_late_older_client_generation() {
+        let cap = Arc::new(SseCapacity::new(1));
+        let alice = user("alice");
+        let first = match cap.try_acquire_ordered(&tenant(), &alice, Some("browser-tab"), Some(1)) {
+            SseCapacityOutcome::Acquired(slot) => slot,
+            result => panic!("first generation must be admitted: {result:?}"),
+        };
+        let current = match cap.try_acquire_ordered(&tenant(), &alice, Some("browser-tab"), Some(2))
+        {
+            SseCapacityOutcome::Acquired(slot) => slot,
+            result => panic!("newer generation must be admitted: {result:?}"),
+        };
+
+        assert!(first.is_cancelled());
+        assert!(!current.is_cancelled());
+        assert!(matches!(
+            cap.try_acquire_ordered(&tenant(), &alice, Some("browser-tab"), Some(1)),
+            SseCapacityOutcome::StaleGeneration
+        ));
+        assert!(
+            !current.is_cancelled(),
+            "a late older request must not cancel the current route stream"
+        );
+        assert_eq!(cap.open_count(&tenant(), &alice), 1);
     }
 }

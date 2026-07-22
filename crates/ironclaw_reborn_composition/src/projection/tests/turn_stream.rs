@@ -976,6 +976,7 @@ async fn webui_event_stream_recovers_from_turn_event_rebase_on_reconnect() {
             runtime_projection_scope(&actor, &scope),
         )),
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: Some(TurnEventProjectionCursor::for_scope(
             scope.clone(),
@@ -1025,6 +1026,7 @@ async fn webui_event_stream_rejects_foreign_composite_turn_cursor() {
     let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
         runtime: None,
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: Some(TurnEventProjectionCursor::for_scope(
             scope_a,
@@ -1078,6 +1080,7 @@ async fn webui_event_stream_rejects_foreign_composite_runtime_cursor() {
             runtime_projection_scope(&actor, &scope_a),
         )),
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 1,

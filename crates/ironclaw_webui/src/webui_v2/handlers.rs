@@ -894,13 +894,19 @@ pub async fn stream_events(
     headers: HeaderMap,
     Query(query): Query<StreamEventsQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
-    let slot = match state
-        .sse_capacity()
-        .try_acquire(&caller.tenant_id, &caller.user_id)
-    {
+    let connection_id = stream_connection_id(query.connection_id.as_deref());
+    let slot = match state.sse_capacity().try_acquire_ordered(
+        &caller.tenant_id,
+        &caller.user_id,
+        connection_id,
+        connection_id.and(query.connection_generation),
+    ) {
         SseCapacityOutcome::Acquired(slot) => slot,
         SseCapacityOutcome::Rejected { refundable } => {
             return Ok(sse_capacity_rejected(refundable));
+        }
+        SseCapacityOutcome::StaleGeneration => {
+            return Ok(StatusCode::NO_CONTENT.into_response());
         }
     };
     let services = state.services().clone();
@@ -967,6 +973,20 @@ fn sse_concurrency_exhausted() -> WebUiV2HttpError {
 pub struct StreamEventsQuery {
     #[serde(default)]
     pub after_cursor: Option<String>,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub connection_generation: Option<u64>,
+}
+
+fn stream_connection_id(connection_id: Option<&str>) -> Option<&str> {
+    connection_id.filter(|connection_id| {
+        !connection_id.is_empty()
+            && connection_id.len() <= 64
+            && connection_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    })
 }
 
 /// Redacted SSE error payload. Defined as a typed struct (not built with
@@ -1029,6 +1049,14 @@ fn sse_error_event(error: RebornServicesError) -> Event {
     }
 }
 
+const STREAM_READY_PAYLOAD: &str = r#"{"type":"keep_alive"}"#;
+
+fn sse_ready_event() -> Event {
+    Event::default()
+        .event("keep_alive")
+        .data(STREAM_READY_PAYLOAD)
+}
+
 fn build_sse_stream(
     services: std::sync::Arc<dyn RebornServicesApi>,
     caller: WebUiAuthenticatedCaller,
@@ -1041,7 +1069,7 @@ fn build_sse_stream(
         // the lifetime of this stream. It drops automatically when the
         // generator is dropped (client disconnect, max-lifetime expiry,
         // or facade error), releasing the per-caller concurrency slot.
-        let _slot_guard = slot;
+        let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
         if services.supports_stream_events_subscription() {
@@ -1053,12 +1081,15 @@ fn build_sse_stream(
                 thread_id: thread_id.clone(),
                 after_cursor: after_cursor.clone(),
             };
-            let mut subscription = match tokio::time::timeout(
-                remaining,
-                services.subscribe_events(caller.clone(), request),
-            )
-            .await
-            {
+            let subscription_result = tokio::select! {
+                biased;
+                _ = slot_guard.cancelled() => return,
+                result = tokio::time::timeout(
+                    remaining,
+                    services.subscribe_events(caller.clone(), request),
+                ) => result,
+            };
+            let mut subscription = match subscription_result {
                 Err(_elapsed) => {
                     tracing::debug!(
                         target = "ironclaw_webui_v2::sse",
@@ -1077,12 +1108,23 @@ fn build_sse_stream(
                     return;
                 }
             };
+            // Axum can complete the HTTP handshake before the facade has
+            // admitted its projection subscription. This application frame
+            // proves the stream is actually ready, so a route switch can clear
+            // a stale reconnecting state without waiting for the next model
+            // delta or the transport keep-alive interval.
+            yield Ok(sse_ready_event());
             loop {
                 let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
                 if remaining.is_zero() {
                     return;
                 }
-                match tokio::time::timeout(remaining, subscription.next()).await {
+                let next = tokio::select! {
+                    biased;
+                    _ = slot_guard.cancelled() => return,
+                    result = tokio::time::timeout(remaining, subscription.next()) => result,
+                };
+                match next {
                     Err(_elapsed) => {
                         tracing::debug!(
                             target = "ironclaw_webui_v2::sse",
@@ -1124,12 +1166,15 @@ fn build_sse_stream(
                 thread_id: thread_id.clone(),
                 after_cursor: after_cursor.clone(),
             };
-            match tokio::time::timeout(
-                remaining,
-                services.stream_events(caller.clone(), request),
-            )
-            .await
-            {
+            let drain = tokio::select! {
+                biased;
+                _ = slot_guard.cancelled() => return,
+                result = tokio::time::timeout(
+                    remaining,
+                    services.stream_events(caller.clone(), request),
+                ) => result,
+            };
+            match drain {
                 Err(_elapsed) => {
                     // The facade drain was still pending when SSE_MAX_LIFETIME
                     // ran out. Returning here drops the generator (and the
@@ -1169,7 +1214,11 @@ fn build_sse_stream(
                     if sleep_for.is_zero() {
                         return;
                     }
-                    tokio::time::sleep(sleep_for).await;
+                    tokio::select! {
+                        biased;
+                        _ = slot_guard.cancelled() => return,
+                        _ = tokio::time::sleep(sleep_for) => {}
+                    }
                 }
                 Ok(Err(error)) => {
                     // Surface a redacted error event and close the stream.
@@ -2269,13 +2318,17 @@ pub async fn stream_events_ws(
     Query(query): Query<StreamEventsQuery>,
     upgrade: axum::extract::ws::WebSocketUpgrade,
 ) -> Result<axum::response::Response, WebUiV2HttpError> {
-    let slot = match state
-        .sse_capacity()
-        .try_acquire(&caller.tenant_id, &caller.user_id)
-    {
+    let slot = match state.sse_capacity().try_acquire(
+        &caller.tenant_id,
+        &caller.user_id,
+        stream_connection_id(query.connection_id.as_deref()),
+    ) {
         SseCapacityOutcome::Acquired(slot) => slot,
         SseCapacityOutcome::Rejected { refundable } => {
             return Ok(sse_capacity_rejected(refundable));
+        }
+        SseCapacityOutcome::StaleGeneration => {
+            return Ok(StatusCode::NO_CONTENT.into_response());
         }
     };
     let services = state.services().clone();
@@ -2313,7 +2366,7 @@ async fn ws_drain_loop(
     //    leave bytes queued indefinitely. Each `socket.send().await`
     //    runs under `ws_send_with_timeout` so the per-caller slot
     //    is released within the lifetime budget regardless.
-    let _slot_guard = slot;
+    let mut slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
     if services.supports_stream_events_subscription() {
@@ -2327,38 +2380,60 @@ async fn ws_drain_loop(
             thread_id: thread_id.clone(),
             after_cursor: after_cursor.clone(),
         };
-        let mut subscription =
-            match tokio::time::timeout(remaining, services.subscribe_events(caller, request)).await
-            {
-                Err(_elapsed) => {
-                    let _ = socket.close().await;
-                    return;
+        let subscription_result = tokio::select! {
+            biased;
+            _ = slot_guard.cancelled() => {
+                let _ = socket.close().await;
+                return;
+            }
+            result = tokio::time::timeout(
+                remaining,
+                services.subscribe_events(caller, request),
+            ) => result,
+        };
+        let mut subscription = match subscription_result {
+            Err(_elapsed) => {
+                let _ = socket.close().await;
+                return;
+            }
+            Ok(Ok(subscription)) => subscription,
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    target = "ironclaw_webui_v2::ws",
+                    error = ?error,
+                    "facade rejected WS subscription; closing stream",
+                );
+                let payload = SseErrorPayload {
+                    error: error.code,
+                    kind: error.kind,
+                    retryable: error.retryable,
+                };
+                if let Ok(text) = serde_json::to_string(&payload) {
+                    let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                    let _ = ws_send_with_timeout(
+                        &mut socket,
+                        Some(axum::extract::ws::Message::Text(text.into())),
+                        send_budget,
+                    )
+                    .await;
                 }
-                Ok(Ok(subscription)) => subscription,
-                Ok(Err(error)) => {
-                    tracing::debug!(
-                        target = "ironclaw_webui_v2::ws",
-                        error = ?error,
-                        "facade rejected WS subscription; closing stream",
-                    );
-                    let payload = SseErrorPayload {
-                        error: error.code,
-                        kind: error.kind,
-                        retryable: error.retryable,
-                    };
-                    if let Ok(text) = serde_json::to_string(&payload) {
-                        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
-                        let _ = ws_send_with_timeout(
-                            &mut socket,
-                            Some(axum::extract::ws::Message::Text(text.into())),
-                            send_budget,
-                        )
-                        .await;
-                    }
-                    let _ = socket.close().await;
-                    return;
-                }
-            };
+                let _ = socket.close().await;
+                return;
+            }
+        };
+        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+        if ws_send_with_timeout(
+            &mut socket,
+            Some(axum::extract::ws::Message::Text(
+                STREAM_READY_PAYLOAD.into(),
+            )),
+            send_budget,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
         loop {
             let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
             if remaining.is_zero() {
@@ -2367,6 +2442,10 @@ async fn ws_drain_loop(
             }
             let outcome = tokio::select! {
                 biased;
+                _ = slot_guard.cancelled() => {
+                    let _ = socket.close().await;
+                    return;
+                }
                 incoming = socket.recv() => {
                     match incoming {
                         None | Some(Err(_)) => return,
@@ -2453,6 +2532,10 @@ async fn ws_drain_loop(
         let facade_call = services.stream_events(caller.clone(), request);
         let outcome = tokio::select! {
             biased;
+            _ = slot_guard.cancelled() => {
+                let _ = socket.close().await;
+                return;
+            }
             // Peer close / socket error wins over the facade poll —
             // if the browser already dropped the connection we want
             // to free the slot immediately, not wait for stream_events
@@ -2531,6 +2614,10 @@ async fn ws_drain_loop(
                 // slot immediately.
                 tokio::select! {
                     biased;
+                    _ = slot_guard.cancelled() => {
+                        let _ = socket.close().await;
+                        return;
+                    }
                     incoming = socket.recv() => match incoming {
                         None | Some(Err(_)) => return,
                         Some(Ok(axum::extract::ws::Message::Close(_))) => return,
