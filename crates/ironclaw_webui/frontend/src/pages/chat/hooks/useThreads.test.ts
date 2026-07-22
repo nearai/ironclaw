@@ -85,6 +85,18 @@ function instantiate(createThreadRequest, overrides = {}) {
       ...data,
       threads: data.threads.filter((thread) => (thread.thread_id || thread.id) !== threadId),
     }),
+    appendThreadListPage: (data, page, expectedCursor) => {
+      if (!data || data.next_cursor !== expectedCursor) return data;
+      const ids = new Set(data.threads.map((thread) => thread.thread_id || thread.id));
+      return {
+        ...data,
+        threads: [
+          ...data.threads,
+          ...page.threads.filter((thread) => !ids.has(thread.thread_id || thread.id)),
+        ],
+        next_cursor: page.next_cursor || null,
+      };
+    },
     queryClient: { setQueryData: () => {}, invalidateQueries: () => {} },
     upsertThreadInCache: () => {},
     globalThis: {},
@@ -247,4 +259,49 @@ test("normalizes raw thread id titles out of sidebar records", () => {
       { id: "thread-real", title: "thread-safety" },
     ],
   );
+});
+
+test("loadMore consumes next_cursor, merges the page, and deduplicates clicks", async () => {
+  const listCalls = [];
+  let cachedData = {
+    threads: [{ thread_id: "thread-new" }],
+    next_cursor: "cursor-1",
+  };
+  let releasePage;
+  const hook = instantiate(async () => ({ thread: { thread_id: "unused" } }), {
+    useQuery: () => ({ data: cachedData, isLoading: false }),
+    listThreads: ({ cursor }) => {
+      listCalls.push(cursor);
+      return new Promise((resolve) => {
+        releasePage = () => resolve({
+          threads: [
+            { thread_id: "thread-new" },
+            { thread_id: "thread-old" },
+          ],
+          next_cursor: null,
+        });
+      });
+    },
+    queryClient: {
+      setQueryData: (_queryKey, update) => {
+        cachedData = update(cachedData);
+      },
+      invalidateQueries: () => {},
+    },
+  });
+
+  const first = hook.loadMore();
+  const second = hook.loadMore();
+  assert.equal(first, second, "concurrent clicks should share one page request");
+  assert.deepEqual(listCalls, ["cursor-1"]);
+
+  releasePage();
+  await first;
+  assert.deepEqual(cachedData, {
+    threads: [
+      { thread_id: "thread-new" },
+      { thread_id: "thread-old" },
+    ],
+    next_cursor: null,
+  });
 });
