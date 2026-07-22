@@ -288,7 +288,7 @@ fn engine_provider_client_for_test(
                     token_exchange_resource: None,
                 },
             ])),
-            client_credentials: Arc::new(TestStaticClientCredentials),
+            configuration: Arc::new(TestStaticClientCredentials),
             egress: egress as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
             secret_store,
             callback_base: ironclaw_auth::EngineCallbackBase::new(
@@ -304,7 +304,7 @@ fn engine_provider_client_for_test(
 struct TestStaticClientCredentials;
 
 #[async_trait]
-impl ironclaw_auth::EngineClientCredentialsSource for TestStaticClientCredentials {
+impl ironclaw_auth::EngineOAuthConfigurationSource for TestStaticClientCredentials {
     async fn resolve(
         &self,
         _vendor: &str,
@@ -315,26 +315,27 @@ impl ironclaw_auth::EngineClientCredentialsSource for TestStaticClientCredential
             client_secret: None,
         })
     }
+
+    async fn resolve_non_secret_value(
+        &self,
+        _vendor: &str,
+        _handle: &ironclaw_host_api::SecretHandle,
+    ) -> Result<Option<String>, ironclaw_auth::AuthProductError> {
+        Ok(None)
+    }
 }
 
-/// Noop continuation dispatcher: swallows every auth-continuation event.
+/// Noop resolution dispatcher: swallows every auth-resolution event.
 #[derive(Debug)]
 struct TestNoopContinuationDispatcher;
 
 #[async_trait]
-impl crate::product_auth::api::auth::RebornAuthContinuationDispatcher
+impl crate::product_auth::api::auth::RebornAuthResolutionDispatcher
     for TestNoopContinuationDispatcher
 {
-    async fn dispatch_auth_continuation(
+    async fn dispatch_auth_resolved(
         &self,
-        _event: ironclaw_auth::AuthContinuationEvent,
-    ) -> Result<(), ironclaw_auth::AuthProductError> {
-        Ok(())
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        _event: ironclaw_auth::AuthContinuationEvent,
+        _event: ironclaw_auth::AuthResolved,
     ) -> Result<(), ironclaw_auth::AuthProductError> {
         Ok(())
     }
@@ -421,7 +422,7 @@ fn build_oauth_product_auth_infra() -> OAuthProductAuthInfra {
 /// - `ScriptedOAuthTokenEgress` intercepting the provider token endpoint.
 /// - Real `FilesystemAuthProductServices<InMemoryBackend>` for flow + account
 ///   persistence — zero mocks on the storage layer.
-/// - Noop continuation dispatcher and noop obligation handler.
+/// - Noop resolution dispatcher and noop obligation handler.
 ///
 /// Calling this multiple times produces independent, isolated bundles.
 pub fn build_oauth_product_auth_for_test() -> OAuthProductAuthTestBundle {
@@ -591,6 +592,186 @@ where
         egress,
         keepalive_recipes,
     }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug)]
+struct NoopChannelConfigReactivation;
+
+#[cfg(feature = "test-support")]
+#[async_trait]
+impl crate::extension_host::channel_config::ChannelConfigReactivation
+    for NoopChannelConfigReactivation
+{
+    async fn reactivate_if_active(
+        &self,
+        _extension_id: &ironclaw_host_api::ExtensionId,
+    ) -> Result<(), ironclaw_product_workflow::ProductWorkflowError> {
+        Ok(())
+    }
+}
+
+/// Prepare an OAuth URL from a parsed extension manifest after saving its
+/// operator configuration through the production admin-configuration service
+/// and resolving it through the production channel-config adapter.
+/// Returns the auth engine's canonical prepared-flow contract, not a test DTO.
+#[cfg(feature = "test-support")]
+pub async fn prepare_manifest_oauth_flow_for_test(
+    manifest_toml: &str,
+    vendor: &str,
+    saved_configuration: Vec<(String, String)>,
+    request: ironclaw_auth::PrepareOAuthFlowRequest,
+) -> Result<ironclaw_auth::PreparedOAuthFlow, String> {
+    use ironclaw_extension_host::{
+        AdminConfigurationIdempotencyKey, AdminConfigurationService,
+        AdminConfigurationSubmittedValue, FilesystemAdminConfigurationStore,
+    };
+    use ironclaw_extensions::{
+        ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+        ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
+        InstallationOwner, ManifestSource,
+    };
+    use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{SecretHandle, VendorAuthRecipe};
+    use ironclaw_secrets::SecretMaterial;
+
+    let record = ExtensionManifestRecord::from_toml(
+        manifest_toml,
+        ManifestSource::HostBundled,
+        &ironclaw_host_runtime::default_host_port_catalog().map_err(|error| error.to_string())?,
+        None,
+        &ironclaw_host_runtime::default_host_api_contract_registry()
+            .map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let resolved = record.resolved().clone();
+    let extension_id = resolved.id.clone();
+    let auth = resolved
+        .auth
+        .iter()
+        .find(|auth| auth.vendor.as_str() == vendor)
+        .ok_or_else(|| format!("manifest does not declare auth vendor {vendor}"))?;
+    let recipe = auth
+        .recipe
+        .clone()
+        .ok_or_else(|| format!("manifest auth vendor {vendor} has no recipe"))?;
+    let VendorAuthRecipe::Oauth2Code(oauth_recipe) = &recipe else {
+        return Err(format!("manifest auth vendor {vendor} is not oauth2_code"));
+    };
+    if oauth_recipe.client_credentials.is_none() {
+        return Err("test manifest must declare client credentials".to_string());
+    }
+
+    let installation_store =
+        Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
+    installation_store
+        .upsert_manifest_and_installation(
+            record,
+            ExtensionInstallation::new(
+                ExtensionInstallationId::new(format!(
+                    "{}-test-installation",
+                    extension_id.as_str()
+                ))
+                .map_err(|error| error.to_string())?,
+                extension_id.clone(),
+                ExtensionActivationState::Installed,
+                ExtensionManifestRef::new(extension_id.clone(), None),
+                Vec::new(),
+                chrono::Utc::now(),
+                InstallationOwner::Tenant,
+            )
+            .map_err(|error| error.to_string())?,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    let secret_store: Arc<dyn ironclaw_secrets::SecretStore> =
+        Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral());
+    let admin_filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let admin_configuration = Arc::new(
+        AdminConfigurationService::new(
+            FilesystemAdminConfigurationStore::new(Arc::new(ScopedFilesystem::new(
+                admin_filesystem,
+                crate::invocation_mount_view,
+            ))),
+            Arc::clone(&secret_store),
+            resolved.admin_configuration.clone(),
+        )
+        .map_err(|error| error.to_string())?,
+    );
+    let submitted_handles = saved_configuration
+        .iter()
+        .map(|(handle, _)| handle.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let configuration_group = resolved
+        .admin_configuration
+        .iter()
+        .find(|descriptor| {
+            let declared = descriptor
+                .fields
+                .iter()
+                .map(|field| field.handle.as_str())
+                .collect::<std::collections::BTreeSet<_>>();
+            submitted_handles.is_subset(&declared)
+        })
+        .ok_or_else(|| {
+            "saved configuration does not belong to one manifest admin-configuration group"
+                .to_string()
+        })?;
+    admin_configuration
+        .replace(
+            &request.scope.resource,
+            &configuration_group.group_id,
+            &AdminConfigurationIdempotencyKey::new("manifest-oauth-config-test")
+                .map_err(|error| error.to_string())?,
+            0,
+            saved_configuration
+                .into_iter()
+                .map(|(handle, value)| {
+                    Ok(AdminConfigurationSubmittedValue {
+                        handle: SecretHandle::new(handle).map_err(|error| error.to_string())?,
+                        value: SecretMaterial::from(value),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let config_service = Arc::new(
+        crate::extension_host::channel_config::ChannelConfigService::new(
+            Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStore>,
+            Arc::clone(&secret_store),
+            request.scope.resource.clone(),
+            Arc::new(NoopChannelConfigReactivation),
+        )
+        .with_admin_configuration(admin_configuration, request.scope.resource.clone()),
+    );
+
+    let slot = crate::product_auth::credentials::product_auth_providers::ChannelConfigCredentialSlot::default();
+    slot.fill(config_service);
+    let mut configuration = crate::product_auth::credentials::product_auth_providers::CompositionOAuthConfiguration::default();
+    configuration.with_channel_config_fallback(slot);
+    let engine = ironclaw_auth::AuthEngine::new(ironclaw_auth::AuthEngineDeps {
+        recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
+            ironclaw_auth::ResolvedVendorAuthRecipe {
+                vendor: vendor.to_string(),
+                recipe,
+                token_exchange_resource: None,
+            },
+        ])),
+        configuration: Arc::new(configuration),
+        egress: Arc::new(ScriptedOAuthTokenEgress::with_access_token("unused-token")),
+        secret_store,
+        callback_base: ironclaw_auth::EngineCallbackBase::new(
+            "https://ironclaw.example/api/reborn/product-auth/oauth",
+        )
+        .map_err(|error| error.to_string())?,
+        dcr_client_name: "Ironclaw integration test".to_string(),
+    });
+    engine
+        .prepare_oauth_flow(request)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 // ─── Slice 8: OAuth credential-refresh sweep test support ────────────────────
@@ -781,7 +962,7 @@ fn engine_provider_client_with_identity_for_test(
                     token_exchange_resource: None,
                 },
             ])),
-            client_credentials: Arc::new(TestStaticClientCredentials),
+            configuration: Arc::new(TestStaticClientCredentials),
             egress: egress as Arc<dyn ironclaw_host_api::RuntimeHttpEgress>,
             secret_store,
             callback_base: ironclaw_auth::EngineCallbackBase::new(

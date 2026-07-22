@@ -182,10 +182,10 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-// Composition's facade re-exports the continuation dispatcher for its own
+// Composition's facade re-exports the resolution dispatcher for its own
 // downstream consumers (root test suites, the CLI) alongside the
 // product-auth service surface that produces it.
-pub use product_auth::api::auth::RebornAuthContinuationDispatcher;
+pub use product_auth::api::auth::RebornAuthResolutionDispatcher;
 pub use product_auth::api::auth::{
     RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
     RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,

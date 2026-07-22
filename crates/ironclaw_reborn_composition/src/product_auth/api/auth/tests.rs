@@ -1,12 +1,12 @@
 use super::*;
 use ironclaw_auth::{
-    AuthChallenge, AuthFlowId, AuthFlowRecord, AuthProductError, AuthProductScope,
-    CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
+    AuthChallenge, AuthFlowId, AuthFlowOutcome, AuthFlowRecord, AuthFlowState, AuthProductError,
+    AuthProductScope, CredentialAccount, CredentialAccountChoiceRequest, CredentialAccountId,
     CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountLookupRequest,
     CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
     CredentialAccountStatus, CredentialRecoveryProjection, CredentialRecoveryRequest,
     CredentialRefreshReport, CredentialRefreshRequest, NewAuthFlow, NewCredentialAccount,
-    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthCallbackClaim, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderRefresh,
     OAuthProviderRefreshRequest, SecretCleanupReport, SecretCleanupRequest, SecretSubmitRequest,
     SecretSubmitResult,
@@ -35,7 +35,7 @@ fn reborn_product_auth_services_new_accepts_separate_impls() {
         credential_account_service.clone(),
         provider_client.clone(),
         cleanup_service.clone(),
-        Arc::new(NoopAuthContinuationDispatcher),
+        Arc::new(NoopAuthResolutionDispatcher),
     );
 
     assert_eq!(
@@ -68,7 +68,7 @@ fn reborn_product_auth_services_new_accepts_separate_impls() {
 fn with_host_managed_nearai_credential_scope_rejects_thread_scoped_value() {
     let shared = Arc::new(SharedAuthTestDouble);
     let services =
-        RebornProductAuthServices::from_shared(shared, Arc::new(NoopAuthContinuationDispatcher));
+        RebornProductAuthServices::from_shared(shared, Arc::new(NoopAuthResolutionDispatcher));
 
     let error = services
         .with_host_managed_nearai_credential_scope(test_auth_product_scope())
@@ -84,7 +84,7 @@ fn with_host_managed_nearai_credential_scope_accepts_owner_granularity_scope() {
 
     let shared = Arc::new(SharedAuthTestDouble);
     let services =
-        RebornProductAuthServices::from_shared(shared, Arc::new(NoopAuthContinuationDispatcher));
+        RebornProductAuthServices::from_shared(shared, Arc::new(NoopAuthResolutionDispatcher));
     let owner_scope = AuthProductScope::new(
         ResourceScope {
             tenant_id: TenantId::new("host-tenant").expect("tenant"),
@@ -111,7 +111,7 @@ fn reborn_product_auth_services_from_shared_clones_arc_per_trait() {
     let shared_ptr = arc_data_ptr(&shared);
 
     let services =
-        RebornProductAuthServices::from_shared(shared, Arc::new(NoopAuthContinuationDispatcher));
+        RebornProductAuthServices::from_shared(shared, Arc::new(NoopAuthResolutionDispatcher));
 
     assert_eq!(arc_data_ptr(&services.flow_manager()), shared_ptr);
     assert_eq!(arc_data_ptr(&services.interaction_service()), shared_ptr);
@@ -136,7 +136,7 @@ fn reborn_product_auth_ports_from_shared_with_provider_uses_separate_provider_cl
 
     let ports = RebornProductAuthServicePorts::from_shared_with_provider(shared, provider_client);
     let services = ports.into_services(
-        Arc::new(NoopAuthContinuationDispatcher),
+        Arc::new(NoopAuthResolutionDispatcher),
         Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
     );
 
@@ -172,7 +172,7 @@ impl AuthFlowManager for SharedAuthTestDouble {
         &self,
         _scope: &AuthProductScope,
         _request: OAuthCallbackClaimRequest,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
+    ) -> Result<OAuthCallbackClaim, AuthProductError> {
         unreachable!("constructor tests do not call auth-flow methods")
     }
 
@@ -224,20 +224,20 @@ impl AuthFlowManager for SharedAuthTestDouble {
         unreachable!("constructor tests do not call auth-flow methods")
     }
 
-    async fn mark_continuation_dispatched(
+    async fn expire_flow(
         &self,
         _scope: &AuthProductScope,
         _flow_id: AuthFlowId,
-        _emitted_at: ironclaw_auth::Timestamp,
+        _observed_at: ironclaw_auth::Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         unreachable!("constructor tests do not call auth-flow methods")
     }
 
-    async fn fail_completed_continuation(
+    async fn mark_resolution_delivered(
         &self,
         _scope: &AuthProductScope,
         _flow_id: AuthFlowId,
-        _error: ironclaw_auth::AuthErrorCode,
+        _delivered_at: ironclaw_auth::Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         unreachable!("constructor tests do not call auth-flow methods")
     }
@@ -449,7 +449,7 @@ async fn lifecycle_cleanup_drops_canceled_flows_durable_pkce_verifier() {
         double.clone() as Arc<dyn CredentialAccountService>,
         double.clone() as Arc<dyn AuthProviderClient>,
         cleanup as Arc<dyn SecretCleanupService>,
-        Arc::new(NoopAuthContinuationDispatcher),
+        Arc::new(NoopAuthResolutionDispatcher),
     )
     .with_secret_store(Arc::clone(&secret_store));
 
@@ -521,7 +521,7 @@ fn make_auth_services_with_flow_source(
         double.clone() as Arc<dyn CredentialAccountService>,
         double.clone() as Arc<dyn AuthProviderClient>,
         double.clone() as Arc<dyn SecretCleanupService>,
-        Arc::new(NoopAuthContinuationDispatcher),
+        Arc::new(NoopAuthResolutionDispatcher),
     )
     .with_flow_record_source(auth_svc as Arc<dyn AuthFlowRecordSource>)
 }
@@ -594,8 +594,8 @@ async fn cancel_blocked_auth_flow_cancels_non_terminal_flow() {
 
     // Sanity: flow is non-terminal before the call.
     assert_eq!(
-        flow.status,
-        AuthFlowStatus::AwaitingUser,
+        flow.state,
+        AuthFlowState::Open,
         "pre-condition: flow must be non-terminal"
     );
 
@@ -613,15 +613,15 @@ async fn cancel_blocked_auth_flow_cancels_non_terminal_flow() {
         .await
         .expect("cancel_blocked_auth_flow must succeed");
 
-    // The flow must now be terminal (Canceled).
+    // The flow must now be terminal (UserAborted).
     let flows = auth_svc.flow_records_snapshot();
     let updated = flows
         .iter()
         .find(|f| f.id == flow.id)
         .expect("flow must still exist after cancel");
     assert_eq!(
-        updated.status,
-        AuthFlowStatus::Canceled,
+        updated.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
         "cancel_blocked_auth_flow must have cancelled the flow via flow_manager"
     );
 }
@@ -735,7 +735,7 @@ async fn cancel_blocked_auth_flow_treats_terminal_race_as_ok() {
             &self,
             _scope: &AuthProductScope,
             _request: OAuthCallbackClaimRequest,
-        ) -> Result<AuthFlowRecord, AuthProductError> {
+        ) -> Result<OAuthCallbackClaim, AuthProductError> {
             unreachable!("terminal-race test does not call claim_oauth_callback")
         }
 
@@ -779,22 +779,22 @@ async fn cancel_blocked_auth_flow_treats_terminal_race_as_ok() {
             unreachable!("terminal-race test does not call fail_oauth_callback")
         }
 
-        async fn mark_continuation_dispatched(
+        async fn expire_flow(
             &self,
             _scope: &AuthProductScope,
             _flow_id: AuthFlowId,
-            _emitted_at: Timestamp,
+            _observed_at: Timestamp,
         ) -> Result<AuthFlowRecord, AuthProductError> {
-            unreachable!("terminal-race test does not call mark_continuation_dispatched")
+            unreachable!("terminal-race test does not call expire_flow")
         }
 
-        async fn fail_completed_continuation(
+        async fn mark_resolution_delivered(
             &self,
             _scope: &AuthProductScope,
             _flow_id: AuthFlowId,
-            _error: ironclaw_auth::AuthErrorCode,
+            _delivered_at: Timestamp,
         ) -> Result<AuthFlowRecord, AuthProductError> {
-            unreachable!("terminal-race test does not call fail_completed_continuation")
+            unreachable!("terminal-race test does not call mark_resolution_delivered")
         }
     }
 
@@ -809,7 +809,7 @@ async fn cancel_blocked_auth_flow_treats_terminal_race_as_ok() {
                 double.clone() as Arc<dyn CredentialAccountService>,
                 double.clone() as Arc<dyn AuthProviderClient>,
                 double.clone() as Arc<dyn SecretCleanupService>,
-                Arc::new(NoopAuthContinuationDispatcher),
+                Arc::new(NoopAuthResolutionDispatcher),
             )
             .with_flow_record_source(auth_svc as Arc<dyn AuthFlowRecordSource>)
         };
@@ -899,7 +899,7 @@ async fn cancel_blocked_auth_flow_is_noop_without_flow_record_source() {
         double.clone() as Arc<dyn CredentialAccountService>,
         double.clone() as Arc<dyn AuthProviderClient>,
         double.clone() as Arc<dyn SecretCleanupService>,
-        Arc::new(NoopAuthContinuationDispatcher),
+        Arc::new(NoopAuthResolutionDispatcher),
     ));
 
     let turn_scope = TurnScope::new_with_owner(
@@ -993,6 +993,14 @@ async fn cancel_blocked_auth_flow_propagates_flow_source_error() {
             Err(AuthProductError::BackendUnavailable)
         }
 
+        async fn flow_for_owner_by_id(
+            &self,
+            _owner_scope: &ironclaw_auth::AuthProductScope,
+            _flow_id: ironclaw_auth::AuthFlowId,
+        ) -> Result<Option<ironclaw_auth::AuthFlowRecord>, AuthProductError> {
+            unreachable!("flow-source-error test does not call flow_for_owner_by_id")
+        }
+
         async fn flows_for_owner(
             &self,
             _owner: ironclaw_auth::AuthFlowOwnerScope,
@@ -1011,7 +1019,7 @@ async fn cancel_blocked_auth_flow_propagates_flow_source_error() {
                 double.clone() as Arc<dyn CredentialAccountService>,
                 double.clone() as Arc<dyn AuthProviderClient>,
                 double.clone() as Arc<dyn SecretCleanupService>,
-                Arc::new(NoopAuthContinuationDispatcher),
+                Arc::new(NoopAuthResolutionDispatcher),
             )
             .with_flow_record_source(
                 Arc::new(AlwaysFailingFlowSource) as Arc<dyn AuthFlowRecordSource>

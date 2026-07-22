@@ -14,10 +14,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_auth::{
     AuthEngine, AuthEngineDeps, AuthProductError, AuthProviderClient, AuthRecipeResolver,
-    EngineCallbackBase, EngineClientCredentialsSource, EngineOAuthClientMaterial, OAuthClientId,
+    EngineCallbackBase, EngineOAuthClientMaterial, EngineOAuthConfigurationSource, OAuthClientId,
     StaticAuthRecipeResolver,
 };
-use ironclaw_host_api::{RecipeClientCredentials, RuntimeHttpEgress};
+use ironclaw_host_api::{RecipeClientCredentials, RuntimeHttpEgress, SecretHandle};
 use ironclaw_host_runtime::ProductAuthProviderRuntimePorts;
 use ironclaw_secrets::SecretStore;
 use secrecy::SecretString;
@@ -86,12 +86,12 @@ impl fmt::Debug for ChannelConfigCredentialSlot {
 /// recipe client material saved through the generic configure surface
 /// resolves with no per-vendor wiring.
 #[derive(Clone, Default)]
-pub(crate) struct CompositionClientCredentials {
+pub(crate) struct CompositionOAuthConfiguration {
     values: BTreeMap<String, ClientCredentialValue>,
     channel_config: Option<ChannelConfigCredentialSlot>,
 }
 
-impl CompositionClientCredentials {
+impl CompositionOAuthConfiguration {
     pub(crate) fn register_static(&mut self, handle: impl Into<String>, value: SecretString) {
         self.values
             .insert(handle.into(), ClientCredentialValue::Static(value));
@@ -124,17 +124,17 @@ impl CompositionClientCredentials {
     }
 }
 
-impl fmt::Debug for CompositionClientCredentials {
+impl fmt::Debug for CompositionOAuthConfiguration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("CompositionClientCredentials")
+            .debug_struct("CompositionOAuthConfiguration")
             .field("handles", &self.values.keys().collect::<Vec<_>>())
             .finish()
     }
 }
 
 #[async_trait]
-impl EngineClientCredentialsSource for CompositionClientCredentials {
+impl EngineOAuthConfigurationSource for CompositionOAuthConfiguration {
     async fn resolve(
         &self,
         vendor: &str,
@@ -161,6 +161,27 @@ impl EngineClientCredentialsSource for CompositionClientCredentials {
             client_secret,
         })
     }
+
+    async fn resolve_non_secret_value(
+        &self,
+        vendor: &str,
+        handle: &SecretHandle,
+    ) -> Result<Option<String>, AuthProductError> {
+        let Some(service) = self.channel_config.as_ref().and_then(|slot| slot.get()) else {
+            return Ok(None);
+        };
+        service
+            .non_secret_handle_value(vendor, handle)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    handle = handle.as_str(),
+                    "operator OAuth configuration lookup failed"
+                );
+                AuthProductError::BackendUnavailable
+            })
+    }
 }
 
 /// Compose the auth engine from deployment inputs: the recipe catalog comes
@@ -181,11 +202,11 @@ pub(crate) fn compose_provider_client(
             })?,
     ));
 
-    let mut client_credentials = CompositionClientCredentials::default();
+    let mut oauth_configuration = CompositionOAuthConfiguration::default();
     for config in &configs {
-        register_vendor_client_config(&mut client_credentials, recipes.as_ref(), config);
+        register_vendor_client_config(&mut oauth_configuration, recipes.as_ref(), config);
     }
-    client_credentials.with_channel_config_fallback(channel_config_credentials);
+    oauth_configuration.with_channel_config_fallback(channel_config_credentials);
     let callback_base = dcr_callback
         .map(|dcr| {
             EngineCallbackBase::new(format!(
@@ -205,7 +226,7 @@ pub(crate) fn compose_provider_client(
 
     compose_auth_engine(
         recipes,
-        client_credentials,
+        oauth_configuration,
         callback_base,
         secret_store,
         runtime_ports,
@@ -214,7 +235,7 @@ pub(crate) fn compose_provider_client(
 
 /// Fill the vendor recipe's client-credential handles from deployment config.
 fn register_vendor_client_config(
-    credentials: &mut CompositionClientCredentials,
+    credentials: &mut CompositionOAuthConfiguration,
     recipes: &dyn AuthRecipeResolver,
     config: &OAuthProviderBackendConfig,
 ) {
@@ -270,7 +291,7 @@ fn callback_base_from_redirect(redirect: &str) -> Option<EngineCallbackBase> {
 /// previous no-providers-configured behavior.
 pub(crate) fn compose_auth_engine(
     recipes: Arc<dyn AuthRecipeResolver>,
-    client_credentials: CompositionClientCredentials,
+    oauth_configuration: CompositionOAuthConfiguration,
     callback_base: Option<EngineCallbackBase>,
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
@@ -289,7 +310,7 @@ pub(crate) fn compose_auth_engine(
     ));
     let engine = Arc::new(AuthEngine::new(AuthEngineDeps {
         recipes,
-        client_credentials: Arc::new(client_credentials),
+        configuration: Arc::new(oauth_configuration),
         egress,
         secret_store: Arc::clone(&secret_store),
         callback_base,

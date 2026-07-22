@@ -23,7 +23,9 @@ use async_trait::async_trait;
 use ironclaw_extensions::{
     ExtensionInstallationStore, ExtensionManifestRecord, ResolvedExtensionManifest,
 };
-use ironclaw_host_api::{ExtensionId, RecipeSecretField, ResourceScope, SecretHandle};
+use ironclaw_host_api::{
+    ExtensionId, RecipeSecretField, ResourceScope, SecretHandle, VendorAuthRecipe,
+};
 use ironclaw_product_workflow::{ProductWorkflowError, RebornServicesError};
 use ironclaw_secrets::{SecretMaterial, SecretStore};
 
@@ -46,6 +48,8 @@ pub(crate) enum ChannelConfigError {
     NotInstalled { extension_id: String },
     #[error("field `{handle}` is not declared by the extension's channel configuration")]
     UnknownField { handle: String },
+    #[error("configuration handle `{handle}` is declared by more than one extension")]
+    AmbiguousField { handle: String },
     #[error("channel configuration storage failed: {reason}")]
     Storage { reason: String },
     #[error("channel reactivation failed: {reason}")]
@@ -336,6 +340,67 @@ impl ChannelConfigService {
             .map(|(_, value)| value))
     }
 
+    /// Resolve one manifest-declared non-secret configuration handle from the
+    /// active/available manifests that own the requested vendor recipe. Secret
+    /// fields are excluded because these values may be placed in a user-visible
+    /// OAuth URL; multiple owning manifests are rejected instead of selecting
+    /// whichever global handle happens to be visited first.
+    pub(crate) async fn non_secret_handle_value(
+        &self,
+        vendor: &str,
+        handle: &SecretHandle,
+    ) -> Result<Option<String>, ChannelConfigError> {
+        let installed_manifests = self
+            .installation_store
+            .list_manifests()
+            .await
+            .map_err(storage_error)?;
+        let mut manifests = self.available_manifests.clone();
+        for record in &installed_manifests {
+            manifests.insert(
+                record.resolved().id.clone(),
+                Arc::new(record.resolved().clone()),
+            );
+        }
+        let mut declaring = manifests.values().filter(|manifest| {
+            let recipe_owns_handle = manifest.auth.iter().any(|auth| {
+                auth.vendor.as_str() == vendor
+                    && auth.recipe.as_ref().is_some_and(|recipe| {
+                        matches!(
+                            recipe,
+                            VendorAuthRecipe::Oauth2Code(oauth)
+                                if oauth
+                                    .authorize_params_from_config
+                                    .values()
+                                    .any(|configured| configured == handle)
+                        )
+                    })
+            });
+            recipe_owns_handle
+                && (manifest.admin_configuration.iter().any(|descriptor| {
+                    descriptor
+                        .fields
+                        .iter()
+                        .any(|field| !field.secret && field.handle == *handle)
+                }) || manifest.channel.as_ref().is_some_and(|channel| {
+                    channel
+                        .config
+                        .fields
+                        .iter()
+                        .any(|field| !field.secret && field.handle == *handle)
+                }))
+        });
+        let Some(manifest) = declaring.next() else {
+            return Ok(None);
+        };
+        if declaring.next().is_some() {
+            return Err(ChannelConfigError::AmbiguousField {
+                handle: handle.as_str().to_string(),
+            });
+        }
+        self.non_secret_value(&manifest.id, handle.as_str()).await
+    }
+
     /// Resolve one auth-recipe client-credential handle from manifest-declared
     /// administrator configuration, including extensions with no channel
     /// surface. The retired channel-config store remains a compatibility
@@ -617,6 +682,14 @@ fn map_channel_config_error(error: ChannelConfigError) -> RebornServicesError {
             field: None,
             validation_code: None,
         },
+        ChannelConfigError::AmbiguousField { .. } => RebornServicesError {
+            code: RebornServicesErrorCode::Conflict,
+            kind: RebornServicesErrorKind::Conflict,
+            status_code: 409,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        },
         ChannelConfigError::Storage { .. } => RebornServicesError {
             code: RebornServicesErrorCode::Unavailable,
             kind: RebornServicesErrorKind::ServiceUnavailable,
@@ -707,6 +780,35 @@ injection = { type = "header", name = "authorization", prefix = "Bearer " }
 [channel.presentation]
 supports_markdown = false
 supports_threads = false
+
+[[tools]]
+id = "acmechat.read_messages"
+description = "Read AcmeChat messages"
+effects = ["network", "use_secret"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/acmechat/read_messages.input.v1.json"
+
+[[tools.credentials]]
+handle = "acmechat_user_token"
+vendor = "acmechat"
+scopes = ["messages:read"]
+audience = { scheme = "https", host = "api.acmechat.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[auth.acmechat]
+method = "oauth2_code"
+display_name = "AcmeChat account"
+authorization_endpoint = "https://acmechat.example/oauth/authorize"
+token_endpoint = "https://acmechat.example/oauth/token"
+pkce = "s256"
+scopes = ["messages:read"]
+authorize_params_from_config = { workspace = "acmechat_public_url" }
+client_credentials = { client_id_handle = "acmechat_public_url", client_secret_handle = "acmechat_api_token" }
+
+[auth.acmechat.token_response]
+access_token = "/access_token"
+scope = { path = "/scope", missing = "fallback_to_requested" }
 "#;
 
     /// A tools-only fixture (no channel surface): nothing to configure.
@@ -1170,6 +1272,30 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
             "https://x.example"
         );
 
+        assert_eq!(
+            fixture
+                .service
+                .non_secret_handle_value(
+                    "acmechat",
+                    &SecretHandle::new("acmechat_public_url").expect("config handle"),
+                )
+                .await
+                .expect("non-secret URL-bound lookup succeeds")
+                .as_deref(),
+            Some("https://x.example")
+        );
+        assert!(
+            fixture
+                .service
+                .non_secret_handle_value(
+                    "acmechat",
+                    &SecretHandle::new("acmechat_api_token").expect("secret handle"),
+                )
+                .await
+                .expect("secret URL-bound lookup fails closed without exposing material")
+                .is_none()
+        );
+
         // A handle no installed manifest declares resolves to nothing —
         // the auth engine falls through to its not-configured path.
         assert!(
@@ -1179,6 +1305,86 @@ input_schema_ref = "schemas/zephyrite/echo.input.v1.json"
                 .await
                 .expect("undeclared lookup succeeds")
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn non_secret_handle_value_rejects_cross_extension_collisions() {
+        let fixture = channel_fixture(RecordingReactivation::new()).await;
+        let rival_manifest = CHANNEL_FIXTURE_MANIFEST
+            .replace("id = \"acmechat\"", "id = \"rivalchat\"")
+            .replace("name = \"AcmeChat\"", "name = \"RivalChat\"")
+            .replace(
+                "service = \"acmechat.extension/v1\"",
+                "service = \"rivalchat.extension/v1\"",
+            )
+            .replace(
+                "id = \"acmechat.read_messages\"",
+                "id = \"rivalchat.read_messages\"",
+            );
+        let rival_record = ExtensionManifestRecord::from_toml(
+            &rival_manifest,
+            ManifestSource::HostBundled,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            None,
+            &product_extension_host_api_contract_registry().expect("contracts"),
+        )
+        .expect("rival manifest parses");
+        let rival_id = ExtensionId::new("rivalchat").expect("extension id");
+        fixture
+            .installation_store
+            .upsert_manifest_and_installation(
+                rival_record,
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new("rivalchat").expect("installation id"),
+                    rival_id.clone(),
+                    ExtensionActivationState::Installed,
+                    ExtensionManifestRef::new(rival_id.clone(), None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    ironclaw_extensions::InstallationOwner::Tenant,
+                )
+                .expect("installation"),
+            )
+            .await
+            .expect("persist rival install");
+        fixture
+            .service
+            .save(
+                &fixture.extension_id,
+                vec![(
+                    "acmechat_public_url".to_string(),
+                    "https://acme.example".to_string(),
+                )],
+            )
+            .await
+            .expect("save acme config");
+        fixture
+            .service
+            .save(
+                &rival_id,
+                vec![(
+                    "acmechat_public_url".to_string(),
+                    "https://rival.example".to_string(),
+                )],
+            )
+            .await
+            .expect("save rival config");
+
+        let error = fixture
+            .service
+            .non_secret_handle_value(
+                "acmechat",
+                &SecretHandle::new("acmechat_public_url").expect("config handle"),
+            )
+            .await
+            .expect_err("same-vendor cross-extension handle is ambiguous");
+        assert_eq!(
+            error,
+            ChannelConfigError::AmbiguousField {
+                handle: "acmechat_public_url".to_string(),
+            },
+            "an OAuth URL must not borrow an ambiguous handle from another extension",
         );
     }
 

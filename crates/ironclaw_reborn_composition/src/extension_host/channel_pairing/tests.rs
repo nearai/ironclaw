@@ -1,8 +1,9 @@
 // Unit tests for the generic pairing service; child module so
 // `use super::*` reaches crate-private items.
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use ironclaw_auth::AuthProductError;
+use ironclaw_auth::{AuthProductError, AuthResolved, CredentialAccountOwnerScope};
 use ironclaw_conversations::{
     ConditionalUnpairOutcome, ExternalActorRef as ConversationActorRef, InboundTurnError,
 };
@@ -123,23 +124,29 @@ impl RebornUserIdentityBindingDeleteStore for InMemoryIdentity {
 
 #[derive(Default)]
 struct RecordingDispatcher {
-    events: Mutex<Vec<AuthContinuationEvent>>,
+    connections: Mutex<Vec<(IdempotencyKey, CredentialAccountOwnerScope, AuthProviderId)>>,
+    fail: AtomicBool,
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for RecordingDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.events.lock().expect("events lock").push(event);
+impl RebornAuthResolutionDispatcher for RecordingDispatcher {
+    async fn dispatch_auth_resolved(&self, _event: AuthResolved) -> Result<(), AuthProductError> {
         Ok(())
     }
 
-    async fn dispatch_canceled_auth_continuation(
+    async fn dispatch_provider_connection(
         &self,
-        _event: AuthContinuationEvent,
+        delivery_key: IdempotencyKey,
+        owner: CredentialAccountOwnerScope,
+        provider: AuthProviderId,
     ) -> Result<(), AuthProductError> {
+        self.connections
+            .lock()
+            .expect("connections lock")
+            .push((delivery_key, owner, provider));
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(AuthProductError::BackendUnavailable);
+        }
         Ok(())
     }
 }
@@ -206,6 +213,7 @@ impl ConversationActorPairingService for RecordingActorPairings {
 
 struct Fixture {
     service: ChannelPairingService,
+    store: Arc<FilesystemChannelPairingStore>,
     identity: Arc<InMemoryIdentity>,
     dispatcher: Arc<RecordingDispatcher>,
     actor_pairings: Arc<RecordingActorPairings>,
@@ -242,7 +250,7 @@ fn fixture_with(
         extension_id,
         connection_notices: ChannelConnectionNoticePolicy::generic("Vendor X"),
         deep_link_template: deep_link_template.map(str::to_string),
-        store,
+        store: Arc::clone(&store),
         installation: Arc::new(StaticInstallation(
             installation.map(|id| AdapterInstallationId::new(id).expect("installation id")),
         )),
@@ -251,18 +259,48 @@ fn fixture_with(
         identity_lookup: Arc::clone(&identity)
             as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
         identity_delete: Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingDeleteStore>,
-        continuation: Arc::clone(&dispatcher) as Arc<dyn RebornAuthContinuationDispatcher>,
+        resolution_dispatcher: Arc::clone(&dispatcher) as Arc<dyn RebornAuthResolutionDispatcher>,
         conversation_actor_pairings: Arc::clone(&actor_pairings)
             as Arc<dyn ConversationActorPairingService>,
         dm_targets: Arc::clone(&dm_targets),
     });
     Fixture {
         service,
+        store,
         identity,
         dispatcher,
         actor_pairings,
         dm_targets,
     }
+}
+
+fn reopened_service(
+    fixture: &Fixture,
+    dispatcher: Arc<RecordingDispatcher>,
+) -> ChannelPairingService {
+    ChannelPairingService::new(ChannelPairingServiceParts {
+        tenant_id: TenantId::new("tenant-alpha").expect("tenant"),
+        agent_id: ironclaw_host_api::AgentId::new("agent-a").expect("agent"),
+        project_id: None,
+        extension_id: ExtensionId::new(EXT).expect("extension id"),
+        connection_notices: ChannelConnectionNoticePolicy::generic("Vendor X"),
+        deep_link_template: Some("https://vendor.example/{bot_username}?start={code}".to_string()),
+        store: Arc::clone(&fixture.store),
+        installation: Arc::new(StaticInstallation(Some(install()))),
+        template_values: Arc::new(StaticTemplateValues(BTreeMap::from([(
+            "bot_username".to_string(),
+            "acme_bot".to_string(),
+        )]))),
+        identity_bind: Arc::clone(&fixture.identity) as Arc<dyn RebornUserIdentityBindingStore>,
+        identity_lookup: Arc::clone(&fixture.identity)
+            as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
+        identity_delete: Arc::clone(&fixture.identity)
+            as Arc<dyn RebornUserIdentityBindingDeleteStore>,
+        resolution_dispatcher: dispatcher as Arc<dyn RebornAuthResolutionDispatcher>,
+        conversation_actor_pairings: Arc::clone(&fixture.actor_pairings)
+            as Arc<dyn ConversationActorPairingService>,
+        dm_targets: Arc::clone(&fixture.dm_targets),
+    })
 }
 
 fn fixture() -> Fixture {
@@ -279,6 +317,32 @@ fn install() -> AdapterInstallationId {
 
 fn user(id: &str) -> UserId {
     UserId::new(id).expect("user")
+}
+
+#[test]
+fn pending_completion_reads_the_previous_resolution_flow_id_field() {
+    let snapshot: PairingSnapshot = serde_json::from_value(serde_json::json!({
+        "pairings": [],
+        "completions": [{
+            "installation_id": INSTALL,
+            "user_id": "alice",
+            "conversation_space_id": null,
+            "conversation_id": "chat-1",
+            "actor_kind": "vendor_user",
+            "external_actor_id": "u-1",
+            "resolution_flow_id": "channel-pairing-legacy-key"
+        }],
+        "paired_actors": []
+    }))
+    .expect("the previous persisted field remains readable");
+
+    assert_eq!(
+        snapshot.completions[0]
+            .resolution_key
+            .as_ref()
+            .map(IdempotencyKey::as_str),
+        Some("channel-pairing-legacy-key")
+    );
 }
 
 #[tokio::test]
@@ -355,7 +419,7 @@ async fn missing_template_values_fall_back_to_code_only_presentation() {
 }
 
 #[tokio::test]
-async fn consume_binds_identity_records_dm_target_and_dispatches_continuation() {
+async fn consume_binds_identity_records_dm_target_and_dispatches_provider_connection() {
     let fixture = fixture();
     let issue = fixture
         .service
@@ -399,12 +463,22 @@ async fn consume_binds_identity_records_dm_target_and_dispatches_continuation() 
         .expect("dm target present");
     assert_eq!(target.external_actor_id, "u-1");
 
-    // The standard fan-out continuation fired, provider-keyed SetupOnly.
+    // The standard provider-connection fan-out fired without fabricating an
+    // OAuth flow, invocation, or continuation identity.
     {
-        let events = fixture.dispatcher.events.lock().expect("events lock");
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].provider.as_str(), EXT);
-        assert_eq!(events[0].continuation, AuthContinuationRef::SetupOnly);
+        let connections = fixture
+            .dispatcher
+            .connections
+            .lock()
+            .expect("connections lock");
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].1.tenant_id.as_str(), "tenant-alpha");
+        assert_eq!(connections[0].1.user_id, user("alice"));
+        assert_eq!(
+            connections[0].1.agent_id.as_ref().map(AgentId::as_str),
+            Some("agent-a")
+        );
+        assert_eq!(connections[0].2.as_str(), EXT);
     }
     // Connected now; a second consumer of the burned code learns nothing.
     let status = fixture
@@ -426,6 +500,129 @@ async fn consume_binds_identity_records_dm_target_and_dispatches_continuation() 
         .await
         .expect("replay consume");
     assert_eq!(replay, ChannelPairingConsumeOutcome::ExpiredOrUnknown);
+}
+
+#[tokio::test]
+async fn failed_pairing_dispatch_reuses_its_durable_key_after_service_reopen() {
+    let fixture = fixture();
+    fixture.dispatcher.fail.store(true, Ordering::SeqCst);
+    let issue = fixture
+        .service
+        .issue_or_rotate(&user("alice"))
+        .await
+        .expect("mint");
+
+    let error = fixture
+        .service
+        .consume(
+            &install(),
+            issue.code.as_str(),
+            "vendor_user",
+            "u-1",
+            None,
+            "chat-1",
+        )
+        .await
+        .expect_err("the first provider-connection dispatch fails");
+    assert!(matches!(
+        error,
+        ChannelPairingError::ResolutionDispatch { .. }
+    ));
+    let first_key = fixture
+        .dispatcher
+        .connections
+        .lock()
+        .expect("connections lock")
+        .first()
+        .expect("first dispatch")
+        .0
+        .clone();
+
+    let retry_dispatcher = Arc::new(RecordingDispatcher::default());
+    let reopened = reopened_service(&fixture, Arc::clone(&retry_dispatcher));
+    let status = reopened
+        .status_for(&user("alice"))
+        .await
+        .expect("status polling retries the durable completion");
+    assert!(status.connected);
+
+    let retried = retry_dispatcher
+        .connections
+        .lock()
+        .expect("connections lock");
+    assert_eq!(retried.len(), 1);
+    assert_eq!(
+        retried[0].0, first_key,
+        "restart must reuse the persisted key"
+    );
+    assert_eq!(retried[0].1.user_id, user("alice"));
+    assert_eq!(retried[0].2.as_str(), EXT);
+}
+
+#[tokio::test]
+async fn caller_dispatcher_failure_retries_with_the_same_persisted_key() {
+    let fixture = fixture();
+    let caller_dispatcher = Arc::new(RecordingDispatcher::default());
+    caller_dispatcher.fail.store(true, Ordering::SeqCst);
+    let issue = fixture
+        .service
+        .issue_or_rotate(&user("alice"))
+        .await
+        .expect("mint");
+
+    let caller_service = fixture.service.with_resolution_context_for_test(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        Arc::clone(&caller_dispatcher) as Arc<dyn RebornAuthResolutionDispatcher>,
+    );
+    let error = caller_service
+        .consume(
+            &install(),
+            issue.code.as_str(),
+            "vendor_user",
+            "u-1",
+            None,
+            "chat-1",
+        )
+        .await
+        .expect_err("the caller's first provider-connection dispatch fails");
+    assert!(matches!(
+        error,
+        ChannelPairingError::ResolutionDispatch { .. }
+    ));
+    let first_key = caller_dispatcher
+        .connections
+        .lock()
+        .expect("connections lock")
+        .first()
+        .expect("first dispatch")
+        .0
+        .clone();
+    assert!(
+        fixture
+            .dispatcher
+            .connections
+            .lock()
+            .expect("connections lock")
+            .is_empty(),
+        "consume must not dispatch a second synthetic resolution through the composed dispatcher"
+    );
+
+    let status = fixture
+        .service
+        .status_for(&user("alice"))
+        .await
+        .expect("status polling retries the durable completion");
+    assert!(status.connected);
+    let retry = fixture
+        .dispatcher
+        .connections
+        .lock()
+        .expect("connections lock");
+    assert_eq!(retry.len(), 1);
+    assert_eq!(
+        retry[0].0, first_key,
+        "the normal retry path must reuse the key persisted before caller dispatch"
+    );
 }
 
 #[tokio::test]

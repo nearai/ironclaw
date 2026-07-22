@@ -102,7 +102,7 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-pub use product_auth::api::auth::RebornAuthContinuationDispatcher;
+pub use product_auth::api::auth::RebornAuthResolutionDispatcher;
 pub use product_auth::api::auth::{
     RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
     RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,

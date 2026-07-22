@@ -161,12 +161,14 @@ async fn serializable_records_never_include_raw_oauth_or_token_material() {
     assert!(!serialized.contains("ghp_"));
     assert!(serialized.contains(&fake_digest("code-hash")));
 
+    let AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) = completed.state
+    else {
+        panic!("completed flow has authorized outcome");
+    };
     let account = services
         .get_account(CredentialAccountLookupRequest::new(
             owner.clone(),
-            completed
-                .credential_account_id
-                .expect("completed flow has account"),
+            account_id,
         ))
         .await
         .expect("lookup")

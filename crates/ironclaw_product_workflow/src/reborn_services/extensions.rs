@@ -490,8 +490,8 @@ fn vendor_auth_accounts(
     let account_status = account_state
         .and_then(|state| state.account_status)
         .or(is_connected.then_some(CredentialAccountStatus::Configured));
-    let active_flow_status = account_state.and_then(|state| state.active_flow_status);
-    let (state, last_error) = project_auth_account_state(account_status, active_flow_status);
+    let active_flow_state = account_state.and_then(|state| state.active_flow_state);
+    let (state, last_error) = project_auth_account_state(account_status, active_flow_state);
     vec![RebornVendorAuthAccounts {
         vendor: vendor.clone(),
         // One account per vendor today; its id is the vendor id until the

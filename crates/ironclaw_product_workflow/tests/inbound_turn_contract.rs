@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical §4.3 store swap only — test seams repointed from deleted InMemory*Store doubles to the production stores over InMemoryBackend, plan #6168
+// arch-exempt: large_file, mechanical §4.3 store swap and cancel-precondition propagation only, plan #6168
 //! Contract tests for the InboundTurnService.
 
 use std::collections::{HashMap, VecDeque};
@@ -1009,6 +1009,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
             scope: turn_scope.clone(),
             actor: TurnActor::new(binding.actor_user_id.clone()),
             run_id: submitted_run_id,
+            precondition: None,
             reason: SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new("idem-product-live-cancel").expect("valid"),
         })

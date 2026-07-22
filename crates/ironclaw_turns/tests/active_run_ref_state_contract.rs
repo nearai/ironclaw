@@ -82,6 +82,7 @@ async fn active_run_ref_state_classifies_missing_nonterminal_and_terminal() {
             scope: scope.clone(),
             actor: turn_actor(),
             run_id,
+            precondition: None,
             reason: ironclaw_turns::SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new("active-run-ref-state-cancel").unwrap(),
         })

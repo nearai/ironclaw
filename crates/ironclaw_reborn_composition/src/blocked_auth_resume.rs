@@ -4,22 +4,19 @@
 //! An OAuth flow's continuation references at most one run
 //! (`TurnGateResume`), or none at all (`SetupOnly`, when the connect started
 //! from the Settings/extensions surface). But the durable outcome of a
-//! completed flow — the credential account plus, for Slack, the identity
-//! binding — satisfies *every* run of that caller currently `BlockedAuth` on
+//! completed flow — the credential account plus any provider identity binding
+//! — satisfies *every* run of that caller currently `BlockedAuth` on
 //! a requirement for the same provider. The retired pairing-code redeem path
 //! had exactly this fan-out (the deleted `channel_connection_resume`
 //! machinery: pair once, all waiting chats continue); this decorator restores
-//! that behavior for OAuth completions, provider-keyed so Google and Slack
-//! personal both benefit.
+//! that behavior for OAuth completions, keyed only by the provider contract.
 //!
 //! Ordering matters: the decorator runs at continuation-dispatch time, which
 //! is strictly after `complete_oauth_callback` committed the credential
 //! account, so resumed runs re-running `extension_activate` find their
 //! requirements satisfied. Fan-out is idempotent per (flow, run), and an
-//! incomplete sweep returns an error so the durable continuation remains
-//! undispatched and a re-drive (flow reconcile / lifecycle cleanup) retries
-//! it — resumed runs leave `BlockedAuth` and are skipped on replay, and the
-//! primary dispatcher settles idempotently on an already-settled gate.
+//! incomplete sweep returns an error so the durable resolution remains
+//! undelivered and can be retried.
 //!
 //! Scope safety mirrors the deleted read model: the scan is bounded to the
 //! completed flow's `tenant_id` + explicit owner `user_id`, so this can never
@@ -28,14 +25,18 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
+use ironclaw_auth::{
+    AuthContinuationRef, AuthFlowOutcome, AuthProductError, AuthProviderId, AuthResolved,
+    CredentialAccountOwnerScope,
+};
+use ironclaw_common::hashing::sha256_hex;
 use ironclaw_turns::{
     IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnCoordinator,
     TurnPersistenceSnapshot, TurnRunId, TurnStatus,
 };
 use uuid::Uuid;
 
-use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
+use crate::product_auth::api::auth::RebornAuthResolutionDispatcher;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 /// Source of the durable turn-state snapshot the fan-out scans. Split out so
@@ -64,17 +65,17 @@ where
     }
 }
 
-/// Decorates the single-run continuation dispatcher with the caller-wide
+/// Decorates the single-run resolution dispatcher with the caller-wide
 /// blocked-run fan-out described in the module docs.
 pub(crate) struct BlockedAuthResumeFanout {
-    inner: Arc<dyn RebornAuthContinuationDispatcher>,
+    inner: Arc<dyn RebornAuthResolutionDispatcher>,
     snapshot_source: Arc<dyn BlockedAuthSnapshotSource>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
 impl BlockedAuthResumeFanout {
     pub(crate) fn new(
-        inner: Arc<dyn RebornAuthContinuationDispatcher>,
+        inner: Arc<dyn RebornAuthResolutionDispatcher>,
         snapshot_source: Arc<dyn BlockedAuthSnapshotSource>,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
@@ -85,33 +86,27 @@ impl BlockedAuthResumeFanout {
         }
     }
 
-    /// Sweep the caller's other provider-blocked runs. An incomplete sweep —
-    /// unreadable turn snapshot, or any retryable resume failure — returns an
-    /// error so the caller leaves the durable continuation UNDISPATCHED and a
-    /// re-drive (the browser's flow reconcile, or lifecycle cleanup) retries
-    /// the whole dispatch. Retries are safe end-to-end: already-resumed runs
-    /// have left `BlockedAuth` and are skipped here, and the primary
-    /// dispatcher settles idempotently on a no-longer-blocked gate.
-    async fn fan_out(&self, event: &AuthContinuationEvent) -> Result<(), AuthProductError> {
-        let primary_run_id = primary_run_id(&event.continuation);
+    async fn fan_out(
+        &self,
+        delivery_key: &IdempotencyKey,
+        owner: &CredentialAccountOwnerScope,
+        provider: &AuthProviderId,
+        primary_run_id: Option<TurnRunId>,
+    ) -> Result<(), AuthProductError> {
         let Some(snapshot) = self.snapshot_source.snapshot().await else {
-            tracing::warn!(
-                flow_id = %event.flow_id,
-                "blocked-auth fan-out could not read the turn snapshot; keeping the continuation retryable"
-            );
+            tracing::debug!("blocked-auth fan-out could not read the durable turn snapshot");
             return Err(AuthProductError::BackendUnavailable);
         };
-        let tenant_id = &event.scope.resource.tenant_id;
-        let user_id = &event.scope.resource.user_id;
         let mut resumed = 0usize;
         let mut incomplete = false;
+        let delivery_key_hash = sha256_hex(delivery_key.as_str().as_bytes());
         for run in &snapshot.runs {
             if run.status != TurnStatus::BlockedAuth {
                 continue;
             }
             // Strict caller scoping: same tenant and same explicit owner user.
-            if run.scope.tenant_id != *tenant_id
-                || run.scope.explicit_owner_user_id() != Some(user_id)
+            if run.scope.tenant_id != owner.tenant_id
+                || run.scope.explicit_owner_user_id() != Some(&owner.user_id)
             {
                 continue;
             }
@@ -126,33 +121,36 @@ impl BlockedAuthResumeFanout {
             if !run
                 .credential_requirements
                 .iter()
-                .any(|requirement| requirement.provider.as_str() == event.provider.as_str())
+                .any(|requirement| requirement.provider.as_str() == provider.as_str())
             {
                 continue;
             }
             // The run record does not carry the actor; join it from the
-            // parent turn record. Fan-out is best-effort, so a missing parent
-            // is logged and skipped rather than aborting the sweep.
+            // parent turn record. A malformed snapshot must keep the
+            // continuation retryable rather than permanently stranding this
+            // run after the flow is marked dispatched.
             let Some(actor) = snapshot
                 .turns
                 .iter()
                 .find(|turn| turn.turn_id == run.turn_id)
                 .map(|turn| turn.actor.clone())
             else {
-                tracing::warn!(
+                tracing::debug!(
                     run_id = %run.run_id,
                     "blocked-auth fan-out found a blocked run with no parent turn record"
                 );
+                incomplete = true;
                 continue;
             };
             let Ok(idempotency_key) = IdempotencyKey::new(format!(
                 "blocked-auth-fanout-{}-{}",
-                event.flow_id, run.run_id
+                delivery_key_hash, run.run_id
             )) else {
-                tracing::warn!(
+                tracing::debug!(
                     run_id = %run.run_id,
                     "blocked-auth fan-out could not build a resume idempotency key"
                 );
+                incomplete = true;
                 continue;
             };
             let request = ResumeTurnRequest {
@@ -173,31 +171,29 @@ impl BlockedAuthResumeFanout {
             match self.turn_coordinator.resume_turn(request).await {
                 Ok(_) => resumed += 1,
                 Err(error) => {
-                    // Keep sweeping so one failing run does not starve the
-                    // rest, but report the sweep incomplete: the continuation
-                    // must stay undispatched so a re-drive retries this run.
-                    tracing::warn!(
-                        run_id = %run.run_id,
-                        flow_id = %event.flow_id,
-                        %error,
-                        "blocked-auth fan-out failed to resume a parked run; keeping the continuation retryable"
-                    );
                     incomplete = true;
+                    tracing::debug!(
+                        run_id = %run.run_id,
+                        delivery_key_hash,
+                        %error,
+                        "blocked-auth fan-out failed to resume a parked run"
+                    );
                 }
             }
         }
         if resumed > 0 {
             tracing::debug!(
-                flow_id = %event.flow_id,
-                provider = %event.provider,
+                delivery_key_hash,
+                provider = %provider,
                 resumed,
                 "blocked-auth fan-out resumed additional parked runs"
             );
         }
         if incomplete {
-            return Err(AuthProductError::BackendUnavailable);
+            Err(AuthProductError::BackendUnavailable)
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 }
 
@@ -213,30 +209,40 @@ fn primary_run_id(continuation: &AuthContinuationRef) -> Option<TurnRunId> {
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for BlockedAuthResumeFanout {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        let primary = self.inner.dispatch_auth_continuation(event.clone()).await;
+impl RebornAuthResolutionDispatcher for BlockedAuthResumeFanout {
+    async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
+        if !matches!(event.outcome, AuthFlowOutcome::Authorized { .. }) {
+            return self.inner.dispatch_auth_resolved(event).await;
+        }
+        let primary = self.inner.dispatch_auth_resolved(event.clone()).await;
         // Fan out regardless of the primary outcome: the credential account
         // exists once this event is emitted, and the caller's other parked
         // runs deserve the resume even if the primary run's own resume hit a
-        // conflict. Either failure keeps the continuation undispatched (the
-        // caller skips `mark_continuation_dispatched`), so a re-drive retries
-        // both legs; replays are idempotent on both.
-        let sweep = self.fan_out(&event).await;
-        primary.and(sweep)
+        // conflict.
+        let delivery_key = IdempotencyKey::new(format!("auth-flow-{}", event.flow_id))
+            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        let owner = CredentialAccountOwnerScope::from_scope(&event.scope);
+        let fan_out = self
+            .fan_out(
+                &delivery_key,
+                &owner,
+                &event.provider,
+                primary_run_id(&event.continuation),
+            )
+            .await;
+        match (primary, fan_out) {
+            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
     }
 
-    async fn dispatch_canceled_auth_continuation(
+    async fn dispatch_provider_connection(
         &self,
-        event: AuthContinuationEvent,
+        delivery_key: IdempotencyKey,
+        owner: CredentialAccountOwnerScope,
+        provider: AuthProviderId,
     ) -> Result<(), AuthProductError> {
-        // A canceled flow settles only its own continuation: no credential was
-        // minted, so the caller's other parked runs keep waiting for a
-        // successful connect instead of being denied alongside it.
-        self.inner.dispatch_canceled_auth_continuation(event).await
+        self.fan_out(&delivery_key, &owner, &provider, None).await
     }
 }
 
@@ -247,7 +253,8 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use ironclaw_auth::{
-        AuthFlowId, AuthGateRef, AuthProductScope, AuthProviderId, AuthSurface, TurnRunRef,
+        AuthFlowId, AuthGateRef, AuthProductScope, AuthProviderId, AuthSurface,
+        CredentialAccountId, TurnRunRef,
     };
     use ironclaw_host_api::{
         ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountSetup,
@@ -265,23 +272,16 @@ mod tests {
     };
 
     struct RecordingInnerDispatcher {
-        events: Mutex<Vec<AuthContinuationEvent>>,
+        events: Mutex<Vec<AuthResolved>>,
     }
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for RecordingInnerDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for RecordingInnerDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            event: AuthContinuationEvent,
+            event: AuthResolved,
         ) -> Result<(), AuthProductError> {
             self.events.lock().expect("inner events lock").push(event);
-            Ok(())
-        }
-
-        async fn dispatch_canceled_auth_continuation(
-            &self,
-            _event: AuthContinuationEvent,
-        ) -> Result<(), AuthProductError> {
             Ok(())
         }
     }
@@ -300,10 +300,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingTurnCoordinator {
         resumed: Mutex<Vec<ResumeTurnRequest>>,
-        /// Fail this many resume attempts before succeeding — models a
-        /// transient coordinator/store outage that a re-driven dispatch
-        /// recovers from.
-        fail_next_resumes: Mutex<usize>,
+        fail_resumes: bool,
     }
 
     #[async_trait]
@@ -323,14 +320,10 @@ mod tests {
             &self,
             request: ResumeTurnRequest,
         ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
-            {
-                let mut fail_next = self.fail_next_resumes.lock().expect("fail counter");
-                if *fail_next > 0 {
-                    *fail_next -= 1;
-                    return Err(TurnError::Unavailable {
-                        reason: "resume backend down".to_string(),
-                    });
-                }
+            if self.fail_resumes {
+                return Err(TurnError::Unavailable {
+                    reason: "resume backend down".to_string(),
+                });
             }
             let run_id = request.run_id;
             self.resumed.lock().expect("resume lock").push(request);
@@ -366,20 +359,20 @@ mod tests {
     const TENANT: &str = "tenant-fanout";
     const OWNER: &str = "user-alice";
 
-    fn slack_requirement() -> RuntimeCredentialAuthRequirement {
+    fn acme_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: VendorId::new("slack").expect("provider id"),
+            provider: VendorId::new("acme-oauth").expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: ExtensionId::new("slack").expect("extension id"),
+            requester_extension: ExtensionId::new("acme-chat").expect("extension id"),
             provider_scopes: Vec::new(),
         }
     }
 
-    fn google_requirement() -> RuntimeCredentialAuthRequirement {
+    fn other_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: VendorId::new("google").expect("provider id"),
+            provider: VendorId::new("other-oauth").expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: ExtensionId::new("gmail").expect("extension id"),
+            requester_extension: ExtensionId::new("other-extension").expect("extension id"),
             provider_scopes: Vec::new(),
         }
     }
@@ -502,7 +495,7 @@ mod tests {
         }
     }
 
-    fn event(provider: &str, continuation: AuthContinuationRef) -> AuthContinuationEvent {
+    fn event(provider: &str, continuation: AuthContinuationRef) -> AuthResolved {
         let resource = ResourceScope {
             tenant_id: TenantId::new(TENANT).expect("tenant"),
             user_id: UserId::new(OWNER).expect("user"),
@@ -512,19 +505,21 @@ mod tests {
             thread_id: None,
             invocation_id: InvocationId::new(),
         };
-        AuthContinuationEvent {
+        AuthResolved {
             flow_id: AuthFlowId::new(),
             scope: AuthProductScope::new(resource, AuthSurface::Callback),
             continuation,
             provider: AuthProviderId::new(provider).expect("provider"),
-            credential_account_id: None,
-            emitted_at: Utc::now(),
+            outcome: AuthFlowOutcome::Authorized {
+                account_id: CredentialAccountId::new(),
+            },
+            resolved_at: Utc::now(),
         }
     }
 
     fn fanout_with(
         snapshot: TurnPersistenceSnapshot,
-        fail_next_resumes: usize,
+        fail_resumes: bool,
     ) -> (
         BlockedAuthResumeFanout,
         Arc<RecordingTurnCoordinator>,
@@ -535,7 +530,7 @@ mod tests {
         });
         let coordinator = Arc::new(RecordingTurnCoordinator {
             resumed: Mutex::new(Vec::new()),
-            fail_next_resumes: Mutex::new(fail_next_resumes),
+            fail_resumes,
         });
         let fanout = BlockedAuthResumeFanout::new(
             inner.clone(),
@@ -547,15 +542,15 @@ mod tests {
 
     #[tokio::test]
     async fn turn_gate_completion_fans_out_to_other_provider_blocked_runs_only() {
-        let primary = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
-        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
+        let primary = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
+        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
         let other_provider =
-            blocked_run(OWNER, TurnRunId::new(), TurnId::new(), google_requirement());
+            blocked_run(OWNER, TurnRunId::new(), TurnId::new(), other_requirement());
         let foreign_user = blocked_run(
             "user-mallory",
             TurnRunId::new(),
             TurnId::new(),
-            slack_requirement(),
+            acme_requirement(),
         );
         let snapshot = TurnPersistenceSnapshot {
             turns: vec![
@@ -572,11 +567,11 @@ mod tests {
             ],
             ..Default::default()
         };
-        let (fanout, coordinator, inner) = fanout_with(snapshot, 0);
+        let (fanout, coordinator, inner) = fanout_with(snapshot, false);
 
         fanout
-            .dispatch_auth_continuation(event(
-                "slack",
+            .dispatch_auth_resolved(event(
+                "acme-oauth",
                 AuthContinuationRef::TurnGateResume {
                     turn_run_ref: TurnRunRef::new(primary.run_id.to_string())
                         .expect("turn run ref"),
@@ -591,7 +586,7 @@ mod tests {
         assert_eq!(
             resumed.len(),
             1,
-            "exactly the caller's other slack-blocked run resumes"
+            "exactly the caller's other same-provider blocked run resumes"
         );
         assert_eq!(resumed[0].run_id, waiting.run_id);
         assert_eq!(
@@ -602,17 +597,17 @@ mod tests {
 
     #[tokio::test]
     async fn setup_only_completion_resumes_every_provider_blocked_run() {
-        let first = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
-        let second = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
+        let first = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
+        let second = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
         let snapshot = TurnPersistenceSnapshot {
             turns: vec![parent_turn(OWNER, &first), parent_turn(OWNER, &second)],
             runs: vec![first.clone(), second.clone()],
             ..Default::default()
         };
-        let (fanout, coordinator, _inner) = fanout_with(snapshot, 0);
+        let (fanout, coordinator, _inner) = fanout_with(snapshot, false);
 
         fanout
-            .dispatch_auth_continuation(event("slack", AuthContinuationRef::SetupOnly))
+            .dispatch_auth_resolved(event("acme-oauth", AuthContinuationRef::SetupOnly))
             .await
             .expect("dispatch succeeds");
 
@@ -627,51 +622,59 @@ mod tests {
         );
     }
 
-    /// An incomplete sweep keeps the continuation retryable: the first
-    /// dispatch hits a transient resume failure and must error (so the caller
-    /// never stamps `continuation_emitted_at`); the re-driven dispatch retries
-    /// the sweep and resumes the still-parked run. Regression for the
-    /// best-effort weakening where a transient coordinator error permanently
-    /// stranded every other parked run (mega-PR review finding).
     #[tokio::test]
-    async fn incomplete_fan_out_keeps_the_continuation_retryable() {
-        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
+    async fn non_oauth_provider_connection_resumes_matching_blocked_runs_without_fake_auth_ids() {
+        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
+        let snapshot = TurnPersistenceSnapshot {
+            turns: vec![parent_turn(OWNER, &waiting)],
+            runs: vec![waiting.clone()],
+            ..Default::default()
+        };
+        let (fanout, coordinator, inner) = fanout_with(snapshot, false);
+
+        fanout
+            .dispatch_provider_connection(
+                IdempotencyKey::new("provider-connection-1").expect("delivery key"),
+                CredentialAccountOwnerScope {
+                    tenant_id: TenantId::new(TENANT).expect("tenant"),
+                    user_id: UserId::new(OWNER).expect("user"),
+                    agent_id: None,
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: None,
+                    session_id: None,
+                },
+                AuthProviderId::new("acme-oauth").expect("provider"),
+            )
+            .await
+            .expect("dispatch succeeds");
+
+        assert!(
+            inner.events.lock().expect("events").is_empty(),
+            "a provider connection has no synthetic OAuth event"
+        );
+        let resumed = coordinator.resumed.lock().expect("resumed");
+        assert_eq!(resumed.len(), 1);
+        assert_eq!(resumed[0].run_id, waiting.run_id);
+    }
+
+    #[tokio::test]
+    async fn fan_out_failures_keep_the_continuation_retryable() {
+        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
         let snapshot = TurnPersistenceSnapshot {
             turns: vec![parent_turn(OWNER, &waiting)],
             runs: vec![waiting],
             ..Default::default()
         };
-        let (fanout, coordinator, inner) = fanout_with(snapshot, 1);
+        let (fanout, coordinator, inner) = fanout_with(snapshot, true);
 
         let error = fanout
-            .dispatch_auth_continuation(event("slack", AuthContinuationRef::SetupOnly))
+            .dispatch_auth_resolved(event("acme-oauth", AuthContinuationRef::SetupOnly))
             .await
-            .expect_err("an incomplete sweep must keep the continuation retryable");
-        assert!(
-            matches!(error, AuthProductError::BackendUnavailable),
-            "incomplete sweep surfaces as retryable backend unavailability"
-        );
-        assert!(
-            coordinator.resumed.lock().expect("resumed").is_empty(),
-            "the failed attempt resumed nothing"
-        );
+            .expect_err("resume failures must prevent dispatched acknowledgement");
 
-        // The continuation was never marked dispatched, so a re-drive (flow
-        // reconcile / lifecycle cleanup) retries the whole dispatch; the
-        // parked run is still BlockedAuth in the snapshot and now resumes.
-        fanout
-            .dispatch_auth_continuation(event("slack", AuthContinuationRef::SetupOnly))
-            .await
-            .expect("the retried sweep completes");
-        assert_eq!(
-            inner.events.lock().expect("events").len(),
-            2,
-            "the primary dispatch replayed alongside the retried sweep"
-        );
-        assert_eq!(
-            coordinator.resumed.lock().expect("resumed").len(),
-            1,
-            "the parked run resumed exactly once"
-        );
+        assert_eq!(error, AuthProductError::BackendUnavailable);
+        assert_eq!(inner.events.lock().expect("events").len(), 1);
+        assert!(coordinator.resumed.lock().expect("resumed").is_empty());
     }
 }

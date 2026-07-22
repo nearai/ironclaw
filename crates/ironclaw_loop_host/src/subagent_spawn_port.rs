@@ -1,3 +1,4 @@
+// arch-exempt: large_file, one-field cancel precondition compatibility propagation only, plan #6168
 use std::{
     collections::{HashMap, hash_map::Entry},
     fmt,
@@ -434,6 +435,7 @@ impl SpawnCompensationState {
                             scope: scope.clone(),
                             actor: actor.clone(),
                             run_id: *run_id,
+                            precondition: None,
                             reason: SanitizedCancelReason::Superseded,
                             idempotency_key,
                         })

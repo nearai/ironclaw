@@ -891,6 +891,18 @@ impl RebornIntegrationHarness {
         Arc::clone(&self.coordinator)
     }
 
+    /// The production product-auth bundle composed for this group's capability
+    /// runtime. Auth user journeys use the existing typed ports directly; no
+    /// test mirror of durable flow state is introduced.
+    pub(crate) fn product_auth_for_test(
+        &self,
+    ) -> Option<Arc<ironclaw_reborn_composition::RebornProductAuthServices>> {
+        let GroupCapability::HostRuntime(harness) = &self._shared.capability else {
+            return None;
+        };
+        harness.reborn_services_for_test()?.product_auth.clone()
+    }
+
     /// The group-shared turn-state store paired with
     /// [`Self::turn_coordinator_for_test`]. Composition test seams that must
     /// inspect or resume the caller's real runs use this pair instead of the
@@ -1603,7 +1615,7 @@ impl RebornIntegrationHarness {
     /// Deny a blocked AUTH gate and resume the run (user-declines path). Unlike
     /// [`deny_gate`](Self::deny_gate) (approval gates resolve a persisted
     /// request), auth gates have no such store entry, so this resumes directly
-    /// with `GateResumeDisposition::Denied` — `short_circuit_denied_resume`
+    /// with `GateResumeDisposition::Denied` — `short_circuit_gate_resume`
     /// then surfaces a model-visible gate-declined failure instead of
     /// re-dispatching (which would re-block on the missing credential forever).
     ///
@@ -1612,6 +1624,27 @@ impl RebornIntegrationHarness {
     /// same shape as `deny_gate`'s `BlockedApprovalGate`. A client-side
     /// `gate:auth-` prefix check adds cheap defense-in-depth on top.
     pub async fn deny_auth_gate(&self, run_id: TurnRunId, gate_ref: &GateRef) -> HarnessResult<()> {
+        if !gate_ref.as_str().starts_with("gate:auth-") {
+            return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
+        }
+        self.resume_run(
+            run_id,
+            gate_ref.clone(),
+            Some(GateResumeDisposition::Denied),
+            ResumeTurnPrecondition::BlockedAuthGate,
+        )
+        .await
+    }
+
+    /// Resume a blocked auth gate after its credential flow failed or expired.
+    /// Auth retains the precise durable outcome, while the turn resume uses the
+    /// existing terminal `Denied` value so rollback readers stay compatible.
+    /// The executor must not re-dispatch the still-uncredentialed capability.
+    pub async fn resume_failed_auth_gate(
+        &self,
+        run_id: TurnRunId,
+        gate_ref: &GateRef,
+    ) -> HarnessResult<()> {
         if !gate_ref.as_str().starts_with("gate:auth-") {
             return Err(format!("expected an auth gate ref, got {gate_ref:?}").into());
         }
@@ -1868,6 +1901,7 @@ impl RebornIntegrationHarness {
                 scope: self.turn_scope.clone(),
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
+                precondition: None,
                 reason: SanitizedCancelReason::UserRequested,
                 idempotency_key: IdempotencyKey::new(format!("cancel-{run_id}"))?,
             })

@@ -202,7 +202,7 @@ fn map_pairing_error(error: ChannelPairingError) -> Response {
             );
             error_response(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
         }
-        ChannelPairingError::ContinuationDispatch { reason } => {
+        ChannelPairingError::ResolutionDispatch { reason } => {
             tracing::debug!(
                 target: "ironclaw::reborn::channel_pairing",
                 %reason,

@@ -18,7 +18,7 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
-    AuthFlowStatus, AuthProductScope, AuthProviderId, CredentialAccountId,
+    AuthFlowState, AuthProductScope, AuthProviderId, CredentialAccountId,
     CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
     ProviderScope,
 };
@@ -256,7 +256,7 @@ fn rejected_busy_notice(status: TurnStatus) -> String {
 /// grant leaves both `None` and the projection falls back to the connection
 /// bool (a live grant backfills to `connected`, MIG-1); a facade that reads the
 /// durable credential-account status supplies `account_status` (and, mid-flow,
-/// `active_flow_status`) so the wire surfaces the real state.
+/// `active_flow_state`) so the wire surfaces the real state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChannelAuthAccountState {
     /// The caller's durable credential-account status for the extension's
@@ -264,7 +264,7 @@ pub struct ChannelAuthAccountState {
     pub account_status: Option<CredentialAccountStatus>,
     /// A live (non-terminal) auth flow for the extension's vendor, when one is
     /// in progress — projects to `authenticating`.
-    pub active_flow_status: Option<AuthFlowStatus>,
+    pub active_flow_state: Option<AuthFlowState>,
 }
 
 /// Per-user channel connection state. Returns, for the calling user, which
@@ -6478,15 +6478,16 @@ where
                     &gate_ref,
                 )
                 .await?;
-                // `cancel_run` is not gate-aware, so without this check a
-                // denied/cancelled resolution for a stale or attacker-supplied
-                // gate_ref would terminate any non-terminal run sharing run_id.
+                // Generic resource/dependent-run decline retains its existing
+                // unconditioned cancellation contract. Auth decline uses the
+                // dedicated exact compare-and-cancel path instead.
                 let response = self
                     .turn_coordinator
                     .cancel_run(ironclaw_turns::CancelRunRequest {
                         scope,
                         actor,
                         run_id,
+                        precondition: None,
                         reason: SanitizedCancelReason::UserRequested,
                         idempotency_key: client_action_id,
                     })
@@ -6608,10 +6609,8 @@ fn participant_denied() -> RebornServicesError {
     )
 }
 
-/// Reject denied/cancelled generic gate resolutions whose `gate_ref` does not
-/// match the gate the run is actually parked on. `cancel_run` is not gate-aware,
-/// so without this guard a stale or attacker-supplied `gate_ref` would cancel
-/// any non-terminal run sharing the same `run_id`.
+/// Reject generic denied/cancelled resolutions that do not match the gate the
+/// run is currently parked on.
 async fn assert_generic_run_parked_on_gate(
     turn_coordinator: &dyn TurnCoordinator,
     scope: &TurnScope,

@@ -5,9 +5,9 @@
 //! [`InMemoryAuthProductServices`](crate::InMemoryAuthProductServices) fake
 //! (what most consumer tests run against) and the durable
 //! `FilesystemAuthProductServices` in `ironclaw_reborn_composition` (what
-//! production runs). Their VALIDATION core is shared (`domain.rs`'s
-//! `validate_callback_claim` / `prepare_callback_flow`), but each hand-rolls
-//! its orchestration around it — terminal-idempotency sets, expiry
+//! production runs). Their transition core is shared (`domain.rs`'s
+//! `apply_callback_claim` / `prepare_callback_flow`), but each hand-rolls its
+//! orchestration around it — expiry
 //! write-back, account minting — so the suites could drift apart with nothing
 //! failing. Until this module existed their agreement was coincidence, not
 //! contract (found while pinning the #6105 T4 replay arm).
@@ -27,9 +27,10 @@
 use chrono::{Duration, Utc};
 
 use crate::{
-    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowKind, AuthFlowManager, AuthFlowRecord,
-    AuthFlowStatus, AuthProductError, AuthProductScope, AuthProviderId, AuthorizationCodeHash,
-    CredentialAccountLabel, NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackInput,
+    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthFlowManager,
+    AuthFlowOutcome, AuthFlowRecord, AuthFlowState, AuthProductError, AuthProductScope,
+    AuthProviderId, AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow,
+    OAuthAuthorizationUrl, OAuthCallbackClaim, OAuthCallbackFailureInput, OAuthCallbackInput,
     OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
 };
 use ironclaw_host_api::SecretHandle;
@@ -130,10 +131,148 @@ pub async fn assert_auth_flow_callback_conformance(
     provider: &AuthProviderId,
 ) {
     completed_flow_claim_idempotent_and_complete_rejects_replay(flows, scope, provider).await;
+    processing_replays_and_terminal_failure_rejects(flows, scope, provider).await;
+    processing_claim_fences_explicit_cancel(flows, scope, provider).await;
     expired_flow_rejects_and_marks_expired(flows, scope, provider).await;
     canceled_flow_rejects_completion_as_canceled(flows, scope, provider).await;
     unknown_flow_rejects_completion(flows, scope, provider).await;
     state_hash_mismatch_denies_without_burning_the_flow(flows, scope, provider).await;
+}
+
+/// Once a callback owns `Processing`, a concurrent explicit cancel cannot
+/// replace that durable claim. Otherwise the callback could persist a
+/// credential account and then lose its final flow write to `UserAborted`,
+/// leaving an authorized account with no authorized flow.
+async fn processing_claim_fences_explicit_cancel(
+    flows: &dyn AuthFlowManager,
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+) {
+    const CASE: &str = "processing claim fences cancel";
+    let tag = "conformance-processing-cancel";
+    let flow = flows
+        .create_flow(new_flow(
+            scope,
+            provider,
+            tag,
+            Utc::now() + Duration::minutes(5),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] create flow: {error:?}"));
+    let claim = flows
+        .claim_oauth_callback(
+            scope,
+            crate::OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash(tag),
+                provider: provider.clone(),
+                pkce_verifier_hash: pkce_hash(tag),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] claim callback: {error:?}"));
+    assert!(matches!(claim, OAuthCallbackClaim::Acquired(_))); // safety: test-support contract assertion.
+
+    let cancel = flows
+        .cancel_flow(scope, flow.id)
+        .await
+        .expect_err("a callback-owned Processing flow must reject explicit cancel");
+    assert_eq!(cancel, AuthProductError::FlowAlreadyTerminal); // safety: test-support contract assertion.
+
+    let completed = flows
+        .complete_oauth_callback(
+            scope,
+            callback_input(flow.id, tag, authorized_outcome(provider, tag)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] claimed callback completes: {error:?}"));
+    let authorized = matches!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+    );
+    assert!(authorized); // safety: test-support contract assertion.
+}
+
+/// An in-flight claim is an idempotent replay for every continuation, while a
+/// terminal callback failure cannot be replayed as success.
+async fn processing_replays_and_terminal_failure_rejects(
+    flows: &dyn AuthFlowManager,
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+) {
+    const CASE: &str = "callback claim replay";
+    let processing_tag = "conformance-processing";
+    let processing = flows
+        .create_flow(new_flow(
+            scope,
+            provider,
+            processing_tag,
+            Utc::now() + Duration::minutes(5),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] create processing flow: {error:?}"));
+    let request = crate::OAuthCallbackClaimRequest {
+        flow_id: processing.id,
+        opaque_state_hash: state_hash(processing_tag),
+        provider: provider.clone(),
+        pkce_verifier_hash: pkce_hash(processing_tag),
+    };
+    let acquired = flows
+        .claim_oauth_callback(scope, request.clone())
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] first claim: {error:?}"));
+    if !matches!(acquired, OAuthCallbackClaim::Acquired(_)) {
+        panic!("[{CASE}] first claim must acquire provider exchange ownership");
+    }
+    let duplicate = match flows.claim_oauth_callback(scope, request).await {
+        Ok(record) => record,
+        Err(error) => {
+            panic!("[{CASE}] Processing replay must be idempotent: {error:?}")
+        }
+    };
+    let OAuthCallbackClaim::Existing(duplicate) = duplicate else {
+        panic!("[{CASE}] Processing replay must not reacquire provider exchange ownership");
+    };
+    if duplicate.state != AuthFlowState::Processing {
+        panic!("[{CASE}] Processing replay must preserve the claimed state");
+    }
+
+    let failed_tag = "conformance-failed";
+    let failed = flows
+        .create_flow(new_flow(
+            scope,
+            provider,
+            failed_tag,
+            Utc::now() + Duration::minutes(5),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] create failed flow: {error:?}"));
+    flows
+        .fail_oauth_callback(
+            scope,
+            OAuthCallbackFailureInput {
+                flow_id: failed.id,
+                opaque_state_hash: state_hash(failed_tag),
+                error: AuthErrorCode::TokenExchangeFailed,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] fail callback: {error:?}"));
+    let failed_claim = flows
+        .claim_oauth_callback(
+            scope,
+            crate::OAuthCallbackClaimRequest {
+                flow_id: failed.id,
+                opaque_state_hash: state_hash(failed_tag),
+                provider: provider.clone(),
+                pkce_verifier_hash: pkce_hash(failed_tag),
+            },
+        )
+        .await
+        .expect_err("a Resolved(Failed) flow must reject callback claims");
+    if failed_claim != AuthProductError::FlowAlreadyTerminal {
+        panic!("[{CASE}] Resolved(Failed) must reject callback claims");
+    }
 }
 
 /// Happy completion, then both replay arms — the exact split the hosted
@@ -170,10 +309,13 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
         )
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] first claim: {error:?}"));
+    let OAuthCallbackClaim::Acquired(claimed) = claimed else {
+        panic!("[{CASE}] first claim must acquire provider exchange ownership");
+    };
     assert_eq!(
-        claimed.status,
-        AuthFlowStatus::CallbackReceived,
-        "[{CASE}] first claim moves the flow to CallbackReceived"
+        claimed.state,
+        AuthFlowState::Processing,
+        "[{CASE}] first claim moves the flow to Processing"
     );
 
     let completed = flows
@@ -184,13 +326,19 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] complete: {error:?}"));
     assert_eq!(
-        completed.status,
-        AuthFlowStatus::Completed,
-        "[{CASE}] authorized completion lands on Completed"
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: match completed.state {
+                AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) => account_id,
+                _ => panic!("[{CASE}] completion must mint a credential account"),
+            },
+        }),
+        "[{CASE}] authorized completion lands on Resolved(Authorized)"
     );
-    let account_id = completed
-        .credential_account_id
-        .unwrap_or_else(|| panic!("[{CASE}] completion must mint a credential account"));
+    let AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) = completed.state
+    else {
+        panic!("[{CASE}] completion must mint a credential account");
+    };
 
     // Replayed CLAIM (duplicated redirect): idempotent, same terminal record.
     let reclaimed = flows
@@ -207,14 +355,12 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
         .unwrap_or_else(|error| {
             panic!("[{CASE}] a replayed claim on a completed flow must be idempotent: {error:?}")
         });
+    let OAuthCallbackClaim::Existing(reclaimed) = reclaimed else {
+        panic!("[{CASE}] terminal replay must not reacquire provider exchange ownership");
+    };
     assert_eq!(
-        reclaimed.status,
-        AuthFlowStatus::Completed,
-        "[{CASE}] replayed claim returns the completed record"
-    );
-    assert_eq!(
-        reclaimed.credential_account_id,
-        Some(account_id),
+        reclaimed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
         "[{CASE}] replayed claim returns the ORIGINAL grant's account"
     );
 
@@ -233,13 +379,8 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
     );
     let record = read_flow(flows, scope, flow.id, CASE).await;
     assert_eq!(
-        record.status,
-        AuthFlowStatus::Completed,
-        "[{CASE}] record stays Completed"
-    );
-    assert_eq!(
-        record.credential_account_id,
-        Some(account_id),
+        record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
         "[{CASE}] the original grant survives the rejected replay"
     );
 }
@@ -279,14 +420,14 @@ async fn expired_flow_rejects_and_marks_expired(
     );
     let record = read_flow(flows, scope, flow.id, CASE).await;
     assert_eq!(
-        record.status,
-        AuthFlowStatus::Expired,
-        "[{CASE}] the record is marked terminal Expired (write-back), not left pending"
+        record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired),
+        "[{CASE}] the record is marked Resolved(Expired), not left open"
     );
 }
 
-/// A canceled flow rejects completion with the cancel-specific error, and
-/// cancel itself is not silently repeatable.
+/// A canceled flow rejects completion with the cancel-specific error, while
+/// retrying the same terminal cancellation returns the durable winner.
 async fn canceled_flow_rejects_completion_as_canceled(
     flows: &dyn AuthFlowManager,
     scope: &AuthProductScope,
@@ -307,6 +448,10 @@ async fn canceled_flow_rejects_completion_as_canceled(
         .cancel_flow(scope, flow.id)
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] cancel_flow: {error:?}"));
+    let canceled = read_flow(flows, scope, flow.id, CASE).await;
+    if canceled.state != AuthFlowState::Resolved(AuthFlowOutcome::UserAborted) {
+        panic!("[{CASE}] explicit cancel must resolve as UserAborted");
+    }
 
     let error = flows
         .complete_oauth_callback(
@@ -323,11 +468,11 @@ async fn canceled_flow_rejects_completion_as_canceled(
     let recancel = flows
         .cancel_flow(scope, flow.id)
         .await
-        .expect_err("re-canceling a canceled flow must be rejected");
+        .expect("re-canceling a canceled flow must be idempotent"); // safety: test-only
     assert_eq!(
-        recancel,
-        AuthProductError::Canceled,
-        "[{CASE}] re-cancel rejects as Canceled"
+        recancel.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
+        "[{CASE}] re-cancel returns the original UserAborted winner"
     );
 }
 
@@ -400,8 +545,11 @@ async fn state_hash_mismatch_denies_without_burning_the_flow(
             panic!("[{CASE}] the genuine callback must still complete after a mismatch: {error:?}")
         });
     assert_eq!(
-        completed.status,
-        AuthFlowStatus::Completed,
+        completed.state,
+        AuthFlowState::Resolved(match completed.state {
+            AuthFlowState::Resolved(outcome @ AuthFlowOutcome::Authorized { .. }) => outcome,
+            _ => panic!("[{CASE}] genuine callback must authorize"),
+        }),
         "[{CASE}] a rejected mismatch must not consume the flow"
     );
 }

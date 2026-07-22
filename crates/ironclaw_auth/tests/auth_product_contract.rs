@@ -1,3 +1,5 @@
+#[path = "auth_product_contract/auth_flow_state_contract.rs"]
+mod auth_flow_state_contract;
 #[path = "auth_product_contract/cleanup_contract.rs"]
 mod cleanup_contract;
 #[path = "auth_product_contract/common.rs"]

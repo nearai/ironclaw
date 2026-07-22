@@ -4,7 +4,7 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
-    AuthContinuationEvent, AuthContinuationRef, AuthFlowManager, AuthProductError,
+    AuthContinuationRef, AuthFlowManager, AuthFlowState, AuthProductError, AuthResolved,
     CanceledCleanupFlow, CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership,
     SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
@@ -32,13 +32,15 @@ where
         // Owner decision 2026-07-15: cancel on both Deactivate and Uninstall.
         // Shared-vendor safe by construction — the removal caller only
         // selects a provider exclusive to the removed extension. Idempotent:
-        // a concurrently terminal flow is skipped, never an error.
+        // an already-resolved flow is skipped. A callback-owned `Processing`
+        // flow returns retryable `BackendConflict` so a later retry can see
+        // and revoke the account written by that callback.
         //
         // F2 · Any enumerated flow whose `TurnGateResume` continuation was
         // never acknowledged — freshly canceled here or already terminal — is
         // reported so the composition layer denies its blocked turn gate
-        // instead of leaving the turn parked. `mark_continuation_dispatched`
-        // makes the handoff emit-once across cleanup retries.
+        // instead of leaving the turn parked. `resolution_delivered_at` makes
+        // the handoff retry-safe across cleanup retries.
         if request.provider.is_some() || request.lifecycle_package.is_some() {
             let mut flows = Vec::new();
             if let Some(provider) = request.provider.as_ref() {
@@ -63,32 +65,45 @@ where
                 }
             }
             for flow in flows {
-                let canceled = match flow.status {
-                    status if ironclaw_auth::is_terminal_status(status) => flow,
+                let canceled = match flow.state {
+                    AuthFlowState::Resolved(_) => flow,
                     _ => match self.cancel_flow(&flow.scope, flow.id).await {
                         Ok(canceled) => canceled,
                         Err(AuthProductError::Canceled)
-                        | Err(AuthProductError::FlowAlreadyTerminal)
                         | Err(AuthProductError::UnknownOrExpiredFlow) => flow,
+                        Err(AuthProductError::FlowAlreadyTerminal) => {
+                            let current = self
+                                .get_flow(&flow.scope, flow.id)
+                                .await?
+                                .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+                            if current.state == AuthFlowState::Processing {
+                                // A callback durably owns this flow. Abort the
+                                // lifecycle cleanup so its account scan cannot
+                                // race ahead of the callback's account write;
+                                // the caller can retry once the callback has
+                                // resolved and the account is visible.
+                                return Err(AuthProductError::BackendConflict);
+                            }
+                            current
+                        }
                         Err(error) => return Err(error),
                     },
                 };
-                if canceled.continuation_emitted_at.is_none()
+                if canceled.resolution_delivered_at.is_none()
                     && matches!(
                         canceled.continuation,
                         AuthContinuationRef::TurnGateResume { .. }
                     )
+                    && let AuthFlowState::Resolved(outcome) = canceled.state
                 {
-                    report
-                        .canceled_turn_gate_continuations
-                        .push(AuthContinuationEvent {
-                            flow_id: canceled.id,
-                            scope: canceled.scope.clone(),
-                            continuation: canceled.continuation.clone(),
-                            provider: canceled.provider.clone(),
-                            credential_account_id: canceled.credential_account_id,
-                            emitted_at: Utc::now(),
-                        });
+                    report.auth_resolutions.push(AuthResolved {
+                        flow_id: canceled.id,
+                        scope: canceled.scope.clone(),
+                        continuation: canceled.continuation.clone(),
+                        provider: canceled.provider.clone(),
+                        outcome,
+                        resolved_at: canceled.updated_at,
+                    });
                 }
                 // Name every walked terminal flow so the composition wrapper
                 // can eagerly drop its durable setup PKCE verifier.

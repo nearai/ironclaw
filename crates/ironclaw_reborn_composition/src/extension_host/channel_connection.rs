@@ -396,7 +396,7 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
         let mut states = HashMap::new();
         for entry in &entries {
             // The first provider whose account the caller holds decides the
-            // vendor account state (length ≤ 1 today). `active_flow_status`
+            // vendor account state (length ≤ 1 today). `active_flow_state`
             // stays `None`: the mid-flow `authenticating` signal is projected
             // from thread-scoped setup flows owned by the auth-flow read model,
             // not this per-caller connection facade.
@@ -412,7 +412,7 @@ impl ChannelConnectionFacade for GenericChannelConnectionFacade {
                     entry.extension_id.clone(),
                     ChannelAuthAccountState {
                         account_status: Some(account_status),
-                        active_flow_status: None,
+                        active_flow_state: None,
                     },
                 );
             }
@@ -853,7 +853,7 @@ mod tests {
             Some(CredentialAccountStatus::RefreshFailed),
             "the caller's real durable status must reach the wire, not the connection bool",
         );
-        assert_eq!(state.active_flow_status, None);
+        assert_eq!(state.active_flow_state, None);
         assert_eq!(
             reader.calls(),
             vec![(caller().user_id, VENDOR.to_string())],

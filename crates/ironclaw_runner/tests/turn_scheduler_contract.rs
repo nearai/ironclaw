@@ -2048,6 +2048,7 @@ async fn canceled_hanging_executor_lease_expires_to_cancelled() {
             scope: scope.clone(),
             actor: TurnActor::new(UserId::new("user1").unwrap()),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new("idem-cancel-request").unwrap(),
         })

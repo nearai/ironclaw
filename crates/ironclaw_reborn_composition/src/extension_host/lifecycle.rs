@@ -723,6 +723,7 @@ fn map_channel_config_error(
         ChannelConfigError::Storage { reason } => ProductWorkflowError::Transient { reason },
         ChannelConfigError::NotInstalled { .. }
         | ChannelConfigError::UnknownField { .. }
+        | ChannelConfigError::AmbiguousField { .. }
         | ChannelConfigError::Reactivation { .. } => ProductWorkflowError::InvalidBindingRequest {
             reason: error.to_string(),
         },

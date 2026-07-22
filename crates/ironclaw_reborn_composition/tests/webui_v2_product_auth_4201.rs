@@ -5,6 +5,7 @@
 //! These tests drive the HTTP routes end-to-end through `webui_v2_app` so the
 //! caller path (auth layer + body limit + rate limit + handler +
 //! `RebornProductAuthServices`) is exercised, not just the facade helpers.
+// arch-exempt: large_file, preserves caller-level issue 4201 auth route coverage, plan #5905
 
 use std::sync::{Arc, Mutex};
 
@@ -12,7 +13,7 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use ironclaw_auth::{
-    AuthContinuationEvent, AuthProductError, AuthProductScope, AuthSurface, CredentialAccountLabel,
+    AuthProductError, AuthProductScope, AuthResolved, AuthSurface, CredentialAccountLabel,
     CredentialAccountStatus, CredentialOwnership, InMemoryAuthProductServices,
     NewCredentialAccount,
 };
@@ -34,7 +35,7 @@ use ironclaw_product_workflow::{
     WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
+    RebornAuthResolutionDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
 };
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use serde_json::{Value, json};
@@ -58,22 +59,13 @@ impl WebuiAuthenticator for OnlyValidToken {
 
 #[derive(Default)]
 struct NoopAuthDispatcher {
-    events: Mutex<Vec<AuthContinuationEvent>>,
+    events: Mutex<Vec<AuthResolved>>,
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for NoopAuthDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for NoopAuthDispatcher {
+    async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
         self.events.lock().expect("auth events lock").push(event);
-        Ok(())
-    }
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
         Ok(())
     }
 }

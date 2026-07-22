@@ -73,6 +73,8 @@ pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start"
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
 pub(crate) const OAUTH_FLOW_STATUS_PATH: &str =
     "/api/reborn/product-auth/oauth/flow/{flow_id}/status";
+pub(crate) const OAUTH_FLOW_RECONCILE_PATH: &str =
+    "/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile";
 /// One public callback per vendor, `{provider}` resolved as recipe data —
 /// the path shape vendor-registered redirect URLs already point at
 /// (checklist AUTH-13).
@@ -93,6 +95,7 @@ pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecy
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
 const OAUTH_FLOW_STATUS_ROUTE_ID: &str = "product_auth.oauth.flow_status";
+const OAUTH_FLOW_RECONCILE_ROUTE_ID: &str = "product_auth.oauth.flow_reconcile";
 const VENDOR_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.vendor.callback";
 const EXTENSION_OAUTH_START_ROUTE_ID: &str = "webui_v2.extensions.oauth.start";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
@@ -479,6 +482,10 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
                 get(oauth::oauth_flow_status_handler),
             )
             .route(
+                OAUTH_FLOW_RECONCILE_PATH,
+                post(oauth::oauth_flow_reconcile_handler),
+            )
+            .route(
                 EXTENSION_OAUTH_START_PATH,
                 post(oauth::extension_oauth_start_handler),
             )
@@ -556,6 +563,12 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         accounts_refresh_policy(),
     ));
     descriptors.push(descriptor(
+        OAUTH_FLOW_RECONCILE_ROUTE_ID,
+        NetworkMethod::Post,
+        OAUTH_FLOW_RECONCILE_PATH,
+        flow_reconcile_policy(),
+    ));
+    descriptors.push(descriptor(
         OAUTH_FLOW_STATUS_ROUTE_ID,
         NetworkMethod::Get,
         OAUTH_FLOW_STATUS_PATH,
@@ -631,6 +644,33 @@ pub(super) fn flow_status_policy() -> IngressPolicy {
         effect_path: AllowedEffectPath::ProductWorkflow,
     })
     .expect("product-auth OAuth flow-status policy must validate") // safety: same authenticated LocalGateway shape as the OAuth start mutation, but NoBody + read-only per-caller poll cadence.
+}
+
+pub(super) fn flow_reconcile_policy() -> IngressPolicy {
+    let policy = IngressPolicy::new(IngressPolicyParts {
+        listener_class: ListenerClass::LocalGateway,
+        auth: IngressAuthPolicy::Required {
+            schemes: vec![IngressAuthScheme::BearerToken],
+        },
+        scope_source: ironclaw_host_api::IngressScopeSource::AuthenticatedCaller,
+        body_limit: BodyLimitPolicy::NoBody,
+        rate_limit: RateLimitPolicy::Limited {
+            scope: RateLimitScope::PerCaller,
+            max_requests: PRODUCT_AUTH_MUTATION_MAX_REQUESTS,
+            window_seconds: OAUTH_RATE_WINDOW_SECONDS,
+        },
+        cors: CorsPolicy::SameOriginOnly,
+        websocket_origin: WebSocketOriginPolicy::NotApplicable,
+        streaming: StreamingMode::None,
+        audit: AuditTraceClass::UserAction,
+        effect_path: AllowedEffectPath::ProductWorkflow,
+    });
+    match policy {
+        Ok(policy) => policy,
+        // SAFETY: this is the same validated authenticated LocalGateway shape
+        // used by sibling routes, with a stricter no-body boundary.
+        Err(_) => unreachable!(),
+    }
 }
 
 pub(super) fn accounts_refresh_policy() -> IngressPolicy {
@@ -965,9 +1005,9 @@ pub(super) fn route_failure_from_callback_error(
         AuthErrorCode::CrossScopeDenied => StatusCode::FORBIDDEN,
         AuthErrorCode::ProviderDenied | AuthErrorCode::Canceled => StatusCode::BAD_REQUEST,
         AuthErrorCode::FlowAlreadyTerminal => StatusCode::CONFLICT,
-        AuthErrorCode::BackendUnavailable | AuthErrorCode::MalformedConfig => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        AuthErrorCode::BackendUnavailable
+        | AuthErrorCode::CorruptRecord
+        | AuthErrorCode::MalformedConfig => StatusCode::SERVICE_UNAVAILABLE,
         AuthErrorCode::TokenExchangeFailed | AuthErrorCode::RefreshFailed => {
             StatusCode::BAD_GATEWAY
         }
@@ -1537,14 +1577,14 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RebornAuthContinuationDispatcher;
+    use crate::RebornAuthResolutionDispatcher;
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, header};
     use ironclaw_auth::{
-        AuthFlowManager, AuthInteractionService, AuthProviderClient,
-        CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
-        CredentialSetupService, SecretCleanupService,
+        AuthFlowManager, AuthFlowOutcome, AuthFlowState, AuthInteractionService,
+        AuthProviderClient, CredentialAccountLookupRequest, CredentialAccountService,
+        CredentialAccountStatus, CredentialSetupService, SecretCleanupService,
     };
     use ironclaw_host_api::{
         NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
@@ -1604,19 +1644,43 @@ mod tests {
         assert_eq!(policy.cors(), CorsPolicy::SameOriginOnly);
     }
 
+    #[test]
+    fn flow_reconcile_route_descriptor_locks_authenticated_mutation_policy() {
+        let descriptors = product_auth_route_descriptors();
+        let reconcile = descriptors
+            .iter()
+            .find(|descriptor| descriptor.route_id().as_str() == OAUTH_FLOW_RECONCILE_ROUTE_ID)
+            .expect("the flow-reconcile descriptor must be registered");
+
+        assert_eq!(reconcile.method(), NetworkMethod::Post);
+        let policy = reconcile.policy();
+        assert!(matches!(policy.body_limit(), BodyLimitPolicy::NoBody));
+        assert!(matches!(
+            policy.auth(),
+            IngressAuthPolicy::Required { schemes }
+                if schemes.contains(&IngressAuthScheme::BearerToken)
+        ));
+        assert_eq!(
+            policy.scope_source(),
+            ironclaw_host_api::IngressScopeSource::AuthenticatedCaller
+        );
+        assert!(matches!(
+            policy.rate_limit(),
+            RateLimitPolicy::Limited {
+                scope: RateLimitScope::PerCaller,
+                ..
+            }
+        ));
+        assert_eq!(policy.cors(), CorsPolicy::SameOriginOnly);
+    }
+
     struct NoopDispatcher;
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for NoopDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
-        ) -> Result<(), AuthProductError> {
-            Ok(())
-        }
-        async fn dispatch_canceled_auth_continuation(
-            &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
+            _event: ironclaw_auth::AuthResolved,
         ) -> Result<(), ironclaw_auth::AuthProductError> {
             Ok(())
         }
@@ -1624,11 +1688,11 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingDispatcher {
-        events: Mutex<Vec<ironclaw_auth::AuthContinuationEvent>>,
+        events: Mutex<Vec<ironclaw_auth::AuthResolved>>,
     }
 
     impl RecordingDispatcher {
-        fn events(&self) -> Vec<ironclaw_auth::AuthContinuationEvent> {
+        fn events(&self) -> Vec<ironclaw_auth::AuthResolved> {
             self.events
                 .lock()
                 .expect("recording dispatcher lock")
@@ -1637,21 +1701,15 @@ mod tests {
     }
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for RecordingDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for RecordingDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            event: ironclaw_auth::AuthContinuationEvent,
+            event: ironclaw_auth::AuthResolved,
         ) -> Result<(), AuthProductError> {
             self.events
                 .lock()
                 .expect("recording dispatcher lock")
                 .push(event);
-            Ok(())
-        }
-        async fn dispatch_canceled_auth_continuation(
-            &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
-        ) -> Result<(), ironclaw_auth::AuthProductError> {
             Ok(())
         }
     }
@@ -1759,7 +1817,7 @@ mod tests {
     struct StaticTestCredentials;
 
     #[async_trait]
-    impl ironclaw_auth::EngineClientCredentialsSource for StaticTestCredentials {
+    impl ironclaw_auth::EngineOAuthConfigurationSource for StaticTestCredentials {
         async fn resolve(
             &self,
             _vendor: &str,
@@ -1769,6 +1827,14 @@ mod tests {
                 client_id: ironclaw_auth::OAuthClientId::new("vendorco-client-id")?,
                 client_secret: None,
             })
+        }
+
+        async fn resolve_non_secret_value(
+            &self,
+            _vendor: &str,
+            _handle: &SecretHandle,
+        ) -> Result<Option<String>, AuthProductError> {
+            Ok(None)
         }
     }
 
@@ -1780,7 +1846,7 @@ mod tests {
         Arc::new(ironclaw_auth::AuthEngine::new(
             ironclaw_auth::AuthEngineDeps {
                 recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
-                client_credentials: Arc::new(StaticTestCredentials),
+                configuration: Arc::new(StaticTestCredentials),
                 egress,
                 secret_store,
                 callback_base: ironclaw_auth::EngineCallbackBase::new(
@@ -1978,9 +2044,11 @@ mod tests {
             .await
             .expect("completed flow lookup")
             .expect("completed flow");
-        let account_id = completed_flow
-            .credential_account_id
-            .expect("callback should persist account id");
+        let AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }) =
+            completed_flow.state
+        else {
+            panic!("callback should persist an authorized outcome");
+        };
         let account = shared
             .get_account(CredentialAccountLookupRequest {
                 scope: flow_scope,
@@ -2111,11 +2179,10 @@ mod tests {
             .await
             .expect("completed flow lookup")
             .expect("completed flow");
-        assert_eq!(completed_flow.status, AuthFlowStatus::Completed);
-        assert!(
-            completed_flow.credential_account_id.is_some(),
-            "callback should persist an account id"
-        );
+        assert!(matches!(
+            completed_flow.state,
+            AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+        ));
     }
 
     #[tokio::test]
@@ -2256,7 +2323,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let flows = shared.flow_records_snapshot();
         assert_eq!(flows.len(), 1);
-        assert_eq!(flows[0].status, AuthFlowStatus::Canceled);
+        assert_eq!(
+            flows[0].state,
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+        );
     }
 
     /// The callback retrieves the PKCE verifier from the durable gate store

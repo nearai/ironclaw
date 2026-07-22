@@ -1675,6 +1675,7 @@ fn rejection_kind_for_auth_interaction(kind: AuthInteractionRejectionKind) -> Pr
         | AuthInteractionRejectionKind::InvalidCallbackRef
         | AuthInteractionRejectionKind::UnsupportedResult
         | AuthInteractionRejectionKind::FlowUnavailable
+        | AuthInteractionRejectionKind::CorruptState
         | AuthInteractionRejectionKind::InvalidBindingRef => ProductRejectionKind::PolicyDenied,
     }
 }

@@ -61,7 +61,7 @@ pub(super) async fn oauth_start_handler(
 
     Ok(Json(OAuthStartResponse {
         flow_id: flow.id,
-        status: flow.status,
+        status: flow.state.into(),
         provider,
         authorization_url,
         expires_at: flow.expires_at,
@@ -102,6 +102,33 @@ pub(super) async fn oauth_flow_status_handler(
     let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?;
     let status = run_with_backend_timeout(state.product_auth.flow_status(&scope, flow_id)).await?;
     Ok(Json(OAuthFlowStatusResponse { status }))
+}
+
+/// Explicitly retry delivery for a durable terminal OAuth result.
+///
+/// Status polling remains read-only. This authenticated command is the
+/// retry-safe seam used after a callback, process crash, or transient dispatch
+/// failure leaves a resolved flow without its exact gate/run outcome delivered.
+pub(super) async fn oauth_flow_reconcile_handler(
+    State(state): State<ProductAuthRouteState>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(flow_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<OAuthFlowStatusQuery>,
+) -> Result<Json<OAuthFlowStatusResponse>, ProductAuthRouteFailure> {
+    let flow_id = AuthFlowId::from_uuid(
+        Uuid::parse_str(&flow_id).map_err(|_| ProductAuthRouteFailure::malformed_callback())?,
+    );
+    let fields = ScopeFields {
+        session_id: None,
+        thread_id: None,
+        invocation_id: query.invocation_id,
+    };
+    let scope = scope_from_authenticated_caller_parts_requiring_invocation(&caller, &fields)?;
+    let flow_state =
+        run_with_backend_timeout(state.product_auth.reconcile_oauth_flow(&scope, flow_id)).await?;
+    Ok(Json(OAuthFlowStatusResponse {
+        status: flow_state.into(),
+    }))
 }
 
 /// Recipe-driven extension OAuth start: the requested vendor resolves to its
@@ -184,7 +211,7 @@ pub(super) async fn extension_oauth_start_handler(
 
     let response = ProductOAuthStartResponse {
         flow_id: flow.id,
-        status: flow.status,
+        status: flow.state.into(),
         provider,
         authorization_url: prepared.authorization_url,
         expires_at: flow.expires_at,
@@ -238,7 +265,9 @@ pub(super) async fn oauth_callback_handler(
     let scope = scope_from_callback_query(&state, &query)?;
     let state_hash = opaque_state_hash(state_value.as_str())?;
 
-    let flow_provider = if is_authorized_callback_candidate(&query) {
+    let flow_provider = if is_authorized_callback_candidate(&query)
+        || callback_error_outcome(query.error.as_deref()).is_some()
+    {
         Some(
             run_with_backend_timeout(state.product_auth.ensure_oauth_callback_flow_known(
                 &scope,
@@ -366,26 +395,6 @@ async fn vendor_oauth_callback_attempt(
         ));
     }
 
-    if query
-        .error
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-    {
-        let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
-            RebornOAuthCallbackRequest {
-                scope: callback_scope.clone(),
-                flow_id,
-                opaque_state_hash: state_hash.clone(),
-                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
-            },
-        ))
-        .await;
-        state
-            .forget_pkce_verifier_everywhere(callback_scope, flow_id)
-            .await;
-        return oauth_callback_route_result_response(headers, response);
-    }
-
     let flow_provider = match run_with_backend_timeout(
         state
             .product_auth
@@ -400,11 +409,29 @@ async fn vendor_oauth_callback_attempt(
         }
     };
     // Cross-vendor rejection: a state minted for one vendor's flow cannot
-    // complete through another vendor's callback path.
+    // complete through another vendor's callback path, including denial and
+    // terminal provider-error callbacks that do not carry an auth code.
     if flow_provider != provider {
         state.remove_pkce_verifier(flow_id);
         return Err(ProductAuthRouteFailure::malformed_callback());
     }
+
+    if let Some(outcome) = callback_error_outcome(query.error.as_deref()) {
+        let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
+            RebornOAuthCallbackRequest {
+                scope: callback_scope.clone(),
+                flow_id,
+                opaque_state_hash: state_hash.clone(),
+                outcome,
+            },
+        ))
+        .await;
+        state
+            .forget_pkce_verifier_everywhere(callback_scope, flow_id)
+            .await;
+        return oauth_callback_route_result_response(headers, response);
+    }
+
     let Some(code) = query.code.as_ref() else {
         state.remove_pkce_verifier(flow_id);
         return Err(ProductAuthRouteFailure::malformed_callback());
@@ -692,12 +719,17 @@ pub(super) async fn callback_outcome_from_query(
     flow_provider: Option<&AuthProviderId>,
     query: &OAuthCallbackQuery,
 ) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
-    if query
-        .error
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-    {
-        return Ok(RebornOAuthCallbackOutcome::ProviderDenied);
+    if let Some(outcome) = callback_error_outcome(query.error.as_deref()) {
+        let flow_provider =
+            flow_provider.ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
+        if let Some(query_provider) = query.provider.as_deref() {
+            let query_provider = AuthProviderId::new(query_provider.to_string())
+                .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
+            if &query_provider != flow_provider {
+                return Err(ProductAuthRouteFailure::malformed_callback());
+            }
+        }
+        return Ok(outcome);
     }
 
     let provider = match query.provider.as_deref() {
@@ -740,6 +772,16 @@ pub(super) async fn callback_outcome_from_query(
             pkce_verifier_hash,
             scopes,
         },
+    })
+}
+
+fn callback_error_outcome(error: Option<&str>) -> Option<RebornOAuthCallbackOutcome> {
+    error.filter(|value| !value.is_empty()).map(|value| {
+        if value == "access_denied" {
+            RebornOAuthCallbackOutcome::ProviderDenied
+        } else {
+            RebornOAuthCallbackOutcome::Malformed
+        }
     })
 }
 

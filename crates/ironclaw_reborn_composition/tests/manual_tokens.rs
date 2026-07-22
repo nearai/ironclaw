@@ -3,19 +3,20 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowId,
-    AuthFlowManager, AuthFlowRecord, AuthFlowStatus, AuthInteractionId, AuthInteractionService,
-    AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId, AuthSessionId,
-    AuthSurface, CredentialAccountLabel, CredentialAccountListRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialAccountUpdateBinding, CredentialOwnership,
-    CredentialSelectionInput, CredentialSetupService, InMemoryAuthProductServices,
-    ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount,
-    OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackFailureInput,
-    OAuthCallbackInput, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
+    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowManager,
+    AuthFlowOutcome, AuthFlowRecord, AuthFlowState, AuthInteractionId, AuthInteractionService,
+    AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId, AuthResolved,
+    AuthSessionId, AuthSurface, CredentialAccountLabel, CredentialAccountListRequest,
+    CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdateBinding,
+    CredentialOwnership, CredentialSelectionInput, CredentialSetupService,
+    InMemoryAuthProductServices, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthAuthorizationUrl, OAuthCallbackClaim, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult, Timestamp,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
 use ironclaw_reborn_composition::{
-    RebornAuthContinuationDispatcher, RebornManualTokenError, RebornManualTokenSetupRequest,
+    RebornAuthResolutionDispatcher, RebornManualTokenError, RebornManualTokenSetupRequest,
     RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse, RebornProductAuthServices,
 };
 use secrecy::SecretString;
@@ -26,45 +27,27 @@ const RAW_TOKEN: &str = "super-secret-manual-token";
 struct NoopContinuationDispatcher;
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        Ok(())
-    }
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for NoopContinuationDispatcher {
+    async fn dispatch_auth_resolved(&self, _event: AuthResolved) -> Result<(), AuthProductError> {
         Ok(())
     }
 }
 
 #[derive(Debug, Default)]
 struct RecordingContinuationDispatcher {
-    events: Mutex<Vec<AuthContinuationEvent>>,
+    events: Mutex<Vec<AuthResolved>>,
 }
 
 impl RecordingContinuationDispatcher {
-    fn events(&self) -> Vec<AuthContinuationEvent> {
+    fn events(&self) -> Vec<AuthResolved> {
         self.events.lock().unwrap().clone()
     }
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for RecordingContinuationDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for RecordingContinuationDispatcher {
+    async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
         self.events.lock().unwrap().push(event);
-        Ok(())
-    }
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
         Ok(())
     }
 }
@@ -72,33 +55,24 @@ impl RebornAuthContinuationDispatcher for RecordingContinuationDispatcher {
 #[derive(Debug, Default)]
 struct FailsFirstContinuationDispatcher {
     attempts: Mutex<usize>,
-    events: Mutex<Vec<AuthContinuationEvent>>,
+    events: Mutex<Vec<AuthResolved>>,
 }
 
 impl FailsFirstContinuationDispatcher {
-    fn events(&self) -> Vec<AuthContinuationEvent> {
+    fn events(&self) -> Vec<AuthResolved> {
         self.events.lock().unwrap().clone()
     }
 }
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for FailsFirstContinuationDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for FailsFirstContinuationDispatcher {
+    async fn dispatch_auth_resolved(&self, event: AuthResolved) -> Result<(), AuthProductError> {
         let mut attempts = self.attempts.lock().unwrap();
         *attempts += 1;
         if *attempts == 1 {
             return Err(AuthProductError::BackendUnavailable);
         }
         self.events.lock().unwrap().push(event);
-        Ok(())
-    }
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
         Ok(())
     }
 }
@@ -272,7 +246,7 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
         &self,
         _scope: &AuthProductScope,
         _request: OAuthCallbackClaimRequest,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
+    ) -> Result<OAuthCallbackClaim, AuthProductError> {
         unreachable!("manual-token cleanup tests do not claim OAuth callbacks")
     }
 
@@ -320,11 +294,20 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
         unreachable!("manual-token cleanup tests do not fail OAuth callbacks")
     }
 
-    async fn mark_continuation_dispatched(
+    async fn expire_flow(
         &self,
         _scope: &AuthProductScope,
         _flow_id: AuthFlowId,
-        _emitted_at: Timestamp,
+        _observed_at: Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        unreachable!("manual-token cleanup tests do not expire OAuth flows")
+    }
+
+    async fn mark_resolution_delivered(
+        &self,
+        _scope: &AuthProductScope,
+        _flow_id: AuthFlowId,
+        _delivered_at: Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         unreachable!("manual-token cleanup tests do not mark continuations")
     }
@@ -335,15 +318,6 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
         _flow_id: AuthFlowId,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         unreachable!("manual-token cleanup tests do not cancel generic flows")
-    }
-
-    async fn fail_completed_continuation(
-        &self,
-        _scope: &AuthProductScope,
-        _flow_id: AuthFlowId,
-        _error: AuthErrorCode,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        unreachable!("manual-token cleanup tests do not fail completed continuations")
     }
 }
 
@@ -587,7 +561,7 @@ async fn manual_token_facade_tracks_setup_and_submit_in_auth_flow() {
 
     let flows = shared.flow_records_snapshot();
     assert_eq!(flows.len(), 1);
-    assert_eq!(flows[0].status, AuthFlowStatus::AwaitingUser);
+    assert_eq!(flows[0].state, AuthFlowState::Open);
     assert!(matches!(
         &flows[0].challenge,
         Some(AuthChallenge::ManualTokenRequired { interaction_id, .. })
@@ -605,16 +579,25 @@ async fn manual_token_facade_tracks_setup_and_submit_in_auth_flow() {
 
     let flows = shared.flow_records_snapshot();
     assert_eq!(flows.len(), 1);
-    assert_eq!(flows[0].status, AuthFlowStatus::Completed);
-    assert_eq!(flows[0].credential_account_id, Some(response.account_id));
+    assert_eq!(
+        flows[0].state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: response.account_id,
+        })
+    );
     assert!(
-        flows[0].continuation_emitted_at.is_some(),
+        flows[0].resolution_delivered_at.is_some(),
         "manual-token submit should mark continuation dispatch"
     );
     let events = dispatcher.events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].flow_id, flows[0].id);
-    assert_eq!(events[0].credential_account_id, Some(response.account_id));
+    assert_eq!(
+        events[0].outcome,
+        AuthFlowOutcome::Authorized {
+            account_id: response.account_id,
+        }
+    );
 }
 
 #[tokio::test]
@@ -653,9 +636,13 @@ async fn manual_token_facade_retries_completed_flow_when_continuation_dispatch_f
     assert_eq!(response.status, CredentialAccountStatus::Configured);
     let flows = shared.flow_records_snapshot();
     assert_eq!(flows.len(), 1);
-    assert_eq!(flows[0].status, AuthFlowStatus::Completed);
-    assert_eq!(flows[0].credential_account_id, Some(response.account_id));
-    assert!(flows[0].continuation_emitted_at.is_some());
+    assert_eq!(
+        flows[0].state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: response.account_id,
+        })
+    );
+    assert!(flows[0].resolution_delivered_at.is_some());
     let events = dispatcher.events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].flow_id, flows[0].id);

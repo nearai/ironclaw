@@ -340,8 +340,9 @@ pub(crate) fn challenge_view_from_flow(
 mod tests {
     use super::*;
     use ironclaw_auth::{
-        AuthEngineDeps, AuthFlowStatus, EngineCallbackBase, InMemoryAuthProductServices,
-        OAuthAuthorizationUrl, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
+        AuthEngineDeps, AuthFlowOutcome, AuthFlowState, EngineCallbackBase,
+        InMemoryAuthProductServices, OAuthAuthorizationUrl, ResolvedVendorAuthRecipe,
+        StaticAuthRecipeResolver,
     };
     use ironclaw_host_api::{
         AgentId, ExtensionId, TenantId, ThreadId, UserId, VendorAuthRecipe, VendorId,
@@ -370,7 +371,7 @@ mod tests {
     struct StaticCredentials;
 
     #[async_trait::async_trait]
-    impl ironclaw_auth::EngineClientCredentialsSource for StaticCredentials {
+    impl ironclaw_auth::EngineOAuthConfigurationSource for StaticCredentials {
         async fn resolve(
             &self,
             _vendor: &str,
@@ -381,19 +382,35 @@ mod tests {
                 client_secret: None,
             })
         }
+
+        async fn resolve_non_secret_value(
+            &self,
+            _vendor: &str,
+            _handle: &SecretHandle,
+        ) -> Result<Option<String>, AuthProductError> {
+            Ok(None)
+        }
     }
 
     #[derive(Debug)]
     struct UnconfiguredCredentials;
 
     #[async_trait::async_trait]
-    impl ironclaw_auth::EngineClientCredentialsSource for UnconfiguredCredentials {
+    impl ironclaw_auth::EngineOAuthConfigurationSource for UnconfiguredCredentials {
         async fn resolve(
             &self,
             _vendor: &str,
             _credentials: &ironclaw_host_api::RecipeClientCredentials,
         ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
             Err(AuthProductError::MalformedConfig)
+        }
+
+        async fn resolve_non_secret_value(
+            &self,
+            _vendor: &str,
+            _handle: &SecretHandle,
+        ) -> Result<Option<String>, AuthProductError> {
+            Ok(None)
         }
     }
 
@@ -414,11 +431,11 @@ mod tests {
     }
 
     fn engine_with_credentials(
-        credentials: Arc<dyn ironclaw_auth::EngineClientCredentialsSource>,
+        credentials: Arc<dyn ironclaw_auth::EngineOAuthConfigurationSource>,
     ) -> Arc<AuthEngine> {
         Arc::new(AuthEngine::new(AuthEngineDeps {
             recipes: Arc::new(StaticAuthRecipeResolver::new(vec![acme_vendor_recipe()])),
-            client_credentials: credentials,
+            configuration: credentials,
             egress: Arc::new(PanicEgress),
             secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
             callback_base: EngineCallbackBase::new(
@@ -504,7 +521,7 @@ mod tests {
                 .unwrap()
                 .into_iter()
                 .filter(|flow| {
-                    flow.status == AuthFlowStatus::AwaitingUser
+                    flow.state == AuthFlowState::Open
                         && matches!(
                             flow.continuation,
                             AuthContinuationRef::TurnGateResume { .. }
@@ -572,7 +589,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(expired.status, AuthFlowStatus::Canceled);
+        assert_eq!(
+            expired.state,
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+        );
         assert_eq!(fixture.active_gate_flows().await.len(), 1);
     }
 

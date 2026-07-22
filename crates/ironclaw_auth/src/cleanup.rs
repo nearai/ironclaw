@@ -3,7 +3,7 @@ use ironclaw_host_api::ExtensionId;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AuthContinuationEvent, AuthFlowId, AuthProductError, AuthProviderId, CredentialAccountId,
+    AuthFlowId, AuthProductError, AuthProviderId, AuthResolved, CredentialAccountId,
     LifecyclePackageRef, scope::AuthProductScope,
 };
 
@@ -67,11 +67,11 @@ pub struct SecretCleanupReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub quarantined_accounts: Vec<SecretCleanupQuarantine>,
     /// Canceled turn-gate continuations that the composition layer must deny
-    /// through the turn coordinator before lifecycle cleanup is complete.
-    /// This internal handoff is deliberately omitted from product responses;
-    /// it carries no secret material (flow/scope/continuation refs only).
+    /// through the canonical turn coordinator before lifecycle cleanup is
+    /// complete. This internal handoff is deliberately omitted from product
+    /// responses; it carries no secret material.
     #[serde(skip)]
-    pub canceled_turn_gate_continuations: Vec<AuthContinuationEvent>,
+    pub auth_resolutions: Vec<AuthResolved>,
     /// Flows this cleanup walked to a terminal state, so the composition
     /// layer can eagerly drop their durable setup PKCE verifier secrets
     /// instead of leaving them to TTL expiry. Internal handoff only — never

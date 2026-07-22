@@ -8,10 +8,12 @@
 //!   redirect) — idempotent, no second account, and a later reconnect works;
 //! - the user CLOSES the popup and clicks Connect again — creating the
 //!   reopened flow supersedes the abandoned one at the `create_flow` seam,
-//!   and the abandoned tab's late callback dies at claim as `Canceled`;
+//!   and the abandoned tab's late callback dies at claim as terminal;
 //! - the user DENIES consent on the provider page — the flow terminalizes as
-//!   Failed with no exchange and no account, and an immediate fresh Connect
-//!   succeeds.
+//!   `ProviderDenied` with no exchange and no account, and an immediate fresh
+//!   Connect succeeds.
+//! - a vendor-required authorize parameter is resolved from the extension's
+//!   declared non-secret configuration and appears in the user-visible URL.
 
 #[path = "common.rs"]
 mod common;
@@ -19,13 +21,106 @@ mod common;
 use chrono::{Duration, Utc};
 use common::{authorized_callback_request, hex64, new_flow_request, test_scope};
 use ironclaw_auth::{
-    AuthErrorCode, AuthFlowStatus, AuthProviderId, AuthorizationCodeHash,
+    AuthErrorCode, AuthFlowOutcome, AuthFlowState, AuthProviderId, AuthorizationCodeHash,
     CredentialAccountListRequest, OpaqueStateHash, PkceVerifierHash,
 };
 use ironclaw_reborn_composition::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
-    test_support::build_oauth_product_auth_for_test,
+    test_support::{build_oauth_product_auth_for_test, prepare_manifest_oauth_flow_for_test},
 };
+
+/// Original QA regression, expressed without a concrete channel: a
+/// non-distributed vendor app requires the configured workspace in its
+/// authorization request. The generic recipe/config binding must carry that
+/// value into the URL the user opens; omitting it can make the vendor select a
+/// different signed-in workspace and reject the app before callback.
+#[tokio::test]
+async fn configured_workspace_is_present_in_the_user_visible_authorization_url() {
+    let manifest = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acme-oauth-journey"
+name = "Acme OAuth Journey"
+version = "0.1.0"
+description = "Invented provider fixture for the configured OAuth URL journey."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "acme-oauth-journey.extension/v1"
+
+[admin_configuration]
+group_id = "extension.acme-oauth-journey"
+display_name = "Acme deployment configuration"
+description = "Deployment-owned OAuth configuration."
+fields = [
+  { handle = "acme_workspace_id", label = "Workspace ID", secret = false, required = true },
+  { handle = "acme_oauth_client_id", label = "OAuth client ID", secret = false, required = true },
+]
+
+[[tools]]
+id = "acme-oauth-journey.read_messages"
+description = "Read messages from the invented Acme provider."
+effects = ["network", "use_secret"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/acme/read_messages.input.v1.json"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["messages:read"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[auth.acme]
+method = "oauth2_code"
+display_name = "Acme account"
+authorization_endpoint = "https://oauth.acme.example/authorize"
+token_endpoint = "https://oauth.acme.example/token"
+scopes = ["messages:read"]
+authorize_params_from_config = { workspace = "acme_workspace_id" }
+client_credentials = { client_id_handle = "acme_oauth_client_id" }
+
+[auth.acme.token_response]
+access_token = "/access_token"
+"#;
+    let prepared = prepare_manifest_oauth_flow_for_test(
+        manifest,
+        "acme",
+        vec![
+            ("acme_workspace_id".to_string(), "ACME-TEAM".to_string()),
+            (
+                "acme_oauth_client_id".to_string(),
+                "acme-client-id".to_string(),
+            ),
+        ],
+        ironclaw_auth::PrepareOAuthFlowRequest {
+            vendor: "acme".to_string(),
+            scope: test_scope(),
+            flow_id: ironclaw_auth::AuthFlowId::new(),
+            account_label: ironclaw_auth::CredentialAccountLabel::new("Acme account")
+                .expect("account label"),
+            requested_scopes: Vec::new(),
+        },
+    )
+    .await
+    .expect("manifest-declared admin configuration resolves through production composition");
+    let url = url::Url::parse(prepared.authorization_url.as_str()).expect("authorization URL");
+    assert_eq!(
+        url.query_pairs()
+            .find(|(name, _)| name == "workspace")
+            .map(|(_, value)| value.into_owned()),
+        Some("ACME-TEAM".to_string()),
+        "the user-visible authorization link must stay pinned to the configured workspace"
+    );
+    assert_eq!(
+        url.query_pairs()
+            .find(|(name, _)| name == "client_id")
+            .map(|(_, value)| value.into_owned()),
+        Some("acme-client-id".to_string()),
+        "the OAuth client id must come from the same saved manifest configuration"
+    );
+}
 
 /// Extension-runtime P6 S3: a CHANNEL extension's OAuth connect must bind
 /// the proven vendor identity to the authenticated caller through the
@@ -453,9 +548,9 @@ async fn expired_flow_callback_rejected_then_fresh_flow_retry_succeeds() {
         .expect("get_flow must not error")
         .expect("the expired flow record must remain readable");
     assert_eq!(
-        record.status,
-        AuthFlowStatus::Expired,
-        "the lapsed flow must be marked terminal Expired, not left pending"
+        record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired),
+        "the lapsed flow must be resolved as Expired, not left open"
     );
     assert_eq!(
         bundle.egress.captured_count(),
@@ -691,9 +786,9 @@ async fn replayed_callback_is_idempotent_then_fresh_flow_reconnects() {
 /// The connect-popup journey: the user opens the OAuth popup (flow A), closes
 /// it without authorizing, and clicks Connect again (flow B). Creating flow B
 /// supersedes the abandoned attempt at the `create_flow` seam itself — A reads
-/// back terminal `Canceled` — and completing B mints exactly one credential
+/// back resolved as aborted — and completing B mints exactly one credential
 /// account. The abandoned tab's LATE callback for A (the user finds the old
-/// popup and finishes it anyway) must die at the claim with `Canceled`: no
+/// popup and finishes it anyway) must die at the claim: no
 /// token exchange runs for it and no second account appears.
 #[tokio::test]
 async fn closed_popup_reopen_supersedes_abandoned_flow_then_completes() {
@@ -742,8 +837,8 @@ async fn closed_popup_reopen_supersedes_abandoned_flow_then_completes() {
         .expect("get_flow must not error")
         .expect("the abandoned flow record must remain readable");
     assert_eq!(
-        abandoned_record.status,
-        AuthFlowStatus::Canceled,
+        abandoned_record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
         "creating the reopened flow must supersede (cancel) the abandoned popup's flow"
     );
 
@@ -813,7 +908,7 @@ async fn closed_popup_reopen_supersedes_abandoned_flow_then_completes() {
 }
 
 /// Denied consent: the user clicks "Deny" on the provider page. The flow
-/// terminalizes durably as Failed with no token exchange and no credential
+/// terminalizes durably as `Resolved(ProviderDenied)` with no token exchange and no credential
 /// account — the route-visible outcome is the sanitized non-retryable
 /// `ProviderDenied` error — and an immediate fresh Connect succeeds cleanly
 /// (denial leaves a clean retry path, not a wedge).
@@ -865,9 +960,9 @@ async fn denied_consent_terminalizes_flow_and_fresh_retry_connects() {
         .expect("get_flow must not error")
         .expect("the denied flow record must remain readable");
     assert_eq!(
-        denied_record.status,
-        AuthFlowStatus::Failed,
-        "denied consent must terminalize the flow durably as Failed"
+        denied_record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied),
+        "denied consent must preserve the provider-denied outcome durably"
     );
     assert_eq!(
         bundle.egress.captured_count(),

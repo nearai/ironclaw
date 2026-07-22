@@ -12,15 +12,16 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthEngine, AuthEngineDeps, AuthFlowId, AuthFlowKind,
-    AuthFlowManager, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
-    AuthSurface, AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
-    EngineCallbackBase, EngineClientCredentialsSource, EngineOAuthClientMaterial,
-    InMemoryAuthProductServices, NewAuthFlow, OAuthAuthorizationCode, OAuthAuthorizationUrl,
-    OAuthCallbackClaimRequest, OAuthCallbackInput, OAuthClientId, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefreshRequest,
-    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, PrepareOAuthFlowRequest,
-    ProviderCallbackOutcome, ProviderScope, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
+    AuthChallenge, AuthContinuationRef, AuthEngine, AuthEngineDeps, AuthErrorCode, AuthFlowId,
+    AuthFlowKind, AuthFlowManager, AuthProductError, AuthProductScope, AuthProviderClient,
+    AuthProviderId, AuthSurface, AuthorizationCodeHash, CredentialAccountId,
+    CredentialAccountLabel, EngineCallbackBase, EngineOAuthClientMaterial,
+    EngineOAuthConfigurationSource, InMemoryAuthProductServices, NewAuthFlow,
+    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackClaimRequest, OAuthCallbackInput,
+    OAuthClientId, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OAuthProviderExchangeContext, OAuthProviderRefreshRequest, OpaqueStateHash, PkceVerifierHash,
+    PkceVerifierSecret, PrepareOAuthFlowRequest, ProviderCallbackOutcome, ProviderScope,
+    ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
 };
 use ironclaw_host_api::{
     InvocationId, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
@@ -153,10 +154,11 @@ impl RuntimeHttpEgress for ScriptedVendorServer {
 #[derive(Debug, Default)]
 struct StaticClientCredentials {
     by_vendor: HashMap<String, (String, Option<String>)>,
+    non_secret_by_handle: HashMap<String, String>,
 }
 
 #[async_trait]
-impl EngineClientCredentialsSource for StaticClientCredentials {
+impl EngineOAuthConfigurationSource for StaticClientCredentials {
     async fn resolve(
         &self,
         vendor: &str,
@@ -171,6 +173,14 @@ impl EngineClientCredentialsSource for StaticClientCredentials {
             client_secret: client_secret.clone().map(SecretString::from),
         })
     }
+
+    async fn resolve_non_secret_value(
+        &self,
+        _vendor: &str,
+        handle: &SecretHandle,
+    ) -> Result<Option<String>, AuthProductError> {
+        Ok(self.non_secret_by_handle.get(handle.as_str()).cloned())
+    }
 }
 
 const CALLBACK_BASE: &str = "https://host.example/api/reborn/product-auth/oauth";
@@ -183,6 +193,29 @@ struct Harness {
 
 impl Harness {
     fn new(recipes: Vec<ResolvedVendorAuthRecipe>) -> Self {
+        let non_secret_by_handle = recipes
+            .iter()
+            .flat_map(|resolved| match &resolved.recipe {
+                VendorAuthRecipe::Oauth2Code(recipe) => recipe
+                    .authorize_params_from_config
+                    .values()
+                    .map(|handle| {
+                        (
+                            handle.as_str().to_string(),
+                            format!("configured-{}", handle.as_str()),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                VendorAuthRecipe::ApiKey(_) => Vec::new(),
+            })
+            .collect();
+        Self::with_configuration(recipes, non_secret_by_handle)
+    }
+
+    fn with_configuration(
+        recipes: Vec<ResolvedVendorAuthRecipe>,
+        non_secret_by_handle: HashMap<String, String>,
+    ) -> Self {
         let mut by_vendor = HashMap::new();
         for recipe in &recipes {
             by_vendor.insert(
@@ -197,7 +230,10 @@ impl Harness {
         let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
         let engine = AuthEngine::new(AuthEngineDeps {
             recipes: Arc::new(StaticAuthRecipeResolver::new(recipes)),
-            client_credentials: Arc::new(StaticClientCredentials { by_vendor }),
+            configuration: Arc::new(StaticClientCredentials {
+                by_vendor,
+                non_secret_by_handle,
+            }),
             egress: Arc::clone(&server) as Arc<dyn RuntimeHttpEgress>,
             secret_store: Arc::clone(&secrets),
             callback_base: EngineCallbackBase::new(CALLBACK_BASE).expect("callback base"),
@@ -497,6 +533,62 @@ async fn google_extra_authorize_params_come_from_recipe_data() {
             .get("scope")
             .is_some_and(|scopes| scopes.contains("gmail.readonly"))
     );
+}
+
+#[tokio::test]
+async fn configured_authorize_params_are_resolved_by_handle() {
+    let row = synthetic_recipe(
+        "acme",
+        &acme_recipe_toml("authorize_params_from_config = { workspace = \"acme_workspace_id\" }"),
+    );
+    let harness = Harness::with_configuration(
+        vec![row],
+        HashMap::from([("acme_workspace_id".to_string(), "ACME-TEAM".to_string())]),
+    );
+
+    let prepared = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "acme".to_string(),
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect("declared non-secret configuration resolves");
+
+    let url = url::Url::parse(prepared.authorization_url.as_str()).unwrap();
+    assert_eq!(
+        url.query_pairs()
+            .find(|(name, _)| name == "workspace")
+            .map(|(_, value)| value.into_owned()),
+        Some("ACME-TEAM".to_string())
+    );
+}
+
+#[tokio::test]
+async fn missing_configured_authorize_param_fails_before_provider_contact() {
+    let row = synthetic_recipe(
+        "acme",
+        &acme_recipe_toml("authorize_params_from_config = { workspace = \"acme_workspace_id\" }"),
+    );
+    let harness = Harness::with_configuration(vec![row], HashMap::new());
+
+    let error = harness
+        .engine
+        .prepare_oauth_flow(PrepareOAuthFlowRequest {
+            vendor: "acme".to_string(),
+            scope: test_scope(),
+            flow_id: AuthFlowId::new(),
+            account_label: CredentialAccountLabel::new("account").unwrap(),
+            requested_scopes: Vec::new(),
+        })
+        .await
+        .expect_err("missing authorize configuration must fail closed");
+
+    assert_eq!(error.code(), AuthErrorCode::MalformedConfig);
+    assert_eq!(harness.server.request_count(), 0);
 }
 
 #[tokio::test]
@@ -1660,7 +1752,10 @@ impl SweepFixture {
         let secrets: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
         let engine = Arc::new(AuthEngine::new(AuthEngineDeps {
             recipes: Arc::new(StaticAuthRecipeResolver::new(recipes.clone())),
-            client_credentials: Arc::new(StaticClientCredentials { by_vendor }),
+            configuration: Arc::new(StaticClientCredentials {
+                by_vendor,
+                non_secret_by_handle: HashMap::new(),
+            }),
             egress: Arc::clone(&server) as Arc<dyn RuntimeHttpEgress>,
             secret_store: Arc::clone(&secrets),
             callback_base: EngineCallbackBase::new(CALLBACK_BASE).expect("callback base"),

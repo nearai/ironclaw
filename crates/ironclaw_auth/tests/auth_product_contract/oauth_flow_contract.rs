@@ -19,52 +19,296 @@ async fn oauth_flow_state_machine_conformance_holds_for_in_memory_fake() {
 }
 
 #[tokio::test]
-async fn continuation_side_effect_failure_terminalizes_only_the_expected_completion() {
+async fn auth_flow_wire_writes_only_the_canonical_state_and_resolution_marker() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("wire");
+    let flow = oauth_flow(&services, owner.clone()).await;
+    let resolved = services
+        .cancel_flow(&owner, flow.id)
+        .await
+        .expect("flow resolves as user-aborted");
+    let delivered_at = "2026-07-20T12:00:00Z".parse().expect("timestamp");
+    let resolved = services
+        .mark_resolution_delivered(&owner, resolved.id, delivered_at)
+        .await
+        .expect("resolution delivery is acknowledged");
+    let record = serde_json::to_value(resolved).expect("resolved flow serializes");
+    let object = record.as_object().expect("flow record is an object");
+    assert_eq!(object.get("state"), Some(&serde_json::json!("resolved")));
+    assert_eq!(
+        object.get("outcome"),
+        Some(&serde_json::json!({"type": "user_aborted"}))
+    );
+    assert_eq!(
+        object.get("resolution_delivered_at"),
+        Some(&serde_json::json!("2026-07-20T12:00:00Z"))
+    );
+    for removed in [
+        "status",
+        "credential_account_id",
+        "error",
+        "continuation_emitted_at",
+    ] {
+        assert!(
+            !object.contains_key(removed),
+            "legacy field {removed} was written"
+        );
+    }
+
+    let decoded: ironclaw_auth::AuthFlowRecord =
+        serde_json::from_value(record).expect("canonical resolved flow decodes");
+    assert_eq!(
+        decoded.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
+}
+
+#[tokio::test]
+async fn mixed_canonical_and_legacy_lifecycle_fields_fail_closed() {
+    let services = InMemoryAuthProductServices::new();
+    let canonical = serde_json::to_value(oauth_flow(&services, scope("mixed-wire")).await)
+        .expect("sample flow serializes");
+    let base = canonical.as_object().expect("record object");
+
+    let mut consistent = base.clone();
+    consistent.insert("status".to_string(), serde_json::json!("awaiting_user"));
+    assert!(
+        serde_json::from_value::<ironclaw_auth::AuthFlowRecord>(serde_json::Value::Object(
+            consistent
+        ))
+        .is_err(),
+        "even equivalent canonical and legacy lifecycle fields are ambiguous"
+    );
+
+    let mut contradictory = base.clone();
+    contradictory.insert("state".to_string(), serde_json::json!("resolved"));
+    contradictory.insert(
+        "outcome".to_string(),
+        serde_json::json!({"type": "provider_denied"}),
+    );
+    contradictory.insert("status".to_string(), serde_json::json!("completed"));
+    contradictory.insert(
+        "credential_account_id".to_string(),
+        serde_json::json!(CredentialAccountId::new()),
+    );
+    assert!(
+        serde_json::from_value::<ironclaw_auth::AuthFlowRecord>(serde_json::Value::Object(
+            contradictory
+        ))
+        .is_err(),
+        "contradictory terminal lifecycle representations must fail closed"
+    );
+
+    let mut malformed_canonical_with_valid_legacy = base.clone();
+    malformed_canonical_with_valid_legacy
+        .insert("state".to_string(), serde_json::json!("resolved"));
+    malformed_canonical_with_valid_legacy.remove("outcome");
+    malformed_canonical_with_valid_legacy
+        .insert("status".to_string(), serde_json::json!("canceled"));
+    assert!(
+        serde_json::from_value::<ironclaw_auth::AuthFlowRecord>(serde_json::Value::Object(
+            malformed_canonical_with_valid_legacy
+        ))
+        .is_err(),
+        "a malformed canonical lifecycle cannot fall through to valid legacy fields"
+    );
+
+    let mut neither = base.clone();
+    neither.remove("state");
+    neither.remove("outcome");
+    assert!(
+        serde_json::from_value::<ironclaw_auth::AuthFlowRecord>(serde_json::Value::Object(neither))
+            .is_err(),
+        "a record with neither lifecycle representation must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn legacy_auth_flow_wire_decodes_into_the_canonical_model_and_fails_closed() {
+    let services = InMemoryAuthProductServices::new();
+    let canonical = serde_json::to_value(oauth_flow(&services, scope("legacy-wire")).await)
+        .expect("sample flow serializes");
+    let mut legacy = canonical.as_object().expect("record object").clone();
+    legacy.remove("state");
+    legacy.remove("outcome");
+    legacy.remove("resolution_delivered_at");
+    legacy.insert("status".to_string(), serde_json::json!("failed"));
+    legacy.insert("error".to_string(), serde_json::json!("provider_denied"));
+    legacy.insert(
+        "continuation_emitted_at".to_string(),
+        serde_json::json!("2026-07-20T12:00:00Z"),
+    );
+    let migrated: ironclaw_auth::AuthFlowRecord =
+        serde_json::from_value(serde_json::Value::Object(legacy.clone()))
+            .expect("legacy provider denial decodes");
+    assert_eq!(
+        migrated.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+    );
+    assert_eq!(
+        migrated.resolution_delivered_at,
+        Some("2026-07-20T12:00:00Z".parse().expect("timestamp"))
+    );
+
+    legacy.insert("status".to_string(), serde_json::json!("completed"));
+    legacy.remove("error");
+    assert!(
+        serde_json::from_value::<ironclaw_auth::AuthFlowRecord>(serde_json::Value::Object(legacy))
+            .is_err(),
+        "legacy completed flow without an account must fail closed"
+    );
+}
+
+#[tokio::test]
+async fn legacy_failed_lifecycle_delivery_preserves_the_authorized_account() {
+    let services = InMemoryAuthProductServices::new();
+    let canonical = serde_json::to_value(oauth_flow(&services, scope("legacy-lifecycle")).await)
+        .expect("sample flow serializes");
+    let account_id = CredentialAccountId::new();
+    let mut legacy = canonical.as_object().expect("record object").clone();
+    legacy.remove("state");
+    legacy.remove("outcome");
+    legacy.remove("resolution_delivered_at");
+    legacy.insert("status".to_string(), serde_json::json!("failed"));
+    legacy.insert(
+        "error".to_string(),
+        serde_json::json!(AuthErrorCode::BackendUnavailable),
+    );
+    legacy.insert(
+        "credential_account_id".to_string(),
+        serde_json::json!(account_id),
+    );
+    legacy.insert(
+        "credential_secret_fingerprint".to_string(),
+        serde_json::json!("c".repeat(64)),
+    );
+    legacy.insert(
+        "continuation".to_string(),
+        serde_json::json!({
+            "type": "lifecycle_activation",
+            "package_ref": "slack"
+        }),
+    );
+
+    let migrated: ironclaw_auth::AuthFlowRecord =
+        serde_json::from_value(serde_json::Value::Object(legacy))
+            .expect("legacy committed lifecycle failure decodes");
+
+    assert_eq!(
+        migrated.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
+        "the provider authorization succeeded; only its old delivery protocol failed"
+    );
+    assert!(migrated.resolution_delivered_at.is_none());
+}
+
+#[tokio::test]
+async fn every_supported_legacy_lifecycle_shape_maps_to_one_canonical_state() {
+    let services = InMemoryAuthProductServices::new();
+    let canonical = serde_json::to_value(oauth_flow(&services, scope("legacy-matrix")).await)
+        .expect("sample flow serializes");
+    let base = canonical.as_object().expect("record object").clone();
+    let account_id = CredentialAccountId::new();
+    let cases = [
+        ("pending", None, None, AuthFlowState::Open),
+        ("awaiting_user", None, None, AuthFlowState::Open),
+        ("callback_received", None, None, AuthFlowState::Processing),
+        ("completing", None, None, AuthFlowState::Processing),
+        (
+            "completing",
+            Some(account_id),
+            None,
+            AuthFlowState::Processing,
+        ),
+        (
+            "completed",
+            Some(account_id),
+            None,
+            AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
+        ),
+        (
+            "failed",
+            None,
+            Some(AuthErrorCode::ProviderDenied),
+            AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied),
+        ),
+        (
+            "failed",
+            None,
+            Some(AuthErrorCode::BackendUnavailable),
+            AuthFlowState::Resolved(AuthFlowOutcome::Failed {
+                error: AuthErrorCode::BackendUnavailable,
+            }),
+        ),
+        (
+            "expired",
+            None,
+            None,
+            AuthFlowState::Resolved(AuthFlowOutcome::Expired),
+        ),
+        (
+            "canceling",
+            None,
+            None,
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
+        ),
+        (
+            "canceled",
+            None,
+            None,
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
+        ),
+    ];
+
+    for (status, legacy_account, error, expected) in cases {
+        let mut wire = base.clone();
+        wire.remove("state");
+        wire.remove("outcome");
+        wire.remove("resolution_delivered_at");
+        wire.insert("status".to_string(), serde_json::json!(status));
+        if let Some(account_id) = legacy_account {
+            wire.insert(
+                "credential_account_id".to_string(),
+                serde_json::json!(account_id),
+            );
+        }
+        if let Some(error) = error {
+            wire.insert("error".to_string(), serde_json::json!(error));
+        }
+        let migrated: ironclaw_auth::AuthFlowRecord =
+            serde_json::from_value(serde_json::Value::Object(wire))
+                .unwrap_or_else(|error| panic!("legacy {status} must decode: {error}"));
+        assert_eq!(migrated.state, expected, "legacy {status}");
+    }
+}
+
+#[tokio::test]
+async fn resolution_delivery_marker_is_terminal_only_and_idempotent() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");
     let flow = oauth_flow(&services, owner.clone()).await;
-    let completed = services
-        .complete_oauth_callback(
-            &owner,
-            OAuthCallbackInput {
-                flow_id: flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: Box::new(OAuthProviderExchange {
-                        provider: provider(),
-                        account_label: label("work github"),
-                        authorization_code_hash: code_hash("code-hash"),
-                        pkce_verifier_hash: pkce_hash("pkce-hash"),
-                        access_secret: SecretHandle::new("github-access").unwrap(),
-                        refresh_secret: None,
-                        scopes: Vec::new(),
-                        account_id: None,
-                        provider_identity: None,
-                    }),
-                },
-            },
-        )
+    let open_error = services
+        .mark_resolution_delivered(&owner, flow.id, Utc::now())
         .await
-        .expect("OAuth completion");
+        .expect_err("open flow cannot be marked delivered");
+    assert_eq!(open_error, AuthProductError::FlowAlreadyTerminal);
 
-    // Re-expressed from main's claim/settle continuation-dispatch shape onto
-    // this branch's equivalent hardening (`fail_completed_continuation` —
-    // PR body "Auth = ours"): one call terminalizes the completed flow whose
-    // continuation side effects failed, and a second call cannot overwrite
-    // the terminal state.
-    let failed = services
-        .fail_completed_continuation(&owner, completed.id, AuthErrorCode::BackendUnavailable)
+    let resolved = services
+        .cancel_flow(&owner, flow.id)
         .await
-        .expect("terminal continuation failure");
-    assert_eq!(failed.status, AuthFlowStatus::Failed);
-    assert_eq!(failed.error, Some(AuthErrorCode::BackendUnavailable));
-    assert!(failed.continuation_emitted_at.is_none());
+        .expect("flow resolves");
+    let first_delivery = Utc::now();
+    let delivered = services
+        .mark_resolution_delivered(&owner, resolved.id, first_delivery)
+        .await
+        .expect("resolved flow can be marked delivered");
+    assert_eq!(delivered.resolution_delivered_at, Some(first_delivery));
 
-    let stale = services
-        .fail_completed_continuation(&owner, completed.id, AuthErrorCode::BackendUnavailable)
+    let replay = services
+        .mark_resolution_delivered(&owner, resolved.id, first_delivery + Duration::seconds(1))
         .await
-        .expect_err("stale failure cannot overwrite terminal state");
-    assert_eq!(stale, AuthProductError::FlowAlreadyTerminal);
+        .expect("delivery marker is idempotent");
+    assert_eq!(replay.resolution_delivered_at, Some(first_delivery));
 }
 
 #[tokio::test]
@@ -112,8 +356,10 @@ async fn oauth_callback_exchanges_provider_code_then_completes_once() {
         .await
         .expect("callback completes");
 
-    assert_eq!(completed.status, AuthFlowStatus::Completed);
-    assert!(completed.credential_account_id.is_some());
+    assert!(matches!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+    ));
     assert_eq!(services.continuations().len(), 1);
 
     let replay = services
@@ -182,8 +428,12 @@ async fn credential_selection_completes_account_selection_flow_once() {
         .await
         .expect("credential selection completes");
 
-    assert_eq!(completed.status, AuthFlowStatus::Completed);
-    assert_eq!(completed.credential_account_id, Some(account.id));
+    assert_eq!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: account.id,
+        })
+    );
     assert_eq!(services.continuations().len(), 1);
 
     let replay = services
@@ -196,7 +446,7 @@ async fn credential_selection_completes_account_selection_flow_once() {
         )
         .await
         .expect("matching completed selection is idempotent");
-    assert_eq!(replay.credential_account_id, Some(account.id));
+    assert_eq!(replay.state, completed.state);
     assert_eq!(services.continuations().len(), 1);
 }
 
@@ -329,7 +579,12 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
         .await
         .expect("callback updates account");
 
-    assert_eq!(completed.credential_account_id, Some(existing.id));
+    assert_eq!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: existing.id,
+        })
+    );
     let updated = services
         .get_account(CredentialAccountLookupRequest::new(
             owner.clone(),
@@ -403,7 +658,12 @@ async fn oauth_callback_with_no_provider_account_id_updates_bound_account_across
         .await
         .expect("no-account-id reconnect must update the bound account, not fork");
 
-    assert_eq!(completed.credential_account_id, Some(existing.id));
+    assert_eq!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: existing.id,
+        })
+    );
     let accounts = services
         .list_accounts(CredentialAccountListRequest::new(create_scope, provider()).with_limit(10))
         .await
@@ -761,13 +1021,16 @@ async fn cancel_flow_preserves_terminal_state_and_blocks_callback() {
         .cancel_flow(&owner, flow.id)
         .await
         .expect("owner cancel");
-    assert_eq!(canceled.status, AuthFlowStatus::Canceled);
+    assert_eq!(
+        canceled.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
 
     let second_cancel = services
         .cancel_flow(&owner, flow.id)
         .await
-        .expect_err("terminal cancel rejected");
-    assert_eq!(second_cancel, AuthProductError::Canceled);
+        .expect("identical terminal cancel is idempotent");
+    assert_eq!(second_cancel, canceled);
 
     let callback = services
         .complete_oauth_callback(
@@ -784,7 +1047,7 @@ async fn cancel_flow_preserves_terminal_state_and_blocks_callback() {
 }
 
 #[tokio::test]
-async fn terminal_flow_status_is_not_rewritten_after_expiry() {
+async fn terminal_flow_state_is_not_rewritten_after_expiry() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");
     let flow = services
@@ -827,7 +1090,10 @@ async fn terminal_flow_status_is_not_rewritten_after_expiry() {
         .await
         .expect("lookup")
         .expect("flow remains");
-    assert_eq!(record.status, AuthFlowStatus::Canceled);
+    assert_eq!(
+        record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
 }
 
 #[tokio::test]
@@ -870,8 +1136,10 @@ async fn oauth_callback_marks_expired_flow_and_rejects_completion() {
         .await
         .expect("lookup")
         .expect("flow remains");
-    assert_eq!(record.status, AuthFlowStatus::Expired);
-    assert_eq!(record.error, Some(AuthErrorCode::UnknownOrExpiredFlow));
+    assert_eq!(
+        record.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Expired)
+    );
 }
 
 #[tokio::test]
@@ -941,17 +1209,17 @@ fn lifecycle_continuation() -> AuthContinuationRef {
     }
 }
 
-async fn flow_status(
+async fn flow_state(
     services: &InMemoryAuthProductServices,
     owner: &AuthProductScope,
     flow_id: ironclaw_auth::AuthFlowId,
-) -> AuthFlowStatus {
+) -> AuthFlowState {
     services
         .get_flow(owner, flow_id)
         .await
         .expect("lookup")
         .expect("record")
-        .status
+        .state
 }
 
 /// Supersede-on-start lives INSIDE `create_flow`: minting a setup-class flow
@@ -1012,32 +1280,32 @@ async fn create_flow_supersedes_prior_live_setup_class_flows() {
     .await;
 
     assert_eq!(
-        flow_status(&services, &owner, reopened.id).await,
-        AuthFlowStatus::AwaitingUser,
+        flow_state(&services, &owner, reopened.id).await,
+        AuthFlowState::Open,
         "the freshly created flow must not supersede itself"
     );
     assert_eq!(
-        flow_status(&services, &owner, setup_only.id).await,
-        AuthFlowStatus::Canceled,
+        flow_state(&services, &owner, setup_only.id).await,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
         "creating a setup-class flow must cancel the prior SetupOnly flow"
     );
     assert_eq!(
-        flow_status(&services, &owner, lifecycle.id).await,
-        AuthFlowStatus::Canceled,
+        flow_state(&services, &owner, lifecycle.id).await,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
         "creating a setup-class flow must cancel the prior LifecycleActivation flow"
     );
     assert_eq!(
-        flow_status(&services, &owner, turn_gate.id).await,
-        AuthFlowStatus::AwaitingUser,
+        flow_state(&services, &owner, turn_gate.id).await,
+        AuthFlowState::Open,
         "a parked turn's auth gate is not a setup flow and must survive creation"
     );
     assert_eq!(
-        flow_status(&services, &owner, other_prov.id).await,
-        AuthFlowStatus::AwaitingUser
+        flow_state(&services, &owner, other_prov.id).await,
+        AuthFlowState::Open
     );
     assert_eq!(
-        flow_status(&services, &bob, other_owner.id).await,
-        AuthFlowStatus::AwaitingUser
+        flow_state(&services, &bob, other_owner.id).await,
+        AuthFlowState::Open
     );
 }
 
@@ -1066,13 +1334,13 @@ async fn create_flow_for_a_parked_turn_gate_does_not_supersede_setup_flows() {
     .await;
 
     assert_eq!(
-        flow_status(&services, &owner, setup_only.id).await,
-        AuthFlowStatus::AwaitingUser,
+        flow_state(&services, &owner, setup_only.id).await,
+        AuthFlowState::Open,
         "a gate flow's creation must never cancel the setup surface's flow"
     );
     assert_eq!(
-        flow_status(&services, &owner, turn_gate.id).await,
-        AuthFlowStatus::AwaitingUser
+        flow_state(&services, &owner, turn_gate.id).await,
+        AuthFlowState::Open
     );
 }
 
@@ -1104,7 +1372,7 @@ async fn concurrent_setup_creates_leave_exactly_one_live_flow() {
         let live = services
             .flow_records_snapshot()
             .into_iter()
-            .filter(|flow| flow.status == AuthFlowStatus::AwaitingUser)
+            .filter(|flow| flow.state == AuthFlowState::Open)
             .count();
         assert_eq!(
             live, 1,

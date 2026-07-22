@@ -328,6 +328,7 @@ pub(crate) async fn cancel_auth_blocked_run(
             scope: scope.clone(),
             actor,
             run_id,
+            precondition: None,
             reason: ironclaw_turns::SanitizedCancelReason::Policy,
             idempotency_key,
         })

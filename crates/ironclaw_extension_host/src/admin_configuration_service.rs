@@ -501,8 +501,9 @@ fn staged_secret_handle(
     hash_part(&mut hasher, group_id.as_str().as_bytes());
     hash_part(&mut hasher, field.as_str().as_bytes());
     let digest = hasher.finalize();
-    let suffix = digest[..16]
+    let suffix = digest
         .iter()
+        .take(16)
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     SecretHandle::new(format!("admincfg-r{revision}-{suffix}"))

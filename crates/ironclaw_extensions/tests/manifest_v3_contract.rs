@@ -257,6 +257,62 @@ fn reserved_authorize_params_are_rejected() {
 }
 
 #[test]
+fn authorize_params_may_bind_declared_non_secret_configuration() {
+    let toml = ACME_MANIFEST
+        .replace(
+            "  { handle = \"acme_signing_secret\", label = \"Signing secret\", secret = true },\n]",
+            "  { handle = \"acme_signing_secret\", label = \"Signing secret\", secret = true },\n  { handle = \"acme_workspace_id\", label = \"Workspace ID\", secret = false },\n]",
+        )
+        .replace(
+            "pkce = \"s256\"",
+            "pkce = \"s256\"\nauthorize_params_from_config = { workspace = \"acme_workspace_id\" }",
+        );
+
+    let record = parse_v3(&toml).expect("declared non-secret config binding must parse");
+    let recipe = record.resolved().auth[0].recipe.as_ref().expect("recipe");
+    let VendorAuthRecipe::Oauth2Code(recipe) = recipe else {
+        panic!("expected oauth recipe");
+    };
+    assert_eq!(
+        recipe
+            .authorize_params_from_config
+            .get("workspace")
+            .map(|handle| handle.as_str()),
+        Some("acme_workspace_id")
+    );
+}
+
+#[test]
+fn authorize_param_config_bindings_fail_closed_for_undeclared_or_secret_handles() {
+    let undeclared = ACME_MANIFEST.replace(
+        "pkce = \"s256\"",
+        "pkce = \"s256\"\nauthorize_params_from_config = { workspace = \"missing_workspace_id\" }",
+    );
+    let error = parse_v3(&undeclared).expect_err("undeclared config handle must fail");
+    assert!(error.contains("missing_workspace_id"), "{error}");
+
+    let secret = ACME_MANIFEST.replace(
+        "pkce = \"s256\"",
+        "pkce = \"s256\"\nauthorize_params_from_config = { workspace = \"acme_bot_token\" }",
+    );
+    let error = parse_v3(&secret).expect_err("secret config handle must not enter a URL");
+    assert!(
+        error.contains("acme_bot_token") && error.contains("non-secret"),
+        "{error}"
+    );
+}
+
+#[test]
+fn configured_authorize_params_cannot_claim_host_owned_protocol_fields() {
+    let toml = ACME_MANIFEST.replace(
+        "pkce = \"s256\"",
+        "pkce = \"s256\"\nauthorize_params_from_config = { redirect_uri = \"acme_bot_token\" }",
+    );
+    let error = parse_v3(&toml).expect_err("reserved authorize parameter must fail");
+    assert!(error.contains("redirect_uri"), "{error}");
+}
+
+#[test]
 fn wildcard_or_deep_json_pointers_are_rejected() {
     let wildcard = ACME_MANIFEST.replace(
         "access_token = \"/access_token\"",

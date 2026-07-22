@@ -715,6 +715,7 @@ where
                     scope: scope_list[h.scope_idx].clone(),
                     actor: turn_actor(),
                     run_id: h.run_id,
+                    precondition: None,
                     reason: SanitizedCancelReason::UserRequested,
                     idempotency_key: IdempotencyKey::new(idem).unwrap(),
                 })
@@ -3068,6 +3069,7 @@ async fn write_behind_cancel_of_running_run_survives_crash() {
                 scope: scope.clone(),
                 actor: turn_actor(),
                 run_id,
+                precondition: None,
                 reason: SanitizedCancelReason::UserRequested,
                 idempotency_key: IdempotencyKey::new("idem-wb-cancel-req").unwrap(),
             })

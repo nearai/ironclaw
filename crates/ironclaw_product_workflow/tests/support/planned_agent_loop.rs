@@ -552,6 +552,7 @@ impl ProductLiveAgentLoopHarness {
                 scope: self.turn_scope(),
                 actor: TurnActor::new(self.binding.actor_user_id.clone()),
                 run_id,
+                precondition: None,
                 reason: SanitizedCancelReason::UserRequested,
                 idempotency_key: IdempotencyKey::new(format!("idem-harness-cancel-{run_id}"))
                     .expect("valid harness cancellation idempotency key"),

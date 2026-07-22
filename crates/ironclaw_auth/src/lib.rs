@@ -20,9 +20,6 @@ mod flow;
 mod ids;
 mod interaction;
 pub mod loopback_oauth;
-// `pub` for the v1 monolith's historical `ironclaw_auth::oauth::…` loopback
-// re-export path (see the compat note at the top of the module); narrows back
-// to `mod` when v1 retires.
 pub mod oauth;
 mod provider;
 mod scope;
@@ -54,18 +51,19 @@ pub use engine::keepalive::{
 };
 pub use engine::{
     AuthEngine, AuthEngineDeps, AuthRecipeResolver, DCR_CLIENT_HANDLE_PREFIX, EngineCallbackBase,
-    EngineClientCredentialsSource, EngineOAuthClientMaterial, PrepareOAuthFlowRequest,
+    EngineOAuthClientMaterial, EngineOAuthConfigurationSource, PrepareOAuthFlowRequest,
     PreparedOAuthFlow, ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
-    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowStatus,
-    CredentialAccountUpdateBinding, CredentialSelectionInput, ManualTokenCompletionInput,
-    NewAuthFlow, OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
-    ProviderCallbackOutcome, TurnGateAuthFlowQuery, credential_status_for_completed_flow,
-    flow_matches_turn_gate_query, flow_shares_setup_owner_root, is_setup_class_continuation,
+    AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthFlowManager, AuthFlowOutcome,
+    AuthFlowOwnerScope, AuthFlowRecord, AuthFlowRecordSource, AuthFlowState, AuthFlowStatus,
+    AuthResolved, CredentialAccountUpdateBinding, CredentialSelectionInput,
+    ManualTokenCompletionInput, NewAuthFlow, OAuthCallbackClaim, OAuthCallbackClaimRequest,
+    OAuthCallbackFailureInput, OAuthCallbackInput, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
+    credential_status_for_completed_flow, flow_matches_durable_owner, flow_matches_turn_gate_query,
+    flow_shares_setup_owner_root, is_setup_class_continuation,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
@@ -126,12 +124,6 @@ pub fn scope_matches(left: &AuthProductScope, right: &AuthProductScope) -> bool 
     left == right
 }
 
-pub fn is_terminal_status(status: AuthFlowStatus) -> bool {
-    matches!(
-        status,
-        AuthFlowStatus::Completed
-            | AuthFlowStatus::Failed
-            | AuthFlowStatus::Expired
-            | AuthFlowStatus::Canceled
-    )
+pub fn is_terminal_state(state: AuthFlowState) -> bool {
+    matches!(state, AuthFlowState::Resolved(_))
 }

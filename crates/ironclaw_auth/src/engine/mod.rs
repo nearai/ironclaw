@@ -32,7 +32,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::{
     OAuth2CodeRecipe, PkceMode, RecipeClientCredentials, ResourceScope, RuntimeHttpEgress,
-    VendorAuthRecipe,
+    SecretHandle, VendorAuthRecipe,
 };
 use ironclaw_secrets::SecretStore;
 use secrecy::SecretString;
@@ -120,18 +120,30 @@ impl fmt::Debug for EngineOAuthClientMaterial {
     }
 }
 
-/// Port resolving the deployment client credentials a recipe names by handle.
+/// Port resolving deployment OAuth configuration a recipe names by handle.
 ///
-/// Implementations look the handles up in operator-managed secret storage /
-/// deployment configuration. Returning `MalformedConfig` means the operator
-/// has not configured the vendor's client credentials yet.
+/// Implementations look handles up in operator-managed deployment
+/// configuration. Client credentials remain redacted; values explicitly
+/// declared non-secret may be returned for vendor authorize parameters. The
+/// vendor argument keeps a handle bound to the manifests that supplied that
+/// recipe instead of treating handle names as deployment-global identities.
+/// Returning `MalformedConfig` means required deployment configuration is
+/// missing or invalid.
 #[async_trait]
-pub trait EngineClientCredentialsSource: Send + Sync + fmt::Debug {
+pub trait EngineOAuthConfigurationSource: Send + Sync + fmt::Debug {
     async fn resolve(
         &self,
         vendor: &str,
         credentials: &RecipeClientCredentials,
     ) -> Result<EngineOAuthClientMaterial, AuthProductError>;
+
+    async fn resolve_non_secret_value(
+        &self,
+        _vendor: &str,
+        _handle: &SecretHandle,
+    ) -> Result<Option<String>, AuthProductError> {
+        Ok(None)
+    }
 }
 
 /// The static callback base every vendor callback hangs off:
@@ -173,7 +185,7 @@ impl EngineCallbackBase {
 /// Engine construction inputs.
 pub struct AuthEngineDeps {
     pub recipes: Arc<dyn AuthRecipeResolver>,
-    pub client_credentials: Arc<dyn EngineClientCredentialsSource>,
+    pub configuration: Arc<dyn EngineOAuthConfigurationSource>,
     pub egress: Arc<dyn RuntimeHttpEgress>,
     pub secret_store: Arc<dyn SecretStore>,
     pub callback_base: EngineCallbackBase,
@@ -220,7 +232,7 @@ impl fmt::Debug for PreparedOAuthFlow {
 /// existing durable flow/grant/account services drive it unchanged.
 pub struct AuthEngine {
     recipes: Arc<dyn AuthRecipeResolver>,
-    client_credentials: Arc<dyn EngineClientCredentialsSource>,
+    configuration: Arc<dyn EngineOAuthConfigurationSource>,
     egress: Arc<dyn RuntimeHttpEgress>,
     secret_store: Arc<dyn SecretStore>,
     callback_base: EngineCallbackBase,
@@ -244,7 +256,7 @@ impl AuthEngine {
     pub fn new(deps: AuthEngineDeps) -> Self {
         Self {
             recipes: deps.recipes,
-            client_credentials: deps.client_credentials,
+            configuration: deps.configuration,
             egress: deps.egress,
             secret_store: deps.secret_store,
             callback_base: deps.callback_base,
@@ -289,7 +301,7 @@ impl AuthEngine {
         register_if_missing: bool,
     ) -> Result<exchange::EffectiveOAuthClient, AuthProductError> {
         if let Some(credentials) = &recipe.client_credentials {
-            let material = self.client_credentials.resolve(vendor, credentials).await?;
+            let material = self.configuration.resolve(vendor, credentials).await?;
             return Ok(exchange::EffectiveOAuthClient {
                 client_id: material.client_id,
                 client_secret: material.client_secret,
@@ -318,6 +330,9 @@ impl AuthEngine {
             .map_err(|_| AuthProductError::MalformedConfig)?;
         let requested_scopes =
             effective_requested_scopes(&recipe, request.requested_scopes.clone())?;
+        let authorize_params = self
+            .resolve_authorize_params(&request.vendor, &recipe)
+            .await?;
         let client = self
             .oauth_client_material(
                 &request.scope.resource,
@@ -349,6 +364,7 @@ impl AuthEngine {
             &state,
             &pkce_secret,
             &requested_scopes,
+            &authorize_params,
         )?;
 
         Ok(PreparedOAuthFlow {
@@ -359,6 +375,30 @@ impl AuthEngine {
             pkce_verifier_hash: verifier_hash,
             pkce_verifier,
         })
+    }
+
+    async fn resolve_authorize_params(
+        &self,
+        vendor: &str,
+        recipe: &OAuth2CodeRecipe,
+    ) -> Result<BTreeMap<String, String>, AuthProductError> {
+        let mut resolved = BTreeMap::new();
+        for (parameter, handle) in &recipe.authorize_params_from_config {
+            let Some(value) = self
+                .configuration
+                .resolve_non_secret_value(vendor, handle)
+                .await?
+            else {
+                tracing::debug!(
+                    parameter,
+                    handle = handle.as_str(),
+                    "OAuth authorize parameter configuration is missing"
+                );
+                return Err(AuthProductError::MalformedConfig);
+            };
+            resolved.insert(parameter.clone(), value);
+        }
+        Ok(resolved)
     }
 }
 
@@ -467,6 +507,7 @@ fn build_recipe_authorization_url(
     state: &OAuthState,
     pkce_verifier: &PkceVerifierSecret,
     scopes: &[ProviderScope],
+    configured_authorize_params: &BTreeMap<String, String>,
 ) -> Result<OAuthAuthorizationUrl, AuthProductError> {
     let mut url = Url::parse(&client.authorization_endpoint)
         .map_err(|_| AuthProductError::MalformedConfig)?;
@@ -502,6 +543,9 @@ fn build_recipe_authorization_url(
                 .append_pair("code_challenge_method", "S256");
         }
         for (name, value) in &recipe.extra_authorize_params {
+            pairs.append_pair(name, value);
+        }
+        for (name, value) in configured_authorize_params {
             pairs.append_pair(name, value);
         }
     }

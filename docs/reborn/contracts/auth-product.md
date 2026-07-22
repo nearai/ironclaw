@@ -42,7 +42,7 @@ manager authority, and V1 secret stores are inventory evidence only.
 | `AuthProviderClient` | one-shot OAuth provider exchange/refresh vocabulary over host egress | product workflow or route state |
 | `SecretCleanupService` | ownership-aware uninstall/deactivate cleanup reports | deleting reusable/shared accounts by default |
 
-Low-level encrypted storage, leases, host-mediated HTTP credential injection,
+Low-level encrypted storage, approval leases, host-mediated HTTP credential injection,
 approval interaction UI, and no-exposure enforcement remain owned by their
 respective Reborn substrate contracts.
 
@@ -95,15 +95,20 @@ Host-owned OAuth callback routes should parse and validate their HTTP input,
 derive hashes for opaque state/code/verifier values, then call
 `RebornProductAuthServices` for flow preflight/callback handling. The handler
 claims the flow through `AuthFlowManager`, performs provider exchange through
-`AuthProviderClient`, completes the auth flow through `AuthFlowManager`, and
-dispatches an `AuthContinuationEvent` to the injected continuation dispatcher.
-If continuation dispatch fails, the handler returns a sanitized retryable
-error instead of reporting callback success. Lifecycle continuations take a
-durable, per-flow claim with a lease/fence before their side effect; retry or
-explicit reconciliation may reclaim an abandoned lease without re-exchanging
-provider code, and only the current claimant may settle it. After the
-continuation marker is stored, callback replay returns the completed flow
-without dispatching again. A lifecycle activation that is still missing
+`AuthProviderClient`, resolves the auth flow through `AuthFlowManager`, and
+dispatches one `AuthResolved` value to the injected resolution dispatcher.
+The durable `Resolved(outcome)` record is written before delivery. If delivery
+or its acknowledgement fails, the handler returns a sanitized retryable error;
+callback replay or explicit reconciliation redelivers the same outcome without
+re-exchanging provider code. Delivery is idempotent on the exact run and gate,
+and `resolution_delivered_at` is recorded only after the side effect succeeds.
+An overdue `Open` flow, or a `Processing` flow stranded by a process failure,
+atomically resolves as `Expired` at the original flow TTL; any service instance
+can then redeliver that exact resolution. Provider-owned terminal cleanup is a
+separate idempotent effect: reconciliation attempts it even when generic
+resolution delivery fails, and keeps returning a retryable error until both
+effects converge.
+A lifecycle activation that is still missing
 another declared credential settles the current credential flow successfully
 with typed credential blockers; it does not revoke that credential or resume
 blocked runs. The completion that satisfies the final credential activates the
@@ -123,13 +128,19 @@ authorization URL from configured Reborn product-auth client metadata and keeps
 the static redirect URI aligned with the provider exchange client.
 
 `ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher` is the
-product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It converts
-that specific typed auth continuation into a `TurnCoordinator::resume_turn` call
-using the canonical turn scope, actor, run id, and gate ref carried by the auth
-event. It does not define auth state, credential vocabulary, or generic
-continuation dispatch. Setup-only, lifecycle-activation, and product-action
-continuations remain explicit cases for their owning continuation dispatchers.
-The provider callback route itself never owns those side effects.
+product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It looks up
+the exact scoped run and gate carried by `AuthResolved`, then uses the persisted
+run actor for the canonical `TurnCoordinator` transition. `Authorized` resumes
+normally; `ProviderDenied`, `Expired`, and `Failed` all use the existing
+terminal `Denied` turn disposition so the parked capability cannot re-block and
+older rollback readers can still deserialize persisted turn state. Their exact
+causes remain distinct in the durable `AuthResolved` outcome. `UserAborted`
+cancels that exact blocked-auth run. If the run has already left that gate,
+delivery is an idempotent no-op. The dispatcher does not define auth state,
+credential vocabulary, or generic gate policy. Setup-only,
+lifecycle-activation, and product-action continuations remain explicit cases
+for their owning resolution dispatchers. The provider callback route itself
+never owns those side effects.
 
 `ironclaw_product_workflow::AuthInteractionService` owns the product/WebUI
 blocked-auth interaction loop from #3094. It reads auth-required gates from
@@ -138,9 +149,9 @@ adapter/UI-safe DTOs, and routes credential/callback/cancel decisions back
 through `AuthFlowManager` and `TurnCoordinator` with the `BlockedAuthGate`
 precondition. It consumes the auth-flow boundary here for auth gates; it must
 not create a second credential-account or OAuth-flow model.
-Only non-terminal auth-flow states are listed as pending interactions. Terminal
-states such as `failed`, `completed`, `expired`, and `canceled` must not be
-rendered as actionable auth gates.
+Only user-actionable, non-terminal auth-flow states (`Open` and `Processing`)
+are listed as pending interactions. `Resolved(outcome)` is durable terminal
+history and must not be rendered as an actionable auth gate.
 
 Legacy web/CLI/channel auth UX may remain behavior-compatible during
 migration, but Reborn paths should enter through `ProductWorkflow` or the
@@ -148,6 +159,9 @@ WebUI-facing `RebornServicesApi` facade. They must not call V1 pending maps,
 V1 OAuth routes, extension-manager authority, or route-local credential state.
 Dedicated HTTP route mounting for manual-token and OAuth callback transports
 remains a host-composition concern around `RebornProductAuthServices`.
+Browser HTTP and popup signals intentionally project the domain state to the
+stable wire strings `pending`, `processing`, `completed`, `failed`, `canceled`,
+and `expired`; frontend terminology is not durable auth-flow state.
 
 ---
 
@@ -202,9 +216,9 @@ secret handles or raw token material.
 
 OAuth callback de-duplication is flow-id based. Callback-created accounts use
 a deterministic account id derived from the flow id; bound reauthorization
-updates the pre-authorized account id captured in the flow. Completed flows
+updates the pre-authorized account id captured in the flow. Authorized flows
 return their stored credential account id on callback retry/replay, so provider
-code is not re-exchanged after a completed durable claim.
+code is not re-exchanged after a durable resolution.
 
 Google OAuth production config is resolved by host composition before provider
 client construction. Injected `OAuthClientConfig` is the canonical production
@@ -229,8 +243,9 @@ flows:
 
 ```text
 AuthFlowKind::{integration_credential, identity_login}
-AuthFlowStatus::{pending, awaiting_user, callback_received, completing,
-                 completed, failed, expired, canceled}
+AuthFlowState::{open, processing, resolved(outcome)}
+AuthFlowOutcome::{authorized(account_id), provider_denied, user_aborted,
+                  expired, failed(error_code)}
 AuthChallenge::{oauth_url, manual_token_required, account_selection_required,
                 setup_required, reauthorize_required}
 AuthContinuationRef::{setup_only, lifecycle_activation, turn_gate_resume,
@@ -254,21 +269,22 @@ Rules:
   constraint: multi-replica or restart-surviving deployments must introduce a
   host-owned encrypted verifier store or equivalent sticky callback mechanism
   before treating the route as HA-safe.
-- Public callbacks must validate and claim the scoped flow/state/provider/PKCE
-  hash before exchanging raw code/verifier through non-serializable one-shot
-  provider inputs and completing the flow.
+- Public callbacks must validate and advance the scoped flow from `Open` to
+  `Processing` before exchanging raw code/verifier through non-serializable
+  one-shot provider inputs and resolving the flow.
+- Explicit in-product denial resolves the flow to `UserAborted` with bounded
+  CAS before attempting exact blocked-run cancellation. A callback racing that
+  action observes the same durable terminal winner. If cancellation delivery
+  fails, reconciliation retries `UserAborted`; there is no cancellation lease,
+  rollback, or second terminalization protocol.
 - Once a callback is tied to a known scoped flow, missing authorization code,
   missing one-shot PKCE material, or malformed/invalid scope input must durably
   mark that flow `failed` before discarding callback material. Provider denial
   is terminal through the same scoped flow boundary.
-- Callback completion emits typed continuations; callback routes must not
+- Auth resolution emits a typed `AuthResolved` value; callback routes must not
   directly activate extensions, resume turns, replay messages, or dispatch work.
-- Terminal flows cannot be completed or canceled again.
-- `CredentialSecretFingerprint` values loaded from durable state are exactly 64
-  lowercase hexadecimal characters. Compensation compares that fingerprint
-  before revocation: `compensated` removes only the exact failed generation,
-  `superseded` preserves newer secret material, and `already_absent` is an
-  idempotent converged success. Retryable backend failures retain the journal.
+- Repeating a terminal operation returns the durable winning outcome. Competing
+  terminal outcomes never overwrite one another.
 
 ---
 
@@ -504,7 +520,7 @@ tenant/user fields.
 | `POST` | `/api/reborn/product-auth/oauth/start` | Open an OAuth setup flow; returns redacted authorization URL + invocation scope. |
 | `GET`  | `/api/reborn/product-auth/oauth/callback/{flow_id}` | Public OAuth callback; validates scope/state hash before any product effect. |
 | `GET` | `/api/reborn/product-auth/oauth/flow/{flow_id}/status` | Observational caller-scoped durable status read. It performs no continuation dispatch, activation, compensation, provider cleanup, or other writes. |
-| `POST` | `/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile` | Explicit bounded recovery command that resumes a claimed lifecycle continuation or converges its exact compensation and provider cleanup journals. |
+| `POST` | `/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile` | Explicit bounded recovery command that redelivers an unacknowledged `AuthResolved` outcome and converges any provider-cleanup journal. |
 | `POST` | `/api/reborn/product-auth/oauth/google/start` | Open a Google product-auth setup flow from configured Reborn Google OAuth client metadata; returns a Google authorization URL with PKCE/offline consent and invocation scope. |
 | `GET`  | `/api/reborn/product-auth/oauth/google/callback` | Public static Google OAuth callback; resolves flow/scope from auth-owned encoded state, validates the durable state hash/PKCE claim, and completes through `RebornProductAuthServices`. |
 | `POST` | `/api/reborn/product-auth/manual-token/submit` | One-shot manual-token setup + secret-submit (legacy WebUI shape, compatibility). |
@@ -583,11 +599,11 @@ Rules:
 `ironclaw_auth` contract tests cover:
 
 - OAuth start, provider exchange, callback success, callback replay, stale,
-  canceled, malformed, denied, and cross-scope callback behavior;
+  user-aborted, malformed, provider-denied, and cross-scope callback behavior;
 - secure manual-token submit, bound account update, cross-scope denial, empty
   input, expiry, and debug redaction;
 - composition-facade manual-token request/submit, stale/duplicate/malformed
-  failures, bound account update, sanitized backend/canceled errors, and no
+  failures, bound account update, sanitized backend/user-aborted errors, and no
   raw-token exposure in debug output, serialized responses/errors, or account
   projections;
 - missing, refresh-failed, single-account, and multi-account selection states;

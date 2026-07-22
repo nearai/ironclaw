@@ -1,12 +1,12 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthErrorCode, AuthFlowKind,
-    AuthFlowManager, AuthFlowStatus, AuthGateRef, AuthProductError, AuthProductScope,
-    AuthProviderId, AuthSessionId, AuthSurface, CredentialAccountLookupRequest,
+    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowKind, AuthFlowManager,
+    AuthFlowOutcome, AuthFlowState, AuthGateRef, AuthProductError, AuthProductScope,
+    AuthProviderId, AuthResolved, AuthSessionId, AuthSurface, CredentialAccountLookupRequest,
     CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
     CredentialRefreshRequest, InMemoryAuthProductServices, NewAuthFlow, NewCredentialAccount,
     OAuthAuthorizationUrl, OAuthCallbackFailureInput, OAuthProviderCallbackRequest,
@@ -16,30 +16,22 @@ use ironclaw_auth::{
 };
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, ThreadId, UserId};
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
-use ironclaw_reborn_composition::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
+use ironclaw_reborn_composition::{RebornAuthResolutionDispatcher, RebornProductAuthServices};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GateRef, GateResumeDisposition,
-    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnPrecondition, ResumeTurnRequest,
-    ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError,
-    TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus, events::EventCursor,
+    AcceptedMessageRef, CancelRunPrecondition, CancelRunRequest, CancelRunResponse, GateRef,
+    GateResumeDisposition, GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
+    ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest, RetryTurnResponse, RunProfileId,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStatus,
+    events::EventCursor,
 };
 
 #[derive(Debug, Default)]
 struct NoopContinuationDispatcher;
 
 #[async_trait]
-impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        Ok(())
-    }
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
+impl RebornAuthResolutionDispatcher for NoopContinuationDispatcher {
+    async fn dispatch_auth_resolved(&self, _event: AuthResolved) -> Result<(), AuthProductError> {
         Ok(())
     }
 }
@@ -124,6 +116,8 @@ struct LifecycleTurnCoordinator {
     gate_ref: GateRef,
     status: Mutex<TurnStatus>,
     resumes: Mutex<Vec<ResumeTurnRequest>>,
+    cancellations: Mutex<Vec<CancelRunRequest>>,
+    fail_next_cancel: AtomicBool,
 }
 
 impl LifecycleTurnCoordinator {
@@ -140,7 +134,14 @@ impl LifecycleTurnCoordinator {
             gate_ref,
             status: Mutex::new(TurnStatus::BlockedAuth),
             resumes: Mutex::new(Vec::new()),
+            cancellations: Mutex::new(Vec::new()),
+            fail_next_cancel: AtomicBool::new(false),
         }
+    }
+
+    fn fail_next_cancel(self) -> Self {
+        self.fail_next_cancel.store(true, Ordering::SeqCst);
+        self
     }
 
     fn status(&self) -> TurnStatus {
@@ -149,6 +150,13 @@ impl LifecycleTurnCoordinator {
 
     fn resumes(&self) -> Vec<ResumeTurnRequest> {
         self.resumes.lock().expect("resumes lock").clone()
+    }
+
+    fn cancellations(&self) -> Vec<CancelRunRequest> {
+        self.cancellations
+            .lock()
+            .expect("cancellations lock")
+            .clone()
     }
 }
 
@@ -185,8 +193,24 @@ impl TurnCoordinator for LifecycleTurnCoordinator {
         panic!("lifecycle cleanup must not retry turns")
     }
 
-    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        panic!("lifecycle cleanup must deny the auth gate, not cancel the run")
+    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        if self.fail_next_cancel.swap(false, Ordering::SeqCst) {
+            return Err(TurnError::Unavailable {
+                reason: "simulated cancellation failure".to_string(),
+            });
+        }
+        self.cancellations
+            .lock()
+            .expect("cancellations lock")
+            .push(request.clone());
+        *self.status.lock().expect("status lock") = TurnStatus::Cancelled;
+        Ok(CancelRunResponse {
+            run_id: request.run_id,
+            status: TurnStatus::Cancelled,
+            event_cursor: EventCursor(2),
+            already_terminal: false,
+            actor: Some(request.actor),
+        })
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
@@ -220,15 +244,76 @@ impl TurnCoordinator for LifecycleTurnCoordinator {
 
 #[tokio::test]
 async fn lifecycle_uninstall_cancels_turn_flow_and_denies_blocked_auth_gate() {
-    assert_lifecycle_uninstall_denies_blocked_auth_gate(false).await;
+    assert_lifecycle_uninstall_denies_blocked_auth_gate(false, false).await;
 }
 
 #[tokio::test]
 async fn lifecycle_uninstall_denies_failed_turn_flow_and_is_idempotent() {
-    assert_lifecycle_uninstall_denies_blocked_auth_gate(true).await;
+    assert_lifecycle_uninstall_denies_blocked_auth_gate(true, false).await;
 }
 
-async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_uninstall: bool) {
+#[tokio::test]
+async fn lifecycle_uninstall_retries_user_abort_after_exact_run_cancellation_failure() {
+    assert_lifecycle_uninstall_denies_blocked_auth_gate(false, true).await;
+}
+
+#[tokio::test]
+async fn expired_auth_resolution_requeues_only_the_exact_gate_with_terminal_disposition() {
+    let actor = TurnActor::new(UserId::new("alice").unwrap());
+    let run_id = TurnRunId::new();
+    let gate_ref = GateRef::new("gate:expired-oauth").unwrap();
+    let thread_id = ThreadId::new("thread-expired-oauth").unwrap();
+    let mut flow_scope = scope("alice");
+    flow_scope.resource.thread_id = Some(thread_id.clone());
+    let turn_scope = TurnScope::new_with_owner(
+        flow_scope.resource.tenant_id.clone(),
+        flow_scope.resource.agent_id.clone(),
+        flow_scope.resource.project_id.clone(),
+        thread_id,
+        Some(actor.user_id.clone()),
+    );
+    let coordinator = Arc::new(LifecycleTurnCoordinator::blocked_auth(
+        actor.clone(),
+        turn_scope,
+        run_id,
+        gate_ref.clone(),
+    ));
+    let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+
+    dispatcher
+        .dispatch_auth_resolved(AuthResolved {
+            flow_id: ironclaw_auth::AuthFlowId::new(),
+            scope: flow_scope,
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+                gate_ref: AuthGateRef::new(gate_ref.as_str()).unwrap(),
+            },
+            provider: provider(),
+            outcome: AuthFlowOutcome::Expired,
+            resolved_at: Utc::now(),
+        })
+        .await
+        .expect("expired auth resumes the parked run");
+
+    assert_eq!(coordinator.status(), TurnStatus::Queued);
+    assert!(coordinator.cancellations().is_empty());
+    let resumes = coordinator.resumes();
+    assert_eq!(resumes.len(), 1);
+    assert_eq!(resumes[0].actor, actor);
+    assert_eq!(
+        resumes[0].precondition,
+        ResumeTurnPrecondition::BlockedAuthGate
+    );
+    assert_eq!(
+        resumes[0].resume_disposition,
+        Some(GateResumeDisposition::Denied)
+    );
+}
+
+async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(
+    fail_flow_before_uninstall: bool,
+    fail_first_cancel: bool,
+) {
     let auth = Arc::new(InMemoryAuthProductServices::new());
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let run_id = TurnRunId::new();
@@ -280,18 +365,18 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
         .await
         .expect("mark callback failed");
     }
-    let coordinator = Arc::new(LifecycleTurnCoordinator::blocked_auth(
-        actor.clone(),
-        turn_scope,
-        run_id,
-        gate_ref,
-    ));
+    let mut coordinator =
+        LifecycleTurnCoordinator::blocked_auth(actor.clone(), turn_scope, run_id, gate_ref);
+    if fail_first_cancel {
+        coordinator = coordinator.fail_next_cancel();
+    }
+    let coordinator = Arc::new(coordinator);
     let dispatcher = Arc::new(ProductAuthTurnGateResumeDispatcher::new(
         coordinator.clone(),
     ));
     let services = RebornProductAuthServices::from_shared(auth.clone(), dispatcher);
 
-    let report = services
+    let first_result = services
         .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
             scope: flow_scope.clone(),
             extension_id: ExtensionId::new("github").unwrap(),
@@ -299,36 +384,84 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
             lifecycle_package: None,
             action: SecretCleanupAction::Uninstall,
         })
-        .await
-        .unwrap();
+        .await;
+
+    if fail_first_cancel {
+        assert!(first_result.is_err());
+        let persisted = auth.get_flow(&flow_scope, flow.id).await.unwrap().unwrap();
+        assert_eq!(
+            persisted.state,
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted),
+            "the terminal outcome must be durable before cancellation"
+        );
+        assert!(persisted.resolution_delivered_at.is_none());
+        assert!(coordinator.cancellations().is_empty());
+    }
+    let report = if fail_first_cancel {
+        services
+            .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
+                scope: flow_scope.clone(),
+                extension_id: ExtensionId::new("github").unwrap(),
+                provider: Some(provider()),
+                lifecycle_package: None,
+                action: SecretCleanupAction::Uninstall,
+            })
+            .await
+            .expect("lifecycle cleanup retry")
+    } else {
+        first_result.expect("lifecycle cleanup")
+    };
 
     let canceled = auth.get_flow(&flow_scope, flow.id).await.unwrap().unwrap();
     assert_eq!(
-        canceled.status,
+        canceled.state,
         if fail_flow_before_uninstall {
-            AuthFlowStatus::Failed
+            AuthFlowState::Resolved(AuthFlowOutcome::Failed {
+                error: AuthErrorCode::TokenExchangeFailed,
+            })
         } else {
-            AuthFlowStatus::Canceled
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
         }
     );
-    assert!(canceled.continuation_emitted_at.is_some());
+    assert!(canceled.resolution_delivered_at.is_some());
     assert!(
         !serde_json::to_string(&report)
             .unwrap()
             .contains("canceled_turn_gate_continuations")
     );
-    assert_eq!(coordinator.status(), TurnStatus::Queued);
+    assert_eq!(
+        coordinator.status(),
+        if fail_flow_before_uninstall {
+            TurnStatus::Queued
+        } else {
+            TurnStatus::Cancelled
+        }
+    );
     let resumes = coordinator.resumes();
-    assert_eq!(resumes.len(), 1);
-    assert_eq!(resumes[0].actor, actor);
-    assert_eq!(
-        resumes[0].precondition,
-        ResumeTurnPrecondition::BlockedAuthGate
-    );
-    assert_eq!(
-        resumes[0].resume_disposition,
-        Some(GateResumeDisposition::Denied)
-    );
+    let cancellations = coordinator.cancellations();
+    if fail_flow_before_uninstall {
+        assert_eq!(resumes.len(), 1);
+        assert!(cancellations.is_empty());
+        assert_eq!(resumes[0].actor, actor);
+        assert_eq!(
+            resumes[0].precondition,
+            ResumeTurnPrecondition::BlockedAuthGate
+        );
+        assert_eq!(
+            resumes[0].resume_disposition,
+            Some(GateResumeDisposition::Denied)
+        );
+    } else {
+        assert!(resumes.is_empty());
+        assert_eq!(cancellations.len(), 1);
+        assert_eq!(cancellations[0].actor, actor);
+        assert_eq!(
+            cancellations[0].precondition,
+            Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: GateRef::new("gate:lifecycle").unwrap(),
+            })
+        );
+    }
 
     services
         .cleanup_credentials_for_lifecycle(SecretCleanupRequest {
@@ -341,7 +474,7 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(fail_flow_before_un
         .await
         .expect("lifecycle cleanup retry");
     assert_eq!(
-        coordinator.resumes().len(),
+        coordinator.resumes().len() + coordinator.cancellations().len(),
         1,
         "continuation marking must make lifecycle cleanup idempotent"
     );
@@ -600,152 +733,4 @@ async fn cleanup_credentials_for_lifecycle_uses_facade_and_quarantine_report() {
     let serialized = serde_json::to_string(&report).unwrap();
     assert!(!serialized.contains("github-owned-facade"));
     assert!(!serialized.contains("github-quarantined-facade"));
-}
-
-#[derive(Debug, Default)]
-struct RecordingCanceledContinuationDispatcher {
-    canceled: Mutex<Vec<AuthContinuationEvent>>,
-}
-
-impl RecordingCanceledContinuationDispatcher {
-    fn canceled(&self) -> Vec<AuthContinuationEvent> {
-        self.canceled.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl RebornAuthContinuationDispatcher for RecordingCanceledContinuationDispatcher {
-    async fn dispatch_auth_continuation(
-        &self,
-        _event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        Ok(())
-    }
-
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        event: AuthContinuationEvent,
-    ) -> Result<(), AuthProductError> {
-        self.canceled.lock().unwrap().push(event);
-        Ok(())
-    }
-}
-
-/// F2 · `cleanup_credentials_for_lifecycle` must hand EVERY canceled turn-gate
-/// continuation the cleanup reports to the continuation dispatcher (the
-/// gate-denial seam) and then acknowledge it via `mark_continuation_dispatched`,
-/// making the handoff emit-once: a cleanup retry reports nothing and dispatches
-/// nothing further. `SetupOnly` flows are canceled but never dispatched.
-#[tokio::test]
-async fn lifecycle_cleanup_dispatches_each_canceled_turn_gate_continuation_once() {
-    let auth = Arc::new(InMemoryAuthProductServices::new());
-    let flow_scope = scope("alice");
-    let expires_at = Utc::now() + Duration::minutes(10);
-
-    let make_flow = |name: &'static str, continuation: AuthContinuationRef| {
-        let auth = auth.clone();
-        let flow_scope = flow_scope.clone();
-        async move {
-            auth.create_flow(NewAuthFlow {
-                id: None,
-                scope: flow_scope,
-                kind: AuthFlowKind::IntegrationCredential,
-                provider: provider(),
-                challenge: AuthChallenge::OAuthUrl {
-                    authorization_url: OAuthAuthorizationUrl::new(
-                        "https://example.com/oauth/authorize",
-                    )
-                    .unwrap(),
-                    expires_at,
-                },
-                continuation,
-                update_binding: None,
-                opaque_state_hash: Some(opaque_state_hash(name).unwrap()),
-                pkce_verifier_hash: None,
-                expires_at,
-            })
-            .await
-            .unwrap()
-        }
-    };
-    let gate_continuation = |gate: &str| AuthContinuationRef::TurnGateResume {
-        turn_run_ref: TurnRunRef::new(TurnRunId::new().to_string()).unwrap(),
-        gate_ref: AuthGateRef::new(format!("gate:{gate}")).unwrap(),
-    };
-
-    // Two unacknowledged turn-gate flows — one still pending, one already
-    // failed terminally — plus a `SetupOnly` connect flow that must be
-    // canceled without ever reaching the dispatcher.
-    let turn_flow = make_flow("turn", gate_continuation("turn")).await;
-    let failed_turn_flow = make_flow("failed-turn", gate_continuation("failed-turn")).await;
-    auth.fail_oauth_callback(
-        &flow_scope,
-        OAuthCallbackFailureInput {
-            flow_id: failed_turn_flow.id,
-            opaque_state_hash: opaque_state_hash("failed-turn").unwrap(),
-            error: AuthErrorCode::TokenExchangeFailed,
-        },
-    )
-    .await
-    .expect("terminal callback failure persists");
-    let setup_flow = make_flow("setup", AuthContinuationRef::SetupOnly).await;
-
-    let dispatcher = Arc::new(RecordingCanceledContinuationDispatcher::default());
-    let services = RebornProductAuthServices::from_shared(auth.clone(), dispatcher.clone());
-
-    let cleanup_request = SecretCleanupRequest {
-        scope: flow_scope.clone(),
-        extension_id: ExtensionId::new("github").unwrap(),
-        provider: Some(provider()),
-        lifecycle_package: None,
-        action: SecretCleanupAction::Uninstall,
-    };
-    let report = services
-        .cleanup_credentials_for_lifecycle(cleanup_request.clone())
-        .await
-        .expect("lifecycle cleanup");
-
-    // Each reported canceled turn-gate continuation was dispatched, in report
-    // order, and nothing else was.
-    assert_eq!(report.canceled_turn_gate_continuations.len(), 2);
-    assert_eq!(
-        dispatcher.canceled(),
-        report.canceled_turn_gate_continuations
-    );
-    let dispatched_flow_ids = dispatcher
-        .canceled()
-        .iter()
-        .map(|event| event.flow_id)
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        dispatched_flow_ids,
-        [turn_flow.id, failed_turn_flow.id].into_iter().collect()
-    );
-
-    // Each dispatched event was acknowledged with ITS emitted_at stamp.
-    for event in &report.canceled_turn_gate_continuations {
-        let flow = auth
-            .get_flow(&flow_scope, event.flow_id)
-            .await
-            .unwrap()
-            .expect("dispatched flow remains durable");
-        assert_eq!(flow.continuation_emitted_at, Some(event.emitted_at));
-    }
-    // The connect flow was canceled but never handed to the dispatcher.
-    let setup_after = auth
-        .get_flow(&flow_scope, setup_flow.id)
-        .await
-        .unwrap()
-        .expect("setup flow remains durable");
-    assert_eq!(setup_after.status, AuthFlowStatus::Canceled);
-    assert!(setup_after.continuation_emitted_at.is_none());
-    assert!(!dispatched_flow_ids.contains(&setup_flow.id));
-
-    // Emit-once: the acknowledgement makes a cleanup retry converge.
-    let retry = services
-        .cleanup_credentials_for_lifecycle(cleanup_request)
-        .await
-        .expect("lifecycle cleanup retry");
-    assert!(retry.canceled_turn_gate_continuations.is_empty());
-    assert_eq!(dispatcher.canceled().len(), 2);
 }

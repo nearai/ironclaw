@@ -24,22 +24,16 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use crate::RebornAuthContinuationDispatcher;
+    use crate::RebornAuthResolutionDispatcher;
 
     #[derive(Debug)]
     struct NoopDispatcher;
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for NoopDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
-        ) -> Result<(), AuthProductError> {
-            Ok(())
-        }
-        async fn dispatch_canceled_auth_continuation(
-            &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
+            _event: ironclaw_auth::AuthResolved,
         ) -> Result<(), ironclaw_auth::AuthProductError> {
             Ok(())
         }
@@ -86,7 +80,7 @@ mod tests {
     struct StaticCredentials;
 
     #[async_trait]
-    impl ironclaw_auth::EngineClientCredentialsSource for StaticCredentials {
+    impl ironclaw_auth::EngineOAuthConfigurationSource for StaticCredentials {
         async fn resolve(
             &self,
             vendor: &str,
@@ -96,6 +90,14 @@ mod tests {
                 client_id: ironclaw_auth::OAuthClientId::new(format!("{vendor}-client-id"))?,
                 client_secret: None,
             })
+        }
+
+        async fn resolve_non_secret_value(
+            &self,
+            _vendor: &str,
+            _handle: &SecretHandle,
+        ) -> Result<Option<String>, AuthProductError> {
+            Ok(None)
         }
     }
 
@@ -120,7 +122,7 @@ mod tests {
     fn test_engine(recipes: Vec<ResolvedVendorAuthRecipe>) -> Arc<AuthEngine> {
         Arc::new(AuthEngine::new(AuthEngineDeps {
             recipes: Arc::new(StaticAuthRecipeResolver::new(recipes)),
-            client_credentials: Arc::new(StaticCredentials),
+            configuration: Arc::new(StaticCredentials),
             egress: Arc::new(PanicEgress),
             secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
             callback_base: EngineCallbackBase::new(

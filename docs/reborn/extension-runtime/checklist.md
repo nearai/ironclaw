@@ -40,10 +40,13 @@ Rules — kept short on purpose:
   `unknown_channel_fields_fail_closed`
   (`crates/ironclaw_host_api/src/{recipe,channel}.rs`).
 - [x] MAN-5 Recipe validation rejects: non-https endpoints, reserved authorize
-  params in `extra_authorize_params`, invalid/deep/wildcard JSON pointers,
+  params in literal or config-bound authorize parameters, secret/undeclared
+  config handles used in authorization URLs, invalid/deep/wildcard JSON pointers,
   wildcard egress hosts, multi-segment `route_suffix`. —
   `non_https_recipe_endpoints_are_rejected`,
   `reserved_authorize_params_are_rejected`,
+  `authorize_param_config_bindings_fail_closed_for_undeclared_or_secret_handles`,
+  `configured_authorize_params_cannot_claim_host_owned_protocol_fields`,
   `wildcard_or_deep_json_pointers_are_rejected`,
   `wildcard_egress_hosts_are_rejected`, `wildcard_tool_audience_hosts_are_rejected`,
   `multi_segment_route_suffixes_are_rejected` (`manifest_v3_contract.rs`) plus

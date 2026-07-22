@@ -14,9 +14,9 @@ use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
-    BlockedReason, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
-    DefaultTurnLifecycleEventBus, FilesystemTurnStateRowStore, GateRef, GetRunStateRequest,
-    IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink,
+    BlockedReason, CancelRunPrecondition, CancelRunRequest, CancelRunResponse,
+    DefaultTurnCoordinator, DefaultTurnLifecycleEventBus, FilesystemTurnStateRowStore, GateRef,
+    GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink,
     LifecyclePublicationErrorPort, LifecyclePublishingTurnStateStore, LoopBlockedKind,
     LoopCheckpointStateRef, LoopExitMapping, LoopGateRef, ProductTurnContext,
     ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RetryTurnRequest,
@@ -2149,6 +2149,7 @@ async fn default_turn_coordinator_cancel_event_uses_committed_run_owner() {
             scope: scope("thread-cancel-owner"),
             actor: TurnActor::new(UserId::new("user-run-owner").unwrap()),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::OperatorRequested,
             idempotency_key: IdempotencyKey::new("idem-cancel-owner").unwrap(),
         })
@@ -2206,6 +2207,7 @@ async fn default_turn_coordinator_required_observer_sees_terminal_cancel() {
             scope: scope("thread-required-cancel-observer"),
             actor: TurnActor::new(UserId::new("user-run-owner").unwrap()),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::OperatorRequested,
             idempotency_key: IdempotencyKey::new("idem-required-cancel-observer").unwrap(),
         })
@@ -2753,6 +2755,7 @@ async fn turn_lifecycle_projection_replays_cancelled_terminal_without_raw_refs()
             scope: request.scope.clone(),
             actor: actor(),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::OperatorRequested,
             idempotency_key: IdempotencyKey::new("idem-turn-cancel-running").unwrap(),
         })
@@ -5597,6 +5600,7 @@ async fn cancel_requested_runner_heartbeat_does_not_extend_lease() {
             scope,
             actor: TurnActor::new(UserId::new("user1").unwrap()),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new("idem-cancel-heartbeat").unwrap(),
         })
@@ -6025,6 +6029,7 @@ async fn cancel_after_expired_failed_run_reports_already_terminal_and_allows_new
             scope: scope("thread-a"),
             actor: actor(),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::OperatorRequested,
             idempotency_key: IdempotencyKey::new("idem-cancel-recovered").unwrap(),
         })
@@ -6297,6 +6302,7 @@ async fn cancel_run_from_foreign_actor_is_denied_without_mutating_run() {
             scope: scope("thread-a"),
             actor: TurnActor::new(UserId::new("user2").unwrap()),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new("idem-cancel-foreign-actor").unwrap(),
         })
@@ -6320,6 +6326,7 @@ async fn cancel_run_from_foreign_actor_is_denied_without_mutating_run() {
             scope: scope("thread-a"),
             actor: TurnActor::new(UserId::new("user1").unwrap()),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::UserRequested,
             idempotency_key: IdempotencyKey::new("idem-cancel-owner").unwrap(),
         })
@@ -7146,6 +7153,7 @@ fn cancel_request(thread: &str, run_id: TurnRunId, idempotency_key: &str) -> Can
         scope: scope(thread),
         actor: actor(),
         run_id,
+        precondition: None,
         reason: SanitizedCancelReason::UserRequested,
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
     }
@@ -7970,6 +7978,7 @@ async fn observed_cancelled_loop_exit_without_recorded_cancel_fails_and_releases
             scope: scope("thread-a"),
             actor: actor(),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::OperatorRequested,
             idempotency_key: IdempotencyKey::new("idem-cancel-after-unrecorded-interrupt").unwrap(),
         })
@@ -8063,6 +8072,7 @@ async fn lifecycle_publishing_store_publishes_record_runner_failure_as_cancelled
             scope: scope("thread-runner-failure-cancel"),
             actor: actor(),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::OperatorRequested,
             idempotency_key: IdempotencyKey::new("idem-cancel-runner-failure-cancel").unwrap(),
         })
@@ -8158,6 +8168,7 @@ async fn cancel_on_legacy_recovery_required_run_reports_already_terminal() {
             scope: scope("thread-legacy-rr-cancel"),
             actor: actor(),
             run_id,
+            precondition: None,
             reason: SanitizedCancelReason::OperatorRequested,
             idempotency_key: IdempotencyKey::new("idem-legacy-rr-cancel-cancel").unwrap(),
         })
@@ -8216,6 +8227,187 @@ async fn submit_child_run_inherits_parent_product_context() {
         Some(product_context),
         "child run record must carry the parent's product_context verbatim"
     );
+}
+
+#[tokio::test]
+async fn conditional_cancel_requires_the_exact_blocked_gate_at_transition_time() {
+    let (coordinator, store) = coordinator();
+    let thread = "thread-conditional-auth-cancel";
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(thread, "idem-conditional-auth-submit"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope(thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("gate:conditional-auth-cancel").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let wrong_gate = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope(thread),
+            actor: actor(),
+            run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: GateRef::new("gate:other-auth-cancel").unwrap(),
+            }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-conditional-auth-wrong-gate").unwrap(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(wrong_gate, TurnError::InvalidRequest { .. }));
+
+    coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope(thread),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: gate_ref.clone(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::BlockedAuthGate,
+            source_binding_ref: SourceBindingRef::new("source-conditional-auth").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-conditional-auth").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-conditional-auth-resume").unwrap(),
+            resume_disposition: None,
+        })
+        .await
+        .unwrap();
+
+    let stale = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope(thread),
+            actor: actor(),
+            run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate { gate_ref }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-conditional-auth-stale").unwrap(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(
+        stale,
+        TurnError::InvalidTransition {
+            from: TurnStatus::Queued,
+            to: TurnStatus::Cancelled,
+        }
+    );
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope(thread),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn conditional_auth_cancel_with_fresh_key_replays_only_for_the_same_gate() {
+    let (coordinator, store) = coordinator();
+    let thread = "thread-conditional-auth-cancel-replay";
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                thread,
+                "idem-conditional-auth-replay-submit",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope(thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("gate:conditional-auth-cancel-replay").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Auth {
+                gate_ref: gate_ref.clone(),
+                credential_requirements: Vec::new(),
+            },
+        })
+        .await
+        .unwrap();
+
+    coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope(thread),
+            actor: actor(),
+            run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: gate_ref.clone(),
+            }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-conditional-auth-replay-first").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let replay = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope(thread),
+            actor: actor(),
+            run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: gate_ref.clone(),
+            }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-conditional-auth-replay-fresh").unwrap(),
+        })
+        .await
+        .expect("fresh idempotency key must converge on the matching cancelled gate");
+    assert_eq!(replay.status, TurnStatus::Cancelled);
+    assert!(replay.already_terminal);
+
+    let mismatch = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope(thread),
+            actor: actor(),
+            run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: GateRef::new("gate:different-auth-cancel-replay").unwrap(),
+            }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-conditional-auth-replay-mismatch").unwrap(),
+        })
+        .await
+        .expect_err("a fresh key for a different gate must not replay cancellation");
+    assert!(matches!(mismatch, TurnError::InvalidRequest { .. }));
 }
 
 // Persistence path: resume_turn with resume_disposition writes the field onto the run

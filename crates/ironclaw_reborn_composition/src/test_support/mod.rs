@@ -111,6 +111,8 @@ pub use local_dev_capability_io::staged_capability_io_for_test;
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
 pub use oauth_product_auth::build_oauth_product_auth_for_test_on_libsql;
 pub use oauth_product_auth::build_oauth_product_auth_for_test_on_root;
+#[cfg(feature = "test-support")]
+pub use oauth_product_auth::prepare_manifest_oauth_flow_for_test;
 pub use oauth_product_auth::{
     OAuthProductAuthTestBundle, ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,
     build_oauth_product_auth_with_identity_for_test,

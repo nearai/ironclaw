@@ -749,7 +749,7 @@ impl RebornBuildInput {
     /// Inject Reborn-native product-auth service ports.
     ///
     /// Production callers should provide durable implementations here. The
-    /// composition root attaches the turn-continuation dispatcher after it has
+    /// composition root attaches the auth-resolution dispatcher after it has
     /// composed the profile's [`ironclaw_turns::TurnCoordinator`], so OAuth
     /// continuations cannot accidentally bypass the active coordinator.
     pub fn with_product_auth_ports(mut self, ports: RebornProductAuthServicePorts) -> Self {

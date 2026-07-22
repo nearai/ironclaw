@@ -183,12 +183,12 @@ Direction is web→Telegram: IronClaw issues the code; the bot never does
 - **Disconnect** (`DELETE`, or extension remove): removes the caller's
   binding + DM target and invalidates any live code; only that user is
   affected; history retained.
-- **Blocked-run resume:** consume dispatches an `AuthContinuationEvent`
-  with `provider = telegram` and `AuthContinuationRef::SetupOnly`; the
-  standard `BlockedAuthResumeFanout` resumes every `BlockedAuth` run parked
-  for that tenant+user on provider `telegram`. **Codes expire; gates
-  don't** — the parked run is provider-keyed, not code-keyed, so pairing
-  with the n-th rotated code still resumes it.
+- **Blocked-run resume:** consume dispatches the durable pairing record's
+  resolution key plus the authenticated owner scope and provider through the
+  shared auth-resolution dispatcher. The standard blocked-auth fanout resumes
+  every `BlockedAuth` run parked for that owner on provider `telegram`.
+  **Codes expire; gates don't** — the parked run is provider-keyed, not
+  code-keyed, so pairing with the n-th rotated code still resumes it.
 
 ## The in-chat gate
 

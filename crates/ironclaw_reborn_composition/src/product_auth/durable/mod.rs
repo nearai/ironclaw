@@ -41,8 +41,8 @@ const MAX_OWNER_SESSION_ROOTS_PER_SURFACE: usize = 1024;
 const MAX_OWNER_RECORDS_PER_ROOT: usize = 1024;
 
 fn flow_requires_lifecycle_cleanup(flow: &AuthFlowRecord) -> bool {
-    !ironclaw_auth::is_terminal_status(flow.status)
-        || (flow.continuation_emitted_at.is_none()
+    !ironclaw_auth::is_terminal_state(flow.state)
+        || (flow.resolution_delivered_at.is_none()
             && matches!(
                 flow.continuation,
                 AuthContinuationRef::TurnGateResume { .. }
@@ -171,8 +171,7 @@ where
         let Some(versioned) = self.filesystem.get(scope, path).await.map_err(fs_error)? else {
             return Ok(None);
         };
-        let value = serde_json::from_slice(&versioned.entry.body)
-            .map_err(|_| AuthProductError::BackendUnavailable)?;
+        let value = decode_durable_record(&versioned.entry.body, "product-auth record")?;
         Ok(Some((value, versioned.version)))
     }
 
@@ -184,9 +183,7 @@ where
         let Some(versioned) = self.filesystem.get(scope, path).await.map_err(fs_error)? else {
             return Ok(None);
         };
-        serde_json::from_slice(&versioned.entry.body)
-            .map(Some)
-            .map_err(|_| AuthProductError::BackendUnavailable)
+        decode_durable_record(&versioned.entry.body, "credential account").map(Some)
     }
 
     async fn write_record<T>(
@@ -199,7 +196,7 @@ where
     where
         T: Serialize,
     {
-        let body = serde_json::to_vec(value).map_err(|_| AuthProductError::BackendUnavailable)?;
+        let body = encode_durable_record(value, "product-auth record")?;
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
         self.filesystem
             .put(scope, path, entry, cas)
@@ -963,7 +960,42 @@ where
     }
 }
 
-use ironclaw_auth::{credential_status_for_completed_flow, is_terminal_status, scope_matches};
+fn decode_durable_record<T>(bytes: &[u8], record_kind: &'static str) -> Result<T, AuthProductError>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_slice(bytes).map_err(|error| {
+        tracing::error!(
+            record_kind,
+            error_category = ?error.classify(),
+            error_line = error.line(),
+            error_column = error.column(),
+            "durable auth record decode failed"
+        );
+        AuthProductError::CorruptRecord
+    })
+}
+
+fn encode_durable_record<T>(
+    value: &T,
+    record_kind: &'static str,
+) -> Result<Vec<u8>, AuthProductError>
+where
+    T: Serialize,
+{
+    serde_json::to_vec(value).map_err(|error| {
+        tracing::error!(
+            record_kind,
+            error_category = ?error.classify(),
+            error_line = error.line(),
+            error_column = error.column(),
+            "durable auth record encode failed"
+        );
+        AuthProductError::CorruptRecord
+    })
+}
+
+use ironclaw_auth::{credential_status_for_completed_flow, scope_matches};
 
 /// Production candidate source for the engine keepalive sweep
 /// (`ironclaw_auth::keepalive`): the durable store enumerates every

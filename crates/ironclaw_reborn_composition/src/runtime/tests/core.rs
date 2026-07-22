@@ -2605,7 +2605,6 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     // never read from disk or contacted over the network.
     let _env_guard =
         RuntimeEnvGuard::with([("NEARAI_SESSION_TOKEN", None), ("NEARAI_API_KEY", None)]).await;
-    let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
 
     let root = tempfile::tempdir().expect("tempdir");
     let local_dev_root = root.path().join("local-dev");
@@ -2626,6 +2625,11 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
         .await
         .expect("stored key seeded");
     drop(services);
+
+    // Start the short-lived capture server only after the first service build
+    // and secret seed. On slower debug builds, starting it above could exhaust
+    // its idle timeout before the runtime under test made its first request.
+    let (base_url, auth_rx) = start_nearai_auth_capture_server().await;
 
     // Provider selection lives entirely in config.toml (mirrors an
     // onboard-style setup): no env var carries the key, only the

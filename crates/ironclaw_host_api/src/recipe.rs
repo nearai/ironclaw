@@ -287,6 +287,12 @@ pub struct OAuth2CodeRecipe {
     /// parameters are rejected by [`OAuth2CodeRecipe::validate`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra_authorize_params: BTreeMap<String, String>,
+    /// Vendor-specific authorize parameters whose values come from declared,
+    /// non-secret operator configuration. The map is query parameter name to
+    /// configuration handle. Manifest validation proves that every handle is
+    /// declared and non-secret before the recipe reaches the auth engine.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub authorize_params_from_config: BTreeMap<String, SecretHandle>,
     /// Deployment-level client-credential handles. Absent means the vendor
     /// requires dynamic client registration (RFC 7591 — generic hosted-MCP
     /// behavior, implemented once by the host auth engine).
@@ -323,10 +329,23 @@ impl OAuth2CodeRecipe {
             return Err(RecipeValidationError::EmptyScopeParam);
         }
         let scope_param = self.scope_param().to_string();
-        for key in self.extra_authorize_params.keys() {
+        for key in self
+            .extra_authorize_params
+            .keys()
+            .chain(self.authorize_params_from_config.keys())
+        {
             if RESERVED_AUTHORIZE_PARAMS.contains(&key.as_str()) || *key == scope_param {
                 return Err(RecipeValidationError::ReservedAuthorizeParam { param: key.clone() });
             }
+        }
+        if let Some(param) = self
+            .extra_authorize_params
+            .keys()
+            .find(|param| self.authorize_params_from_config.contains_key(*param))
+        {
+            return Err(RecipeValidationError::DuplicateAuthorizeParam {
+                param: param.clone(),
+            });
         }
         if let Some(seconds) = self.refresh.as_ref().and_then(|r| r.keepalive_idle_seconds)
             && !(MIN_KEEPALIVE_IDLE_SECONDS..=MAX_KEEPALIVE_IDLE_SECONDS).contains(&seconds)
@@ -568,6 +587,11 @@ pub enum RecipeValidationError {
          (the host constructs it)"
     )]
     ReservedAuthorizeParam { param: String },
+    #[error(
+        "authorize parameter `{param}` must be declared by exactly one of \
+         extra_authorize_params or authorize_params_from_config"
+    )]
+    DuplicateAuthorizeParam { param: String },
     #[error("api_key recipes must declare at least one field")]
     ApiKeyWithoutFields,
     #[error("validation probe must declare at least one success status")]
@@ -743,6 +767,40 @@ team_id = "/team/id"
                 "expected reserved-param rejection for {reserved}, got {error:?}"
             );
         }
+    }
+
+    #[test]
+    fn oauth2_recipe_rejects_invalid_config_bound_authorize_params() {
+        let mut recipe: VendorAuthRecipe = toml::from_str(slack_shaped_recipe_toml()).unwrap();
+        let VendorAuthRecipe::Oauth2Code(inner) = &mut recipe else {
+            panic!("expected oauth2_code");
+        };
+        inner.authorize_params_from_config.insert(
+            "redirect_uri".to_string(),
+            SecretHandle::new("workspace_id").unwrap(),
+        );
+        assert!(matches!(
+            recipe.validate(),
+            Err(RecipeValidationError::ReservedAuthorizeParam { param })
+                if param == "redirect_uri"
+        ));
+
+        let mut recipe: VendorAuthRecipe = toml::from_str(slack_shaped_recipe_toml()).unwrap();
+        let VendorAuthRecipe::Oauth2Code(inner) = &mut recipe else {
+            panic!("expected oauth2_code");
+        };
+        inner
+            .extra_authorize_params
+            .insert("workspace".to_string(), "literal".to_string());
+        inner.authorize_params_from_config.insert(
+            "workspace".to_string(),
+            SecretHandle::new("workspace_id").unwrap(),
+        );
+        assert!(matches!(
+            recipe.validate(),
+            Err(RecipeValidationError::DuplicateAuthorizeParam { param })
+                if param == "workspace"
+        ));
     }
 
     #[test]

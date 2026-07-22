@@ -163,6 +163,9 @@ signed_payload = [
 fields = [
   { handle = "slack_bot_token", label = "Bot token", secret = true },
   { handle = "slack_signing_secret", label = "Signing secret", secret = true },
+  { handle = "slack_team_id", label = "Workspace ID", secret = false },
+  { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false },
+  { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true },
 ]
 
 [[channel.egress]]
@@ -186,6 +189,7 @@ token_endpoint = "https://slack.com/api/oauth.v2.access"
 scope_param = "user_scope"        # Slack reserves `scope=` for bot tokens
 pkce = "s256"
 scopes = ["search:read", "channels:history", "channels:read", "users:read", "chat:write"]
+authorize_params_from_config = { team = "slack_team_id" }
 client_credentials = { client_id_handle = "slack_oauth_client_id", client_secret_handle = "slack_oauth_client_secret" }
 
 [auth.slack.token_response]
@@ -211,6 +215,10 @@ Notes on the sections:
   `shared_secret_header` (constant-time compare), or `none`. Signing secrets
   never reach the adapter. Two recipe kinds cover Slack and Telegram; new kinds
   are added to the host when a protocol genuinely needs one.
+- **`authorize_params_from_config`** maps a vendor query-parameter name to a
+  declared non-secret configuration handle. The host resolves it when the
+  flow starts; missing values fail closed. Secret handles and host-owned OAuth
+  protocol parameters are rejected during manifest validation.
 - **`conversation_model`** (required on `[channel]`) classifies how external
   conversations map to IronClaw conversations:
   - `continuous` — the protocol supplies conversation identity; each external

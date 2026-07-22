@@ -141,11 +141,11 @@ pub async fn run_channel_adapter_conformance(conformance: ChannelAdapterConforma
 
     // ── Inbound: malformed and truncated bodies fail cleanly, never panic.
     for garbage in [
-        &b""[..],
-        &b"{"[..],
-        &b"\xff\xfe\x00garbage"[..],
-        &b"[]"[..],
-        &b"{\"unexpected\":true}"[..],
+        b"".as_slice(),
+        b"{".as_slice(),
+        b"\xff\xfe\x00garbage".as_slice(),
+        b"[]".as_slice(),
+        b"{\"unexpected\":true}".as_slice(),
     ] {
         match adapter.inbound(VerifiedInbound {
             extension_id: &extension_id,

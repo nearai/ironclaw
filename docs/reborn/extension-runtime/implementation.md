@@ -110,9 +110,11 @@ engine, or the router.
   same resolved model (auth surfaces synthesized from tool credentials, as
   today). v3 requires explicit `[auth.*]` for every referenced vendor.
 - Validation: JSON pointers RFC 6901, depth ≤ 8, no wildcards; all recipe
-  endpoints `https`; `extra_authorize_params` may not contain reserved keys
+  endpoints `https`; `extra_authorize_params` and
+  `authorize_params_from_config` may not contain reserved keys
   (`state`, `redirect_uri`, `code_challenge*`, `client_id`, `response_type`,
-  the scope param); `[channel].route_suffix` one URL-safe segment;
+  the scope param); config-bound authorize values must name a declared
+  non-secret configuration field; `[channel].route_suffix` one URL-safe segment;
   `[channel].conversation_model` required (`continuous` | `isolated`); egress
   hosts non-wildcard; **exactly one of `[runtime]` or `[mcp]`** declares the
   implementation; `[mcp]` requires `server` + `namespace` + `max_tools`, is
@@ -274,7 +276,8 @@ branch anywhere in dispatch (`tests/integration/extension_runtime.rs`).
   `token_response.{access_token,refresh_token,expires_in,scope}` pointers with
   `missing = "fallback_to_requested"` option, `identity` from token response or
   follow-up `endpoint`, `refresh.rotates_refresh_token`, `revoke.{endpoint,
-  token_param}`, `client_credentials.{client_id_handle,client_secret_handle}`
+  token_param}`, `client_credentials.{client_id_handle,client_secret_handle}`,
+  `authorize_params_from_config` (query name → declared non-secret config handle)
   (deployment-level secrets via the existing secret store). Vendor response
   bodies are size-capped and redacted from errors/logs.
 - Write the recipes: Slack and Google (`oauth2_code`), Notion (`oauth2_code`;

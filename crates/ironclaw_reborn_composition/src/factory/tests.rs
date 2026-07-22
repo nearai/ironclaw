@@ -767,11 +767,20 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
         .unwrap();
     let completed_flow = flows
         .iter()
-        .find(|flow| flow.credential_account_id == Some(submitted.account_id))
+        .find(|flow| {
+            flow.state
+                == ironclaw_auth::AuthFlowState::Resolved(
+                    ironclaw_auth::AuthFlowOutcome::Authorized {
+                        account_id: submitted.account_id,
+                    },
+                )
+        })
         .expect("manual-token completion should remain visible to auth gates");
     assert_eq!(
-        completed_flow.status,
-        ironclaw_auth::AuthFlowStatus::Completed
+        completed_flow.state,
+        ironclaw_auth::AuthFlowState::Resolved(ironclaw_auth::AuthFlowOutcome::Authorized {
+            account_id: submitted.account_id,
+        },)
     );
 }
 

@@ -1476,11 +1476,11 @@ impl RebornLocalExtensionManagementPort {
                 .get_extension(extension_id)
                 == Some(&active_package)
         {
-            // Lifecycle OAuth continuation dispatch is lease-recoverable. A
-            // replacement claimant can therefore arrive after the original
-            // claimant already activated this exact package. Treat that state
-            // as the authoritative success instead of re-publishing and
-            // risking a conflicting failure followed by credential rollback.
+            // Lifecycle OAuth continuation delivery is retryable. A retry can
+            // therefore arrive after the original attempt already activated
+            // this exact package. Treat that state as the authoritative
+            // success instead of re-publishing and risking a conflicting
+            // failure followed by credential rollback.
             return Ok(activation_success_response(
                 package_ref,
                 &active_package,

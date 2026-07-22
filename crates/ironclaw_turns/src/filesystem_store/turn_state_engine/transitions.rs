@@ -496,6 +496,19 @@ impl Inner {
                 return Err(TurnError::Unauthorized);
             }
             if record.status.get().is_terminal() {
+                if let Some(precondition) = request.precondition.as_ref() {
+                    if record.status.get() != TurnStatus::Cancelled {
+                        return Err(TurnError::InvalidTransition {
+                            from: record.status.get(),
+                            to: TurnStatus::Cancelled,
+                        });
+                    }
+                    if record.gate_ref.as_ref() != Some(precondition.gate_ref()) {
+                        return Err(TurnError::InvalidRequest {
+                            reason: "gate cancellation reference mismatch".to_string(),
+                        });
+                    }
+                }
                 return Ok(CancelRunResponse {
                     run_id: record.run_id,
                     status: record.status.get(),
@@ -503,6 +516,19 @@ impl Inner {
                     already_terminal: true,
                     actor: Some(record.actor.clone()),
                 });
+            }
+            if let Some(precondition) = request.precondition.as_ref() {
+                if record.status.get() != precondition.required_status() {
+                    return Err(TurnError::InvalidTransition {
+                        from: record.status.get(),
+                        to: TurnStatus::Cancelled,
+                    });
+                }
+                if record.gate_ref.as_ref() != Some(precondition.gate_ref()) {
+                    return Err(TurnError::InvalidRequest {
+                        reason: "gate cancellation reference mismatch".to_string(),
+                    });
+                }
             }
             let (next_status, event_kind) = match record.status.get() {
                 TurnStatus::Queued

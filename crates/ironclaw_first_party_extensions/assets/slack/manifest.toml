@@ -250,6 +250,7 @@ token_endpoint = "https://slack.com/api/oauth.v2.access"
 scope_param = "user_scope"
 pkce = "s256"
 scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"]
+authorize_params_from_config = { team = "slack_team_id" }
 client_credentials = { client_id_handle = "slack_oauth_client_id", client_secret_handle = "slack_oauth_client_secret" }
 
 [auth.slack.token_response]

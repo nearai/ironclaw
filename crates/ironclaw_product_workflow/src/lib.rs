@@ -77,7 +77,7 @@ pub use approval_prompt::{
 };
 /// Concrete turn-gate resume dispatcher used by the Reborn composition crate to
 /// bridge product-auth continuations into the workflow-owned turn boundary.
-pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
+pub use auth_continuation::{AuthResolutionDispatchOutcome, ProductAuthTurnGateResumeDispatcher};
 pub use auth_interaction::{
     AuthCredentialAccountChoiceView, AuthGateRecord, AuthInteractionChallengeView,
     AuthInteractionDecision, AuthInteractionReadModel, AuthInteractionRejectionKind,

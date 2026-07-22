@@ -8,7 +8,7 @@
 //! installation-scoped identity bindings. Codes expire; gates don't — the
 //! parked `BlockedAuth` run is provider-keyed (the extension id), so pairing
 //! with the n-th rotated code still resumes it via the standard
-//! auth-continuation fan-out.
+//! auth-resolution fan-out.
 //!
 //! Everything here is vendor-blind: the extension declares the strategy and
 //! optional deep-link template through its [`ExtensionAccountSetupDescriptor`]
@@ -22,10 +22,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
-use ironclaw_auth::{
-    AuthContinuationEvent, AuthContinuationRef, AuthFlowId, AuthProductScope, AuthProviderId,
-    AuthSurface,
-};
+use ironclaw_auth::{AuthProviderId, CredentialAccountOwnerScope};
 use ironclaw_conversations::{
     AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner, ExternalActorRef,
 };
@@ -39,11 +36,13 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::AdapterInstallationId;
 use ironclaw_product_workflow::ChannelConnectionNoticePolicy;
+use ironclaw_turns::IdempotencyKey;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::extension_host::channel_identity_store::path_segment;
-use crate::product_auth::api::auth::RebornAuthContinuationDispatcher;
+use crate::product_auth::api::auth::RebornAuthResolutionDispatcher;
 use crate::provider_identity::{
     RebornIdentityProviderId, RebornIdentityProviderUserId, RebornUserIdentityBinding,
     RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
@@ -144,7 +143,7 @@ impl ChannelPairingRecord {
 
 /// A pairing-completion outbox entry: durable intent to (re)run the
 /// completion effects for `(installation, user)` — DM-target write plus
-/// blocked-run continuation — retried from status polling after a failed
+/// blocked-run resolution — retried from status polling after a failed
 /// dispatch or a process restart.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingPairingCompletion {
@@ -154,6 +153,15 @@ struct PendingPairingCompletion {
     conversation_id: String,
     actor_kind: String,
     external_actor_id: String,
+    /// Stable key for the provider-connection outbox delivery. Records
+    /// written before this field existed are upgraded before their next
+    /// dispatch. The alias preserves the feature branch's persisted shape.
+    #[serde(
+        default,
+        alias = "resolution_flow_id",
+        skip_serializing_if = "Option::is_none"
+    )]
+    resolution_key: Option<IdempotencyKey>,
 }
 
 /// Durable metadata for one identity binding written by pairing consume —
@@ -204,8 +212,8 @@ pub(crate) enum ChannelPairingError {
     StoreUnavailable { reason: String },
     #[error("this channel is not configured by an administrator yet")]
     NotConfigured,
-    #[error("pairing continuation dispatch failed: {reason}")]
-    ContinuationDispatch { reason: String },
+    #[error("pairing auth-resolution dispatch failed: {reason}")]
+    ResolutionDispatch { reason: String },
 }
 
 fn store_unavailable(reason: impl std::fmt::Display) -> ChannelPairingError {
@@ -452,9 +460,10 @@ fn bound_snapshot(snapshot: &mut PairingSnapshot) {
 
 /// The generic pairing service for one `WebGeneratedCode` channel extension.
 ///
-/// Provider identity for bindings and continuation fan-out is the extension
+/// Provider identity for bindings and auth-resolution fan-out is the extension
 /// id itself (the same provider the parked `BlockedAuth` requirement names in
 /// the extension's account-setup descriptor).
+#[derive(Clone)]
 pub(crate) struct ChannelPairingService {
     tenant_id: TenantId,
     agent_id: AgentId,
@@ -468,7 +477,7 @@ pub(crate) struct ChannelPairingService {
     identity_bind: Arc<dyn RebornUserIdentityBindingStore>,
     identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     identity_delete: Arc<dyn RebornUserIdentityBindingDeleteStore>,
-    continuation: Arc<dyn RebornAuthContinuationDispatcher>,
+    resolution_dispatcher: Arc<dyn RebornAuthResolutionDispatcher>,
     /// Conversation-actor pairing cleanup on unpair (disconnect parity
     /// with the OAuth channel lane): without it a re-paired chat resurrects
     /// its old thread and any run parked there.
@@ -500,7 +509,7 @@ pub(crate) struct ChannelPairingServiceParts {
     pub(crate) identity_bind: Arc<dyn RebornUserIdentityBindingStore>,
     pub(crate) identity_lookup: Arc<dyn RebornUserIdentityLookup>,
     pub(crate) identity_delete: Arc<dyn RebornUserIdentityBindingDeleteStore>,
-    pub(crate) continuation: Arc<dyn RebornAuthContinuationDispatcher>,
+    pub(crate) resolution_dispatcher: Arc<dyn RebornAuthResolutionDispatcher>,
     pub(crate) conversation_actor_pairings: Arc<dyn ConversationActorPairingService>,
     pub(crate) dm_targets:
         Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
@@ -521,7 +530,7 @@ impl ChannelPairingService {
             identity_bind: parts.identity_bind,
             identity_lookup: parts.identity_lookup,
             identity_delete: parts.identity_delete,
-            continuation: parts.continuation,
+            resolution_dispatcher: parts.resolution_dispatcher,
             conversation_actor_pairings: parts.conversation_actor_pairings,
             dm_targets: parts.dm_targets,
         }
@@ -618,15 +627,11 @@ impl ChannelPairingService {
             .map_err(store_unavailable)?;
         let connected = match &installation_id {
             Some(installation_id) => {
-                let _ = installation_id;
-                let snapshot = self.store.read_snapshot().await?;
-                if let Some(pending) = snapshot.completions.iter().find(|completion| {
-                    &completion.installation_id == installation_id && &completion.user_id == caller
-                }) {
+                if let Some(pending) = self.pending_completion(installation_id, caller).await? {
                     // Outbox retry: a completion that failed after the claim
                     // (or a restart between claim and completion) re-runs
                     // here; the user never re-sends a consumed code.
-                    self.finish_pending_completion(pending.clone()).await?;
+                    self.finish_pending_completion(pending).await?;
                 }
                 self.dm_targets
                     .load(self.extension_id.as_str(), caller)
@@ -664,7 +669,7 @@ impl ChannelPairingService {
     /// Ordering is claim-first: the code is atomically consumed (single
     /// winner) BEFORE any identity/target side effect, so two concurrent
     /// consumers of one code can never both bind. Completion (peer target +
-    /// continuation dispatch) is idempotently repairable: a sender already
+    /// auth-resolution dispatch) is idempotently repairable: a sender already
     /// bound to the code's user re-runs the completion effects — including on
     /// an already-consumed code — so a consume that failed after the claim is
     /// recovered by re-sending a code instead of stranding the blocked run.
@@ -753,7 +758,7 @@ impl ChannelPairingService {
 
     /// The idempotent completion tail shared by first-time pairing and the
     /// repair path: persist the outbox entry, then dispatch the blocked-run
-    /// continuation and record the peer delivery target.
+    /// auth resolution and record the peer delivery target.
     async fn complete_pairing(
         &self,
         record: &ChannelPairingRecord,
@@ -769,6 +774,7 @@ impl ChannelPairingService {
             conversation_id: conversation_id.to_string(),
             actor_kind: actor_kind.to_string(),
             external_actor_id: external_actor_id.to_string(),
+            resolution_key: None,
         };
         let provider_user_id =
             installation_scoped_provider_user_id(&record.installation_id, external_actor_id);
@@ -779,9 +785,18 @@ impl ChannelPairingService {
             external_actor_id: external_actor_id.to_string(),
             user_id: record.user_id.clone(),
         };
-        let stored = completion.clone();
-        self.store
+        let candidate_key = IdempotencyKey::new(format!("channel-pairing-{}", Uuid::new_v4()))
+            .map_err(store_unavailable)?;
+        let stored = self
+            .store
             .update_snapshot(move |mut snapshot| {
+                let mut stored = completion.clone();
+                stored.resolution_key = snapshot
+                    .completions
+                    .iter()
+                    .find(|existing| same_pending_completion(existing, &stored))
+                    .and_then(|existing| existing.resolution_key.clone())
+                    .or_else(|| Some(candidate_key.clone()));
                 snapshot.completions.retain(|existing| {
                     existing.installation_id != stored.installation_id
                         || existing.user_id != stored.user_id
@@ -791,19 +806,58 @@ impl ChannelPairingService {
                     .paired_actors
                     .retain(|existing| existing.provider_user_id != paired_actor.provider_user_id);
                 snapshot.paired_actors.push(paired_actor.clone());
-                (snapshot, ())
+                (snapshot, stored.clone())
             })
             .await?;
-        self.finish_pending_completion(completion).await
+        self.finish_pending_completion(stored).await
+    }
+
+    /// Load the current pending intent and atomically upgrade records written
+    /// before `resolution_key` existed. Reading and upgrading in one CAS
+    /// prevents a stale status poll from resurrecting an already-finished or
+    /// concurrently-replaced completion.
+    async fn pending_completion(
+        &self,
+        installation_id: &AdapterInstallationId,
+        user_id: &UserId,
+    ) -> Result<Option<PendingPairingCompletion>, ChannelPairingError> {
+        let candidate_key = IdempotencyKey::new(format!("channel-pairing-{}", Uuid::new_v4()))
+            .map_err(store_unavailable)?;
+        let installation_id = installation_id.clone();
+        let user_id = user_id.clone();
+        self.store
+            .update_snapshot(move |mut snapshot| {
+                let pending = snapshot
+                    .completions
+                    .iter_mut()
+                    .find(|completion| {
+                        completion.installation_id == installation_id
+                            && completion.user_id == user_id
+                    })
+                    .map(|completion| {
+                        if completion.resolution_key.is_none() {
+                            completion.resolution_key = Some(candidate_key.clone());
+                        }
+                        completion.clone()
+                    });
+                (snapshot, pending)
+            })
+            .await
     }
 
     async fn finish_pending_completion(
         &self,
         completion: PendingPairingCompletion,
     ) -> Result<(), ChannelPairingError> {
-        // Boxed: the continuation fan-out resumes parked runs through the
+        let resolution_key = completion.resolution_key.clone().ok_or_else(|| {
+            ChannelPairingError::StoreUnavailable {
+                reason: "pairing completion is missing its durable resolution key".to_string(),
+            }
+        })?;
+        // Boxed: the resolution fan-out resumes parked runs through the
         // turn coordinator — a deep async subtree relative to this caller.
-        Box::pin(self.dispatch_pairing_completion(&completion.user_id)).await?;
+        Box::pin(self.dispatch_pairing_completion(&completion.user_id, resolution_key.clone()))
+            .await?;
         self.dm_targets
             .upsert(
                 self.extension_id.as_str(),
@@ -821,6 +875,7 @@ impl ChannelPairingService {
                 snapshot.completions.retain(|existing| {
                     existing.installation_id != completion.installation_id
                         || existing.user_id != completion.user_id
+                        || existing.resolution_key.as_ref() != Some(&resolution_key)
                 });
                 (snapshot, ())
             })
@@ -934,74 +989,64 @@ impl ChannelPairingService {
         RebornIdentityProviderId::new(self.extension_id.as_str()).map_err(store_unavailable)
     }
 
-    /// Emit the standard auth-continuation completion so the
+    /// Emit the standard provider-connection completion so the
     /// `BlockedAuthResumeFanout` resumes every run parked on this extension's
-    /// provider for this user. `SetupOnly` deliberately: the resumed run
-    /// re-runs `extension_activate` and re-checks pairedness itself.
+    /// provider for this user. Pairing is not an OAuth flow and therefore
+    /// never fabricates auth-flow, invocation, or continuation identities.
     async fn dispatch_pairing_completion(
         &self,
         user_id: &UserId,
-    ) -> Result<(), ChannelPairingError> {
-        self.dispatch_pairing_completion_with(
-            user_id,
-            self.tenant_id.clone(),
-            Arc::clone(&self.continuation),
-        )
-        .await
-    }
-
-    async fn dispatch_pairing_completion_with(
-        &self,
-        user_id: &UserId,
-        tenant_id: TenantId,
-        continuation: Arc<dyn RebornAuthContinuationDispatcher>,
+        resolution_key: IdempotencyKey,
     ) -> Result<(), ChannelPairingError> {
         let provider = AuthProviderId::new(self.extension_id.as_str()).map_err(|error| {
-            ChannelPairingError::ContinuationDispatch {
+            ChannelPairingError::ResolutionDispatch {
                 reason: error.to_string(),
             }
         })?;
-        let event = AuthContinuationEvent {
-            flow_id: AuthFlowId::new(),
-            scope: AuthProductScope::new(
-                ResourceScope {
-                    tenant_id,
-                    user_id: user_id.clone(),
-                    agent_id: Some(self.agent_id.clone()),
-                    project_id: self.project_id.clone(),
-                    mission_id: None,
-                    thread_id: None,
-                    invocation_id: InvocationId::new(),
-                },
-                AuthSurface::Callback,
-            ),
-            continuation: AuthContinuationRef::SetupOnly,
-            provider,
-            credential_account_id: None,
-            emitted_at: Utc::now(),
+        let owner = CredentialAccountOwnerScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: user_id.clone(),
+            agent_id: Some(self.agent_id.clone()),
+            project_id: self.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            session_id: None,
         };
-        continuation
-            .dispatch_auth_continuation(event)
+        self.resolution_dispatcher
+            .dispatch_provider_connection(resolution_key, owner, provider)
             .await
-            .map_err(|error| ChannelPairingError::ContinuationDispatch {
+            .map_err(|error| ChannelPairingError::ResolutionDispatch {
                 reason: error.to_string(),
             })
     }
 
-    /// Re-dispatch pairing completion through the caller's real turn world.
-    /// Integration groups execute runs in a shared turn store created after
-    /// this composed service, unlike production where both use one store.
+    /// Clone this service with the caller's turn-world tenant and resolution
+    /// dispatcher. Integration groups create that shared turn world after
+    /// this composed service, unlike production where both use one context.
     /// Test-only: zero production bytes.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) async fn dispatch_pairing_completion_with_for_test(
+    pub(crate) fn with_resolution_context_for_test(
         &self,
-        user_id: &UserId,
         tenant_id: TenantId,
-        continuation: Arc<dyn RebornAuthContinuationDispatcher>,
-    ) -> Result<(), ChannelPairingError> {
-        self.dispatch_pairing_completion_with(user_id, tenant_id, continuation)
-            .await
+        resolution_dispatcher: Arc<dyn RebornAuthResolutionDispatcher>,
+    ) -> Self {
+        let mut service = self.clone();
+        service.tenant_id = tenant_id;
+        service.resolution_dispatcher = resolution_dispatcher;
+        service
     }
+}
+
+fn same_pending_completion(
+    left: &PendingPairingCompletion,
+    right: &PendingPairingCompletion,
+) -> bool {
+    left.installation_id == right.installation_id
+        && left.user_id == right.user_id
+        && left.conversation_space_id == right.conversation_space_id
+        && left.conversation_id == right.conversation_id
+        && left.actor_kind == right.actor_kind
+        && left.external_actor_id == right.external_actor_id
 }
 
 /// Composition-built registry of pairing services keyed by extension id.

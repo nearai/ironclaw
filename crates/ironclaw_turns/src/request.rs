@@ -12,11 +12,14 @@ pub type TurnTimestamp = DateTime<Utc>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateResumeDisposition {
-    /// The user explicitly declined the gate (auth OR approval). The executor
-    /// surfaces this to the model as a non-retryable authorization failure rather
-    /// than re-dispatching the gate.
+    /// The gate ended without the requirement being satisfied. The executor
+    /// surfaces this to the model as a non-retryable authorization failure
+    /// rather than re-dispatching the gate.
     ///
-    /// New variants (e.g. `Deferred`) may be added here as needs arise.
+    /// Auth keeps the precise terminal cause in its durable `AuthResolved`
+    /// outcome. The turn layer deliberately collapses provider denial, expiry,
+    /// and failure onto this already-deployed wire value so persisted turn state
+    /// remains safe to read after rollback.
     Denied,
 }
 
@@ -150,8 +153,33 @@ pub struct CancelRunRequest {
     pub scope: TurnScope,
     pub actor: TurnActor,
     pub run_id: TurnRunId,
+    /// Optional compare-and-cancel condition evaluated atomically with the
+    /// state transition. Product gate actions use this to ensure a stale
+    /// decision cannot cancel a run that has already left the referenced gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precondition: Option<CancelRunPrecondition>,
     pub reason: SanitizedCancelReason,
     pub idempotency_key: IdempotencyKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CancelRunPrecondition {
+    BlockedAuthGate { gate_ref: GateRef },
+}
+
+impl CancelRunPrecondition {
+    pub fn required_status(&self) -> TurnStatus {
+        match self {
+            Self::BlockedAuthGate { .. } => TurnStatus::BlockedAuth,
+        }
+    }
+
+    pub fn gate_ref(&self) -> &GateRef {
+        match self {
+            Self::BlockedAuthGate { gate_ref } => gate_ref,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +223,65 @@ mod tests {
         assert_eq!(json, format!("\"{}\"", disposition.as_str()));
         let decoded: GateResumeDisposition = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(disposition, decoded);
+    }
+
+    #[test]
+    fn gate_resume_disposition_rejects_new_persisted_variants() {
+        assert!(
+            serde_json::from_str::<GateResumeDisposition>("\"error\"").is_err(),
+            "terminal auth failures must reuse the deployed denied wire value so rollback readers remain compatible"
+        );
+    }
+
+    #[test]
+    fn cancel_run_precondition_is_backward_compatible_and_round_trips() {
+        let resume = make_resume_request(None);
+        let gate_ref = resume.gate_resolution_ref.clone();
+        let request = CancelRunRequest {
+            scope: resume.scope,
+            actor: resume.actor,
+            run_id: resume.run_id,
+            precondition: Some(CancelRunPrecondition::BlockedAuthGate {
+                gate_ref: gate_ref.clone(),
+            }),
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: resume.idempotency_key,
+        };
+
+        let encoded = serde_json::to_value(&request).expect("serialize conditional cancel");
+        assert_eq!(
+            encoded.get("precondition"),
+            Some(&serde_json::json!({
+                "kind": "blocked_auth_gate",
+                "gate_ref": gate_ref.as_str(),
+            }))
+        );
+        let decoded: CancelRunRequest =
+            serde_json::from_value(encoded.clone()).expect("round-trip conditional cancel");
+        assert_eq!(decoded, request);
+
+        let mut legacy = encoded;
+        legacy
+            .as_object_mut()
+            .expect("cancel request object")
+            .remove("precondition");
+        let decoded_legacy: CancelRunRequest =
+            serde_json::from_value(legacy).expect("deserialize legacy unconditional cancel");
+        assert_eq!(decoded_legacy.precondition, None);
+    }
+
+    #[test]
+    fn cancel_run_precondition_wire_accepts_only_blocked_auth_gate() {
+        for removed_kind in ["blocked_resource_gate", "blocked_dependent_run_gate"] {
+            let encoded = serde_json::json!({
+                "kind": removed_kind,
+                "gate_ref": "gate:removed-broad-cancel"
+            });
+            assert!(
+                serde_json::from_value::<CancelRunPrecondition>(encoded).is_err(),
+                "{removed_kind} must not remain part of the cancel wire contract"
+            );
+        }
     }
 
     #[test]

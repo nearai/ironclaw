@@ -76,11 +76,10 @@ pub trait AuthChallengeProvider: Send + Sync {
 /// When a channel run blocked on interactive auth is auto-denied (a non-OAuth
 /// challenge the channel surface can't satisfy), the delivery path cancels the
 /// run directly via `TurnCoordinator` rather than through the canonical
-/// `AuthInteractionService` deny path (which *resumes* the run with a denied
-/// disposition instead of cancelling it). Without this port the underlying
-/// `AuthFlow` record lingers non-terminal (`Pending`/`AwaitingUser`) until it
-/// expires — see issue #4952. Implemented by the composition's product-auth
-/// services when a flow record source is wired in; a no-op when it isn't.
+/// `AuthInteractionService` user-abort path. Without this port the underlying
+/// `AuthFlow` record lingers `Open` until it expires — see issue #4952.
+/// Implemented by the composition's product-auth services when a flow record
+/// source is wired in; a no-op when it isn't.
 ///
 /// Implementations MUST scope the lookup by caller user, run id, gate ref, and
 /// tenant/agent/project/thread, and MUST treat an already-terminal (or absent)

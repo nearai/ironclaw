@@ -101,16 +101,10 @@ fn auth_error_mapping_run_state(request: &GetRunStateRequest) -> TurnRunState {
 struct NoopContinuationDispatcher;
 
 #[async_trait::async_trait]
-impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
-    async fn dispatch_auth_continuation(
+impl RebornAuthResolutionDispatcher for NoopContinuationDispatcher {
+    async fn dispatch_auth_resolved(
         &self,
-        _event: ironclaw_auth::AuthContinuationEvent,
-    ) -> Result<(), ironclaw_auth::AuthProductError> {
-        Ok(())
-    }
-    async fn dispatch_canceled_auth_continuation(
-        &self,
-        _event: ironclaw_auth::AuthContinuationEvent,
+        _event: ironclaw_auth::AuthResolved,
     ) -> Result<(), ironclaw_auth::AuthProductError> {
         Ok(())
     }
@@ -563,7 +557,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
     struct StaticTestCredentials;
 
     #[async_trait::async_trait]
-    impl ironclaw_auth::EngineClientCredentialsSource for StaticTestCredentials {
+    impl ironclaw_auth::EngineOAuthConfigurationSource for StaticTestCredentials {
         async fn resolve(
             &self,
             _vendor: &str,
@@ -574,6 +568,14 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
                 client_id: OAuthClientId::new("vendorco-client-123")?,
                 client_secret: None,
             })
+        }
+
+        async fn resolve_non_secret_value(
+            &self,
+            _vendor: &str,
+            _handle: &ironclaw_host_api::SecretHandle,
+        ) -> Result<Option<String>, ironclaw_auth::AuthProductError> {
+            Ok(None)
         }
     }
 
@@ -586,7 +588,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
                     token_exchange_resource: Some("https://mcp.vendorco.example/mcp".to_string()),
                 },
             ])),
-            client_credentials: Arc::new(StaticTestCredentials),
+            configuration: Arc::new(StaticTestCredentials),
             egress: egress.clone(),
             secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
             callback_base: ironclaw_auth::EngineCallbackBase::new(

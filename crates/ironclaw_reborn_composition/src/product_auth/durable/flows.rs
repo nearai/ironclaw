@@ -8,22 +8,23 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
 
 use super::domain::{
-    PreparedCallbackFlow, prepare_callback_flow, update_account_from_exchange,
-    update_account_from_request, validate_bound_update_authority, validate_callback_claim,
+    PreparedCallbackFlow, apply_callback_claim, prepare_callback_flow,
+    update_account_from_exchange, update_account_from_request, validate_bound_update_authority,
     validate_flow_update_binding, validate_manual_token_flow, validate_selection_flow,
 };
-use super::paths::setup_creation_coordination_path;
+use super::paths::{flow_path, setup_creation_coordination_path};
 use super::{
-    FilesystemAuthProductServices, credential_status_for_completed_flow, is_terminal_status,
-    scope_matches,
+    FilesystemAuthProductServices, credential_status_for_completed_flow, decode_durable_record,
+    encode_durable_record, scope_matches,
 };
 use ironclaw_auth::{
-    AuthChallenge, AuthErrorCode, AuthFlowId, AuthFlowManager, AuthFlowRecord,
-    AuthFlowRecordSource, AuthFlowStatus, AuthProductError, CredentialAccountId,
+    AuthChallenge, AuthFlowId, AuthFlowManager, AuthFlowOutcome, AuthFlowRecord,
+    AuthFlowRecordSource, AuthFlowState, AuthProductError, CredentialAccountId,
     CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
-    ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
-    TurnGateAuthFlowQuery, binding_scope_owns_account, flow_matches_turn_gate_query,
+    ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaim,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthProviderExchange, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
+    binding_scope_owns_account, flow_matches_durable_owner, flow_matches_turn_gate_query,
     is_setup_class_continuation,
 };
 
@@ -171,17 +172,15 @@ where
             id: request.id.unwrap_or_default(),
             scope: request.scope,
             kind: request.kind,
-            status: AuthFlowStatus::AwaitingUser,
+            state: AuthFlowState::Open,
             provider: request.provider,
             challenge: Some(request.challenge),
             continuation: request.continuation,
-            credential_account_id: None,
             update_binding: request.update_binding,
             opaque_state_hash: request.opaque_state_hash,
             pkce_verifier_hash: request.pkce_verifier_hash,
             authorization_code_hash: None,
-            error: None,
-            continuation_emitted_at: None,
+            resolution_delivered_at: None,
             created_at: now,
             updated_at: now,
             expires_at: request.expires_at,
@@ -201,7 +200,7 @@ where
         // path. Filter to non-terminal setup-class flows so a parked turn-gate
         // flow is never disturbed.
         for (flow, _version) in self.flow_records_under_scope_root(scope).await? {
-            if is_terminal_status(flow.status)
+            if ironclaw_auth::is_terminal_state(flow.state)
                 || flow.provider != *provider
                 || !is_setup_class_continuation(&flow.continuation)
             {
@@ -272,31 +271,44 @@ where
         &self,
         scope: &ironclaw_auth::AuthProductScope,
         request: OAuthCallbackClaimRequest,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        let lock = self.lock_for(format!("flow:{}", request.flow_id));
-        let _guard = lock.lock().await;
-        let now = Utc::now();
-        let (mut record, version) = self
-            .read_flow(scope, request.flow_id)
-            .await?
-            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        match validate_callback_claim(&mut record, scope, &request, now) {
-            Ok(()) => {}
-            Err(AuthProductError::UnknownOrExpiredFlow) => {
-                self.write_flow(scope, &record, CasExpectation::Version(version))
-                    .await?;
-                return Err(AuthProductError::UnknownOrExpiredFlow);
-            }
-            Err(error) => return Err(error),
-        }
-        if record.status == AuthFlowStatus::Completed {
-            return Ok(record);
-        }
-        record.status = AuthFlowStatus::CallbackReceived;
-        record.updated_at = now;
-        self.write_flow(scope, &record, CasExpectation::Version(version))
-            .await?;
-        Ok(record)
+    ) -> Result<OAuthCallbackClaim, AuthProductError> {
+        let path = flow_path(scope, request.flow_id)?;
+        let expected_scope = scope.clone();
+        cas_update(
+            self.filesystem.as_ref(),
+            &scope.resource,
+            &path,
+            |bytes| decode_durable_record::<AuthFlowRecord>(bytes, "auth flow"),
+            |record| {
+                let body = encode_durable_record(record, "auth flow")?;
+                Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+            },
+            |current: Option<AuthFlowRecord>| {
+                let outcome = (|| {
+                    let mut record = current.ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+                    let claim =
+                        apply_callback_claim(&mut record, &expected_scope, &request, Utc::now());
+                    match claim {
+                        Ok(claim @ OAuthCallbackClaim::Acquired(_)) => {
+                            Ok(CasApply::new(record, Ok(claim)))
+                        }
+                        Ok(claim @ OAuthCallbackClaim::Existing(_)) => {
+                            Ok(CasApply::no_op(record, Ok(claim)))
+                        }
+                        Err(error @ AuthProductError::UnknownOrExpiredFlow)
+                            if record.state
+                                == AuthFlowState::Resolved(AuthFlowOutcome::Expired) =>
+                        {
+                            Ok(CasApply::new(record, Err(error)))
+                        }
+                        Err(error) => Ok(CasApply::no_op(record, Err(error))),
+                    }
+                })();
+                async move { outcome }
+            },
+        )
+        .await
+        .map_err(map_setup_creation_cas_error)?
     }
     async fn complete_oauth_callback(
         &self,
@@ -322,12 +334,11 @@ where
             };
         let exchange = match input.outcome {
             ProviderCallbackOutcome::Denied => {
-                record.status = AuthFlowStatus::Failed;
-                record.error = Some(AuthErrorCode::ProviderDenied);
+                record.state = AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied);
                 record.updated_at = now;
                 self.write_flow(scope, &record, CasExpectation::Version(version))
                     .await?;
-                return Err(AuthProductError::ProviderDenied);
+                return Ok(record);
             }
             ProviderCallbackOutcome::Authorized { exchange } => {
                 let exchange = *exchange;
@@ -347,11 +358,9 @@ where
         let account_id = self
             .resolve_callback_account(input.flow_id, callback, &exchange)
             .await?;
-        record.status = AuthFlowStatus::Completed;
-        record.error = None;
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id });
         record.authorization_code_hash = Some(exchange.authorization_code_hash);
         record.pkce_verifier_hash = Some(exchange.pkce_verifier_hash);
-        record.credential_account_id = Some(account_id);
         record.updated_at = now;
         if let Err(error) = self
             .write_flow(scope, &record, CasExpectation::Version(version))
@@ -384,7 +393,7 @@ where
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
         validate_selection_flow(&mut record, scope, &input, now)?;
-        if record.status == AuthFlowStatus::Completed {
+        if matches!(record.state, AuthFlowState::Resolved(_)) {
             return Ok(record);
         }
         let account = self
@@ -406,9 +415,9 @@ where
         {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        record.status = AuthFlowStatus::Completed;
-        record.error = None;
-        record.credential_account_id = Some(input.credential_account_id);
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: input.credential_account_id,
+        });
         record.updated_at = now;
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
@@ -449,7 +458,7 @@ where
             }
             Err(error) => return Err(error),
         }
-        if record.status == AuthFlowStatus::Completed {
+        if matches!(record.state, AuthFlowState::Resolved(_)) {
             return Ok(record);
         }
         let account = self
@@ -473,9 +482,9 @@ where
         {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        record.status = AuthFlowStatus::Completed;
-        record.error = None;
-        record.credential_account_id = Some(input.credential_account_id);
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: input.credential_account_id,
+        });
         record.updated_at = now;
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
@@ -511,9 +520,8 @@ where
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if !is_terminal_status(record.status) {
-            record.status = AuthFlowStatus::Canceled;
-            record.error = Some(AuthErrorCode::Canceled);
+        if !matches!(record.state, AuthFlowState::Resolved(_)) {
+            record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
             record.updated_at = Utc::now();
             self.write_flow(scope, &record, CasExpectation::Version(version))
                 .await?;
@@ -542,8 +550,7 @@ where
             }
             Err(e) => return Err(e),
         }
-        record.status = AuthFlowStatus::Failed;
-        record.error = Some(input.error);
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::Failed { error: input.error });
         record.updated_at = now;
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
@@ -564,25 +571,25 @@ where
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if is_terminal_status(record.status) {
-            return Err(match record.status {
-                AuthFlowStatus::Canceled => AuthProductError::Canceled,
-                _ => AuthProductError::FlowAlreadyTerminal,
-            });
+        match record.state {
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted) => return Ok(record),
+            AuthFlowState::Resolved(_) | AuthFlowState::Processing => {
+                return Err(AuthProductError::FlowAlreadyTerminal);
+            }
+            AuthFlowState::Open => {}
         }
-        record.status = AuthFlowStatus::Canceled;
-        record.error = Some(AuthErrorCode::Canceled);
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
         record.updated_at = Utc::now();
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
         Ok(record)
     }
 
-    async fn mark_continuation_dispatched(
+    async fn expire_flow(
         &self,
         scope: &ironclaw_auth::AuthProductScope,
         flow_id: AuthFlowId,
-        emitted_at: ironclaw_auth::Timestamp,
+        observed_at: ironclaw_auth::Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError> {
         let lock = self.lock_for(format!("flow:{flow_id}"));
         let _guard = lock.lock().await;
@@ -593,52 +600,40 @@ where
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if !matches!(
-            record.status,
-            AuthFlowStatus::Completed
-                | AuthFlowStatus::Canceled
-                | AuthFlowStatus::Failed
-                | AuthFlowStatus::Expired
-        ) {
+        if !matches!(record.state, AuthFlowState::Resolved(_)) && observed_at > record.expires_at {
+            record.state = AuthFlowState::Resolved(AuthFlowOutcome::Expired);
+            record.updated_at = observed_at;
+            self.write_flow(scope, &record, CasExpectation::Version(version))
+                .await?;
+        }
+        Ok(record)
+    }
+
+    async fn mark_resolution_delivered(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+        delivered_at: ironclaw_auth::Timestamp,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{flow_id}"));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !matches!(record.state, AuthFlowState::Resolved(_)) {
             return Err(AuthProductError::FlowAlreadyTerminal);
         }
-        // Idempotent: if the continuation was already marked by a concurrent
+        // Idempotent: if the resolution was already marked by a concurrent
         // caller, return the existing record without writing.
-        if record.continuation_emitted_at.is_some() {
+        if record.resolution_delivered_at.is_some() {
             return Ok(record);
         }
-        record.continuation_emitted_at = Some(emitted_at);
-        record.updated_at = emitted_at;
-        self.write_flow(scope, &record, CasExpectation::Version(version))
-            .await?;
-        Ok(record)
-    }
-
-    async fn fail_completed_continuation(
-        &self,
-        scope: &ironclaw_auth::AuthProductScope,
-        flow_id: AuthFlowId,
-        error: AuthErrorCode,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        let lock = self.lock_for(format!("flow:{flow_id}"));
-        let _guard = lock.lock().await;
-        let (mut record, version) = self
-            .read_flow(scope, flow_id)
-            .await?
-            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        if !scope_matches(scope, &record.scope) {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-        // Only a completed flow that has not yet acknowledged its continuation
-        // can be terminalized by a continuation-dispatch failure. Anything else
-        // (already dispatched, or already terminal in another state) must not
-        // regress — this races safely against a concurrent completion/dispatch.
-        if record.status != AuthFlowStatus::Completed || record.continuation_emitted_at.is_some() {
-            return Err(AuthProductError::FlowAlreadyTerminal);
-        }
-        record.status = AuthFlowStatus::Failed;
-        record.error = Some(error);
-        record.updated_at = Utc::now();
+        record.resolution_delivered_at = Some(delivered_at);
+        record.updated_at = delivered_at;
         self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
         Ok(record)
@@ -659,6 +654,29 @@ where
             .await?
             .into_iter()
             .find(|flow| flow_matches_turn_gate_query(flow, &query)))
+    }
+
+    async fn flow_for_owner_by_id(
+        &self,
+        owner_scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<Option<AuthFlowRecord>, AuthProductError> {
+        let resource = ResourceScope {
+            tenant_id: owner_scope.resource.tenant_id.clone(),
+            user_id: owner_scope.resource.user_id.clone(),
+            agent_id: owner_scope.resource.agent_id.clone(),
+            project_id: owner_scope.resource.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        };
+        Ok(self
+            .flow_records_for_resource_filtered(&resource, |flow| {
+                flow.id == flow_id && flow_matches_durable_owner(flow, owner_scope)
+            })
+            .await?
+            .into_iter()
+            .next())
     }
 
     async fn flows_for_owner(

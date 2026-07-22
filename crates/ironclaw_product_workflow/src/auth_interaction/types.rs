@@ -1,5 +1,5 @@
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowStatus,
+    AuthChallenge, AuthContinuationRef, AuthFlowId, AuthFlowRecord, AuthFlowState,
     AuthProductScope, CredentialAccountId, CredentialAccountStatus, Timestamp,
 };
 use ironclaw_product_adapters::ProductWorkflowRejectionKind;
@@ -27,6 +27,7 @@ pub enum AuthInteractionRejectionKind {
     InvalidCallbackRef,
     UnsupportedResult,
     FlowUnavailable,
+    CorruptState,
     InvalidBindingRef,
 }
 
@@ -44,6 +45,7 @@ impl AuthInteractionRejectionKind {
             Self::InvalidCallbackRef => "callback reference is invalid",
             Self::UnsupportedResult => "auth interaction result is not supported",
             Self::FlowUnavailable => "auth interaction service is unavailable",
+            Self::CorruptState => "auth interaction state is corrupt",
             Self::InvalidBindingRef => "auth resume binding is invalid",
         }
     }
@@ -60,6 +62,7 @@ impl AuthInteractionRejectionKind {
             | Self::UnsupportedResult
             | Self::InvalidBindingRef => ProductWorkflowRejectionKind::InvalidRequest,
             Self::FlowUnavailable => ProductWorkflowRejectionKind::Unavailable,
+            Self::CorruptState => ProductWorkflowRejectionKind::Unavailable,
         }
     }
 
@@ -69,6 +72,7 @@ impl AuthInteractionRejectionKind {
             Self::CrossScopeDenied => 403,
             Self::AmbiguousAuth | Self::StaleAuth => 409,
             Self::FlowUnavailable => 503,
+            Self::CorruptState => 500,
             Self::InvalidGateRef
             | Self::InvalidCredentialRef
             | Self::InvalidCallbackRef
@@ -166,16 +170,11 @@ pub enum AuthInteractionStatus {
 }
 
 impl AuthInteractionStatus {
-    fn from_flow_status(status: AuthFlowStatus) -> Option<Self> {
-        match status {
-            AuthFlowStatus::Pending => Some(Self::Pending),
-            AuthFlowStatus::AwaitingUser => Some(Self::AwaitingUser),
-            AuthFlowStatus::CallbackReceived => Some(Self::CallbackReceived),
-            AuthFlowStatus::Completing => Some(Self::Completing),
-            AuthFlowStatus::Completed
-            | AuthFlowStatus::Failed
-            | AuthFlowStatus::Expired
-            | AuthFlowStatus::Canceled => None,
+    fn from_flow_state(state: AuthFlowState) -> Option<Self> {
+        match state {
+            AuthFlowState::Open => Some(Self::AwaitingUser),
+            AuthFlowState::Processing => Some(Self::CallbackReceived),
+            AuthFlowState::Resolved(_) => None,
         }
     }
 }
@@ -293,8 +292,8 @@ impl AuthGateRecord {
         &self.flow
     }
 
-    pub fn status(&self) -> AuthFlowStatus {
-        self.flow.status
+    pub fn state(&self) -> AuthFlowState {
+        self.flow.state
     }
 
     pub(super) fn to_view(&self, now: Timestamp) -> Option<PendingAuthInteractionView> {
@@ -309,7 +308,7 @@ impl AuthGateRecord {
         if now >= self.flow.expires_at {
             return None;
         }
-        let status = AuthInteractionStatus::from_flow_status(self.flow.status)?;
+        let status = AuthInteractionStatus::from_flow_state(self.flow.state)?;
         Some(PendingAuthInteractionView {
             scope: self.scope.clone(),
             run_id: self.run_id,
@@ -363,8 +362,8 @@ pub enum ResolveAuthInteractionResponse {
     Canceled(CancelRunResponse),
 }
 
-pub(super) fn is_pending_auth_status(status: AuthFlowStatus) -> bool {
-    AuthInteractionStatus::from_flow_status(status).is_some()
+pub(super) fn is_pending_auth_state(state: AuthFlowState) -> bool {
+    AuthInteractionStatus::from_flow_state(state).is_some()
 }
 
 fn display_safe_auth_summary() -> String {
@@ -401,6 +400,26 @@ mod tests {
         assert_eq!(
             interaction_scope.project_id.as_ref().map(ProjectId::as_str),
             Some("project:shared")
+        );
+    }
+
+    #[test]
+    fn auth_interaction_state_projection_preserves_the_existing_wire_statuses() {
+        assert_eq!(
+            serde_json::to_value(
+                AuthInteractionStatus::from_flow_state(AuthFlowState::Open)
+                    .expect("open interaction"),
+            )
+            .expect("serialize open status"),
+            serde_json::json!("awaiting_user"),
+        );
+        assert_eq!(
+            serde_json::to_value(
+                AuthInteractionStatus::from_flow_state(AuthFlowState::Processing)
+                    .expect("processing interaction"),
+            )
+            .expect("serialize processing status"),
+            serde_json::json!("callback_received"),
         );
     }
 }

@@ -23,7 +23,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::credential::CredentialAccountStatus;
-use crate::flow::AuthFlowStatus;
+use crate::flow::{AuthFlowOutcome, AuthFlowState};
 
 /// The auth-account state (one enum, every vendor; overview §6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -45,6 +45,8 @@ pub enum AuthAccountLastError {
     FlowExpired,
     /// The vendor denied authorization (user declined or scopes rejected).
     VendorDenied,
+    /// The provider exchange failed after the callback was accepted.
+    ExchangeFailed,
     /// On-demand refresh failed transiently.
     RefreshFailed,
     /// The vendor permanently revoked the grant (`invalid_grant`).
@@ -59,18 +61,13 @@ pub enum AuthAccountLastError {
 /// §6.3 enum without a second persisted state column.
 pub fn project_auth_account_state(
     account_status: Option<CredentialAccountStatus>,
-    active_flow_status: Option<AuthFlowStatus>,
+    active_flow_state: Option<AuthFlowState>,
 ) -> (AuthAccountState, Option<AuthAccountLastError>) {
     // A live (non-terminal) flow means the user is mid-authentication,
     // regardless of what an older account row says.
     if matches!(
-        active_flow_status,
-        Some(
-            AuthFlowStatus::Pending
-                | AuthFlowStatus::AwaitingUser
-                | AuthFlowStatus::CallbackReceived
-                | AuthFlowStatus::Completing
-        )
+        active_flow_state,
+        Some(AuthFlowState::Open | AuthFlowState::Processing)
     ) {
         return (AuthAccountState::Authenticating, None);
     }
@@ -93,14 +90,18 @@ pub fn project_auth_account_state(
             Some(AuthAccountLastError::CredentialMissing),
         ),
         Some(CredentialAccountStatus::Inactive | CredentialAccountStatus::PendingSetup) | None => {
-            match active_flow_status {
-                Some(AuthFlowStatus::Expired) => (
+            match active_flow_state {
+                Some(AuthFlowState::Resolved(AuthFlowOutcome::Expired)) => (
                     AuthAccountState::Disconnected,
                     Some(AuthAccountLastError::FlowExpired),
                 ),
-                Some(AuthFlowStatus::Failed) => (
+                Some(AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)) => (
                     AuthAccountState::Disconnected,
                     Some(AuthAccountLastError::VendorDenied),
+                ),
+                Some(AuthFlowState::Resolved(AuthFlowOutcome::Failed { .. })) => (
+                    AuthAccountState::Disconnected,
+                    Some(AuthAccountLastError::ExchangeFailed),
                 ),
                 _ => (AuthAccountState::Disconnected, None),
             }
@@ -111,6 +112,12 @@ pub fn project_auth_account_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn failed_flow() -> AuthFlowState {
+        AuthFlowState::Resolved(AuthFlowOutcome::Failed {
+            error: crate::AuthErrorCode::TokenExchangeFailed,
+        })
+    }
 
     #[test]
     fn auth_account_state_wire_form_is_stable() {
@@ -128,11 +135,31 @@ mod tests {
     }
 
     #[test]
+    fn auth_account_last_error_wire_form_is_stable() {
+        for (error, expected) in [
+            (AuthAccountLastError::FlowExpired, "flow_expired"),
+            (AuthAccountLastError::VendorDenied, "vendor_denied"),
+            (AuthAccountLastError::ExchangeFailed, "exchange_failed"),
+            (AuthAccountLastError::RefreshFailed, "refresh_failed"),
+            (AuthAccountLastError::GrantRevoked, "grant_revoked"),
+            (
+                AuthAccountLastError::CredentialMissing,
+                "credential_missing",
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(error).unwrap(),
+                serde_json::Value::String(expected.to_string())
+            );
+        }
+    }
+
+    #[test]
     fn projection_prefers_live_flow_then_account_status() {
         assert_eq!(
             project_auth_account_state(
                 Some(CredentialAccountStatus::Configured),
-                Some(AuthFlowStatus::AwaitingUser),
+                Some(AuthFlowState::Open),
             ),
             (AuthAccountState::Authenticating, None)
         );
@@ -157,7 +184,10 @@ mod tests {
         // Flow TTL expiry with no configured account lands in `disconnected`
         // with a typed reason (AUTH-10).
         assert_eq!(
-            project_auth_account_state(None, Some(AuthFlowStatus::Expired)),
+            project_auth_account_state(
+                None,
+                Some(AuthFlowState::Resolved(AuthFlowOutcome::Expired)),
+            ),
             (
                 AuthAccountState::Disconnected,
                 Some(AuthAccountLastError::FlowExpired)
@@ -165,11 +195,31 @@ mod tests {
         );
         // Vendor denial lands in `disconnected` with a typed reason (AUTH-10).
         assert_eq!(
-            project_auth_account_state(None, Some(AuthFlowStatus::Failed)),
+            project_auth_account_state(
+                None,
+                Some(AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)),
+            ),
             (
                 AuthAccountState::Disconnected,
                 Some(AuthAccountLastError::VendorDenied)
             )
+        );
+        // A provider/transport exchange failure is not a denial by the user.
+        assert_eq!(
+            project_auth_account_state(None, Some(failed_flow())),
+            (
+                AuthAccountState::Disconnected,
+                Some(AuthAccountLastError::ExchangeFailed)
+            )
+        );
+        // Explicit user abort is a clean return to disconnected, not a
+        // provider failure.
+        assert_eq!(
+            project_auth_account_state(
+                None,
+                Some(AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)),
+            ),
+            (AuthAccountState::Disconnected, None)
         );
     }
 }

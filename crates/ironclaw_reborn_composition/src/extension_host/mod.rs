@@ -58,7 +58,7 @@ pub(crate) mod webui_extension_credentials;
 // the decoder through this narrow module-level seam.
 pub(crate) use extension_bundle::unzip_extension_bundle;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn filesystem_installation_store_for_test()
 -> ironclaw_extensions::FilesystemExtensionInstallationStore {
     use std::sync::Arc;

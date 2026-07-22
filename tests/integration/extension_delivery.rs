@@ -1293,12 +1293,12 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
             ),
         )
         .await
-        .expect("pairing consume dispatches its continuation");
+        .expect("pairing consume dispatches its provider-scoped resolution");
     assert_eq!(paired.as_ref(), Some(&paired_user));
     lifecycle
         .wait_for_status(activation_run_id, ironclaw_turns::TurnStatus::Completed)
         .await
-        .expect("pairing continuation resumes the exact blocked activation");
+        .expect("pairing resolution resumes the exact blocked activation");
     lifecycle
         .assert_tool_result_contains("\"activated\":true")
         .await
@@ -1638,7 +1638,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
 
     // Bootstrap one caller-scoped account connection through the same
     // generic pairing service before activation. The sibling Telegram test
-    // drives the blocked-run continuation itself; this journey keeps its
+    // drives the blocked-run auth resolution itself; this journey keeps its
     // existing focus on the post-activation behavior of a second, unbound
     // external actor.
     let paired_user = inbound

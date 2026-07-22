@@ -421,27 +421,21 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
 #[tokio::test]
 async fn webui_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_gate() {
     use crate::product_auth::api::auth::{
-        RebornAuthContinuationDispatcher, RebornProductAuthServices,
+        RebornAuthResolutionDispatcher, RebornProductAuthServices,
     };
     use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
     use async_trait::async_trait;
-    use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
+    use ironclaw_auth::{AuthResolved, InMemoryAuthProductServices};
     use ironclaw_secrets::FilesystemSecretStore;
 
     #[derive(Debug)]
     struct NoopDispatcher;
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for NoopDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: AuthContinuationEvent,
-        ) -> Result<(), ironclaw_auth::AuthProductError> {
-            Ok(())
-        }
-        async fn dispatch_canceled_auth_continuation(
-            &self,
-            _event: ironclaw_auth::AuthContinuationEvent,
+            _event: AuthResolved,
         ) -> Result<(), ironclaw_auth::AuthProductError> {
             Ok(())
         }
@@ -451,7 +445,7 @@ async fn webui_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_g
     struct StaticTestCredentials;
 
     #[async_trait]
-    impl ironclaw_auth::EngineClientCredentialsSource for StaticTestCredentials {
+    impl ironclaw_auth::EngineOAuthConfigurationSource for StaticTestCredentials {
         async fn resolve(
             &self,
             _vendor: &str,
@@ -462,6 +456,14 @@ async fn webui_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_g
                 client_id: ironclaw_auth::OAuthClientId::new("vendorco-client-id")?,
                 client_secret: None,
             })
+        }
+
+        async fn resolve_non_secret_value(
+            &self,
+            _vendor: &str,
+            _handle: &ironclaw_host_api::SecretHandle,
+        ) -> Result<Option<String>, ironclaw_auth::AuthProductError> {
+            Ok(None)
         }
     }
 
@@ -519,7 +521,7 @@ async fn webui_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_g
                     token_exchange_resource: None,
                 },
             ])),
-            client_credentials: Arc::new(StaticTestCredentials),
+            configuration: Arc::new(StaticTestCredentials),
             egress: Arc::new(PanicEgress),
             secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
             callback_base: ironclaw_auth::EngineCallbackBase::new(

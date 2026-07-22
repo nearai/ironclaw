@@ -116,6 +116,12 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> RebornServicesError {
             503,
             error.retryable,
         ),
+        AuthErrorCode::CorruptRecord => services_error(
+            RebornServicesErrorCode::Internal,
+            RebornServicesErrorKind::ServiceUnavailable,
+            500,
+            false,
+        ),
         AuthErrorCode::AccountSelectionRequired
         | AuthErrorCode::ProviderIdentityAlreadyConnected => services_error(
             RebornServicesErrorCode::Conflict,
@@ -186,7 +192,7 @@ mod tests {
     use super::ProductAuthExtensionCredentialSetup;
     use async_trait::async_trait;
     use ironclaw_auth::{
-        AuthContinuationEvent, AuthProductError, AuthProductScope, AuthProviderId, AuthSurface,
+        AuthProductError, AuthProductScope, AuthProviderId, AuthResolved, AuthSurface,
         CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
         CredentialOwnership, InMemoryAuthProductServices, NewCredentialAccount, ProviderScope,
     };
@@ -198,21 +204,15 @@ mod tests {
         LifecycleExtensionCredentialSetup,
     };
 
-    use crate::{RebornAuthContinuationDispatcher, RebornProductAuthServices};
+    use crate::{RebornAuthResolutionDispatcher, RebornProductAuthServices};
 
     struct NoopDispatcher;
 
     #[async_trait]
-    impl RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
+    impl RebornAuthResolutionDispatcher for NoopDispatcher {
+        async fn dispatch_auth_resolved(
             &self,
-            _event: AuthContinuationEvent,
-        ) -> Result<(), AuthProductError> {
-            Ok(())
-        }
-        async fn dispatch_canceled_auth_continuation(
-            &self,
-            _event: AuthContinuationEvent,
+            _event: AuthResolved,
         ) -> Result<(), AuthProductError> {
             Ok(())
         }

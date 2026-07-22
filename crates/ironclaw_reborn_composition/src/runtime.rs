@@ -2777,6 +2777,7 @@ impl RebornRuntime {
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
                 run_id,
+                precondition: None,
                 reason,
                 idempotency_key: IdempotencyKey::new(format!(
                     "{}-{}-{}",
@@ -2854,6 +2855,7 @@ impl RebornRuntime {
                     scope: child_scope.clone(),
                     actor: TurnActor::new(self.actor_user_id.clone()),
                     run_id: child_run_id,
+                    precondition: None,
                     reason,
                     idempotency_key,
                 })

@@ -307,18 +307,6 @@ pub(crate) fn parse_v3(
         ExtensionRuntimeV2::Wasm { .. } | ExtensionRuntimeV2::Mcp { .. }
     );
 
-    // Validate recipes.
-    let mut recipes: BTreeMap<VendorId, VendorAuthRecipe> = BTreeMap::new();
-    for (vendor, recipe) in raw.auth {
-        recipe
-            .validate()
-            .map_err(|error| ManifestV3Error::InvalidRecipe {
-                vendor: vendor.clone(),
-                error,
-            })?;
-        recipes.insert(VendorId::new(vendor)?, recipe);
-    }
-
     // Validate the channel declaration.
     if let Some(channel) = &raw.channel {
         channel
@@ -346,6 +334,67 @@ pub(crate) fn parse_v3(
                 });
             }
         }
+    }
+
+    let configured_fields: BTreeMap<String, bool> = raw
+        .admin_configuration
+        .as_ref()
+        .map(|descriptor| {
+            descriptor
+                .fields
+                .iter()
+                .map(|field| (field.handle.as_str().to_string(), field.secret))
+                .collect()
+        })
+        .or_else(|| {
+            raw.channel.as_ref().map(|channel| {
+                channel
+                    .config
+                    .fields
+                    .iter()
+                    .map(|field| (field.handle.as_str().to_string(), field.secret))
+                    .collect()
+            })
+        })
+        .unwrap_or_default();
+
+    // Validate recipes only after operator configuration is validated: a
+    // URL-bound value must come from a declared non-secret field. This keeps
+    // deployment values out of manifests without allowing secret material to
+    // leak into browser-visible authorization URLs.
+    let mut recipes: BTreeMap<VendorId, VendorAuthRecipe> = BTreeMap::new();
+    for (vendor, recipe) in raw.auth {
+        recipe
+            .validate()
+            .map_err(|error| ManifestV3Error::InvalidRecipe {
+                vendor: vendor.clone(),
+                error,
+            })?;
+        if let VendorAuthRecipe::Oauth2Code(oauth) = &recipe {
+            for (param, handle) in &oauth.authorize_params_from_config {
+                match configured_fields.get(handle.as_str()) {
+                    Some(false) => {}
+                    Some(true) => {
+                        return Err(ManifestV3Error::Invalid {
+                            reason: format!(
+                                "[auth.{vendor}].authorize_params_from_config.{param} references \
+                                 secret configuration handle `{handle}`; authorize URL bindings \
+                                 must use declared non-secret fields"
+                            ),
+                        });
+                    }
+                    None => {
+                        return Err(ManifestV3Error::Invalid {
+                            reason: format!(
+                                "[auth.{vendor}].authorize_params_from_config.{param} references \
+                                 undeclared configuration handle `{handle}`"
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        recipes.insert(VendorId::new(vendor)?, recipe);
     }
 
     // Normalize tools (or the synthesized MCP connection template) into the

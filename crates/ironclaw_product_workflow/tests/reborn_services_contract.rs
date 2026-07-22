@@ -5625,7 +5625,7 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
             "acme".to_string(),
             ChannelAuthAccountState {
                 account_status: Some(CredentialAccountStatus::RefreshFailed),
-                active_flow_status: None,
+                active_flow_state: None,
             },
         )]),
     }));

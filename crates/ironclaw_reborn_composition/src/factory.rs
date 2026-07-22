@@ -51,7 +51,7 @@ use crate::runtime_input::RebornRuntimeIdentity;
 use crate::support::fs::RebornProjectService;
 use crate::web_access::register_bundled_web_access_first_party_handlers;
 use crate::{
-    RebornAuthContinuationDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
+    RebornAuthResolutionDispatcher, RebornBuildError, RebornBuildInput, RebornCompositionProfile,
     RebornFacadeReadiness, RebornProductAuthServices, RebornReadiness, RebornWorkerReadiness,
 };
 use ironclaw_approvals::{
@@ -584,9 +584,9 @@ impl RebornServices {
 
     /// Consume a pairing code through the composed generic service — tests
     /// only. Mirrors the production channel-ingress pairing interceptor and
-    /// dispatches the same provider-keyed auth continuation. Integration
+    /// dispatches the same provider-keyed auth resolution. Integration
     /// groups supply their separately-built shared turn world so the
-    /// continuation can see the runs that group actually executes; production
+    /// resolution can see the runs that group actually executes; production
     /// composition uses one coordinator/store and needs no override.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn pairing_consume_for_test<F>(
@@ -615,6 +615,12 @@ impl RebornServices {
         let installation_id =
             ironclaw_product_adapters::AdapterInstallationId::new(authenticated_installation_id)
                 .map_err(|error| error.to_string())?;
+        let (turn_coordinator, turn_state, tenant_id) = turn_world;
+        let resolution_dispatcher = auth_resolution_dispatcher(
+            turn_coordinator,
+            Some(turn_state as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
+        );
+        let service = service.with_resolution_context_for_test(tenant_id, resolution_dispatcher);
         let outcome = service
             .consume(
                 &installation_id,
@@ -636,17 +642,6 @@ impl RebornServices {
             crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
             | crate::extension_host::channel_pairing::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
         };
-        if let Some(user_id) = paired_user.as_ref() {
-            let (turn_coordinator, turn_state, tenant_id) = turn_world;
-            let continuation = auth_continuation_dispatcher(
-                turn_coordinator,
-                Some(turn_state as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
-            );
-            service
-                .dispatch_pairing_completion_with_for_test(user_id, tenant_id, continuation)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
         Ok(paired_user)
     }
 
@@ -1618,13 +1613,13 @@ pub async fn build_reborn_services(
     }
 }
 
-fn auth_continuation_dispatcher(
+fn auth_resolution_dispatcher(
     turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     blocked_auth_snapshot_source: Option<
         Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>,
     >,
-) -> Arc<dyn RebornAuthContinuationDispatcher> {
-    let single_run: Arc<dyn RebornAuthContinuationDispatcher> = Arc::new(
+) -> Arc<dyn RebornAuthResolutionDispatcher> {
+    let single_run: Arc<dyn RebornAuthResolutionDispatcher> = Arc::new(
         ProductAuthTurnGateResumeDispatcher::new(Arc::clone(&turn_coordinator)),
     );
     match blocked_auth_snapshot_source {
@@ -1671,7 +1666,7 @@ fn compose_product_auth_services(
         None => ports,
     };
     let mut services = ports.into_services(
-        auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source),
+        auth_resolution_dispatcher(turn_coordinator, blocked_auth_snapshot_source),
         secret_store,
     );
     if let Some(sink) = security_audit_sink {
@@ -2087,7 +2082,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 )
                 .with_provider_client(Arc::clone(&provider_client))
                 .into_services(
-                    auth_continuation_dispatcher(
+                    auth_resolution_dispatcher(
                         turn_coordinator.clone(),
                         Some(Arc::clone(&store_graph.turn_state)
                             as Arc<
@@ -2568,7 +2563,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     )
                     .await
                     .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
-                let continuation = auth_continuation_dispatcher(
+                let resolution_dispatcher = auth_resolution_dispatcher(
                     turn_coordinator.clone(),
                     Some(Arc::clone(&store_graph.turn_state)
                         as Arc<
@@ -2596,7 +2591,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                                 as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
                             identity_delete: Arc::clone(&identity_store)
                                 as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
-                            continuation,
+                            resolution_dispatcher,
                             conversation_actor_pairings: Arc::clone(&workflow_state.conversations)
                                 as Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
                             dm_targets,
