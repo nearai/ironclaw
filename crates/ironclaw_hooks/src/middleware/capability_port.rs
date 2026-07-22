@@ -1,4 +1,5 @@
 //! Capability-port middleware that runs `dispatch_before_capability` ahead of
+// arch-exempt: large_file, capability middleware remains centralized during Resolution migration, plan #6175
 //! every invocation and translates hook decisions into the existing
 //! `CapabilityOutcome` vocabulary.
 //!
@@ -28,10 +29,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::{Resolution, ResolutionBatch, TenantId};
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
-    CapabilityDeniedReasonKind, CapabilityInvocation, LoopCapabilityPort, ProviderToolCall,
-    ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+    AgentLoopHostError, CapabilityCallCandidate, CapabilityDeniedReasonKind, LoopCapabilityPort,
+    LoopRequest, LoopRequestBatch, ProviderToolCall, ProviderToolCallCapabilityIds,
+    ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, resolution,
 };
 
 use crate::dispatch::{BeforeCapabilityDispatchOutcome, HookDispatcher};
@@ -135,7 +136,7 @@ impl HookedLoopCapabilityPort {
 
     pub(crate) async fn hook_context(
         &self,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
         provider: Option<ironclaw_host_api::ExtensionId>,
     ) -> BeforeCapabilityHookContext {
         // Lazy input resolution probe (PR #3573 follow-up): when no
@@ -176,7 +177,7 @@ impl HookedLoopCapabilityPort {
     ///    backstop for resolvers whose `size_hint` returns `None`
     ///    (default-impl, or sources that don't know the size up
     ///    front).
-    async fn resolve_arguments(&self, invocation: &CapabilityInvocation) -> SanitizedArguments {
+    async fn resolve_arguments(&self, invocation: &LoopRequest) -> SanitizedArguments {
         if let Some(size) = self.resolver.size_hint(invocation).await
             && size > MAX_PREDICATE_INPUT_BYTES
         {
@@ -220,7 +221,7 @@ impl HookedLoopCapabilityPort {
 
     async fn run_dispatch(
         &self,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
         provider: Option<ironclaw_host_api::ExtensionId>,
     ) -> BeforeCapabilityDispatchOutcome {
         let ctx = self.hook_context(invocation, provider).await;
@@ -267,7 +268,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         let provider = self
             .provider_resolver
@@ -301,7 +302,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         // Two-phase batch dispatch that preserves the inner port's batch
         // semantics when hooks are active:
@@ -325,7 +326,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         //   AfterCapability observers fire per resolved entry in the merged
         //   outcome vec, in original index order, matching the per-entry
         //   semantics established in PR #3573 (serrrfirat P2 #3).
-        let CapabilityBatchInvocation {
+        let LoopRequestBatch {
             invocations,
             stop_on_first_suspension,
         } = request;
@@ -344,7 +345,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         }
 
         let mut slots: Vec<Slot> = Vec::with_capacity(invocations.len());
-        let mut pending: Vec<CapabilityInvocation> = Vec::new();
+        let mut pending: Vec<LoopRequest> = Vec::new();
         let mut stopped_in_preflight = false;
         for invocation in invocations {
             let provider = self
@@ -387,7 +388,7 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
             })
         } else {
             self.inner
-                .invoke_capability_batch(CapabilityBatchInvocation {
+                .invoke_capability_batch(LoopRequestBatch {
                     invocations: pending,
                     stop_on_first_suspension,
                 })
@@ -626,7 +627,7 @@ fn serialized_len(value: &serde_json::Value) -> Result<u64, serde_json::Error> {
 /// - **Not** suitable as a primary key for cross-process deduplication —
 ///   two distinct invocations with the same `input_ref` (rare but legal)
 ///   produce the same digest.
-fn invocation_arguments_digest(invocation: &CapabilityInvocation) -> [u8; 32] {
+fn invocation_arguments_digest(invocation: &LoopRequest) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     let cap = invocation.capability_id.to_string();
     hasher.update(&(cap.len() as u64).to_le_bytes());
@@ -712,7 +713,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            request: CapabilityInvocation,
+            request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             self.calls
                 .lock()
@@ -731,7 +732,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            request: CapabilityBatchInvocation,
+            request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             self.batch_calls.lock().expect("not poisoned").push(
                 request
@@ -880,8 +881,8 @@ mod tests {
     const SNAPSHOT_FIXTURE_DIGEST_HEX: &str =
         "4d0ab78e009b32615c2766bd1c26921bd59ef81b5741a75387707f82f0344315";
 
-    fn snapshot_fixture_invocation() -> CapabilityInvocation {
-        CapabilityInvocation {
+    fn snapshot_fixture_invocation() -> LoopRequest {
+        LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
                 "snapshot:v1",
@@ -929,7 +930,7 @@ mod tests {
     /// without auditing every caller that keys on `arguments_digest`.**
     #[test]
     fn invocation_arguments_digest_is_stable_for_known_inputs() {
-        let invocation = CapabilityInvocation {
+        let invocation = LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
                 "snapshot:v1",
@@ -975,13 +976,13 @@ mod tests {
             }
             async fn invoke_capability(
                 &self,
-                _request: CapabilityInvocation,
+                _request: LoopRequest,
             ) -> Result<Resolution, AgentLoopHostError> {
                 unreachable!("snapshot test never invokes through inner port")
             }
             async fn invoke_capability_batch(
                 &self,
-                _request: CapabilityBatchInvocation,
+                _request: LoopRequestBatch,
             ) -> Result<ResolutionBatch, AgentLoopHostError> {
                 unreachable!("snapshot test never invokes through inner port")
             }
@@ -992,7 +993,7 @@ mod tests {
             StdArc::new(HookDispatcher::new(HookRegistry::new())),
             TenantId::new("alpha").expect("ok"),
         );
-        let invocation = CapabilityInvocation {
+        let invocation = LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
                 "snapshot:v1",
@@ -1051,7 +1052,7 @@ mod tests {
         let dispatcher = dispatcher_with_capturing_hook(hook.clone());
         let wrapped = HookedLoopCapabilityPort::new(inner.clone(), dispatcher, tenant());
 
-        let batch = CapabilityBatchInvocation {
+        let batch = LoopRequestBatch {
             invocations: vec![snapshot_fixture_invocation(), snapshot_fixture_invocation()],
             stop_on_first_suspension: false,
         };
@@ -1096,7 +1097,7 @@ mod tests {
     fn invocation_arguments_digest_differs_for_different_input_refs() {
         let cap_id = CapabilityId::new("cap.x").expect("ok");
         let surface = ironclaw_turns::run_profile::CapabilitySurfaceVersion::new("v").expect("ok");
-        let a = CapabilityInvocation {
+        let a = LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.clone(),
             capability_id: cap_id.clone(),
@@ -1104,7 +1105,7 @@ mod tests {
             approval_resume: None,
             auth_resume: None,
         };
-        let b = CapabilityInvocation {
+        let b = LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface,
             capability_id: cap_id,
@@ -1118,8 +1119,8 @@ mod tests {
         );
     }
 
-    fn invocation(capability: &str) -> CapabilityInvocation {
-        CapabilityInvocation {
+    fn invocation(capability: &str) -> LoopRequest {
+        LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1").expect("ok"),
             capability_id: CapabilityId::new(capability).expect("ok"),
@@ -1201,7 +1202,7 @@ mod tests {
         let (dispatcher, _) = dispatcher_with_deny_hook();
         let wrapped = HookedLoopCapabilityPort::new(inner.clone(), dispatcher, tenant());
 
-        let batch = CapabilityBatchInvocation {
+        let batch = LoopRequestBatch {
             invocations: vec![invocation("cap.alpha"), invocation("cap.beta")],
             stop_on_first_suspension: false,
         };
@@ -1390,7 +1391,7 @@ mod tests {
             }
             async fn invoke_capability(
                 &self,
-                _request: CapabilityInvocation,
+                _request: LoopRequest,
             ) -> Result<Resolution, AgentLoopHostError> {
                 Err(AgentLoopHostError::new(
                     ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
@@ -1399,7 +1400,7 @@ mod tests {
             }
             async fn invoke_capability_batch(
                 &self,
-                _request: CapabilityBatchInvocation,
+                _request: LoopRequestBatch,
             ) -> Result<ResolutionBatch, AgentLoopHostError> {
                 // After the batched-dispatch refactor, the wrapper forwards
                 // hook-allowed invocations as a single batched call. Surface
@@ -1452,7 +1453,7 @@ mod tests {
         let wrapped =
             HookedLoopCapabilityPort::new(Arc::new(FailingPort), Arc::new(dispatcher), tenant());
 
-        let batch = CapabilityBatchInvocation {
+        let batch = LoopRequestBatch {
             invocations: vec![invocation("cap.x")],
             stop_on_first_suspension: false,
         };
@@ -1478,7 +1479,7 @@ mod tests {
         let dispatcher = Arc::new(HookDispatcher::new(HookRegistry::new()));
         let wrapped = HookedLoopCapabilityPort::new(inner.clone(), dispatcher, tenant());
 
-        let batch = CapabilityBatchInvocation {
+        let batch = LoopRequestBatch {
             invocations: vec![invocation("cap.alpha"), invocation("cap.beta")],
             stop_on_first_suspension: false,
         };
@@ -1519,7 +1520,7 @@ mod tests {
         let (dispatcher, _) = dispatcher_with_restricted_hook("allowing", Box::new(AllowingHook));
         let wrapped = HookedLoopCapabilityPort::new(inner.clone(), dispatcher, tenant());
 
-        let batch = CapabilityBatchInvocation {
+        let batch = LoopRequestBatch {
             invocations: vec![
                 invocation("cap.alpha"),
                 invocation("cap.beta"),
@@ -1576,7 +1577,7 @@ mod tests {
         );
         let wrapped = HookedLoopCapabilityPort::new(inner.clone(), dispatcher, tenant());
 
-        let batch = CapabilityBatchInvocation {
+        let batch = LoopRequestBatch {
             invocations: vec![
                 invocation("cap.alpha"),
                 invocation("cap.beta"),
@@ -1654,7 +1655,7 @@ mod tests {
         let inner = Arc::new(AlwaysCompletedPort::new());
         let wrapped = HookedLoopCapabilityPort::new(inner.clone(), Arc::new(dispatcher), tenant());
 
-        let batch = CapabilityBatchInvocation {
+        let batch = LoopRequestBatch {
             invocations: vec![
                 invocation("cap.alpha"),
                 invocation("cap.beta"),
@@ -1819,12 +1820,12 @@ mod tests {
 
     #[async_trait]
     impl CapabilityInputResolver for ProbingResolver {
-        async fn resolve(&self, _invocation: &CapabilityInvocation) -> Option<serde_json::Value> {
+        async fn resolve(&self, _invocation: &LoopRequest) -> Option<serde_json::Value> {
             self.resolve_calls.fetch_add(1, AtomicOrdering::SeqCst);
             Some(self.value.clone())
         }
 
-        async fn size_hint(&self, _invocation: &CapabilityInvocation) -> Option<u64> {
+        async fn size_hint(&self, _invocation: &LoopRequest) -> Option<u64> {
             self.size_hint_calls.fetch_add(1, AtomicOrdering::SeqCst);
             self.size
         }
@@ -2010,15 +2011,12 @@ mod tests {
         }
         #[async_trait]
         impl CapabilityInputResolver for OrderingResolver {
-            async fn resolve(
-                &self,
-                _invocation: &CapabilityInvocation,
-            ) -> Option<serde_json::Value> {
+            async fn resolve(&self, _invocation: &LoopRequest) -> Option<serde_json::Value> {
                 let s = self.sequence.fetch_add(1, AtomicOrdering::SeqCst) + 1;
                 self.resolve_seq.store(s, AtomicOrdering::SeqCst);
                 Some(serde_json::json!({"amount": 1}))
             }
-            async fn size_hint(&self, _invocation: &CapabilityInvocation) -> Option<u64> {
+            async fn size_hint(&self, _invocation: &LoopRequest) -> Option<u64> {
                 let s = self.sequence.fetch_add(1, AtomicOrdering::SeqCst) + 1;
                 self.size_hint_seq.store(s, AtomicOrdering::SeqCst);
                 Some(self.size)
@@ -2302,7 +2300,7 @@ mod tests {
         // Phase 1 (beta was the suspension trigger), pushes alpha, then
         // breaks before reaching beta's slot — dropping beta's observer
         // and outcome.
-        let batch = CapabilityBatchInvocation {
+        let batch = LoopRequestBatch {
             invocations: vec![invocation("cap.alpha"), invocation("cap.beta")],
             stop_on_first_suspension: true,
         };

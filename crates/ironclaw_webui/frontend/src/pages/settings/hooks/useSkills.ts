@@ -55,7 +55,9 @@ export function useSkills() {
           auto_activate_learned: enabled,
         };
       });
-      queryClient.invalidateQueries({ queryKey: ["skills"] });
+      // Keep the active view on the mutation-confirmed value while marking the
+      // cached list stale for the next normal refresh.
+      queryClient.invalidateQueries({ queryKey: ["skills"], refetchType: "none" });
     },
   });
 
@@ -78,6 +80,10 @@ export function useSkills() {
     isRemoving: removeMutation.isPending,
     isUpdating: updateMutation.isPending,
     isSettingAutoActivate: autoActivateMutation.isPending,
-    isSettingAutoActivateLearned: learnedAutoActivateMutation.isPending,
+    // The card renders before the initial skills request settles. Keep its
+    // toggle disabled until that authoritative value arrives so an older GET
+    // cannot overwrite a mutation-confirmed cache update.
+    isSettingAutoActivateLearned:
+      query.isLoading || learnedAutoActivateMutation.isPending,
   };
 }

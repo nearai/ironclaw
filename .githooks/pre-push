@@ -24,12 +24,6 @@ echo "==> static: hermetic env mutation"
 if [ "${IRONCLAW_STRICT_DELTA_LINT:-0}" = "1" ]; then
     "$SCRIPT_DIR/delta_lint.sh" "$1"
 elif [ "${IRONCLAW_STRICT_LINT:-0}" = "1" ]; then
-    echo "==> clippy (strict: all warnings, default features)"
-    cargo clippy --locked --all-targets -- -D warnings
-    # Feature-matrix leg: the libsql-only build gates a distinct set of
-    # `cfg`/`dead_code` lints that default-feature clippy never sees — the
-    # class that reds `Clippy (libsql-only)` on main (e.g. the `Prebuilt`
-    # dead_code break, #5840). Cheap relative to a full test run.
-    echo "==> clippy (strict: libsql-only feature leg)"
-    cargo clippy --locked --no-default-features --features libsql --all-targets -- -D warnings
+    echo "==> clippy (strict: all warnings, all targets)"
+    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 fi

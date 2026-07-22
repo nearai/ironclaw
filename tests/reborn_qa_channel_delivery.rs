@@ -1,15 +1,13 @@
-//! QA use-case coverage for channel (Slack-shaped) inbound/outbound flows:
+//! QA use-case coverage for channel (Slack-shaped) inbound flows:
 //!
 //! - "In Slack, in a DM with IronClaw, ask a detailed strategy question"
 //!   → Slack reply that answers the question.
 //! - "In Slack, send a message starting with 'bug:'" → the logging action
 //!   runs and the bug is acknowledged.
-//! - Outbound replies must deliver to the reply target bound to the Slack
-//!   installation that received the inbound message.
 //!
-//! Inbound Slack traffic is simulated through the harness product adapter
-//! (verified protocol auth evidence, Slack-shaped adapter installation id);
-//! outbound delivery is asserted through the recording delivery sink.
+//! Inbound Slack traffic is driven through the binary-e2e harness. Outbound
+//! reply-target delivery coverage moved to the `ChannelAdapter` contract in
+//! P7b (DEL-5) — see the removed-test note at the bottom of this file.
 
 #[allow(dead_code)]
 #[path = "support/reborn_parity_qa/mod.rs"]
@@ -20,22 +18,13 @@ mod reborn_support;
 mod support;
 
 use ironclaw_loop_host::HostManagedModelResponse;
-use ironclaw_product_adapters::{
-    DeliveryStatus, ExternalConversationRef, FakeProtocolHttpEgress, FinalReplyView,
-    ProductAdapter, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductRenderOutcome, ProjectionCursor,
-};
 use ironclaw_threads::{MessageKind, MessageStatus};
-use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId, TurnStatus};
+use ironclaw_turns::TurnStatus;
 use parity_qa_support::binary_e2e::{
     RebornBinaryE2EHarness, RebornHarnessSharedStorage, trace_tool_call_response,
 };
-use parity_qa_support::delivery::RecordingOutboundDeliverySink;
 use parity_qa_support::model_replay::RebornTraceReplayModelGateway;
-use reborn_support::{
-    harness::{RecordingTestCapabilityPort, test_product_scope},
-    test_adapter::RebornTestProductAdapter,
-};
+use reborn_support::harness::{RecordingTestCapabilityPort, test_product_scope};
 
 const SLACK_ADAPTER_ID: &str = "slack-v2";
 const SLACK_INSTALLATION_ID: &str = "install-qa-slack";
@@ -162,44 +151,12 @@ async fn reborn_qa_slack_bug_prefix_message_runs_logging_action() {
     harness.shutdown().await;
 }
 
-#[tokio::test]
-async fn reborn_qa_slack_outbound_reply_delivers_to_bound_reply_target() {
-    let adapter = RebornTestProductAdapter::new(SLACK_ADAPTER_ID, SLACK_INSTALLATION_ID)
-        .expect("slack-shaped adapter");
-    let target =
-        ReplyTargetBindingRef::new("reply:install-qa-slack:dm-alice").expect("reply target");
-    let sink = RecordingOutboundDeliverySink::new();
-    let egress = FakeProtocolHttpEgress::new(["slack.example.test".to_string()]);
-
-    let envelope = ProductOutboundEnvelope::new(
-        adapter.adapter_id().clone(),
-        adapter.installation_id().clone(),
-        ProductOutboundTarget::new(
-            target.clone(),
-            ExternalConversationRef::new(None, "dm-alice", None, None).expect("conversation ref"),
-            None,
-        ),
-        ProjectionCursor::new("cursor:qa-slack-outbound").expect("projection cursor"),
-        ProductOutboundPayload::FinalReply(FinalReplyView {
-            turn_run_id: TurnRunId::new(),
-            text: "Here is the summary you asked for".to_string(),
-            generated_at: chrono::Utc::now(),
-        }),
-    );
-
-    let outcome = adapter
-        .render_outbound(envelope, &egress, &sink)
-        .await
-        .expect("render slack outbound");
-    assert_eq!(outcome, ProductRenderOutcome::DeliveryRecorded);
-
-    let statuses = sink.statuses();
-    assert_eq!(statuses.len(), 1, "exactly one delivery should be recorded");
-    assert!(
-        matches!(
-            &statuses[0],
-            DeliveryStatus::Delivered { target: delivered, .. } if delivered == &target
-        ),
-        "the Slack reply must deliver to the reply target bound to the inbound DM; statuses={statuses:?}"
-    );
-}
+// The retired `ProductAdapter::render_outbound` outbound-delivery test
+// (`reborn_qa_slack_outbound_reply_delivers_to_bound_reply_target`) was removed
+// in P7b (DEL-5). Live coverage of outbound reply-target delivery and
+// per-installation routing lives on the `ChannelAdapter` contract:
+// `run_channel_adapter_conformance` (deliver drives the vendor server, every
+// part Sent), the `DeliveryCoordinator` suite in
+// `crates/ironclaw_product_workflow/tests/outbound_delivery_contract.rs`
+// (`coordinator_notice_is_source_routed_and_persists_before_egress` et al.),
+// and `tests/reborn_adapter_installation_scope_isolation_parity.rs`.

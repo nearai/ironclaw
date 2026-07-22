@@ -9,11 +9,11 @@
 //! - the OAuth public router from `webui_v2_auth_router` (mints
 //!   sessions),
 //! - a `SessionAuthenticator` backed by the SAME
-//!   `InMemorySessionStore` (validates bearers),
+//!   `SignedTokenSessionStore` (validates bearers),
 //! - a minimal `RebornServicesApi` stub that only implements
 //!   `create_thread` for the round-trip assertion.
 //!
-//! The chain it locks: OAuth callback → SessionStore::create_session
+//! The chain it locks: OAuth callback → SignedTokenSessionStore::create_session
 //! → one-time `login_ticket` exchange → SessionAuthenticator → v2
 //! route handler → facade call. A regression that loses any link
 //! (e.g. store mismatch, bearer exchange drift, missing user_id
@@ -51,11 +51,12 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_webui::{
-    EmailUserDirectory, InMemorySessionStore, OAuthProvider, OAuthProviderName, OAuthRouterConfig,
-    OAuthUserProfile, SessionAuthenticator, SessionStore, webui_v2_auth_router,
+    EmailUserDirectory, OAuthProvider, OAuthProviderName, OAuthRouterConfig, OAuthUserProfile,
+    SessionAuthenticator, SignedTokenSessionStore, signed_session_store, webui_v2_auth_router,
 };
 use ironclaw_webui::{WebuiServeConfig, webui_v2_app};
 use parking_lot::Mutex as PlMutex;
+use secrecy::SecretString;
 use serde::Deserialize;
 use tower::ServiceExt;
 
@@ -377,14 +378,21 @@ fn state_from_location(location: &str) -> String {
     panic!("no state in {location}");
 }
 
-fn build_app() -> (axum::Router, Arc<StubServices>, Arc<InMemorySessionStore>) {
-    let session_store: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
+fn build_app() -> (
+    axum::Router,
+    Arc<StubServices>,
+    Arc<SignedTokenSessionStore>,
+) {
+    let session_store = signed_session_store(
+        &SecretString::from("operator-secret".to_string()),
+        &TenantId::new(TENANT).expect("tenant"),
+    );
     let bearer_authenticator = Arc::new(SessionAuthenticator::new(session_store.clone()));
 
     let oauth_mount = webui_v2_auth_router(
         OAuthRouterConfig::new(
             TenantId::new(TENANT).expect("tenant"),
-            session_store.clone() as Arc<dyn SessionStore>,
+            session_store.clone(),
             Arc::new(EmailUserDirectory),
             vec![StubProvider::new(alice_profile()) as Arc<dyn OAuthProvider>],
             "https://gateway.example",
@@ -480,7 +488,14 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
     );
     let ticket = ticket_from_landing(&landing);
     let bearer = redeem_ticket(app.clone(), &ticket).await;
-    assert_eq!(session_store.len(), 1, "session must be persisted");
+    assert!(
+        session_store
+            .lookup(&bearer)
+            .await
+            .expect("lookup")
+            .is_some(),
+        "session must authenticate after ticket exchange",
+    );
 
     // 3. Use the bearer on a protected WebChat v2 route. This is
     //    the contract the issue #4116 acceptance criterion calls
@@ -536,7 +551,14 @@ async fn session_minted_via_oauth_callback_authenticates_protected_v2_route() {
         .await
         .expect("oneshot");
     assert_eq!(logout.status(), StatusCode::NO_CONTENT);
-    assert_eq!(session_store.len(), 0, "session must be revoked");
+    assert!(
+        session_store
+            .lookup(&bearer)
+            .await
+            .expect("lookup")
+            .is_none(),
+        "session must be revoked",
+    );
 
     let post_logout = app
         .oneshot(with_peer(

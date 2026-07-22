@@ -128,9 +128,9 @@ run_cargo_test() {
   local filter="${2:-}"
 
   if [[ -n "${filter}" ]]; then
-    run_with_timeout cargo test --features libsql --test "${test_target}" "${filter}" -- --ignored --nocapture --test-threads=1
+    run_with_timeout cargo test --test "${test_target}" "${filter}" -- --ignored --nocapture --test-threads=1
   else
-    run_with_timeout cargo test --features libsql --test "${test_target}" -- --ignored --nocapture --test-threads=1
+    run_with_timeout cargo test --test "${test_target}" -- --ignored --nocapture --test-threads=1
   fi
 }
 

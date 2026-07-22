@@ -501,7 +501,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "onboarding_state": "auth_required",
                 }
             if method == "POST" and path == "/api/reborn/product-auth/accounts/list":
-                self.assertEqual(payload["provider"], "slack_personal")
+                self.assertEqual(payload["provider"], "slack")
                 self.assertEqual(payload["requester_extension"], "slack")
                 self.assertEqual(payload["invocation_id"], "invocation-slack")
                 self.assertEqual(payload["thread_id"], "thread-slack")
@@ -509,8 +509,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "accounts": [
                         {
                             "id": "slack-account",
-                            "provider": "slack_personal",
-                            "label": "slack_personal",
+                            "provider": "slack",
+                            "label": "slack",
                             "status": "configured",
                             "ownership": "user_reusable",
                             "secret_handle_count": 1,
@@ -518,12 +518,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     ]
                 }
             if method == "POST" and path == "/api/webchat/v2/extensions/slack/setup/oauth/start":
-                self.assertEqual(payload["provider"], "slack_personal")
+                self.assertEqual(payload["provider"], "slack")
                 self.assertEqual(payload["scopes"], [])
                 self.assertIsInstance(payload.get("invocation_id"), str)
                 self.assertIsInstance(payload.get("expires_at"), str)
                 return {
-                    "provider": "slack_personal",
+                    "provider": "slack",
                     "authorization_url": "https://slack.com/oauth/v2/authorize?user_scope=chat:write",
                     "flow_id": "flow-slack",
                     "status": "pending",
@@ -531,27 +531,32 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertEqual(method, "GET")
             if path == "/api/webchat/v2/extensions":
                 return {"extensions": []}
-            self.assertEqual(path, "/api/webchat/v2/channels/connectable")
+            self.assertEqual(path, "/api/webchat/v2/extensions/registry")
             return {
-                "channels": [
+                "entries": [
                     {
-                        "channel": "slack",
+                        "package_ref": {"kind": "extension", "id": "slack"},
                         "display_name": "Slack",
-                        "strategy": "admin_managed_channels",
-                        "action": {"title": "Choose Slack channel"},
-                    },
-                    {
-                        "channel": "slack",
-                        "display_name": "Slack",
-                        "strategy": "oauth",
-                        "action": {
-                            "title": "Slack account connection",
-                            "instructions": (
-                                "Connect Slack with OAuth from the extension "
-                                "configuration, then message the Slack bot directly."
-                            ),
-                        },
-                    },
+                        "runtime": "wasm",
+                        "installed": False,
+                        "surfaces": [
+                            {"kind": "tool"},
+                            {
+                                "kind": "channel",
+                                "inbound": True,
+                                "outbound": True,
+                                "connection": {
+                                    "channel": "slack",
+                                    "display_name": "Slack",
+                                    "strategy": "oauth",
+                                    "instructions": (
+                                        "Connect Slack with OAuth from the extension "
+                                        "configuration, then message Slack directly."
+                                    ),
+                                },
+                            },
+                        ],
+                    }
                 ]
             }
 
@@ -564,9 +569,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             "slack": {
                                 "enabled_in_config": True,
                                 "env_present": True,
-                                "setup": {
-                                    "configured": True,
-                                    "personal_oauth_ready": True,
+                                "setup_api": {
+                                    "status": {
+                                        "secrets": [
+                                            {
+                                                "name": "slack_user_token",
+                                                "optional": False,
+                                                "provided": True,
+                                            }
+                                        ]
+                                    }
                                 },
                                 "auth_test": {
                                     "ok": True,
@@ -644,24 +656,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         observed_expectations = [text for _selector, text, _timeout in expected_texts]
         self.assertIn("Channels", observed_expectations)
-        self.assertIn("Slack workspace setup", observed_expectations)
-        self.assertNotIn("Slack account connection", observed_expectations)
-        self.assertNotIn("Connect Slack with OAuth", observed_expectations)
-        self.assertNotIn("Connect Slack", observed_expectations)
-        self.assertNotIn("pairing code", observed_expectations)
+        self.assertIn("Slack", observed_expectations)
         self.assertFalse(any("/chat" in url for url, _wait in fake_page.gotos))
         self.assertEqual(
             result.details["slack_connect_surface"],
             "/extensions/channels",
         )
-        self.assertEqual(
-            result.details["slack_connect_title"],
-            "Slack account connection",
-        )
+        self.assertEqual(result.details["slack_catalog_source"], "registry")
+        self.assertEqual(result.details["slack_connection_strategy"], "oauth")
+        self.assertEqual(result.details["slack_connect_display_name"], "Slack")
         self.assertEqual(
             fetched_paths,
             [
-                "/api/webchat/v2/channels/connectable",
+                "/api/webchat/v2/extensions",
+                "/api/webchat/v2/extensions/registry",
                 "/api/webchat/v2/extensions",
                 "/api/webchat/v2/extensions/install",
                 "/api/reborn/product-auth/accounts/list",
@@ -680,12 +688,31 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         )
         self.assertEqual(
             result.details["slack_oauth_start_provider"],
-            "slack_personal",
+            "slack",
         )
         self.assertIn(
             "https://slack.com/oauth/v2/authorize",
             result.details["slack_oauth_start_url"],
         )
+
+    def test_webui_json_preserves_non_json_error_body_without_double_read(self):
+        class FakePage:
+            async def evaluate(self, source: str, _args: dict[str, object]):
+                self.source = source
+                return {"status": 404, "body": "route not found"}
+
+        page = FakePage()
+        with self.assertRaisesRegex(AssertionError, "HTTP 404: 'route not found'"):
+            asyncio.run(
+                run_live_qa._webui_json(
+                    page,
+                    "GET",
+                    "/api/webchat/v2/missing",
+                )
+            )
+
+        self.assertIn("await response.text()", page.source)
+        self.assertNotIn("await response.json()", page.source)
 
     def test_slack_connect_case_fails_on_workspace_mismatch(self):
         async def fail_if_page_opens(*_args, **_kwargs) -> None:
@@ -703,10 +730,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             "slack": {
                                 "enabled_in_config": True,
                                 "env_present": True,
-                                "setup": {
-                                    "configured": True,
-                                    "team_id": "T-BOT",
-                                    "personal_oauth_ready": True,
+                                "setup_api": {
+                                    "status": {
+                                        "secrets": [
+                                            {
+                                                "name": "slack_user_token",
+                                                "optional": False,
+                                                "provided": True,
+                                            }
+                                        ]
+                                    }
                                 },
                                 "auth_test": {
                                     "ok": True,
@@ -775,9 +808,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             "slack": {
                                 "enabled_in_config": True,
                                 "env_present": True,
-                                "setup": {
-                                    "configured": True,
-                                    "personal_oauth_ready": True,
+                                "setup_api": {
+                                    "status": {
+                                        "secrets": [
+                                            {
+                                                "name": "slack_user_token",
+                                                "optional": False,
+                                                "provided": True,
+                                            }
+                                        ]
+                                    }
                                 },
                                 "auth_test": {
                                     "ok": True,
@@ -838,11 +878,20 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                             "slack": {
                                 "enabled_in_config": True,
                                 "env_present": True,
-                                "setup": {
-                                    "configured": True,
-                                    "personal_oauth_ready": False,
-                                    "oauth_client_id_configured": False,
-                                    "oauth_client_secret_configured": False,
+                                "setup_api": {
+                                    "status": {
+                                        "package_ref": {
+                                            "kind": "extension",
+                                            "id": "slack",
+                                        },
+                                        "secrets": [
+                                            {
+                                                "name": "slack_user_token",
+                                                "optional": False,
+                                                "provided": False,
+                                            }
+                                        ],
+                                    }
                                 },
                                 "auth_test": {
                                     "ok": True,
@@ -883,7 +932,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 )
 
         self.assertFalse(result.success)
-        self.assertIn("personal OAuth", str(result.details["error"]))
+        self.assertIn("generic setup projection", str(result.details["error"]))
+        self.assertIn("slack_user_token", str(result.details["error"]))
 
     def test_slack_connect_instruction_validation_accepts_oauth_copy(self):
         self.assertTrue(
@@ -3838,7 +3888,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertEqual(result.details["delivery_target_present"], True)
         self.assertIn("preflight", result.details)
 
-    def test_start_reborn_server_sets_slack_personal_oauth_redirect(self):
+    def test_start_reborn_server_sets_slack_oauth_redirect(self):
         captured: dict[str, object] = {}
 
         class FakeProcess:
@@ -3883,7 +3933,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"],
             (
                 "http://127.0.0.1:38555"
-                "/api/reborn/product-auth/oauth/slack_personal/callback"
+                "/api/reborn/product-auth/oauth/slack/callback"
             ),
         )
 
@@ -3954,7 +4004,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             env["IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI"],
             (
                 "http://127.0.0.1:38555"
-                "/api/reborn/product-auth/oauth/slack_personal/callback"
+                "/api/reborn/product-auth/oauth/slack/callback"
             ),
         )
 
@@ -4603,6 +4653,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
     def test_slack_side_effect_setup_prompts_avoid_connect_action_trigger(self):
         captured_prompts: dict[str, str] = {}
         captured_slack_required_text: list[str] = []
+        captured_slack_event_texts: list[str] = []
         document_id = "1DocCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
         spreadsheet_id = "1AbCdEfGhIjKlMnOpQrStUvWxYz_1234567890"
 
@@ -4622,7 +4673,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 details={"text_excerpt": f"Created {file_url}"},
             )
 
-        async def fake_post_signed_slack_dm_event(*_args, **_kwargs):
+        async def fake_post_signed_slack_dm_event(*_args, **kwargs):
+            captured_slack_event_texts.append(kwargs["text"])
             return {"ok": True}
 
         async def fake_slack_history_contains_marker(*_args, **kwargs):
@@ -4693,6 +4745,11 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertTrue(
             any(text.startswith("QA5D-NONCE-") for text in captured_slack_required_text)
         )
+        qa_5d_event_text = captured_slack_event_texts[0]
+        self.assertNotIn("In Slack", qa_5d_event_text)
+        self.assertNotIn("Expected result", qa_5d_event_text)
+        self.assertIn("What is the strategy north star", qa_5d_event_text)
+        self.assertIn(f"https://docs.google.com/document/d/{document_id}/edit", qa_5d_event_text)
 
     def test_signed_slack_event_cases_resolve_inbound_user_without_legacy_config(self):
         for case_name in (
@@ -4714,6 +4771,62 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
 
                 self.assertEqual(user_id, "U0REBORNQA")
                 self.assertNotIn("slack_user_id", config_path.read_text(encoding="utf-8"))
+
+    def test_signed_slack_event_uses_extension_scoped_ingress_route(self):
+        posted_urls: list[str] = []
+
+        class FakeResponse:
+            status_code = 200
+            text = "ok"
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+            async def post(self, url, **_kwargs):
+                posted_urls.append(url)
+                return FakeResponse()
+
+        fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ctx = run_live_qa.LiveQaContext(
+                base_url="http://127.0.0.1:3000",
+                output_dir=root,
+                reborn_home=root / "reborn-home",
+                env={"IRONCLAW_REBORN_SLACK_SIGNING_SECRET": "signing-secret"},
+            )
+            with (
+                patch.dict(sys.modules, {"httpx": fake_httpx}),
+                patch.object(
+                    run_live_qa,
+                    "_slack_preflight",
+                    return_value={
+                        "auth_test": {"ok": True, "team_id": "T123"},
+                        "secret_source": {"api_app_id": "A123"},
+                    },
+                ),
+            ):
+                asyncio.run(
+                    run_live_qa._post_signed_slack_dm_event(
+                        ctx,
+                        channel_id="D123",
+                        user_id="U123",
+                        text="hello",
+                        event_id="Ev123",
+                    )
+                )
+
+        self.assertEqual(
+            posted_urls,
+            ["http://127.0.0.1:3000/webhooks/extensions/slack/events"],
+        )
 
     def test_signed_slack_event_cases_prefer_real_route_user_actor_without_legacy_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -4776,7 +4889,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 dm_row = db.execute(
                     """
                     SELECT path, contents FROM root_filesystem_entries
-                    WHERE path LIKE '%/slack-personal-binding/dm-targets/%'
+                    WHERE path LIKE '%/shared/channel-dm-targets/%'
                     """
                 ).fetchone()
                 row = db.execute(
@@ -4788,8 +4901,8 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertIsNotNone(dm_row)
             self.assertEqual(
                 dm_row[0],
-                "/tenants/reborn-cli/shared/slack-personal-binding/dm-targets/"
-                "aW5zdGFsbC1hbHBoYQ/VDEyMw/dXNlcjp3ZWI.json",
+                "/tenants/reborn-cli/shared/channel-dm-targets/"
+                "c2xhY2s/dXNlcjp3ZWI.json",
             )
             self.assertIsNotNone(row)
             preference = json.loads(row[1])
@@ -4809,6 +4922,12 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             self.assertIn("actor_kind:10:slack_user;", preference["final_reply_target"])
             self.assertIn("actor:7:UQAUSER;", preference["final_reply_target"])
             self.assertEqual(preference["updated_by"], "user:web")
+            self.assertEqual(
+                result["identity_binding"]["provider_user_id"],
+                "slack:UQAUSER",
+                "generic identity scope uses the installed extension id, while the "
+                "outbound target retains the external Slack installation id",
+            )
 
     def test_slack_personal_dm_lookup_requires_exact_user_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5145,11 +5264,36 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                         ),
                     ),
                 )
+                db.execute(
+                    "INSERT INTO root_filesystem_entries(path, contents) VALUES (?, ?)",
+                    (
+                        "/tenants/reborn-cli/shared/channel-extensions/slack/"
+                        "product-workflow/idempotency/actions/event.json",
+                        json.dumps(
+                            {
+                                "fingerprint": {
+                                    "external_event_id": (
+                                        "slack-slack-EvREBORNQA7D456"
+                                    )
+                                },
+                                "dispatch_kind": {
+                                    "user_message_turn": {
+                                        "run_id": "run-from-generic-ingress"
+                                    }
+                                },
+                            }
+                        ),
+                    ),
+                )
                 db.commit()
 
             self.assertEqual(
                 run_live_qa._slack_event_run_id_for_event(home, "EvREBORNQA5D123"),
                 "run-from-dispatch",
+            )
+            self.assertEqual(
+                run_live_qa._slack_event_run_id_for_event(home, "EvREBORNQA7D456"),
+                "run-from-generic-ingress",
             )
 
     def test_wait_for_google_sheet_marker_after_slack_event_approves_gate(self):
@@ -5443,7 +5587,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 ).fetchone()
             self.assertIsNotNone(account_row)
             account = json.loads(account_row[0])
-            self.assertEqual(account["provider"], "slack_personal")
+            self.assertEqual(account["provider"], "slack")
             self.assertEqual(account["status"], "configured")
             self.assertEqual(account["provider_identity"]["subject"], "U123")
             self.assertEqual(account["provider_identity"]["team_id"], "T123")
@@ -5525,10 +5669,16 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "IRONCLAW_REBORN_SLACK_SIGNING_SECRET": "signing-secret",
                     "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET": "oauth-secret",
                 },
+                bot_user_id="U-BOT",
+                shared_subject_user_id="user:web",
             )
 
         self.assertIsNotNone(payload)
         self.assertEqual(payload.get("oauth_client_id"), "persisted-client-id")
+        self.assertEqual(payload.get("bot_user_id"), "U-BOT")
+        self.assertEqual(payload.get("shared_subject_user_id"), "user:web")
+        self.assertEqual(payload.get("allowed_channels"), "[]")
+        self.assertEqual(payload.get("subject_routes"), "{}")
         self.assertTrue(preflight["personal_oauth_ready"])
 
     def test_slack_setup_payload_prefers_env_oauth_client_id(self):
@@ -5555,12 +5705,55 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                     "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID": "fresh-client-id",
                     "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET": "oauth-secret",
                 },
+                bot_user_id="U-BOT",
+                shared_subject_user_id="user:web",
             )
 
         self.assertIsNotNone(payload)
         self.assertEqual(payload.get("oauth_client_id"), "fresh-client-id")
         self.assertEqual(preflight["oauth_client_id"], "fresh-client-id")
         self.assertTrue(preflight["personal_oauth_ready"])
+
+    def test_slack_setup_payload_requires_oauth_client_material(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reborn_home = Path(tmpdir) / "reborn-home"
+            db_path = reborn_home / "local-dev" / "reborn-local-dev.db"
+            run_live_qa._root_filesystem_create_table(db_path)
+            run_live_qa._put_root_filesystem_json(
+                db_path,
+                "/tenants/reborn-cli/shared/slack-setup/installation.json",
+                {
+                    "installation_id": "local-dev-installation",
+                    "team_id": "T123",
+                    "api_app_id": "A123",
+                },
+            )
+            base_env = {
+                "IRONCLAW_REBORN_SLACK_BOT_TOKEN": "xoxb-bot",
+                "IRONCLAW_REBORN_SLACK_SIGNING_SECRET": "signing-secret",
+            }
+            cases = {
+                "oauth_client_id": {
+                    **base_env,
+                    "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_SECRET": "oauth-secret",
+                },
+                "oauth_client_secret": {
+                    **base_env,
+                    "REBORN_WEBUI_V2_LIVE_QA_SLACK_OAUTH_CLIENT_ID": "oauth-client-id",
+                },
+            }
+            for missing_name, env in cases.items():
+                with self.subTest(missing=missing_name):
+                    payload, preflight = run_live_qa._slack_setup_payload(
+                        reborn_home,
+                        "[slack]\nenabled = true\n",
+                        env,
+                        bot_user_id="U-BOT",
+                        shared_subject_user_id="user:web",
+                    )
+                    self.assertIsNone(payload)
+                    self.assertFalse(preflight["ready_for_api"])
+                    self.assertIn(missing_name, preflight["missing"])
 
     def test_slack_personal_auth_preflight_rejects_account_without_user_scope(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5627,7 +5820,29 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             async def __aexit__(self, _exc_type, _exc, _tb):
                 return None
 
-            async def put(self, *_args, **_kwargs):
+            async def get(self, url, **_kwargs):
+                if url.endswith("/api/webchat/v2/extensions"):
+                    return types.SimpleNamespace(
+                        status_code=200,
+                        json=lambda: {
+                            "extensions": [
+                                {"package_ref": {"kind": "extension", "id": "slack"}}
+                            ]
+                        },
+                    )
+                return types.SimpleNamespace(
+                    status_code=200,
+                    json=lambda: {
+                        "secrets": [
+                            {"name": "slack_bot_token"},
+                            {"name": "slack_signing_secret"},
+                            {"name": "slack_oauth_client_secret"},
+                        ],
+                        "fields": [],
+                    },
+                )
+
+            async def post(self, *_args, **_kwargs):
                 return FakeResponse()
 
         fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
@@ -5666,28 +5881,43 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 )
 
         error = str(raised.exception)
-        self.assertIn("Slack setup API returned HTTP 400", error)
+        self.assertIn("Extension setup API submit returned HTTP 400", error)
         self.assertIn("response body omitted", error)
         self.assertNotIn("xoxb-bot-token", error)
         self.assertNotIn("signing-secret-value", error)
         self.assertNotIn("oauth-client-secret-value", error)
         self.assertNotIn("echoed", error)
 
-    def test_slack_setup_api_requires_configured_status(self):
+    def test_slack_setup_api_uses_generic_manifest_declared_setup_contract(self):
+        requests: list[tuple[str, str, dict[str, object] | None]] = []
+
         class FakeResponse:
-            status_code = 200
+            def __init__(self, status_code: int, body: dict[str, object]):
+                self.status_code = status_code
+                self._body = body
 
             def json(self):
-                return {
-                    "configured": False,
-                    "installation_id": "install-123",
-                    "team_id": "T123",
-                    "api_app_id": "A123",
-                    "bot_token_configured": True,
-                    "signing_secret_configured": False,
-                    "oauth_client_id_configured": True,
-                    "oauth_client_secret_configured": False,
-                }
+                return self._body
+
+        setup_projection = {
+            "package_ref": {"kind": "extension", "id": "slack"},
+            "phase": "installed",
+            "secrets": [
+                {"name": "slack_bot_token", "provided": False},
+                {"name": "slack_signing_secret", "provided": False},
+                {"name": "slack_oauth_client_secret", "provided": False},
+            ],
+            "fields": [
+                {"name": "slack_installation_id"},
+                {"name": "slack_team_id"},
+                {"name": "slack_api_app_id"},
+                {"name": "slack_bot_user_id"},
+                {"name": "slack_shared_subject_user_id"},
+                {"name": "slack_oauth_client_id"},
+                {"name": "slack_allowed_channels"},
+                {"name": "slack_subject_routes"},
+            ],
+        }
 
         class FakeAsyncClient:
             def __init__(self, *args, **kwargs):
@@ -5699,8 +5929,307 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             async def __aexit__(self, _exc_type, _exc, _tb):
                 return None
 
-            async def put(self, *_args, **_kwargs):
-                return FakeResponse()
+            async def get(self, url, **_kwargs):
+                requests.append(("GET", url, None))
+                if url.endswith("/api/webchat/v2/extensions"):
+                    list_count = sum(
+                        method == "GET" and request_url == url
+                        for method, request_url, _payload in requests
+                    )
+                    return FakeResponse(
+                        200,
+                        {
+                            "extensions": [
+                                {
+                                    "package_ref": {"kind": "extension", "id": "slack"},
+                                    "active": list_count > 1,
+                                    "authenticated": list_count > 1,
+                                    "needs_setup": list_count <= 1,
+                                }
+                            ]
+                        },
+                    )
+                return FakeResponse(200, setup_projection)
+
+            async def post(self, url, *, json=None, **_kwargs):
+                requests.append(("POST", url, json))
+                if url.endswith("/activate"):
+                    return FakeResponse(
+                        200,
+                        {"success": True, "activated": True, "message": "Slack activated"},
+                    )
+                configured = {
+                    **setup_projection,
+                    "secrets": [
+                        {"name": secret["name"], "provided": True}
+                        for secret in setup_projection["secrets"]
+                    ],
+                }
+                return FakeResponse(200, configured)
+
+        fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reborn_home = Path(tmpdir) / "reborn-home"
+            reborn_home.mkdir()
+            (reborn_home / "config.toml").write_text(
+                "[slack]\nenabled = true\n",
+                encoding="utf-8",
+            )
+            prepared = run_live_qa.PreparedRebornHome(path=reborn_home)
+            with (
+                patch.dict(sys.modules, {"httpx": fake_httpx}),
+                patch.object(
+                    run_live_qa,
+                    "_slack_setup_payload",
+                    return_value=(
+                        {
+                            "installation_id": "install-123",
+                            "team_id": "T123",
+                            "api_app_id": "A123",
+                            "bot_user_id": "U-BOT",
+                            "shared_subject_user_id": "user:web",
+                            "bot_token": "xoxb-bot-token",
+                            "signing_secret": "signing-secret-value",
+                            "oauth_client_id": "oauth-client-id",
+                            "oauth_client_secret": "oauth-client-secret-value",
+                            "allowed_channels": "[]",
+                            "subject_routes": "{}",
+                        },
+                        {},
+                    ),
+                ),
+            ):
+                result = asyncio.run(
+                    run_live_qa._apply_slack_setup_api_after_start(
+                        base_url="http://127.0.0.1:38555",
+                        prepared_home=prepared,
+                    )
+                )
+
+        setup_url = "http://127.0.0.1:38555/api/webchat/v2/extensions/slack/setup"
+        self.assertEqual(
+            requests,
+            [
+                (
+                    "GET",
+                    "http://127.0.0.1:38555/api/webchat/v2/extensions",
+                    None,
+                ),
+                ("GET", setup_url, None),
+                (
+                    "POST",
+                    setup_url,
+                    {
+                        "action": "submit",
+                        "payload": {
+                            "secrets": {
+                                "slack_bot_token": "xoxb-bot-token",
+                                "slack_signing_secret": "signing-secret-value",
+                                "slack_oauth_client_secret": "oauth-client-secret-value",
+                            },
+                            "fields": {
+                                "slack_installation_id": "install-123",
+                                "slack_team_id": "T123",
+                                "slack_api_app_id": "A123",
+                                "slack_bot_user_id": "U-BOT",
+                                "slack_shared_subject_user_id": "user:web",
+                                "slack_oauth_client_id": "oauth-client-id",
+                                "slack_allowed_channels": "[]",
+                                "slack_subject_routes": "{}",
+                            },
+                        },
+                    },
+                ),
+                (
+                    "POST",
+                    "http://127.0.0.1:38555/api/webchat/v2/extensions/slack/activate",
+                    {},
+                ),
+                (
+                    "GET",
+                    "http://127.0.0.1:38555/api/webchat/v2/extensions",
+                    None,
+                ),
+            ],
+        )
+        self.assertTrue(result["applied"])
+        self.assertEqual(
+            result["request"]["secret_handles"],
+            [
+                "slack_bot_token",
+                "slack_oauth_client_secret",
+                "slack_signing_secret",
+            ],
+        )
+        self.assertEqual(
+            result["request"]["field_handles"],
+            [
+                "slack_allowed_channels",
+                "slack_api_app_id",
+                "slack_bot_user_id",
+                "slack_installation_id",
+                "slack_oauth_client_id",
+                "slack_shared_subject_user_id",
+                "slack_subject_routes",
+                "slack_team_id",
+            ],
+        )
+        self.assertTrue(result["activation"]["verified_active"])
+
+    def test_slack_setup_api_requires_fully_ready_activation_projection(self):
+        class FakeResponse:
+            def __init__(self, body: dict[str, object]):
+                self.status_code = 200
+                self._body = body
+
+            def json(self):
+                return self._body
+
+        list_count = 0
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+            async def get(self, url, **_kwargs):
+                nonlocal list_count
+                if url.endswith("/api/webchat/v2/extensions"):
+                    list_count += 1
+                    return FakeResponse(
+                        {
+                            "extensions": [
+                                {
+                                    "package_ref": {
+                                        "kind": "extension",
+                                        "id": "slack",
+                                    },
+                                    "active": list_count > 1,
+                                    "authenticated": False,
+                                    "needs_setup": True,
+                                }
+                            ]
+                        }
+                    )
+                return FakeResponse(
+                    {
+                        "package_ref": {"kind": "extension", "id": "slack"},
+                        "phase": "installed",
+                        "secrets": [
+                            {
+                                "name": "slack_bot_token",
+                                "optional": False,
+                                "provided": False,
+                            }
+                        ],
+                        "fields": [{"name": "slack_team_id", "optional": False}],
+                    }
+                )
+
+            async def post(self, url, **_kwargs):
+                if url.endswith("/activate"):
+                    return FakeResponse({"success": True, "activated": True})
+                return FakeResponse(
+                    {
+                        "package_ref": {"kind": "extension", "id": "slack"},
+                        "phase": "installed",
+                        "secrets": [
+                            {
+                                "name": "slack_bot_token",
+                                "optional": False,
+                                "provided": True,
+                            }
+                        ],
+                        "fields": [{"name": "slack_team_id", "optional": False}],
+                    }
+                )
+
+        fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
+        with (
+            patch.dict(sys.modules, {"httpx": fake_httpx}),
+            self.assertRaises(run_live_qa.LiveQaError) as raised,
+        ):
+            asyncio.run(
+                run_live_qa._apply_extension_setup_api_after_start(
+                    base_url="http://127.0.0.1:38555",
+                    package_id="slack",
+                    values={"bot_token": "xoxb-bot", "team_id": "T123"},
+                )
+            )
+
+        self.assertIn("authenticated=true", str(raised.exception))
+        self.assertIn("needs_setup=false", str(raised.exception))
+
+    def test_slack_setup_api_requires_secret_presence_projection(self):
+        class FakeResponse:
+            status_code = 200
+
+            def __init__(self, body):
+                self.body = body
+
+            def json(self):
+                return self.body
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return None
+
+            async def get(self, url, **_kwargs):
+                if url.endswith("/api/webchat/v2/extensions"):
+                    return FakeResponse(
+                        {
+                            "extensions": [
+                                {"package_ref": {"kind": "extension", "id": "slack"}}
+                            ]
+                        }
+                    )
+                return FakeResponse(
+                    {
+                        "package_ref": {"kind": "extension", "id": "slack"},
+                        "phase": "installed",
+                        "secrets": [
+                            {"name": "slack_bot_token", "provided": False},
+                            {"name": "slack_signing_secret", "provided": False},
+                            {"name": "slack_oauth_client_secret", "provided": False},
+                        ],
+                        "fields": [
+                            {"name": "slack_installation_id"},
+                            {"name": "slack_team_id"},
+                            {"name": "slack_api_app_id"},
+                            {"name": "slack_oauth_client_id"},
+                        ],
+                    }
+                )
+
+            async def post(self, *_args, **_kwargs):
+                return FakeResponse(
+                    {
+                        "package_ref": {"kind": "extension", "id": "slack"},
+                        "phase": "installed",
+                        "secrets": [
+                            {"name": "slack_bot_token", "provided": True},
+                            {"name": "slack_signing_secret", "provided": False},
+                            {"name": "slack_oauth_client_secret", "provided": False},
+                        ],
+                        "fields": [
+                            {"name": "slack_installation_id"},
+                            {"name": "slack_team_id"},
+                            {"name": "slack_api_app_id"},
+                            {"name": "slack_oauth_client_id"},
+                        ],
+                    }
+                )
 
         fake_httpx = types.SimpleNamespace(AsyncClient=FakeAsyncClient)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -5739,10 +6268,9 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
                 )
 
         error = str(raised.exception)
-        self.assertIn("incomplete setup status", error)
-        self.assertIn("configured", error)
-        self.assertIn("signing_secret_configured", error)
-        self.assertIn("oauth_client_secret_configured", error)
+        self.assertIn("incomplete setup projection", error)
+        self.assertIn("slack_signing_secret", error)
+        self.assertIn("slack_oauth_client_secret", error)
         self.assertNotIn("xoxb-bot-token", error)
         self.assertNotIn("signing-secret-value", error)
         self.assertNotIn("oauth-client-secret-value", error)
@@ -7753,9 +8281,10 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
         self.assertIn("if ! (", prepare_body)
         self.assertIn("validate_reborn_binary_artifact.py", prepare_body)
         self.assertIn(
-            "libsql",
+            '"${TARGET_REF}" \\\n                ""',
             prepare_body,
         )
+        self.assertIn("--argjson features '[]'", prepare_body)
         self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", prepare_body)
         self.assertIn(
             "ironclaw-reborn.tar.gz ironclaw ironclaw-reborn",
@@ -7773,10 +8302,7 @@ class RebornWebUiV2LiveQaRunnerTests(unittest.TestCase):
             "github.event.pull_request.head.sha",
             reborn_e2e,
         )
-        self.assertIn(
-            '["libsql"]',
-            reborn_e2e,
-        )
+        self.assertIn("--argjson features '[]'", reborn_e2e)
         self.assertIn("cp target/debug/ironclaw target/debug/ironclaw-reborn", reborn_e2e)
         self.assertIn(
             "ironclaw-reborn.tar.gz\" ironclaw ironclaw-reborn",

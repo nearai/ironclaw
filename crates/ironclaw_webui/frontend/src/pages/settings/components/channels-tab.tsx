@@ -30,13 +30,17 @@ function BuiltinChannelCard({ name, description, enabled, detail = "" }) {
   );
 }
 
+function packageId(item) {
+  return item?.package_ref?.id || "";
+}
+
 function ExtensionChannelCard({ channel = null, registryEntry }) {
   const t = useT();
   const name =
     registryEntry?.display_name ||
     channel?.display_name ||
-    channel?.name ||
-    registryEntry?.name ||
+    packageId(channel) ||
+    packageId(registryEntry) ||
     t("common.unknown");
   const desc = registryEntry?.description || channel?.description || "";
   const isInstalled = Boolean(channel);
@@ -122,8 +126,6 @@ function deriveVisibleChannelGroups({
   status,
   channels,
   channelRegistry,
-  mcpServers,
-  mcpRegistry,
   searchQuery,
   t,
 }) {
@@ -136,42 +138,22 @@ function deriveVisibleChannelGroups({
       channel.detail,
     ])
   );
-  const installedNames = new Set(channels.map((c) => c.name));
+  const installedIds = new Set(channels.map((channel) => packageId(channel)));
   const visibleChannels = channels.filter((channel) =>
     matchesSearch(searchQuery, [
       t("channels.messaging"),
-      channel.name,
+      packageId(channel),
       channel.display_name,
       channel.description,
       channel.onboarding_state,
     ])
   );
   const availableRegistry = channelRegistry
-    .filter((r) => !installedNames.has(r.name))
+    .filter((entry) => !installedIds.has(packageId(entry)))
     .filter((entry) =>
       matchesSearch(searchQuery, [
         t("channels.messaging"),
-        entry.name,
-        entry.display_name,
-        entry.description,
-      ])
-    );
-  const installedMcpNames = new Set(mcpServers.map((m) => m.name));
-  const visibleMcpServers = mcpServers.filter((server) =>
-    matchesSearch(searchQuery, [
-      t("channels.mcpServers"),
-      server.name,
-      server.display_name,
-      server.description,
-      server.active ? t("channels.active") : t("channels.inactive"),
-    ])
-  );
-  const availableMcp = mcpRegistry
-    .filter((r) => !installedMcpNames.has(r.name))
-    .filter((entry) =>
-      matchesSearch(searchQuery, [
-        t("channels.mcpServers"),
-        entry.name,
+        packageId(entry),
         entry.display_name,
         entry.description,
       ])
@@ -181,8 +163,6 @@ function deriveVisibleChannelGroups({
     builtInChannels,
     visibleChannels,
     availableRegistry,
-    visibleMcpServers,
-    availableMcp,
   };
 }
 
@@ -192,8 +172,6 @@ export function ChannelsTab({ searchQuery = "" }) {
     status,
     channels,
     channelRegistry,
-    mcpServers,
-    mcpRegistry,
     isLoading,
   } = useChannels();
 
@@ -222,14 +200,10 @@ export function ChannelsTab({ searchQuery = "" }) {
     builtInChannels,
     visibleChannels,
     availableRegistry,
-    visibleMcpServers,
-    availableMcp,
   } = deriveVisibleChannelGroups({
     status,
     channels,
     channelRegistry,
-    mcpServers,
-    mcpRegistry,
     searchQuery,
     t,
   });
@@ -237,9 +211,7 @@ export function ChannelsTab({ searchQuery = "" }) {
   if (
     builtInChannels.length === 0 &&
     visibleChannels.length === 0 &&
-    availableRegistry.length === 0 &&
-    visibleMcpServers.length === 0 &&
-    availableMcp.length === 0
+    availableRegistry.length === 0
   ) {
     return (<SettingsSearchEmpty query={searchQuery} />);
   }
@@ -279,78 +251,18 @@ export function ChannelsTab({ searchQuery = "" }) {
           {visibleChannels.map(
             (ch) => (
               <ExtensionChannelCard
-                key={ch.name}
+                key={packageId(ch)}
                 channel={ch}
-                registryEntry={channelRegistry.find((r) => r.name === ch.name)}
+                registryEntry={channelRegistry.find(
+                  (entry) => packageId(entry) === packageId(ch)
+                )}
               />
             )
           )}
           {availableRegistry.map(
-            (r) => (
-              <ExtensionChannelCard key={r.name} registryEntry={r} />
+            (entry) => (
+              <ExtensionChannelCard key={packageId(entry)} registryEntry={entry} />
             )
-          )}
-        </Card>
-      )}
-      {(visibleMcpServers.length > 0 || availableMcp.length > 0) &&
-      (
-        <Card padding="md">
-          <h3
-            className="mb-4 font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--v2-accent-text)]"
-          >
-            {t("channels.mcpServers")}
-          </h3>
-          {visibleMcpServers.map(
-            (m) =>
-              (
-                <div
-                  key={m.name}
-                  className="flex items-start justify-between gap-4 border-t border-[var(--v2-panel-border)] py-4 first:border-0 first:pt-0"
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-[var(--v2-text)]"
-                        >{m.display_name || m.name}</span
-                      >
-                      <Badge
-                        tone={m.active ? "positive" : "muted"}
-                        label={m.active
-                          ? t("channels.active")
-                          : t("channels.inactive")}
-                        size="sm"
-                      />
-                    </div>
-                    <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
-                      {m.description || ""}
-                    </div>
-                  </div>
-                </div>
-              )
-          )}
-          {availableMcp.map(
-            (r) =>
-              (
-                <div
-                  key={r.name}
-                  className="flex items-start justify-between gap-4 border-t border-[var(--v2-panel-border)] py-4 first:border-0 first:pt-0"
-                >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-[var(--v2-text)]"
-                        >{r.display_name || r.name}</span
-                      >
-                      <Badge
-                        tone="muted"
-                        label={t("channels.available")}
-                        size="sm"
-                      />
-                    </div>
-                    <div className="mt-1 text-xs text-[var(--v2-text-muted)]">
-                      {r.description || ""}
-                    </div>
-                  </div>
-                </div>
-              )
           )}
         </Card>
       )}

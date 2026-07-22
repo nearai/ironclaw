@@ -112,7 +112,11 @@ impl<'a> OutboundPolicyService<'a> {
                     delivery_id: OutboundDeliveryId::new(),
                     scope: request.scope,
                     candidate: request.candidate,
-                    status: OutboundDeliveryStatus::Pending,
+                    // Coordinator lifecycle: persisted before any vendor
+                    // egress; the coordinator moves it Prepared→Sending. The
+                    // legacy `Pending` variant survives only for rows written
+                    // before the cutover.
+                    status: OutboundDeliveryStatus::Prepared,
                     attempted_at: request.attempted_at,
                     failure_kind: None,
                 };

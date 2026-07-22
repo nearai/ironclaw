@@ -19,14 +19,13 @@ use ironclaw_turns::{
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        BatchPolicyKind, CapabilityBatchInvocation, CapabilityDeniedReasonKind,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityProgress,
-        CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
+        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
+        CapabilityProgress, CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
         ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-        DeliveryTargetSummary, FinalizeAssistantMessage, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
-        InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
+        DeliveryTargetSummary, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
+        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
+        InstructionMaterializationStore, InstructionSafetyContext,
         LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
@@ -39,10 +38,11 @@ use ironclaw_turns::{
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
         LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
         LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome,
-        ModelWorkRequest, ParentLoopOutput, PromptMode, PromptSkillContextMetadata,
-        SkillTrustLevel, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRequest,
+        LoopRequestBatch, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
+        LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
+        PromptSkillContextMetadata, SkillTrustLevel, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, resolution,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -1474,7 +1474,7 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
             },
         ],
     };
-    let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let port = HostManagedLoopPromptPort::new(
         host.context.clone(),
         host.clone(),
@@ -1741,7 +1741,7 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
         host.milestone_sink.clone(),
     )
     .with_instruction_materialization_store(Arc::new(
-        InMemoryInstructionMaterializationStore::default(),
+        EphemeralInstructionMaterializationStore::default(),
     ));
 
     let bundle = port
@@ -2057,7 +2057,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
     };
-    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let materialization_store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let port = HostManagedLoopPromptPort::new(
         host.context.clone(),
         host.clone(),
@@ -2374,7 +2374,7 @@ async fn capability_invocations_must_cite_visible_surface_before_host_dispatch()
     let foreign = CapabilityId::new("demo.foreign").unwrap();
 
     let error = host
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
             capability_id: foreign,
@@ -2454,7 +2454,7 @@ fn loop_host_refs_validate_when_deserialized() {
         "capability_id": "demo.echo",
         "input_ref": {"raw": "RAW_AGENT_LOOP_HOST_SENTINEL"}
     });
-    assert!(serde_json::from_value::<CapabilityInvocation>(invalid_invocation).is_err());
+    assert!(serde_json::from_value::<LoopRequest>(invalid_invocation).is_err());
 
     let invalid_checkpoint = serde_json::json!({
         "kind": "before_block",
@@ -2652,7 +2652,7 @@ impl AgentLoopDriver for CapabilityDriver {
             .await
             .map_err(driver_error)?;
         let outcome = host
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: surface.descriptors[0].capability_id.clone(),
@@ -3222,7 +3222,7 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         if request.surface_version != self.visible_surface.version
             || !self
@@ -3251,7 +3251,7 @@ impl LoopCapabilityPort for RecordingAgentLoopHost {
 
     async fn invoke_capability_batch(
         &self,
-        _request: CapabilityBatchInvocation,
+        _request: LoopRequestBatch,
     ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         Ok(ironclaw_host_api::ResolutionBatch {
             resolutions: Vec::new(),
@@ -4262,6 +4262,7 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
                     name: "Slack".to_string(),
                     authenticated: true,
                     active: true,
+                    presentation: None,
                 }]),
                 delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
                     display_name: "#general".to_string(),

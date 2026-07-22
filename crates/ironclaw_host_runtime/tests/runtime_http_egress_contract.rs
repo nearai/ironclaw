@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
+// arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
@@ -8,11 +8,10 @@ use ironclaw_host_api::{
     AgentId, CapabilityHostHttpRequest, CapabilityId, CapabilitySet, CredentialStageError,
     ExecutionContext, ExtensionId, InvocationId, MountAlias, MountGrant, MountPermissions,
     MountView, NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
-    ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialInjection, RuntimeCredentialSource, RuntimeCredentialTarget,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeHttpSaveTarget, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
-    VirtualPath,
+    ProjectId, ResourceEstimate, ResourceScope, RuntimeCredentialInjection,
+    RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeKind,
+    ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     BuiltinObligationServices, RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
@@ -816,6 +815,68 @@ async fn host_http_egress_preserves_existing_path_encoding_when_rewriting_placeh
         requests[0].url,
         "https://api.example.test/v1/foo%20bar/sk-staged-secret/run%2Ftail"
     );
+}
+
+#[tokio::test]
+async fn host_http_egress_substitutes_brace_template_placeholder_within_a_segment() {
+    // Some vendor APIs fuse the credential into a path segment (the Telegram
+    // Bot API's `/bot<token>/method`); a `{placeholder}` template inside
+    // exactly one segment substitutes host-side. (The URL parser percent-
+    // encodes the braces; the rewriter matches the encoded form.)
+    let (_response, network_recorder) = execute_path_placeholder_egress(
+        "https://api.example.test/bot{__credential__}/sendMessage",
+        "__credential__",
+        "sk-staged-secret",
+    )
+    .await
+    .expect("brace-template placeholder should substitute");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/botsk-staged-secret/sendMessage"
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_accepts_colon_credential_values_in_path() {
+    // RFC 3986 allows `:` raw inside a path segment, and real vendor tokens
+    // carry it (a `<bot-id>:<secret>` token); everything else non-unreserved
+    // stays rejected.
+    let (_response, network_recorder) = execute_path_placeholder_egress(
+        "https://api.example.test/bot{__credential__}/sendMessage",
+        "__credential__",
+        "123456:telegram-token",
+    )
+    .await
+    .expect("pchar credential values are legal path material");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].url,
+        "https://api.example.test/bot123456:telegram-token/sendMessage"
+    );
+}
+
+#[tokio::test]
+async fn host_http_egress_rejects_mixed_placeholder_forms_before_transport() {
+    // One whole-segment occurrence plus one brace-template occurrence is two
+    // substitution sites — rejected before any transport activity.
+    let (error, network_recorder) = execute_path_placeholder_egress(
+        "https://api.example.test/__credential__/bot{__credential__}/run",
+        "__credential__",
+        "sk-staged-secret",
+    )
+    .await
+    .expect_err("mixed placeholder forms must be rejected");
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+    ));
+    assert!(error.to_string().contains("exactly once"));
+    assert!(network_recorder.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2536,7 +2597,7 @@ async fn mcp_http_client_reuses_product_auth_staged_credential_for_json_rpc_sess
                 },
                 Obligation::InjectCredentialAccountOnce {
                     handle: runtime_slot_handle.clone(),
-                    provider: RuntimeCredentialAccountProviderId::new("mcp").unwrap(),
+                    provider: VendorId::new("mcp").unwrap(),
                     setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
                     provider_scopes: Vec::new(),
                     requester_extension: ExtensionId::new("mcp").unwrap(),

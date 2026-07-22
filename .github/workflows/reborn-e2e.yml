@@ -179,13 +179,9 @@ jobs:
           cargo build
           -p ironclaw
           --bin ironclaw
-          --features test-support
 
-      - name: Mark E2E binary build
-        run: >-
-          touch
-          target/debug/.ironclaw-reborn-openai-compat.stamp
-          target/debug/.ironclaw-reborn-test-support.stamp
+      - name: Mark OpenAI-compatible binary build
+        run: touch target/debug/.ironclaw-reborn-openai-compat.stamp
 
       - name: Install Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -247,7 +243,7 @@ jobs:
           )
           jq -n \
             --arg product_ref "${product_ref}" \
-            --argjson features '["libsql"]' \
+            --argjson features '[]' \
             '{format_version: 1, product_ref: $product_ref, features: $features}' \
             > "${artifact_dir}/manifest.json"
           echo "product_ref=${product_ref}" >> "${GITHUB_OUTPUT}"

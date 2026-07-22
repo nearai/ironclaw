@@ -159,6 +159,11 @@ pub struct ExtensionManifest {
     pub runtime: ExtensionRuntime,
     pub host_apis: Vec<HostApiRefV2>,
     pub capabilities: Vec<CapabilityManifest>,
+    /// Surfaces projected by host API contract sections (channel and future
+    /// section-declared kinds); tool and auth surfaces derive from
+    /// capability declarations on demand — see
+    /// [`Self::capability_surfaces`].
+    pub host_api_surfaces: Vec<CapabilitySurfaceDeclV2>,
     /// Declarative hook entries the extension declared. Structurally
     /// validated by the v2 parser; projected into typed hook entries by the
     /// composition loader. Empty for the common no-hooks case.
@@ -166,42 +171,20 @@ pub struct ExtensionManifest {
 }
 
 impl ExtensionManifest {
+    /// Derived, order-stable projection of every product-facing surface this
+    /// manifest declares. See [`ExtensionManifestV2::capability_surfaces`]
+    /// for the derivation rules; this mirror carries the identical data.
+    pub fn capability_surfaces(&self) -> Vec<CapabilitySurfaceDeclV2> {
+        v2::capability_surfaces_from_parts(&self.capabilities, &self.host_api_surfaces)
+    }
+
     pub fn parse(
         input: &str,
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
-    ) -> Result<Self, ExtensionError> {
-        ExtensionManifestV2::parse(input, source, host_port_catalog)?.try_into()
-    }
-
-    pub fn parse_with_host_api_contracts(
-        input: &str,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
         registry: &HostApiContractRegistry,
     ) -> Result<Self, ExtensionError> {
-        ExtensionManifestV2::parse_with_host_api_contracts(
-            input,
-            source,
-            host_port_catalog,
-            registry,
-        )?
-        .try_into()
-    }
-
-    pub fn parse_with_optional_host_api_contracts(
-        input: &str,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
-        registry: &HostApiContractRegistry,
-    ) -> Result<Self, ExtensionError> {
-        ExtensionManifestV2::parse_with_optional_host_api_contracts(
-            input,
-            source,
-            host_port_catalog,
-            registry,
-        )?
-        .try_into()
+        ExtensionManifestV2::parse(input, source, host_port_catalog, registry)?.try_into()
     }
 
     pub fn runtime_kind(&self) -> RuntimeKind {
@@ -225,6 +208,7 @@ impl TryFrom<ExtensionManifestV2> for ExtensionManifest {
             runtime: ExtensionRuntime::from_v2(manifest.runtime)?,
             host_apis: manifest.host_apis,
             capabilities: manifest.capabilities,
+            host_api_surfaces: manifest.host_api_surfaces,
             hooks: manifest.hooks,
         })
     }
@@ -407,14 +391,21 @@ fn descriptors_match_except_schema(
         })
 }
 
+mod admin_configuration;
 mod canonicalization;
 pub mod host_api;
 mod hosted_mcp_discovery;
 mod installations;
 mod lifecycle;
 mod registry;
+pub mod resolved;
 pub mod v2;
+pub mod v3;
 
+pub use admin_configuration::{
+    AdminConfigurationDescriptorError, AdminConfigurationField, AdminConfigurationGroupId,
+    ExtensionAdminConfigurationDescriptor,
+};
 pub use host_api::capability_provider::{
     CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
 };
@@ -422,13 +413,19 @@ pub use hosted_mcp_discovery::{
     HostedMcpDiscoveredTool, HostedMcpDiscoveredToolAnnotations, is_hosted_http_mcp_package,
     package_with_discovered_hosted_mcp_tools,
 };
-pub use v2::{
-    CapabilityDeclV2, CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2,
-    HookSectionEntryV2, HostApiContractRegistry, HostApiId, HostApiManifestContext,
-    HostApiManifestContract, HostApiManifestProjection, HostApiMultiplicity, HostApiRefV2,
-    MANIFEST_SCHEMA_VERSION, MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS,
-    ManifestSectionPath, ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
+pub use resolved::{
+    ResolvedAuthSurface, ResolvedExtensionManifest, ResolvedHostApiRef, ResolvedMcpDeclaration,
+    ResolvedSectionSurface,
 };
+pub use v2::{
+    CapabilityDeclV2, CapabilitySurfaceDeclV2, CapabilityVisibility, ExtensionManifestV2,
+    ExtensionRuntimeV2, HookSectionEntryV2, HostApiContractRegistry, HostApiId,
+    HostApiManifestContext, HostApiManifestContract, HostApiManifestProjection,
+    HostApiMultiplicity, HostApiRefV2, HostApiSectionError, MANIFEST_SCHEMA_VERSION,
+    MAX_HOOK_ENTRY_BYTES, MAX_MANIFEST_BYTES, MAX_MANIFEST_HOOKS, ManifestSectionPath,
+    ManifestSource, ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
+};
+pub use v3::{MANIFEST_SCHEMA_VERSION_V3, ManifestV3Error};
 
 pub type CapabilityManifest = CapabilityDeclV2;
 
@@ -439,7 +436,7 @@ pub use installations::{
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
     ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
     ExtensionRemovalChannelId, ExtensionRemovalCleanupAdapterId, ExtensionRemovalCleanupBinding,
-    ExtensionRemovalCleanupRequirement, InMemoryExtensionInstallationStore, InstallationOwner,
+    ExtensionRemovalCleanupRequirement, FilesystemExtensionInstallationStore, InstallationOwner,
     ManifestHash,
 };
 pub use lifecycle::{
@@ -451,25 +448,6 @@ pub use registry::{ExtensionRegistry, SharedExtensionRegistry};
 pub struct ExtensionDiscovery;
 
 impl ExtensionDiscovery {
-    pub async fn discover<F>(
-        fs: &F,
-        root: &VirtualPath,
-    ) -> Result<ExtensionRegistry, ExtensionError>
-    where
-        F: RootFilesystem,
-    {
-        let host_port_catalog = HostPortCatalog::empty();
-        let host_api_contracts = HostApiContractRegistry::new();
-        Self::discover_with_manifest_contracts(
-            fs,
-            root,
-            ManifestSource::InstalledLocal,
-            &host_port_catalog,
-            &host_api_contracts,
-        )
-        .await
-    }
-
     pub async fn discover_with_manifest_contracts<F>(
         fs: &F,
         root: &VirtualPath,
@@ -664,12 +642,8 @@ impl ExtensionDiscovery {
         let text = String::from_utf8(bytes).map_err(|error| ExtensionError::ManifestParse {
             reason: error.to_string(),
         })?;
-        let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
-            &text,
-            source,
-            host_port_catalog,
-            host_api_contracts,
-        )?;
+        let manifest =
+            ExtensionManifest::parse(&text, source, host_port_catalog, host_api_contracts)?;
         if manifest.id != expected {
             return Err(ExtensionError::ManifestIdMismatch {
                 root: entry.path.clone(),
@@ -761,6 +735,7 @@ fn capability_descriptors_from_manifest(
                 runtime_credentials: capability.runtime_credentials.clone(),
                 network_targets: capability.network_targets.clone(),
                 resource_profile: capability.resource_profile.clone(),
+                origin_gate_matrix: capability.origin_gate_matrix.clone(),
             })
         })
         .collect()

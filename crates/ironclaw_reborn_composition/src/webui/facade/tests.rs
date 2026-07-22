@@ -1,17 +1,29 @@
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}
 use super::*;
 use async_trait::async_trait;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
     ExtensionManifest, ExtensionManifestRecord, ExtensionPackage, ExtensionRegistry,
-    InMemoryExtensionInstallationStore, ManifestSource,
+    FilesystemExtensionInstallationStore, ManifestSource,
 };
-use ironclaw_filesystem::DiskFilesystem;
+use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
     ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView,
     TenantId, UserId, VirtualPath,
 };
 use std::{path::Path, time::Duration};
+
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 #[tokio::test]
 async fn operator_tool_catalog_reads_shared_registry_updates() {
@@ -74,7 +86,10 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
              id = \"{ext}\"\nname = \"{ext}\"\nversion = \"0.1.0\"\n\
              description = \"test\"\ntrust = \"third_party\"\n\n\
              [runtime]\nkind = \"wasm\"\nmodule = \"wasm/{ext}.wasm\"\n\n\
-             [[capabilities]]\nid = \"{ext}.{capability}\"\ndescription = \"{capability}\"\n\
+             [[host_api]]\nid = \"ironclaw.capability_provider/v1\"\n\
+             section = \"capability_provider.tools\"\n\n\
+             [capability_provider.tools]\n\n\
+             [[capability_provider.tools.capabilities]]\nid = \"{ext}.{capability}\"\ndescription = \"{capability}\"\n\
              effects = [\"network\"]\ndefault_permission = \"ask\"\nvisibility = \"model\"\n\
              input_schema_ref = \"schemas/{capability}.input.json\"\n\
              output_schema_ref = \"schemas/{capability}.output.json\"\n"
@@ -84,6 +99,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
             None,
+            &product_extension_host_api_contract_registry().expect("contracts"),
         )
         .expect("manifest record")
     }
@@ -94,7 +110,7 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
 
     // Store: alice privately owns `market-data`; `hacker-news` is tenant-shared.
     // Wrapped so the test can inject an owner-read failure (#5525 review).
-    let store = Arc::new(OwnerReadFailingStore::default());
+    let store = Arc::new(OwnerReadFailingStore::new().await);
     for (ext, capability, owner) in [
         (
             "market-data",
@@ -213,10 +229,29 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
 /// Store wrapper that fails `list_installations` once when armed —
 /// injects the owner-read failure the settings catalog must fail closed
 /// on (#5525 review).
-#[derive(Default)]
 struct OwnerReadFailingStore {
-    inner: InMemoryExtensionInstallationStore,
+    inner: FilesystemExtensionInstallationStore,
     fail_list_installations: std::sync::atomic::AtomicBool,
+}
+
+impl OwnerReadFailingStore {
+    async fn new() -> Self {
+        Self {
+            inner: filesystem_installation_store().await,
+            fail_list_installations: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+async fn filesystem_installation_store() -> FilesystemExtensionInstallationStore {
+    FilesystemExtensionInstallationStore::load_at(
+        Arc::new(InMemoryBackend::new()),
+        VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+        HostPortCatalog::empty(),
+        ironclaw_extensions::HostApiContractRegistry::new(),
+    )
+    .await
+    .expect("filesystem store")
 }
 
 #[async_trait]
@@ -773,7 +808,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/{extension_id}.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.{capability_name}"
 description = "{capability_name}"
 effects = ["network"]
@@ -787,6 +828,7 @@ output_schema_ref = "schemas/{capability_name}.output.json"
         &manifest_toml,
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .expect("manifest parses");
     ExtensionPackage::from_manifest(

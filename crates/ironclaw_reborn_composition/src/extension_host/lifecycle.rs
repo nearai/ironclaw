@@ -4,14 +4,14 @@ use crate::local_dev_mounts::scoped_skill_management_mount_view;
 use async_trait::async_trait;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem};
 use ironclaw_host_api::{
-    HostApiError, HostPath, InvocationId, MountView, ResourceScope, RuntimeHttpEgress, UserId,
-    VirtualPath,
+    ExtensionId, HostApiError, HostPath, InstallationState, InvocationId, MountView, ResourceScope,
+    RuntimeHttpEgress, UserId, VirtualPath,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase,
-    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
-    LifecycleSkillSource, LifecycleSkillSummary, ProductWorkflowError,
+    LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
+    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
+    LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSkillSource,
+    LifecycleSkillSummary, ProductWorkflowError,
 };
 use ironclaw_skills::{
     SkillInstallRequest, SkillInstallSource, SkillManagementContext, SkillManagementError,
@@ -217,6 +217,7 @@ fn invalid_skill_context(error: impl std::fmt::Display) -> RebornLocalSkillManag
 pub(crate) struct RebornLocalLifecycleFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    channel_config: Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     credential_accounts: Option<Arc<dyn RuntimeCredentialAccountSelectionService>>,
 }
@@ -226,6 +227,7 @@ impl RebornLocalLifecycleFacade {
         Self {
             skill_management,
             extension_management: None,
+            channel_config: None,
             runtime_http_egress: None,
             credential_accounts: None,
         }
@@ -236,6 +238,14 @@ impl RebornLocalLifecycleFacade {
         extension_management: Arc<RebornLocalExtensionManagementPort>,
     ) -> Self {
         self.extension_management = Some(extension_management);
+        self
+    }
+
+    pub(crate) fn with_channel_config(
+        mut self,
+        channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
+    ) -> Self {
+        self.channel_config = Some(channel_config);
         self
     }
 
@@ -279,7 +289,7 @@ impl RebornLocalLifecycleFacade {
                 let count = matched_skills.len();
                 Ok(response_with_payload(
                     None,
-                    LifecyclePhase::Discovered,
+                    InstallationState::Installed,
                     LifecycleProductPayload::SkillSearch {
                         skills: matched_skills,
                         count,
@@ -304,7 +314,7 @@ impl RebornLocalLifecycleFacade {
                     .map_err(map_local_skill_management_error)?;
                 Ok(response_with_payload(
                     Some(skill_package_ref(&installed.name)?),
-                    LifecyclePhase::Installed,
+                    InstallationState::Installed,
                     LifecycleProductPayload::SkillInstall {
                         installed: true,
                         name: LifecyclePackageId::new(installed.name)?,
@@ -324,7 +334,7 @@ impl RebornLocalLifecycleFacade {
                     .map_err(map_local_skill_management_error)?;
                 Ok(response_with_payload(
                     Some(skill_package_ref(&removed.name)?),
-                    LifecyclePhase::Removed,
+                    InstallationState::Removed,
                     LifecycleProductPayload::SkillRemove {
                         removed: true,
                         name: LifecyclePackageId::new(removed.name)?,
@@ -447,9 +457,36 @@ impl RebornLocalLifecycleFacade {
                     .remove(package_ref, &scope, Some(&scope.user_id))
                     .await
             }
-            LifecycleProductAction::ExtensionAuth { package_ref }
-            | LifecycleProductAction::ExtensionConfigure { package_ref, .. } => {
+            LifecycleProductAction::ExtensionAuth { package_ref } => {
                 unsupported_extension_auth_configure_projection(Some(package_ref))
+            }
+            LifecycleProductAction::ExtensionConfigure {
+                package_ref,
+                payload,
+            } => {
+                // The configure half of the setup surface: validate + persist
+                // manifest-declared channel-config values (extension-runtime
+                // §6.4; a save against an active extension re-runs activation
+                // per §6.5). Auth keeps the unsupported projection above.
+                let (Some(extension_management), Some(channel_config)) =
+                    (&self.extension_management, &self.channel_config)
+                else {
+                    return unsupported_extension_auth_configure_projection(Some(package_ref));
+                };
+                let extension_id = ExtensionId::new(package_ref.id.as_str()).map_err(|error| {
+                    ProductWorkflowError::InvalidBindingRequest {
+                        reason: format!("invalid extension id: {error}"),
+                    }
+                })?;
+                let values = parse_channel_config_payload(payload.as_ref())?;
+                channel_config
+                    .save(&extension_id, values)
+                    .await
+                    .map_err(map_channel_config_error)?;
+                let caller = lifecycle_caller(&context)?;
+                let mut response = extension_management.project(package_ref, &caller).await?;
+                response.message = Some("channel configuration saved".to_string());
+                Ok(response)
             }
         }
     }
@@ -521,6 +558,23 @@ impl LifecycleProductFacade for RebornLocalLifecycleFacade {
         };
         extension_management.import_bundle(bundle).await
     }
+
+    /// Project the durable installation records' redacted `last_error` so the
+    /// extensions wire's `activation_error` reports *why* a `Failed` extension
+    /// failed. Reads the generic host's working records through the extension
+    /// management port (the same source the installation-state projection uses
+    /// to surface `Failed`). Empty when extension management is not composed.
+    async fn installed_activation_errors(
+        &self,
+        _context: LifecycleProductContext,
+    ) -> Result<std::collections::HashMap<String, String>, ProductWorkflowError> {
+        match &self.extension_management {
+            Some(extension_management) => {
+                extension_management.installation_activation_errors().await
+            }
+            None => Ok(std::collections::HashMap::new()),
+        }
+    }
 }
 
 fn skill_package_ref(name: &str) -> Result<LifecyclePackageRef, ProductWorkflowError> {
@@ -581,7 +635,7 @@ fn lifecycle_caller(context: &LifecycleProductContext) -> Result<UserId, Product
 
 pub(crate) fn response_with_payload(
     package_ref: Option<LifecyclePackageRef>,
-    phase: LifecyclePhase,
+    phase: InstallationState,
     payload: LifecycleProductPayload,
 ) -> LifecycleProductResponse {
     LifecycleProductResponse {
@@ -616,7 +670,7 @@ fn unsupported_projection(
 ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
-        LifecyclePhase::UnsupportedOrLegacy,
+        InstallationState::Unsupported,
         vec![LifecycleReadinessBlocker::runtime(Some(
             "extension_lifecycle_local_runtime_unwired".to_string(),
         ))?],
@@ -628,11 +682,51 @@ fn unsupported_extension_auth_configure_projection(
 ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
-        LifecyclePhase::UnsupportedOrLegacy,
+        InstallationState::Unsupported,
         vec![LifecycleReadinessBlocker::runtime(Some(
             "extension_auth_and_configure_not_yet_wired".to_string(),
         ))?],
     ))
+}
+
+/// Decode a configure payload: optional `fields` and `secrets` string maps,
+/// unioned into `(handle, value)` pairs (the service classifies each handle
+/// by its manifest descriptor, so which map a value rode in is advisory).
+fn parse_channel_config_payload(
+    payload: Option<&serde_json::Value>,
+) -> Result<Vec<(String, String)>, ProductWorkflowError> {
+    #[derive(Default, serde::Deserialize)]
+    struct ConfigurePayload {
+        #[serde(default)]
+        fields: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        secrets: std::collections::BTreeMap<String, String>,
+    }
+    let decoded = match payload {
+        Some(payload) => {
+            serde_json::from_value::<ConfigurePayload>(payload.clone()).map_err(|error| {
+                ProductWorkflowError::InvalidBindingRequest {
+                    reason: format!("invalid extension configure payload: {error}"),
+                }
+            })?
+        }
+        None => ConfigurePayload::default(),
+    };
+    Ok(decoded.fields.into_iter().chain(decoded.secrets).collect())
+}
+
+fn map_channel_config_error(
+    error: crate::extension_host::channel_config::ChannelConfigError,
+) -> ProductWorkflowError {
+    use crate::extension_host::channel_config::ChannelConfigError;
+    match error {
+        ChannelConfigError::Storage { reason } => ProductWorkflowError::Transient { reason },
+        ChannelConfigError::NotInstalled { .. }
+        | ChannelConfigError::UnknownField { .. }
+        | ChannelConfigError::Reactivation { .. } => ProductWorkflowError::InvalidBindingRequest {
+            reason: error.to_string(),
+        },
+    }
 }
 
 fn map_skill_error(error: SkillManagementError) -> ProductWorkflowError {
@@ -687,7 +781,7 @@ mod tests {
             })
             .await
             .expect("install skill");
-        assert_eq!(install.phase, LifecyclePhase::Installed);
+        assert_eq!(install.phase, InstallationState::Installed);
         assert_eq!(
             install.package_ref,
             Some(
@@ -710,7 +804,7 @@ mod tests {
             )
             .await
             .expect("list skills");
-        assert_eq!(list.phase, LifecyclePhase::Discovered);
+        assert_eq!(list.phase, InstallationState::Installed);
         let Some(LifecycleProductPayload::SkillSearch { count, .. }) = list.payload.as_ref() else {
             panic!("expected skill search payload");
         };
@@ -790,7 +884,7 @@ mod tests {
             )
             .await
             .expect("remove skill");
-        assert_eq!(remove.phase, LifecyclePhase::Removed);
+        assert_eq!(remove.phase, InstallationState::Removed);
         assert!(
             !storage_root
                 .join("skills/lifecycle-skill/SKILL.md")

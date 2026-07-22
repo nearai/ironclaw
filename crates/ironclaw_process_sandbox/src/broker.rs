@@ -138,7 +138,8 @@ impl SandboxBrokerPolicy {
                                 )
                     }
                     RuntimeCredentialTarget::QueryParam { .. }
-                    | RuntimeCredentialTarget::PathPlaceholder { .. } => false,
+                    | RuntimeCredentialTarget::PathPlaceholder { .. }
+                    | RuntimeCredentialTarget::BodyJsonPointer { .. } => false,
                 }
         })
     }

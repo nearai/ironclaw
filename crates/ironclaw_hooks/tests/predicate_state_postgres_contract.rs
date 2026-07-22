@@ -22,8 +22,6 @@
 //! table at the start of each, giving every contract a fresh-empty
 //! backend exactly as the in-memory factory does.
 
-#![cfg(feature = "postgres")]
-
 use std::sync::Arc;
 
 use deadpool_postgres::Pool;

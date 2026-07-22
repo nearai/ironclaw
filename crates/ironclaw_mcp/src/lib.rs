@@ -1,3 +1,4 @@
+// arch-exempt: large_file, targeted catalog parsing fix remains beside the existing MCP protocol parser pending the adapter module split, plan #4088
 //! MCP adapter contracts for IronClaw Reborn.
 //!
 //! `ironclaw_mcp` adapts manifest-declared MCP tools into IronClaw
@@ -1069,11 +1070,8 @@ fn parse_tools_list_result(value: &Value) -> Result<Vec<HostedMcpDiscoveredTool>
                 .get("description")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if description.len() > MAX_TOOL_DESCRIPTION_BYTES
-                || description.chars().any(is_unsupported_description_char)
-            {
-                return Err(invalid_tool_list());
-            }
+            let description = bound_mcp_tool_description(description, MAX_TOOL_DESCRIPTION_BYTES)
+                .ok_or_else(invalid_tool_list)?;
             let input_schema = tool
                 .get("inputSchema")
                 .filter(|schema| schema.is_object())
@@ -1160,6 +1158,34 @@ fn validate_mcp_schema_value(
 
 fn is_unsupported_description_char(value: char) -> bool {
     value.is_control() && !matches!(value, '\n' | '\r' | '\t')
+}
+
+/// Preserve a provider's otherwise-valid tool catalog when only descriptive
+/// prose exceeds the host display/prompt budget. Names and schemas remain
+/// fail-closed because truncating either could change capability semantics;
+/// descriptions are presentation metadata and can be safely bounded.
+fn bound_mcp_tool_description(value: &str, max_bytes: usize) -> Option<String> {
+    if value.chars().any(is_unsupported_description_char) {
+        return None;
+    }
+    if value.len() <= max_bytes {
+        return Some(value.to_string());
+    }
+
+    const TRUNCATION_MARKER: &str = "...";
+    if max_bytes <= TRUNCATION_MARKER.len() {
+        return Some(".".repeat(max_bytes));
+    }
+
+    let mut end = max_bytes - TRUNCATION_MARKER.len();
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let prefix = value.get(..end)?;
+    let mut bounded = String::with_capacity(max_bytes);
+    bounded.push_str(prefix);
+    bounded.push_str(TRUNCATION_MARKER);
+    Some(bounded)
 }
 
 fn parse_tool_annotations(
@@ -1688,8 +1714,7 @@ mod tests {
         let credential = RuntimeCredentialRequirement {
             handle: SecretHandle::new("google-drive-access").unwrap(),
             source: RuntimeCredentialRequirementSource::ProductAuthAccount {
-                provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google")
-                    .unwrap(),
+                provider: ironclaw_host_api::VendorId::new("google").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                     scopes: scopes.clone(),
                 },
@@ -1713,8 +1738,7 @@ mod tests {
         assert_eq!(
             context.credential_requirements,
             vec![RuntimeCredentialAuthRequirement {
-                provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google")
-                    .unwrap(),
+                provider: ironclaw_host_api::VendorId::new("google").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes },
                 requester_extension: ExtensionId::new("google-drive").unwrap(),
                 provider_scopes: vec!["https://www.googleapis.com/auth/drive.readonly".to_string()],
@@ -1743,6 +1767,20 @@ mod tests {
             .expect_err("unsupported description control characters must fail");
 
         assert_eq!(error, "mcp_invalid_tool_list");
+    }
+
+    #[test]
+    fn parse_tools_list_result_bounds_utf8_description_at_character_boundary() {
+        let mut tool = valid_tool("search", json!({"type": "object"}));
+        tool["description"] = json!("🔧".repeat(600));
+
+        let tools = parse_tools_list_result(&json!({ "tools": [tool] }))
+            .expect("descriptive prose must not invalidate the catalog");
+        let description = &tools[0].description;
+
+        assert!(description.len() <= 2_048);
+        assert!(description.ends_with("..."));
+        assert!(description.is_char_boundary(description.len()));
     }
 
     #[test]

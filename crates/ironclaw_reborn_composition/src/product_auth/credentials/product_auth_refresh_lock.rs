@@ -1,12 +1,14 @@
-//! Deployment-wide leader-lock for the background credential keepalive worker.
+//! Deployment-wide leader-lock for the engine-owned credential keepalive
+//! sweep (`ironclaw_auth::keepalive`).
 //!
 //! # Leader-lock model
 //!
-//! Only ONE process per deployment should sweep all Google credential accounts
-//! and refresh idle tokens per tick. This module provides a utility the worker
-//! uses to elect a single leader per tick:
+//! Only ONE process per deployment should sweep credential accounts and
+//! refresh idle tokens per tick. This module provides the composition-side
+//! [`ironclaw_auth::KeepaliveLeaderLock`] implementation the sweep uses to
+//! elect a single leader per tick:
 //!
-//! - **Postgres path**: the worker calls [`CredentialRefreshLeaderLock::run_as_leader`]
+//! - **Postgres path**: the sweep calls [`CredentialRefreshLeaderLock::run_as_leader`]
 //!   each tick. That call opens a transaction and tries
 //!   `pg_try_advisory_xact_lock` using a single fixed deployment-wide key. If
 //!   the lock is already held by another process, the current process is not the
@@ -14,7 +16,7 @@
 //!   lock is acquired, the sweep runs inside the transaction, which is then
 //!   committed (releasing the lock) and [`LeaderOutcome::Ran`] is returned. A
 //!   single connection is held only for the duration of the sweep; because the
-//!   worker ticks at ~6 h the connection cost is negligible.
+//!   sweep ticks at ~6 h the connection cost is negligible.
 //!
 //!   The lock is **transaction-level**, not session-level, on purpose: a
 //!   transaction-level advisory lock is released automatically when the
@@ -25,6 +27,10 @@
 //! - **libsql / single-process path** (`pool = None`): this process is
 //!   trivially the only process, so the sweep always runs. No connection is
 //!   held.
+//!
+//! The sweep itself — recipe-threshold selection, refresh, scheduling — is
+//! engine-owned (`ironclaw_auth::keepalive`); composition contributes only
+//! this deployment-topology-aware election.
 //!
 //! # Two-layer concurrency ownership
 //!
@@ -58,7 +64,6 @@
 //! guard inside `ProviderBackedCredentialAccountService` still prevents local
 //! stampede if connectivity recovers mid-tick.
 
-#[cfg(feature = "postgres")]
 use tracing::debug;
 
 // ---------------------------------------------------------------------------
@@ -68,33 +73,24 @@ use tracing::debug;
 // worker leader election" in the Postgres advisory-lock namespace.
 // These were chosen as stable constants; do NOT derive them from a runtime
 // value — the key must be identical across all processes in the deployment.
-#[cfg(feature = "postgres")]
 const KEEPALIVE_LOCK_KEY: (i32, i32) = (0x4B45_4550i32, 0x414C_4956i32); // "KEEP", "ALIV"
 
 // ---------------------------------------------------------------------------
-// Public outcome type
+// Public outcome type — shared with the engine sweep
 // ---------------------------------------------------------------------------
 
-/// Outcome of [`CredentialRefreshLeaderLock::run_as_leader`].
-pub(crate) enum LeaderOutcome<T> {
-    /// Another process holds the leader lock; sweep was skipped.
-    ///
-    /// Only constructed on the Postgres path; under non-postgres builds the
-    /// worker is always the trivial leader, so this variant is unreachable.
-    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
-    NotLeader,
-    /// This process was the leader; the sweep ran and returned `result`.
-    Ran(T),
-}
+pub(crate) use ironclaw_auth::LeaderOutcome;
 
 // ---------------------------------------------------------------------------
 // Leader-lock utility
 // ---------------------------------------------------------------------------
 
-/// Deployment-wide leader-lock for the background credential keepalive worker.
+/// Deployment-wide leader-lock for the engine-owned credential keepalive
+/// sweep.
 ///
-/// Constructed by the composition root (`runtime.rs`) and threaded into the
-/// worker's [`crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerDeps`].
+/// Constructed by the composition root and threaded into the sweep's
+/// [`ironclaw_auth::KeepaliveSweepDeps`] as its
+/// [`ironclaw_auth::KeepaliveLeaderLock`].
 ///
 /// The Postgres pool is intentionally `Option`: `None` on the libsql /
 /// local-dev path means this process is trivially the leader (single writer by
@@ -103,27 +99,15 @@ pub(crate) struct CredentialRefreshLeaderLock {
     /// Postgres pool for leader-lock acquisition. `None` on the libsql /
     /// local-dev path → always-leader (pass-through). MUST stay private;
     /// never exposed through any public API or the composition facade.
-    #[cfg(feature = "postgres")]
     pool: Option<deadpool_postgres::Pool>,
-    /// Marker field so the struct is non-empty when the postgres feature is
-    /// off. ZST — zero runtime cost.
-    #[cfg(not(feature = "postgres"))]
-    _marker: (),
 }
 
 impl CredentialRefreshLeaderLock {
     /// Build a leader lock backed by a Postgres pool (Postgres path).
     ///
     /// Pass `None` for `pool` to get the always-leader (libsql) behaviour.
-    #[cfg(feature = "postgres")]
     pub(crate) fn new(pool: Option<deadpool_postgres::Pool>) -> Self {
         Self { pool }
-    }
-
-    /// Build an always-leader lock (no pool, libsql / local-dev path).
-    #[cfg(not(feature = "postgres"))]
-    pub(crate) fn always_leader() -> Self {
-        Self { _marker: () }
     }
 
     /// Try to become the deployment-wide sweep leader for one tick.
@@ -141,14 +125,18 @@ impl CredentialRefreshLeaderLock {
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = T>,
     {
-        #[cfg(feature = "postgres")]
-        {
-            if let Some(pool) = &self.pool {
-                return run_as_leader_postgres(pool, sweep).await;
-            }
+        if let Some(pool) = &self.pool {
+            return run_as_leader_postgres(pool, sweep).await;
         }
-        // No pool (libsql / local-dev / no-postgres): trivially the leader.
+        // No pool (libsql / local-dev): trivially the leader.
         LeaderOutcome::Ran(sweep().await)
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_auth::KeepaliveLeaderLock for CredentialRefreshLeaderLock {
+    async fn run_as_leader(&self, sweep: ironclaw_auth::KeepaliveSweepFuture) -> LeaderOutcome<()> {
+        CredentialRefreshLeaderLock::run_as_leader(self, move || sweep).await
     }
 }
 
@@ -156,7 +144,6 @@ impl CredentialRefreshLeaderLock {
 // Postgres leader-lock logic
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "postgres")]
 async fn run_as_leader_postgres<F, Fut, T>(
     pool: &deadpool_postgres::Pool,
     sweep: F,
@@ -256,9 +243,6 @@ mod tests {
     /// On the no-pool path the sweep always runs.
     #[tokio::test]
     async fn always_leader_runs_sweep() {
-        #[cfg(not(feature = "postgres"))]
-        let lock = CredentialRefreshLeaderLock::always_leader();
-        #[cfg(feature = "postgres")]
         let lock = CredentialRefreshLeaderLock::new(None);
 
         let ran = Arc::new(AtomicBool::new(false));
@@ -279,9 +263,6 @@ mod tests {
     /// Sweep runs twice on successive calls (no state leaks between calls).
     #[tokio::test]
     async fn always_leader_runs_sweep_twice() {
-        #[cfg(not(feature = "postgres"))]
-        let lock = CredentialRefreshLeaderLock::always_leader();
-        #[cfg(feature = "postgres")]
         let lock = CredentialRefreshLeaderLock::new(None);
 
         let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));

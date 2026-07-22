@@ -63,9 +63,8 @@ pub trait UserDirectory: Send + Sync + 'static {
 /// is available. Production deployments should swap this for a
 /// DB-backed impl that joins to the real user table.
 ///
-/// Gated behind `test-support` for the same reason
-/// [`crate::InMemorySessionStore`] is: a production binary cannot
-/// accidentally name this impl as its `UserDirectory` — that would
+/// Gated behind `test-support` so a production binary cannot accidentally name
+/// this impl as its `UserDirectory` — that would
 /// trust the provider's `sub` blindly without a join against the
 /// installation's user table.
 #[cfg(any(test, feature = "test-support"))]

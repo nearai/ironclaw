@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
+// arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 //! Filesystem-backed implementations of the scoped secret and credential stores.
 //!
 //! Routes persistence through the unified
@@ -239,6 +239,20 @@ where
         }
     }
 
+    /// Like [`FilesystemSecretStore::ephemeral`], but over a caller-supplied
+    /// backend mounted under the same tenant-rewriting `/secrets` view and an
+    /// ephemeral master key.
+    ///
+    /// The seam for fault testing: wrap the backend in
+    /// `ironclaw_filesystem::FaultInjecting` and drive the **real** store
+    /// against injected backend faults, exercising its encryption, CAS write,
+    /// and `FilesystemError -> SecretStoreError` mapping — instead of
+    /// substituting a whole-trait `SecretStore` fake that runs none of that.
+    pub fn ephemeral_over(backend: Arc<F>) -> Self {
+        let scoped = ScopedFilesystem::new(backend, ephemeral_secrets_mount_view);
+        Self::new(Arc::new(scoped), Arc::new(SecretsCrypto::ephemeral()))
+    }
+
     // The FS-stored master-key sentinel and `verify_can_decrypt_existing_secrets`
     // method that used to live here were removed when the per-tenant
     // `ScopedFilesystem` design landed: the sentinel record would have moved to
@@ -371,11 +385,7 @@ impl FilesystemSecretStore<InMemoryBackend> {
     /// stays structural. Replaces the deleted `InMemorySecretStore` (§4.3 of
     /// `docs/reborn/2026-07-17-architecture-simplification-dto-dyn-local.md`).
     pub fn ephemeral() -> Self {
-        let scoped = ScopedFilesystem::new(
-            Arc::new(InMemoryBackend::new()),
-            ephemeral_secrets_mount_view,
-        );
-        Self::new(Arc::new(scoped), Arc::new(SecretsCrypto::ephemeral()))
+        Self::ephemeral_over(Arc::new(InMemoryBackend::new()))
     }
 }
 

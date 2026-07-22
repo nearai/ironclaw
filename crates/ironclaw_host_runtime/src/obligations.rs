@@ -22,8 +22,8 @@ use ironclaw_host_api::{
     CapabilityDispatchResult, CapabilityId, CredentialStageError, DecisionSummary, EffectKind,
     ExtensionId, MountView, NetworkPolicy, Obligation, ProcessId, ResourceCeiling,
     ResourceEstimate, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, SandboxQuota, SecretHandle, Timestamp,
+    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+    SandboxQuota, SecretHandle, Timestamp, VendorId,
 };
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
@@ -45,7 +45,7 @@ pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from
 #[derive(Debug)]
 pub struct RuntimeCredentialAccountRequest<'a> {
     pub scope: &'a ResourceScope,
-    pub provider: &'a RuntimeCredentialAccountProviderId,
+    pub provider: &'a VendorId,
     pub setup: &'a RuntimeCredentialAccountSetup,
     pub provider_scopes: &'a [String],
     pub requester_extension: &'a ExtensionId,
@@ -1802,7 +1802,7 @@ fn secret_injection_handles(obligations: &[Obligation]) -> Vec<SecretHandle> {
 
 struct CredentialAccountInjectionObligation<'a> {
     handle: &'a SecretHandle,
-    provider: &'a RuntimeCredentialAccountProviderId,
+    provider: &'a VendorId,
     setup: &'a RuntimeCredentialAccountSetup,
     provider_scopes: &'a [String],
     requester_extension: &'a ExtensionId,
@@ -2927,6 +2927,7 @@ mod tests {
         };
         ExecutionContext {
             run_id: None,
+            origin: None,
             invocation_id,
             correlation_id: CorrelationId::new(),
             process_id: None,

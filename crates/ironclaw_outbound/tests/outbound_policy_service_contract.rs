@@ -12,7 +12,7 @@ use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 
 fn in_memory_outbound_store() -> FilesystemOutboundStateStore<InMemoryBackend> {
-    // §4.3: the deleted `InMemoryOutboundStateStore` is replaced by the one
+    // §4.3: the deleted `FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>` is replaced by the one
     // production store over a volatile in-memory backend (mirrors the merged
     // budget-gate/run-state consolidations). A local helper because this crate's
     // own integration tests cannot enable its `test-support` feature.
@@ -115,7 +115,7 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
     let OutboundDeliveryDecision::Authorized { attempt, target } = first else {
         panic!("expected authorized delivery decision");
     };
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(target.target(), &candidate.target);
 
     let second = service
@@ -154,7 +154,7 @@ async fn delivery_preparation_revalidates_each_push_and_records_auth_failure_wit
     assert_eq!(
         attempts
             .iter()
-            .filter(|attempt| attempt.status == OutboundDeliveryStatus::Pending)
+            .filter(|attempt| attempt.status == OutboundDeliveryStatus::Prepared)
             .count(),
         2
     );
@@ -337,7 +337,7 @@ async fn communication_delivery_requested_outbound_validates_requested_target() 
     assert_eq!(attempt.candidate.target, reply_ref("reply:requested"));
     assert_eq!(attempt.candidate.kind, OutboundPushKind::FinalReply);
     assert_eq!(attempt.candidate.turn_run_id, Some(turn_run_id()));
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(validator.calls(), 1);
 }
 
@@ -842,7 +842,7 @@ async fn communication_delivery_actor_and_modality_forwarded_through_lowering() 
     let OutboundDeliveryDecision::Authorized { attempt, target } = decision else {
         panic!("expected authorized delivery");
     };
-    assert_eq!(attempt.status, OutboundDeliveryStatus::Pending);
+    assert_eq!(attempt.status, OutboundDeliveryStatus::Prepared);
     assert_eq!(target.target(), &reply_ref("reply:requested"));
     assert_eq!(validator.calls(), 1);
     assert_eq!(

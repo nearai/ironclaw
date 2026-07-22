@@ -241,6 +241,14 @@ SEL_V2 = {
     "admin_token_value": "code",
     "admin_token_description_text": "Copy this now — it will not be shown again.",
     "admin_create_token_button_name": "Create token",
+    "admin_current_role_button_name": "Current role",
+    "admin_save_role_button_name": "Save role",
+    "admin_member_role_name": "Member",
+    "admin_admin_role_name": "Admin",
+    "admin_active_status_name": "Active",
+    "admin_suspended_status_name": "Suspended",
+    "admin_suspend_button_name": "Suspend",
+    "admin_activate_button_name": "Activate",
     "admin_user_secrets_panel": "[data-testid='admin-user-secrets-panel']",
     "admin_secret_handle_input": "[data-testid='admin-secret-handle']",
     "admin_secret_value_input": "[data-testid='admin-secret-value']",
@@ -265,6 +273,7 @@ SEL_V2 = {
     "workspace_directory_entry_for": (
         "[data-testid='workspace-directory-entry'][data-entry-path='{path}']"
     ),
+    "workspace_tree_entry": "[data-testid='workspace-tree-entry']",
     "thread_delete_for": (
         '[data-testid="thread-delete"][data-thread-id="{id}"]'
     ),
@@ -362,6 +371,9 @@ SEL_V2 = {
     "settings_import_file": 'input[type="file"][accept=".json,application/json"]',
     "settings_tool_row_for": (
         "[data-testid='settings-tool-row'][data-tool-name='{name}']"
+    ),
+    "settings_tool_permission_select": (
+        "[data-testid='settings-tool-permission-select']"
     ),
     "settings_tool_permission": (
         "[data-testid='settings-tool-permission-select'] button[aria-haspopup='listbox']"

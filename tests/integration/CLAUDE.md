@@ -361,7 +361,7 @@ over real `FilesystemAuthProductServices<InMemoryBackend>` alongside a
 drives one sweep tick with an always-leader lock and a frozen clock, exercising
 `sweep_once` → `ProviderBackedCredentialAccountService::refresh_account` →
 `HostOAuthProviderClient::refresh_token` → scripted egress. Requires
-`--features libsql`.
+the default backend build.
 
 ### Approvals (group tests only)
 

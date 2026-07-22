@@ -581,7 +581,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **When to touch:** Adding new WASM adapters
 - **Depends on:** `ironclaw_wasm`, `ironclaw_product_adapters`
 
-### ironclaw_slack_v2_adapter
+### ironclaw_slack_extension
 **Role:** Slack workspace adapter
 - Slack OAuth flow
 - Slack message handling
@@ -591,7 +591,7 @@ This page documents all 68+ crates in the IronClaw repository, organized by func
 - **Tests:** Slack adapter contract tests
 - **Depends on:** `ironclaw_product_adapters`, `slack-morphism` or similar
 
-### ironclaw_telegram_v2_adapter
+### ironclaw_telegram_extension
 **Role:** Telegram bot adapter
 - Telegram bot API
 - Message routing

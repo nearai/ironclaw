@@ -17,7 +17,7 @@ use support::*;
 #[tokio::test]
 async fn capability_host_spawn_runs_background_process_through_process_host() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let process_services = ProcessServices::in_memory();
     let executor = Arc::new(RecordingSuccessExecutor::default());
@@ -56,7 +56,7 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
         .await
         .unwrap();
 
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     assert_eq!(spawned.process.status, ProcessStatus::Running);
     assert_eq!(spawned.process.parent_process_id, Some(parent_process_id));
     assert_eq!(spawned.process.invocation_id, invocation_id);
@@ -110,7 +110,7 @@ async fn capability_host_spawn_runs_background_process_through_process_host() {
 #[tokio::test]
 async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let process_services = ProcessServices::in_memory();
     let executor = Arc::new(RecordingSuccessExecutor::default());
     let process_manager = process_services.background_manager(Arc::clone(&executor));
@@ -151,7 +151,7 @@ async fn capability_spawn_process_host_hides_cross_scope_status_and_output() {
 #[tokio::test]
 async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_process_start() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let process_services = ProcessServices::in_memory();
     let executor = Arc::new(RecordingSuccessExecutor::default());
@@ -179,7 +179,7 @@ async fn capability_host_spawn_fails_closed_on_unsupported_obligations_before_pr
         err,
         CapabilityInvocationError::UnsupportedObligations { .. }
     ));
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
     assert!(executor.take_request_opt().is_none());
     assert!(
         process_services
@@ -294,6 +294,9 @@ fn execution_context_with_mounts_and_parent(
         mounts,
     )
     .unwrap();
+    context.origin = Some(InvocationOrigin::Product(
+        ProductKind::new("tests").unwrap(),
+    ));
     context.process_id = parent_process_id;
     context.validate().unwrap();
     context

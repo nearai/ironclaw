@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    marker::PhantomData,
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex, MutexGuard},
 };
@@ -7,17 +8,23 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt;
 
+use ironclaw_extensions::ExtensionPackage;
+use ironclaw_host_api::{
+    CapabilityDescriptor, MountView, ResourceEstimate, ResourceReservation, UserId,
+    runtime_policy::EffectiveRuntimePolicy,
+};
+use serde_json::Value;
+
 use super::wasm_execution::{ReservationGuard, execute_prepared_wasm, run_wasm_prepare_blocking};
 use super::{
     CapabilityId, DenyWasmHostHttp, DispatchError, ExtensionRuntime, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, InvocationServicesResolutionRequest, InvocationServicesResolver,
     McpError, McpExecutionRequest, McpExecutor, McpInvocation, NetworkObligationPolicyStore,
     PlannerError, PreparedWitTool, ResourceGovernor, ResourceReservationId, ResourceScope,
-    RootFilesystem, RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult,
-    RuntimeDispatchErrorKind, RuntimeExecutor, RuntimeKind, RuntimeLane, ScriptError,
-    ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, WasmError,
-    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
-    WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
+    RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeKind, RuntimeLane,
+    ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress,
+    WasmError, WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
+    WitToolHost, WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
 use crate::{
     FirstPartyCapabilityError,
@@ -27,10 +34,62 @@ use crate::{
     },
 };
 
+/// Per-invocation execution request handed to a runtime lane.
+///
+/// Host-internal seam behind the prebound
+/// [`ironclaw_dispatcher::BoundCapabilityAdapter`] bindings: the registry-lane
+/// resolver captures the static fields (package, descriptor, runtime policy,
+/// filesystem, governor) when it constructs a binding and materializes one of
+/// these per call. If `resource_reservation` is present, the lane must
+/// reconcile or release that prepared reservation instead of creating a
+/// second reservation.
+pub(crate) struct RuntimeLaneRequest<'a, F, G>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    pub package: &'a ExtensionPackage,
+    pub descriptor: &'a CapabilityDescriptor,
+    pub filesystem: &'a F,
+    pub governor: &'a G,
+    pub runtime_policy: &'a EffectiveRuntimePolicy,
+    pub capability_id: &'a CapabilityId,
+    pub scope: ResourceScope,
+    /// The authenticated human actor who initiated this invocation, distinct
+    /// from the resource subject carried in `scope`. Threaded end-to-end
+    /// (`CapabilityDispatchRequest` → here → `FirstPartyCapabilityRequest`) so a
+    /// first-party handler can attribute the action to the acting user.
+    pub authenticated_actor_user_id: Option<UserId>,
+    /// Loop turn-run identity forwarded from the dispatch request. `None`
+    /// for non-loop callers.
+    pub run_id: Option<ironclaw_host_api::RunId>,
+    pub estimate: ResourceEstimate,
+    pub mounts: Option<MountView>,
+    pub resource_reservation: Option<ResourceReservation>,
+    pub input: Value,
+}
+
+/// One runtime execution lane (Script/MCP/first-party/WASM).
+///
+/// Implementations must not perform caller-facing authorization or approval
+/// resolution. They may reserve/reconcile resources through the provided
+/// governor and must surface only redacted [`DispatchError`] categories.
+#[async_trait]
+pub(crate) trait RuntimeAdapter<F, G>: Send + Sync
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeLaneRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError>;
+}
+
 type FirstPartyLatencyFields = RuntimeLatencyFields;
 
 fn first_party_latency_fields<F, G>(
-    request: &RuntimeAdapterRequest<'_, F, G>,
+    request: &RuntimeLaneRequest<'_, F, G>,
 ) -> Option<FirstPartyLatencyFields>
 where
     F: RootFilesystem,
@@ -137,7 +196,7 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let plan =
             plan_capability(request.descriptor, request.runtime_policy).map_err(|error| {
@@ -179,26 +238,28 @@ where
     }
 }
 
-/// Closed runtime-lane router: the host-runtime-side [`RuntimeExecutor`] the
-/// dispatcher monomorphizes over (arch-simplification §4.2, `dyn`→enum collapse
-/// of the capability hot path). Each configured lane is a field; adding a
-/// [`RuntimeLane`] variant is a compile error until the two exhaustive matches
-/// below handle it (the §4.2 safety property).
-///
-/// Lanes are `Option` because composition wires them conditionally on which
-/// runtimes are configured — exactly as the prior per-lane registry populated
-/// only the configured `RuntimeKind`s. The dispatcher checks
-/// [`RuntimeExecutor::supports_lane`] before selecting a runtime, so an
-/// unconfigured lane fails closed with `MissingRuntimeBackend` and no
-/// reservation.
-pub(super) struct RuntimeLaneExecutor {
+/// Closed host-runtime lane set. Capability bindings retain this one concrete
+/// executor and a [`RuntimeLane`] value instead of retaining a trait object
+/// selected from a `HashMap<RuntimeKind, dyn RuntimeAdapter>`.
+pub(super) struct RuntimeLaneExecutor<F, G>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
     first_party: Option<FirstPartyRuntimeAdapter>,
     wasm: Option<ServiceResolvedRuntimeAdapter<WasmRuntimeAdapter>>,
     mcp: Option<ServiceResolvedRuntimeAdapter<McpRuntimeAdapter>>,
     process: Option<ServiceResolvedRuntimeAdapter<ScriptRuntimeAdapter>>,
+    #[cfg(test)]
+    test_adapters: HashMap<RuntimeLane, Arc<dyn RuntimeAdapter<F, G>>>,
+    marker: PhantomData<fn() -> (F, G)>,
 }
 
-impl RuntimeLaneExecutor {
+impl<F, G> RuntimeLaneExecutor<F, G>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+{
     pub(super) fn new(
         first_party: Option<FirstPartyRuntimeAdapter>,
         wasm: Option<ServiceResolvedRuntimeAdapter<WasmRuntimeAdapter>>,
@@ -210,17 +271,27 @@ impl RuntimeLaneExecutor {
             wasm,
             mcp,
             process,
+            #[cfg(test)]
+            test_adapters: HashMap::new(),
+            marker: PhantomData,
         }
     }
-}
 
-#[async_trait]
-impl<F, G> RuntimeExecutor<F, G> for RuntimeLaneExecutor
-where
-    F: RootFilesystem,
-    G: ResourceGovernor,
-{
-    fn supports_lane(&self, lane: RuntimeLane) -> bool {
+    #[cfg(test)]
+    pub(super) fn with_test_adapter(
+        mut self,
+        lane: RuntimeLane,
+        adapter: Arc<dyn RuntimeAdapter<F, G>>,
+    ) -> Self {
+        self.test_adapters.insert(lane, adapter);
+        self
+    }
+
+    pub(super) fn supports_lane(&self, lane: RuntimeLane) -> bool {
+        #[cfg(test)]
+        if self.test_adapters.contains_key(&lane) {
+            return true;
+        }
         match lane {
             RuntimeLane::FirstParty => self.first_party.is_some(),
             RuntimeLane::Wasm => self.wasm.is_some(),
@@ -229,58 +300,38 @@ where
         }
     }
 
-    // Hand-desugared (no `async fn`): the router RETURNS the lane adapter's
-    // already-boxed `#[async_trait]` future instead of wrapping it in a future
-    // of its own. The former `dyn RuntimeAdapter` registry contributed exactly
-    // one boxed future here; an `async fn` router would stack a second one on
-    // top of it, and the Reborn trace suite runs close enough to the 2 MiB
-    // test-thread stack limit that the extra layer overflowed it in CI
-    // (`reborn_trace_skill_management_first_party_tools_parity`). Zero-depth
-    // forwarding restores exact structural parity with the dyn registry while
-    // keeping the closed lane set.
-    #[allow(clippy::type_complexity)]
-    fn dispatch_json<'life0, 'life1, 'async_trait>(
-        &'life0 self,
+    pub(super) async fn dispatch_json(
+        &self,
         lane: RuntimeLane,
-        request: RuntimeAdapterRequest<'life1, F, G>,
-    ) -> core::pin::Pin<
-        Box<
-            dyn core::future::Future<Output = Result<RuntimeAdapterResult, DispatchError>>
-                + Send
-                + 'async_trait,
-        >,
-    >
-    where
-        'life0: 'async_trait,
-        'life1: 'async_trait,
-        Self: 'async_trait,
-    {
+        request: RuntimeLaneRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        #[cfg(test)]
+        if let Some(adapter) = self.test_adapters.get(&lane) {
+            return adapter.dispatch_json(request).await;
+        }
         match lane {
             RuntimeLane::FirstParty => match self.first_party.as_ref() {
-                Some(adapter) => adapter.dispatch_json(request),
-                None => Box::pin(fail_unconfigured_lane(request)),
+                Some(adapter) => adapter.dispatch_json(request).await,
+                None => fail_unconfigured_lane(request),
             },
             RuntimeLane::Wasm => match self.wasm.as_ref() {
-                Some(adapter) => adapter.dispatch_json(request),
-                None => Box::pin(fail_unconfigured_lane(request)),
+                Some(adapter) => adapter.dispatch_json(request).await,
+                None => fail_unconfigured_lane(request),
             },
             RuntimeLane::Mcp => match self.mcp.as_ref() {
-                Some(adapter) => adapter.dispatch_json(request),
-                None => Box::pin(fail_unconfigured_lane(request)),
+                Some(adapter) => adapter.dispatch_json(request).await,
+                None => fail_unconfigured_lane(request),
             },
             RuntimeLane::Process => match self.process.as_ref() {
-                Some(adapter) => adapter.dispatch_json(request),
-                None => Box::pin(fail_unconfigured_lane(request)),
+                Some(adapter) => adapter.dispatch_json(request).await,
+                None => fail_unconfigured_lane(request),
             },
         }
     }
 }
 
-/// Fail closed for an unconfigured lane. The dispatcher gates dispatch with
-/// `supports_lane`, so this arm is defensive; it still releases any prepared
-/// reservation rather than leaking it.
-async fn fail_unconfigured_lane<F, G>(
-    request: RuntimeAdapterRequest<'_, F, G>,
+fn fail_unconfigured_lane<F, G>(
+    request: RuntimeLaneRequest<'_, F, G>,
 ) -> Result<RuntimeAdapterResult, DispatchError>
 where
     F: RootFilesystem,
@@ -317,7 +368,7 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let execution = self
             .executor
@@ -369,7 +420,7 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let execution = self
             .executor
@@ -446,7 +497,7 @@ where
     )]
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let latency_fields = first_party_latency_fields(&request);
         let dispatch_started_at = latency_started_at();
@@ -631,7 +682,10 @@ where
         let result = match AssertUnwindSafe(handler.dispatch(FirstPartyCapabilityRequest {
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
-            authenticated_actor_user_id: request.authenticated_actor_user_id,
+            // The authenticated human actor (distinct from the resource subject
+            // in `scope`), threaded through so a first-party handler can
+            // attribute the action to the acting user.
+            authenticated_actor_user_id: request.authenticated_actor_user_id.clone(),
             run_id: request.run_id,
             estimate: request.estimate,
             mounts: request.mounts,
@@ -906,7 +960,7 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: RuntimeLaneRequest<'_, F, G>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => module

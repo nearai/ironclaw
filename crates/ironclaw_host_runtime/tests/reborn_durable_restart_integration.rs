@@ -14,13 +14,12 @@ use ironclaw_events::{
     DurableAuditSink, DurableEventSink, EventStreamKey, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    RuntimeFailureKind,
 };
 use ironclaw_processes::{
     FilesystemProcessResultStore, FilesystemProcessStore, ProcessExecutionRequest,
@@ -97,7 +96,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     let resumed = second
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -171,7 +170,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     let second_resume = third
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -192,7 +191,6 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
 /// opened over the same on-disk libSQL file, mirroring
 /// `libsql_root()` in
 /// `crates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once() {
     let temp = tempfile::tempdir().unwrap();
@@ -246,7 +244,7 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
     let resumed = second
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -320,7 +318,7 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
     let second_resume = third
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -421,7 +419,7 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -562,7 +560,6 @@ async fn durable_services(
 /// reopen, not just a service-graph rebuild around a still-live store.
 /// Mirrors `libsql_root()` in
 /// `crates/ironclaw_filesystem/tests/db_root_filesystem_contract.rs`.
-#[cfg(feature = "libsql")]
 async fn durable_services_with_libsql_run_state(
     engine_root: &Path,
     event_root: &Path,
@@ -599,7 +596,6 @@ async fn durable_services_with_libsql_run_state(
 /// `scoped_run_state_filesystem`. Called once per simulated process restart
 /// so each call is a real reopen of the on-disk libSQL file, not a
 /// reconnect to a still-live in-process handle.
-#[cfg(feature = "libsql")]
 async fn scoped_libsql_run_state_filesystem(
     db_path: &Path,
 ) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
@@ -731,12 +727,7 @@ async fn block_for_approval(
     input: Value,
 ) -> ironclaw_host_runtime::RuntimeApprovalGate {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -903,13 +894,15 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
 
 fn execution_context_without_grants_for_scope(scope: ResourceScope) -> ExecutionContext {
     let context = ExecutionContext {
-        run_id: None,
+        run_id: Some(RunId::new()),
+        origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -937,7 +930,8 @@ fn execution_context_with_dispatch_grant_for_scope(
     scope: ResourceScope,
 ) -> ExecutionContext {
     let context = ExecutionContext {
-        run_id: None,
+        run_id: Some(RunId::new()),
+        origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -998,6 +992,7 @@ fn process_start(
         mounts: MountView::default(),
         estimated_resources: ResourceEstimate::default(),
         resource_reservation_id: None,
+        authorized_continuation: None,
         input: json!({"message": "running"}),
     }
 }
@@ -1055,3 +1050,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

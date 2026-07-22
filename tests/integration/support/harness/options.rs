@@ -51,7 +51,34 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// runtime's own dispatchable registry, so dispatch silently no-ops (the
     /// tool call never reaches `invoke_capability`). Empty for every harness
     /// that surfaces no bundled WASM capability.
-    pub(crate) activate_bundled_extensions_for_test: Vec<ExtensionPackage>,
+    pub(crate) activate_bundled_extensions_for_test: Vec<(
+        ExtensionPackage,
+        Option<ironclaw_extensions::ResolvedExtensionManifest>,
+    )>,
+    /// Fixture extension asset directories copied into the harness storage
+    /// root's `/system/extensions/{id}` BEFORE composition builds, so the
+    /// available-extension catalog discovers them like installed packages
+    /// (the invented-vendor fixture, overview §8).
+    pub(crate) fixture_extension_dirs: Vec<(std::path::PathBuf, String)>,
+    /// `first_party` extension factories the harness assembles into the
+    /// composition input (`RebornBuildInput::with_native_extension_factories`
+    /// — the same seam the binary uses).
+    pub(crate) native_extension_factories:
+        Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
+    /// Channel-adapter bindings for non-`first_party`-runtime channel
+    /// extensions (`RebornBuildInput::with_channel_extension_bindings` — the
+    /// same seam the binary uses for Slack's WASM-runtime package).
+    pub(crate) channel_extension_bindings:
+        Vec<ironclaw_reborn_composition::ChannelExtensionBinding>,
+    /// Binary-parity account-setup declarations (extension-runtime §5.5),
+    /// the `RebornBuildInput::with_account_setup_descriptors` seam.
+    pub(crate) account_setup_descriptors:
+        Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+    /// Typed handle for the recording network egress when the profile wants
+    /// `captured_network_requests` assertions (the dyn seam alone loses the
+    /// recorder type).
+    pub(crate) recording_network_egress:
+        Option<Arc<super::super::doubles::RecordingNetworkHttpEgress>>,
     /// C-SYNTH `project_create` fault-injection seam: wrap the real
     /// `Arc<dyn ProjectService>` (`services.local_dev_project_service_for_test()`)
     /// in `FaultInjectingProjectService` before it reaches the capability-port
@@ -80,7 +107,8 @@ pub(crate) struct HostRuntimeHarnessOptions {
     pub(crate) trigger_active_run_lookup_requested: bool,
     /// Provider-instance readiness map, "config set" + restart arm: when
     /// `true`, registers a dummy Google OAuth backend on the `RebornBuildInput`
-    /// via the SAME production builder (`RebornBuildInput::with_google_oauth_backend`)
+    /// via the SAME generic production builder
+    /// (`RebornBuildInput::with_vendor_oauth_client`)
     /// that `ironclaw config set google.client_id`/`client_secret` feeds in
     /// production — proving the readiness-map check clears once an operator
     /// configures the instance, with no test-only bypass. `false` (the
@@ -102,11 +130,24 @@ impl HostRuntimeHarnessOptions {
             outbound_target_facade: None,
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
+            fixture_extension_dirs: Vec::new(),
+            native_extension_factories: Vec::new(),
+            channel_extension_bindings: Vec::new(),
+            account_setup_descriptors: Vec::new(),
+            recording_network_egress: None,
             project_service_fault_injection: false,
             durable_capability_io: false,
             trigger_active_run_lookup_requested: false,
             google_oauth_backend_for_test: false,
         }
+    }
+
+    /// Request the post-construction real `TriggerActiveRunLookup` rewire
+    /// (#5886) — see the field doc on
+    /// [`Self::trigger_active_run_lookup_requested`].
+    pub(crate) fn with_trigger_active_run_lookup_for_test(mut self) -> Self {
+        self.trigger_active_run_lookup_requested = true;
+        self
     }
 
     pub(crate) fn with_seed_extension_credentials(mut self) -> Self {
@@ -136,8 +177,76 @@ impl HostRuntimeHarnessOptions {
         self
     }
 
+    pub(crate) fn with_fixture_extension_dir(
+        mut self,
+        source: std::path::PathBuf,
+        extension_id: &str,
+    ) -> Self {
+        self.fixture_extension_dirs
+            .push((source, extension_id.to_string()));
+        self
+    }
+
+    /// Install a RECORDING network egress: wires the dyn transport seam AND
+    /// retains the typed handle so `captured_network_requests` works.
+    pub(crate) fn with_recording_network_egress(
+        mut self,
+        egress: Arc<super::super::doubles::RecordingNetworkHttpEgress>,
+    ) -> Self {
+        self.network_http_egress_for_test = Some(egress.clone() as Arc<dyn NetworkHttpEgress>);
+        self.recording_network_egress = Some(egress);
+        self
+    }
+
+    pub(crate) fn with_native_extension_factory(
+        mut self,
+        factory: Arc<dyn ironclaw_extension_host::NativeExtensionFactory>,
+    ) -> Self {
+        self.native_extension_factories.push(factory);
+        self
+    }
+
+    /// Binary-parity channel-adapter binding for channel extensions whose
+    /// runtime is NOT `first_party` (extension-runtime P6): mirrors
+    /// `RebornBuildInput::with_channel_extension_bindings` the same way the
+    /// native factories mirror the CLI assembly. Without it, composition
+    /// binds the transitional `HostServedChannelBridge`, whose `inbound`
+    /// rejects every verified request with `ChannelError::Unsupported`.
+    pub(crate) fn with_channel_extension_binding(
+        mut self,
+        binding: ironclaw_reborn_composition::ChannelExtensionBinding,
+    ) -> Self {
+        self.channel_extension_bindings.push(binding);
+        self
+    }
+
+    /// Binary-parity account-setup declaration (extension-runtime §5.5):
+    /// mirrors `RebornBuildInput::with_account_setup_descriptors` the same
+    /// way the native factories mirror the CLI assembly.
+    pub(crate) fn with_account_setup_descriptor(
+        mut self,
+        descriptor: ironclaw_product_workflow::ExtensionAccountSetupDescriptor,
+    ) -> Self {
+        self.account_setup_descriptors.push(descriptor);
+        self
+    }
+
     pub(crate) fn with_activated_bundled_extension(mut self, package: ExtensionPackage) -> Self {
-        self.activate_bundled_extensions_for_test.push(package);
+        self.activate_bundled_extensions_for_test
+            .push((package, None));
+        self
+    }
+
+    /// Variant for in-code fixture packages with no catalog entry: the
+    /// caller supplies the resolved contract the generic-host mirror
+    /// publishes.
+    pub(crate) fn with_activated_bundled_extension_resolved(
+        mut self,
+        package: ExtensionPackage,
+        resolved: ironclaw_extensions::ResolvedExtensionManifest,
+    ) -> Self {
+        self.activate_bundled_extensions_for_test
+            .push((package, Some(resolved)));
         self
     }
 
@@ -153,14 +262,6 @@ impl HostRuntimeHarnessOptions {
         self.durable_capability_io = true;
         self
     }
-
-    /// Opt into the post-construction `builtin.trigger_list` active-run-lookup
-    /// re-wiring (#5886). See `trigger_active_run_lookup_requested`'s doc.
-    pub(crate) fn with_trigger_active_run_lookup_for_test(mut self) -> Self {
-        self.trigger_active_run_lookup_requested = true;
-        self
-    }
-
     /// Opt into a composition-time Google OAuth backend. See
     /// `google_oauth_backend_for_test`'s doc.
     pub(crate) fn with_google_oauth_backend_for_test(mut self) -> Self {

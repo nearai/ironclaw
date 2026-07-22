@@ -4,23 +4,37 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
+import {
+  channelConnection,
+  isInboundProofCodeConnection,
+} from "../lib/extensions-schema";
+
 function channelsTabSourceForTest() {
   const source = readFileSync(new URL("./channels-tab.tsx", import.meta.url), "utf8");
   const lines = [];
+  let skippingImport = false;
   for (const line of source.split("\n")) {
-    if (line.startsWith("import ")) continue;
+    if (!skippingImport && line.startsWith("import ")) {
+      skippingImport = !line.trimEnd().endsWith(";");
+      continue;
+    }
+    if (skippingImport) {
+      skippingImport = !line.trimEnd().endsWith(";");
+      continue;
+    }
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { ChannelsTab, ChannelConnectActionSections, SlackConnectActionSections, isSlackPackage, isAdminManagedChannelsAction, isInboundProofCodeAction, isWebGeneratedCodeAction, isGenericInboundProofCodeAction, isSlackAdminManagedAction, isTelegramAdminManagedAction, isTelegramWebGeneratedCodeAction, connectActionsForChannel, connectActionsForPackage, findSlackConnectAction, findSlackConnectActions };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { ChannelsTab, ChannelConnectSections };`;
 }
 
-function connectActionSectionsForTest(connectAction, connectActions) {
+function channelConnectSectionsForTest(item) {
   const context = {
     globalThis: {},
     PairingSection() {},
-    SlackAdminManagedSection() {},
-    TelegramAdminManagedSection() {},
-    TelegramPairingPanel() {},
+    // The real surface-taxonomy helpers: connect sections must derive from the
+    // wire connection strategy exactly as production does.
+    channelConnection,
+    isInboundProofCodeConnection,
     html(strings, ...values) {
       return { strings: Array.from(strings), values };
     },
@@ -28,14 +42,9 @@ function connectActionSectionsForTest(connectAction, connectActions) {
   };
   vm.runInNewContext(channelsTabSourceForTest(), context);
   return {
-    rendered: context.globalThis.__testExports.ChannelConnectActionSections({
-      connectAction,
-      connectActions,
-    }),
+    rendered: context.globalThis.__testExports.ChannelConnectSections({ item }),
     PairingSection: context.PairingSection,
-    SlackAdminManagedSection: context.SlackAdminManagedSection,
-    TelegramAdminManagedSection: context.TelegramAdminManagedSection,
-    TelegramPairingPanel: context.TelegramPairingPanel,
+    redeemPairingCode: context.redeemPairingCode,
   };
 }
 
@@ -44,12 +53,10 @@ function channelsTabForTest(props) {
     ExtensionCard() {},
     PairingSection() {},
     RegistryCard() {},
-    SlackChannelPicker() {},
-    SlackAdminManagedSection() {},
-    TelegramAdminManagedSection() {},
-    TelegramPairingPanel() {},
     StatusPill() {},
     globalThis: {},
+    channelConnection,
+    isInboundProofCodeConnection,
     html(strings, ...values) {
       return { strings: Array.from(strings), values };
     },
@@ -59,12 +66,11 @@ function channelsTabForTest(props) {
   vm.runInNewContext(channelsTabSourceForTest(), context);
   return {
     rendered: context.globalThis.__testExports.ChannelsTab(props),
-    ChannelConnectActionSections: context.globalThis.__testExports.ChannelConnectActionSections,
+    ChannelConnectSections: context.globalThis.__testExports.ChannelConnectSections,
+    ExtensionCard: context.ExtensionCard,
     PairingSection: context.PairingSection,
     RegistryCard: context.RegistryCard,
-    SlackChannelPicker: context.SlackChannelPicker,
-    TelegramAdminManagedSection: context.TelegramAdminManagedSection,
-    TelegramPairingPanel: context.TelegramPairingPanel,
+    redeemPairingCode: context.redeemPairingCode,
   };
 }
 
@@ -77,33 +83,6 @@ function renderedContainsComponent(rendered, component) {
   }
   if (Array.isArray(rendered.values)) {
     return rendered.values.some((value) => renderedContainsComponent(value, component));
-  }
-  return false;
-}
-
-function renderedContainsSlackAdminAction(rendered) {
-  return renderedContainsChannelAction(rendered, "slack", "admin_managed_channels");
-}
-
-function renderedContainsChannelAction(rendered, channel, strategy) {
-  if (!rendered || typeof rendered !== "object") {
-    return false;
-  }
-  if (Array.isArray(rendered)) {
-    return rendered.some((value) => renderedContainsChannelAction(value, channel, strategy));
-  }
-  if (Array.isArray(rendered.values)) {
-    for (const value of rendered.values) {
-      if (
-        Array.isArray(value) &&
-        value.some((action) => action?.channel === channel && action.strategy === strategy)
-      ) {
-        return true;
-      }
-      if (renderedContainsChannelAction(value, channel, strategy)) {
-        return true;
-      }
-    }
   }
   return false;
 }
@@ -150,6 +129,12 @@ function renderedComponentCount(rendered, component) {
   return 0;
 }
 
+function componentPropAfter(node, component) {
+  const index = node.values.indexOf(component);
+  assert.notEqual(index, -1, "expected the component reference in the node");
+  return node.values[index + 1];
+}
+
 function componentProps(rendered, component) {
   const node = renderedNodeContainingComponent(rendered, component);
   assert.notEqual(node, undefined, "expected rendered component");
@@ -162,456 +147,313 @@ function componentProps(rendered, component) {
   return props;
 }
 
-test("isSlackPackage recognizes the Slack extension package", () => {
-  const context = { globalThis: {} };
-  vm.runInNewContext(channelsTabSourceForTest(), context);
-  const { isSlackPackage } = context.globalThis.__testExports;
-
-  assert.equal(isSlackPackage({ package_ref: { id: "slack" } }), true);
-  assert.equal(isSlackPackage({ package_ref: { id: "slack_v2" } }), false);
-  assert.equal(isSlackPackage({}), false);
-});
-
-test("connect action predicates keep admin picker and generic proof-code pairing distinct", () => {
-  const context = { globalThis: {} };
-  vm.runInNewContext(channelsTabSourceForTest(), context);
-  const {
-    isAdminManagedChannelsAction,
-    isInboundProofCodeAction,
-    isGenericInboundProofCodeAction,
-    isSlackAdminManagedAction,
-  } = context.globalThis.__testExports;
-
-  assert.equal(
-    isAdminManagedChannelsAction({ channel: "teams", strategy: "admin_managed_channels" }),
-    true,
+function elementUses(node, component) {
+  return Boolean(
+    node && typeof node === "object" && Array.isArray(node.values) && node.values[0] === component,
   );
-  assert.equal(
-    isInboundProofCodeAction({ channel: "teams", strategy: "inbound_proof_code" }),
-    true,
-  );
-  assert.equal(
-    isSlackAdminManagedAction({ channel: "slack", strategy: "admin_managed_channels" }),
-    true,
-  );
-  assert.equal(
-    isGenericInboundProofCodeAction({ channel: "teams", strategy: "inbound_proof_code" }),
-    true,
-  );
-  assert.equal(
-    isSlackAdminManagedAction({ channel: "slack", strategy: "oauth" }),
-    false,
-  );
-  assert.equal(
-    isGenericInboundProofCodeAction({ channel: "slack", strategy: "oauth" }),
-    false,
-  );
-});
+}
 
-test("connectActionsForChannel keeps Slack admin management and generic code-entry setup separate", () => {
-  const context = { globalThis: {} };
-  vm.runInNewContext(channelsTabSourceForTest(), context);
-  const { connectActionsForChannel, findSlackConnectAction, findSlackConnectActions } =
-    context.globalThis.__testExports;
-  const personal = { channel: "slack", strategy: "oauth" };
-  const admin = { channel: "slack", strategy: "admin_managed_channels" };
-  const telegram = { channel: "telegram", strategy: "inbound_proof_code" };
+function renderedNodeWhoseChildrenContain(rendered, components) {
+  if (!rendered || typeof rendered !== "object") return undefined;
+  const nodes = Array.isArray(rendered) ? rendered.flat(Infinity) : [rendered];
+  for (const node of nodes) {
+    if (!node || typeof node !== "object") continue;
+    const children = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+    if (
+      components.every((component) => children.some((child) => elementUses(child, component)))
+    ) {
+      return node;
+    }
+    for (const child of children) {
+      const found = renderedNodeWhoseChildrenContain(child, components);
+      if (found !== undefined) return found;
+    }
+  }
+  return undefined;
+}
 
-  assert.equal(findSlackConnectAction([personal]), null);
-  assert.equal(findSlackConnectAction([personal, admin]), admin);
-  const actions = findSlackConnectActions([personal, admin]);
-  assert.equal(actions.length, 1);
-  assert.equal(actions[0].strategy, "admin_managed_channels");
-  const telegramActions = connectActionsForChannel([personal, admin, telegram], "telegram");
-  assert.equal(telegramActions.length, 1);
-  assert.equal(telegramActions[0].channel, "telegram");
-  assert.equal(telegramActions[0].strategy, "inbound_proof_code");
-});
+const TAB_PROPS = {
+  status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
+  channels: [],
+  channelRegistry: [],
+  isBusy: false,
+  onActivate() {},
+  onConfigure() {},
+  onInstall() {},
+  onRemove() {},
+};
 
-test("ChannelConnectActionSections renders Slack admin setup and code entry only for other channels", () => {
-  const personal = { channel: "slack", strategy: "oauth", action: {} };
-  const admin = { channel: "slack", strategy: "admin_managed_channels", action: {} };
-
-  const adminView = connectActionSectionsForTest(admin);
-  assert.deepEqual(
-    componentProps(adminView.rendered, adminView.SlackAdminManagedSection).action,
-    admin.action,
-  );
-
-  const personalView = connectActionSectionsForTest(personal);
-  assert.equal(personalView.rendered, null);
-
-  const combinedView = connectActionSectionsForTest(null, [admin, personal]);
-  assert.equal(
-    renderedComponentCount(combinedView.rendered, combinedView.SlackAdminManagedSection),
-    1,
-  );
-  assert.equal(renderedComponentCount(combinedView.rendered, combinedView.PairingSection), 0);
-
-  const unhandledView = connectActionSectionsForTest({
-    channel: "slack",
-    strategy: "admin_managed_unknown",
-    action: {},
+test("ChannelConnectSections renders the same generic sections for every package", () => {
+  // A proof-code connection renders the generic pairing section regardless of
+  // the package id — there is no per-extension branch.
+  const slackView = channelConnectSectionsForTest({
+    package_ref: { id: "slack" },
+    surfaces: [
+      {
+        kind: "channel",
+        inbound: true,
+        outbound: true,
+        connection: { channel: "slack", strategy: "inbound_proof_code" },
+      },
+    ],
   });
-  assert.equal(unhandledView.rendered, null);
+  const sections = slackView.rendered.children;
+  assert.equal(sections.length, 1);
+  assert.equal(
+    sections[0].values[0],
+    slackView.PairingSection,
+    "a proof-code connection renders the generic pairing section for any package",
+  );
+
+  // Admin-managed connections have no user-facing connect section: allowed
+  // channels are installation config, not a per-user affordance.
+  const adminView = channelConnectSectionsForTest({
+    package_ref: { id: "teams" },
+    surfaces: [
+      {
+        kind: "channel",
+        inbound: true,
+        outbound: true,
+        connection: { channel: "teams", strategy: "admin_managed_channels" },
+      },
+    ],
+  });
+  assert.equal(
+    adminView.rendered,
+    null,
+    "admin-managed connections render no per-user connect section",
+  );
 });
 
-test("ChannelConnectActionSections renders manual-code channel actions with generic pairing", () => {
-  const telegram = {
+test("ChannelConnectSections renders inbound-proof-code surfaces as pairing with the connection copy", () => {
+  const connection = {
     channel: "telegram",
     strategy: "inbound_proof_code",
-    action: { title: "Telegram account connection" },
+    instructions: "Message the bot, then paste the code it replies with.",
+    input_placeholder: "ABC123",
+    submit_label: "Connect Telegram",
+    error_message: "Invalid or expired pairing code.",
   };
+  const view = channelConnectSectionsForTest({
+    package_ref: { id: "telegram" },
+    surfaces: [
+      { kind: "channel", inbound: true, outbound: true, connection },
+    ],
+  });
 
-  const view = connectActionSectionsForTest(telegram);
+  const section = view.rendered.children[0];
+  assert.equal(section.values[0], view.PairingSection);
   const props = componentProps(view.rendered, view.PairingSection);
-
   assert.equal(props.channel, "telegram");
-  assert.deepEqual(props.copy, telegram.action);
-});
+  assert.equal(props.copy, connection, "the pairing copy IS the surface connection");
+  assert.equal(props.redeemFn, view.redeemPairingCode);
+  assert.equal(props.showPendingRequests, false, "no operator pending-requests list on the user card");
+  assert.deepEqual(JSON.parse(JSON.stringify(props.queryKeys)), [
+    ["extensions"],
+    ["pairing", "telegram"],
+  ]);
 
-test("ChannelsTab keeps Slack controls in the builtin location when Slack is not installed", () => {
-  const view = channelsTabForTest({
-    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
-    channels: [],
-    connectableChannels: [
-      { channel: "slack", strategy: "admin_managed_channels", action: {} },
-      { channel: "slack", strategy: "oauth", action: {} },
-    ],
-    channelRegistry: [{ package_ref: { id: "slack" } }],
-    isBusy: false,
-    onActivate() {},
-    onConfigure() {},
-    onInstall() {},
-    onRemove() {},
+  // A connection without an explicit channel falls back to the package id.
+  const fallbackView = channelConnectSectionsForTest({
+    package_ref: { id: "telegram" },
+    surfaces: [{ kind: "channel", connection: { strategy: "inbound_proof_code" } }],
   });
+  const fallbackProps = componentProps(fallbackView.rendered, fallbackView.PairingSection);
+  assert.equal(fallbackProps.channel, "telegram");
+  assert.deepEqual(JSON.parse(JSON.stringify(fallbackProps.queryKeys)), [
+    ["extensions"],
+    ["pairing", "telegram"],
+  ]);
 
-  const builtinSlackSection = renderedNodeContainingComponent(
-    view.rendered,
-    view.ChannelConnectActionSections,
-  );
-  assert.notEqual(builtinSlackSection, undefined, "expected builtin Slack section");
-  assert.equal(renderedContainsComponent(builtinSlackSection, view.ChannelConnectActionSections), true);
-  assert.equal(renderedContainsSlackAdminAction(builtinSlackSection), true);
-
-  // The registry heading is now localized via t(...), so it is an interpolated
-  // value rather than a literal in the template strings; locate the registry
-  // section by the RegistryCard component instead of by heading text.
-  const registryCard = renderedNodeContainingComponent(
-    view.rendered,
-    view.RegistryCard,
-  );
-  assert.notEqual(registryCard, undefined, "expected available channels registry card");
-
-  assert.equal(renderedContainsComponent(registryCard, view.RegistryCard), true);
+  // OAuth connections (and channels without a connect affordance) render
+  // nothing here — OAuth connect lives in the configure modal.
   assert.equal(
-    renderedContainsComponent(registryCard, view.ChannelConnectActionSections),
-    false,
+    channelConnectSectionsForTest({
+      package_ref: { id: "telegram" },
+      surfaces: [{ kind: "channel", connection: { channel: "telegram", strategy: "oauth" } }],
+    }).rendered,
+    null,
+  );
+  assert.equal(
+    channelConnectSectionsForTest({ package_ref: { id: "telegram" }, surfaces: [] }).rendered,
+    null,
   );
 });
 
-test("ChannelsTab keeps the Telegram bot-setup card in the builtin location when Telegram is not installed", () => {
-  const view = channelsTabForTest({
-    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
-    channels: [],
-    connectableChannels: [
-      { channel: "telegram", strategy: "admin_managed_channels", action: {} },
+test("ChannelsTab renders an installed OAuth-connect channel without pairing or admin sections", () => {
+  const slackItem = {
+    package_ref: { id: "slack" },
+    runtime: "first_party",
+    installation_state: "installed",
+    surfaces: [
+      { kind: "tool" },
+      {
+        kind: "channel",
+        inbound: true,
+        outbound: true,
+        connection: { channel: "slack", strategy: "oauth" },
+      },
     ],
-    channelRegistry: [{ package_ref: { id: "telegram" } }],
-    isBusy: false,
-    onActivate() {},
-    onConfigure() {},
-    onInstall() {},
-    onRemove() {},
+  };
+  const view = channelsTabForTest({ ...TAB_PROPS, channels: [slackItem] });
+
+  const installedCard = renderedNodeContainingComponent(
+    view.rendered,
+    view.ChannelConnectSections,
+  );
+  assert.notEqual(installedCard, undefined, "expected installed channel card wrapper");
+  const cardWrapper = renderedNodeWhoseChildrenContain(view.rendered, [
+    view.ExtensionCard,
+    view.ChannelConnectSections,
+  ]);
+  assert.notEqual(
+    cardWrapper,
+    undefined,
+    "the connect sections render inside the installed extension card wrapper",
+  );
+  assert.equal(
+    componentPropAfter(installedCard, view.ChannelConnectSections),
+    slackItem,
+    "the installed extension item flows into the connect sections",
+  );
+
+  assert.equal(
+    view.ChannelConnectSections({ item: slackItem }),
+    null,
+    "an OAuth connection renders no connect section: connect lives in the configure modal",
+  );
+  assert.equal(
+    renderedComponentCount(view.rendered, view.PairingSection),
+    0,
+    "an OAuth-connect channel must not fall back to the generic code-entry section",
+  );
+});
+
+test("ChannelsTab renders no builtin channel row when the channel is not installed", () => {
+  const view = channelsTabForTest({
+    ...TAB_PROPS,
+    channelRegistry: [
+      {
+        package_ref: { id: "slack" },
+        runtime: "first_party",
+        surfaces: [{ kind: "channel", inbound: true, outbound: true }],
+        installed: false,
+      },
+    ],
   });
 
-  // The operator's bot-setup card must render pre-install (design spec §2:
-  // the Channels tab shows the Telegram card exactly like Slack's), not be
-  // dropped until the extension is installed.
-  const builtinTelegramSection = renderedNodeContainingComponent(
-    view.rendered,
-    view.ChannelConnectActionSections,
-  );
-  assert.notEqual(builtinTelegramSection, undefined, "expected builtin Telegram section");
   assert.equal(
-    renderedContainsChannelAction(builtinTelegramSection, "telegram", "admin_managed_channels"),
-    true,
+    renderedComponentCount(view.rendered, view.ChannelConnectSections),
+    0,
+    "no installed channels means no connect sections anywhere",
   );
+  assert.equal(renderedComponentCount(view.rendered, view.PairingSection), 0);
 
   const registryCard = renderedNodeContainingComponent(view.rendered, view.RegistryCard);
-  assert.notEqual(registryCard, undefined, "expected available channels registry card");
-  assert.equal(
-    renderedContainsComponent(registryCard, view.ChannelConnectActionSections),
-    false,
+  assert.notEqual(
+    registryCard,
+    undefined,
+    "an uninstalled channel is offered through the available-channels registry instead",
   );
 });
 
-test("ChannelsTab moves Telegram connect controls under the installed Telegram card", () => {
-  const view = channelsTabForTest({
-    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
-    channels: [
-      { package_ref: { id: "telegram" }, kind: "channel", activation_status: "installed" },
-    ],
-    connectableChannels: [
-      { channel: "telegram", strategy: "admin_managed_channels", action: {} },
-      { channel: "telegram", strategy: "web_generated_code", action: {} },
-    ],
-    channelRegistry: [],
-    isBusy: false,
-    onActivate() {},
-    onConfigure() {},
-    onInstall() {},
-    onRemove() {},
-  });
-
-  const installedCard = renderedNodeContainingComponent(
-    view.rendered,
-    view.ChannelConnectActionSections,
-  );
-  assert.notEqual(installedCard, undefined, "expected installed Telegram card wrapper");
-  assert.equal(
-    renderedContainsChannelAction(installedCard, "telegram", "admin_managed_channels"),
-    true,
-  );
-  // Exactly one connect-actions section: the builtin row must not duplicate
-  // the installed card's controls.
-  assert.equal(
-    renderedComponentCount(view.rendered, view.ChannelConnectActionSections),
-    1,
-  );
-});
-
-test("ChannelsTab renders Slack connect controls under the installed Slack card", () => {
-  const view = channelsTabForTest({
-    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
-    channels: [{ package_ref: { id: "slack" }, kind: "channel", activation_status: "installed" }],
-    connectableChannels: [
-      { channel: "slack", strategy: "admin_managed_channels", action: {} },
-      { channel: "slack", strategy: "oauth", action: {} },
-    ],
-    channelRegistry: [],
-    isBusy: false,
-    onActivate() {},
-    onConfigure() {},
-    onInstall() {},
-    onRemove() {},
-  });
-
-  const installedCard = renderedNodeContainingComponent(
-    view.rendered,
-    view.ChannelConnectActionSections,
-  );
-  assert.notEqual(installedCard, undefined, "expected installed Slack card wrapper");
-
-  assert.equal(renderedContainsSlackAdminAction(installedCard), true);
-  assert.equal(
-    renderedComponentCount(view.rendered, view.PairingSection),
-    0,
-    "installed Slack must not fall back to the generic code-entry section",
-  );
-});
-
-test("ChannelsTab renders generic connect controls under installed non-Slack channels", () => {
-  const view = channelsTabForTest({
-    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
-    channels: [
-      { package_ref: { id: "telegram" }, kind: "channel", activation_status: "installed" },
-    ],
-    connectableChannels: [
-      {
-        channel: "telegram",
-        strategy: "inbound_proof_code",
-        action: { title: "Telegram account connection" },
-      },
-    ],
-    channelRegistry: [],
-    isBusy: false,
-    onActivate() {},
-    onConfigure() {},
-    onInstall() {},
-    onRemove() {},
-  });
-
-  const installedCard = renderedNodeContainingComponent(
-    view.rendered,
-    view.ChannelConnectActionSections,
-  );
-  assert.notEqual(installedCard, undefined, "expected installed channel card wrapper");
-  assert.equal(
-    renderedContainsChannelAction(installedCard, "telegram", "inbound_proof_code"),
-    true,
-  );
-});
-
-test("telegram connect action predicates route admin setup and web-generated pairing", () => {
-  const context = { globalThis: {} };
-  vm.runInNewContext(channelsTabSourceForTest(), context);
-  const {
-    isWebGeneratedCodeAction,
-    isTelegramAdminManagedAction,
-    isTelegramWebGeneratedCodeAction,
-    isGenericInboundProofCodeAction,
-  } = context.globalThis.__testExports;
-
-  assert.equal(
-    isWebGeneratedCodeAction({ channel: "telegram", strategy: "web_generated_code" }),
-    true,
-  );
-  assert.equal(
-    isTelegramAdminManagedAction({ channel: "telegram", strategy: "admin_managed_channels" }),
-    true,
-  );
-  assert.equal(
-    isTelegramAdminManagedAction({ channel: "slack", strategy: "admin_managed_channels" }),
-    false,
-  );
-  assert.equal(
-    isTelegramWebGeneratedCodeAction({ channel: "telegram", strategy: "web_generated_code" }),
-    true,
-  );
-  assert.equal(
-    isTelegramWebGeneratedCodeAction({ channel: "telegram", strategy: "inbound_proof_code" }),
-    false,
-  );
-  assert.equal(
-    isGenericInboundProofCodeAction({ channel: "telegram", strategy: "web_generated_code" }),
-    false,
-    "web-generated pairing must not fall into the paste-code section",
-  );
-});
-
-test("connectActionsForChannel returns telegram admin and web-generated-code actions together", () => {
-  const context = { globalThis: {} };
-  vm.runInNewContext(channelsTabSourceForTest(), context);
-  const { connectActionsForChannel } = context.globalThis.__testExports;
-  const slackAdmin = { channel: "slack", strategy: "admin_managed_channels" };
-  const telegramAdmin = { channel: "telegram", strategy: "admin_managed_channels" };
-  const telegramPairing = { channel: "telegram", strategy: "web_generated_code" };
-
-  const actions = connectActionsForChannel(
-    [slackAdmin, telegramPairing, telegramAdmin],
-    "telegram",
-  );
-  assert.equal(actions.length, 2);
-  assert.equal(actions[0].strategy, "admin_managed_channels");
-  assert.equal(actions[1].strategy, "web_generated_code");
-  assert.ok(actions.every((action) => action.channel === "telegram"));
-});
-
-test("ChannelConnectActionSections renders telegram admin setup and the web-generated pairing panel", () => {
-  const admin = {
+test("ChannelsTab renders generic connect controls under installed channels", () => {
+  const connection = {
     channel: "telegram",
-    strategy: "admin_managed_channels",
-    action: { title: "Telegram bot" },
+    strategy: "inbound_proof_code",
+    instructions: "Message the bot, then paste the code it replies with.",
+    input_placeholder: "ABC123",
+    submit_label: "Connect Telegram",
+    error_message: "Invalid or expired pairing code.",
   };
-  const pairing = { channel: "telegram", strategy: "web_generated_code", action: {} };
-
-  const view = connectActionSectionsForTest(null, [admin, pairing]);
-  assert.equal(
-    renderedComponentCount(view.rendered, view.TelegramAdminManagedSection),
-    1,
-  );
-  assert.deepEqual(
-    componentProps(view.rendered, view.TelegramAdminManagedSection).action,
-    admin.action,
-  );
-  assert.equal(renderedComponentCount(view.rendered, view.TelegramPairingPanel), 1);
-  // Neither telegram surface leaks into the Slack or paste-code sections.
-  assert.equal(renderedComponentCount(view.rendered, view.SlackAdminManagedSection), 0);
-  assert.equal(renderedComponentCount(view.rendered, view.PairingSection), 0);
-});
-
-test("ChannelsTab renders no fallback paste pairing when telegram web-generated pairing owns onboarding", () => {
-  const view = channelsTabForTest({
-    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
-    channels: [
-      {
-        package_ref: { id: "telegram" },
-        kind: "channel",
-        activation_status: "installed",
-        onboarding_state: "pairing_required",
-      },
+  const telegramItem = {
+    package_ref: { id: "telegram" },
+    runtime: "wasm",
+    installation_state: "installed",
+    surfaces: [
+      { kind: "channel", inbound: true, outbound: true, connection },
     ],
-    connectableChannels: [
-      { channel: "telegram", strategy: "admin_managed_channels", action: {} },
-      { channel: "telegram", strategy: "web_generated_code", action: {} },
-    ],
-    channelRegistry: [],
-    isBusy: false,
-    onActivate() {},
-    onConfigure() {},
-    onInstall() {},
-    onRemove() {},
-  });
+  };
+  const view = channelsTabForTest({ ...TAB_PROPS, channels: [telegramItem] });
 
   const installedCard = renderedNodeContainingComponent(
     view.rendered,
-    view.ChannelConnectActionSections,
-  );
-  assert.notEqual(installedCard, undefined, "expected installed telegram card wrapper");
-  assert.equal(
-    renderedContainsChannelAction(installedCard, "telegram", "admin_managed_channels"),
-    true,
-  );
-  assert.equal(
-    renderedContainsChannelAction(installedCard, "telegram", "web_generated_code"),
-    true,
-  );
-  assert.equal(
-    renderedComponentCount(view.rendered, view.ChannelConnectActionSections),
-    1,
-    "the connect actions own both telegram surfaces",
-  );
-  assert.equal(
-    renderedComponentCount(view.rendered, view.PairingSection),
-    0,
-    "the web-generated pairing panel owns onboarding; no paste-code fallback",
-  );
-});
-
-test("ChannelsTab does not render duplicate fallback pairing when connect action owns pairing", () => {
-  const view = channelsTabForTest({
-    status: { enabled_channels: [], sse_connections: 0, ws_connections: 0 },
-    channels: [
-      {
-        package_ref: { id: "telegram" },
-        kind: "channel",
-        activation_status: "installed",
-        onboarding_state: "pairing_required",
-      },
-    ],
-    connectableChannels: [
-      {
-        channel: "telegram",
-        strategy: "inbound_proof_code",
-        action: { title: "Telegram account connection" },
-      },
-    ],
-    channelRegistry: [],
-    isBusy: false,
-    onActivate() {},
-    onConfigure() {},
-    onInstall() {},
-    onRemove() {},
-  });
-
-  const installedCard = renderedNodeContainingComponent(
-    view.rendered,
-    view.ChannelConnectActionSections,
+    view.ChannelConnectSections,
   );
   assert.notEqual(installedCard, undefined, "expected installed channel card wrapper");
+  assert.equal(componentPropAfter(installedCard, view.ChannelConnectSections), telegramItem);
+
+  const sections = view.ChannelConnectSections({ item: telegramItem });
+  const section = sections.children[0];
+  assert.equal(section.values[0], view.PairingSection);
   assert.equal(
-    renderedContainsChannelAction(installedCard, "telegram", "inbound_proof_code"),
-    true,
+    componentProps(sections, view.PairingSection).copy,
+    connection,
+    "the pairing card copy is the surface connection",
   );
+});
+
+test("ChannelsTab does not render duplicate fallback pairing when the channel surface owns pairing", () => {
+  const surfaceOwned = {
+    package_ref: { id: "telegram" },
+    runtime: "wasm",
+    installation_state: "installed",
+    onboarding_state: "pairing_required",
+    surfaces: [
+      {
+        kind: "channel",
+        inbound: true,
+        outbound: true,
+        connection: { channel: "telegram", strategy: "inbound_proof_code" },
+      },
+    ],
+  };
+  const view = channelsTabForTest({ ...TAB_PROPS, channels: [surfaceOwned] });
+
   assert.equal(
-    renderedComponentCount(view.rendered, view.ChannelConnectActionSections),
+    renderedComponentCount(view.rendered, view.ChannelConnectSections),
     1,
-    "the connect action still owns the pairing UI",
+    "the surface connection owns the pairing UI",
   );
   assert.equal(
     renderedComponentCount(view.rendered, view.PairingSection),
     0,
-    "the legacy fallback pairing section must not duplicate the connect action",
+    "the legacy fallback pairing section must not duplicate the surface connection",
+  );
+});
+
+test("ChannelsTab falls back to pairing only when the surface connection did not handle it", () => {
+  const bareItem = {
+    package_ref: { id: "telegram" },
+    runtime: "wasm",
+    installation_state: "installed",
+    onboarding_state: "pairing_required",
+    surfaces: [{ kind: "channel", inbound: true, outbound: true }],
+  };
+  const view = channelsTabForTest({ ...TAB_PROPS, channels: [bareItem] });
+
+  assert.equal(
+    renderedComponentCount(view.rendered, view.PairingSection),
+    1,
+    "pairing_required without a surface connection still gets the fallback pairing card",
+  );
+  const fallback = renderedNodeContainingComponent(view.rendered, view.PairingSection);
+  assert.equal(componentPropAfter(fallback, view.PairingSection), "telegram");
+  assert.equal(fallback.values[2], view.redeemPairingCode);
+
+  const pairingView = channelsTabForTest({
+    ...TAB_PROPS,
+    channels: [{ ...bareItem, onboarding_state: "pairing" }],
+  });
+  assert.equal(renderedComponentCount(pairingView.rendered, pairingView.PairingSection), 1);
+
+  const activeView = channelsTabForTest({
+    ...TAB_PROPS,
+    channels: [{ ...bareItem, onboarding_state: "active" }],
+  });
+  assert.equal(
+    renderedComponentCount(activeView.rendered, activeView.PairingSection),
+    0,
+    "a connected channel renders no pairing at all",
   );
 });

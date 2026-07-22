@@ -1,4 +1,4 @@
-schema_version = "reborn.extension_manifest.v2"
+schema_version = "reborn.extension_manifest.v3"
 id = "google-calendar"
 name = "Google Calendar"
 version = "0.1.0"
@@ -9,119 +9,186 @@ trust = "first_party_requested"
 kind = "first_party"
 service = "google-calendar"
 
-[[capabilities]]
+[admin_configuration]
+group_id = "vendor.google"
+display_name = "Google OAuth client credentials"
+description = "Deployment OAuth client credentials shared by Google extensions."
+fields = [
+  { handle = "google_oauth_client_id", label = "Google OAuth client ID", secret = false, required = true },
+  { handle = "google_oauth_client_secret", label = "Google OAuth client secret", secret = true, required = true },
+]
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.list_calendars"
 description = "List Google calendars."
-effects = ["dispatch_capability", "network", "use_secret"]
+effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
-runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/google-calendar/list_calendars.input.v1.json"
-output_schema_ref = "schemas/google-calendar/list_calendars.output.v1.json"
 prompt_doc_ref = "prompts/google-calendar/list_calendars.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.list_events"
 description = "List Google Calendar events. Defaults to upcoming expanded events ordered by start time; use include_all_calendars or calendar_ids to cover more than the primary calendar."
-effects = ["dispatch_capability", "network", "use_secret"]
+effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
-runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/google-calendar/list_events.input.v1.json"
-output_schema_ref = "schemas/google-calendar/list_events.output.v1.json"
 prompt_doc_ref = "prompts/google-calendar/list_events.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.get_event"
 description = "Get a Google Calendar event."
-effects = ["dispatch_capability", "network", "use_secret"]
+effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
-runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/google-calendar/get_event.input.v1.json"
-output_schema_ref = "schemas/google-calendar/get_event.output.v1.json"
 prompt_doc_ref = "prompts/google-calendar/get_event.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.find_free_slots"
 description = "Find Google Calendar free slots."
-effects = ["dispatch_capability", "network", "use_secret"]
+effects = ["network", "use_secret"]
 default_permission = "allow"
 visibility = "model"
-runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.readonly"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/google-calendar/find_free_slots.input.v1.json"
-output_schema_ref = "schemas/google-calendar/find_free_slots.output.v1.json"
 prompt_doc_ref = "prompts/google-calendar/find_free_slots.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.readonly"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.create_event"
 description = "Create a Google Calendar event."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
-runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.events"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/google-calendar/create_event.input.v1.json"
-output_schema_ref = "schemas/google-calendar/create_event.output.v1.json"
 prompt_doc_ref = "prompts/google-calendar/create_event.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.events"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.update_event"
 description = "Update a Google Calendar event."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
-runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.events"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/google-calendar/update_event.input.v1.json"
-output_schema_ref = "schemas/google-calendar/update_event.output.v1.json"
 prompt_doc_ref = "prompts/google-calendar/update_event.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.events"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.delete_event"
 description = "Delete a Google Calendar event."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
-runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.events"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/google-calendar/delete_event.input.v1.json"
-output_schema_ref = "schemas/google-calendar/delete_event.output.v1.json"
 prompt_doc_ref = "prompts/google-calendar/delete_event.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.events"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.add_attendees"
 description = "Add attendees to a Google Calendar event."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
-runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.events"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/google-calendar/add_attendees.input.v1.json"
-output_schema_ref = "schemas/google-calendar/add_attendees.output.v1.json"
 prompt_doc_ref = "prompts/google-calendar/add_attendees.md"
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.events"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-calendar.set_reminder"
 description = "Set Google Calendar event reminders."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
-runtime_credentials = [
-  { handle = "google_calendar_account", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/calendar.events"] } }, provider_scopes = ["https://www.googleapis.com/auth/calendar.events"], audience = { scheme = "https", host_pattern = "www.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
 input_schema_ref = "schemas/google-calendar/set_reminder.input.v1.json"
-output_schema_ref = "schemas/google-calendar/set_reminder.output.v1.json"
 prompt_doc_ref = "prompts/google-calendar/set_reminder.md"
+
+[[tools.credentials]]
+handle = "google_calendar_account"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/calendar.events"]
+audience = { scheme = "https", host = "www.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[auth.google]
+method = "oauth2_code"
+display_name = "Google account"
+authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
+token_endpoint = "https://oauth2.googleapis.com/token"
+pkce = "s256"
+scopes = ["https://www.googleapis.com/auth/calendar.readonly", "https://www.googleapis.com/auth/calendar.events"]
+extra_authorize_params = { access_type = "offline", include_granted_scopes = "true", prompt = "consent" }
+client_credentials = { client_id_handle = "google_oauth_client_id", client_secret_handle = "google_oauth_client_secret" }
+
+[auth.google.refresh]
+# Google refresh tokens for apps in "testing" publishing status expire after
+# 7 days of inactivity; the host auth engine's keepalive sweep proactively
+# refreshes idle accounts well before this vendor lifetime.
+keepalive_idle_seconds = 604800
+
+[auth.google.token_response]
+access_token = "/access_token"
+refresh_token = "/refresh_token"
+expires_in = "/expires_in"
+scope = { path = "/scope" }

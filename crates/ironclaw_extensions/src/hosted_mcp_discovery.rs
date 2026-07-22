@@ -65,6 +65,7 @@ pub fn package_with_discovered_hosted_mcp_tools(
             runtime_credentials: capability.runtime_credentials.clone(),
             network_targets: capability.network_targets.clone(),
             resource_profile: capability.resource_profile.clone(),
+            origin_gate_matrix: capability.origin_gate_matrix.clone(),
         })
         .collect();
 
@@ -136,6 +137,7 @@ fn hosted_mcp_capability_template(
         required_host_ports: first.required_host_ports.clone(),
         runtime_credentials: first.runtime_credentials.clone(),
         resource_profile: first.resource_profile.clone(),
+        origin_gate_matrix: first.origin_gate_matrix.clone(),
     })
 }
 
@@ -144,6 +146,7 @@ struct HostedMcpCapabilityTemplate {
     required_host_ports: Vec<ironclaw_host_api::HostPortId>,
     runtime_credentials: Vec<ironclaw_host_api::RuntimeCredentialRequirement>,
     resource_profile: Option<ironclaw_host_api::ResourceProfile>,
+    origin_gate_matrix: Option<ironclaw_host_api::OriginGateMatrix>,
 }
 
 fn discovered_capability_manifest(
@@ -193,7 +196,7 @@ fn discovered_capability_manifest(
         default_permission: PermissionMode::Ask,
         visibility: CapabilityVisibility::Model,
         input_schema_ref,
-        output_schema_ref,
+        output_schema_ref: Some(output_schema_ref),
         prompt_doc_ref: None,
         required_host_ports: template.required_host_ports.clone(),
         runtime_credentials: template.runtime_credentials.clone(),
@@ -201,6 +204,7 @@ fn discovered_capability_manifest(
         // not a manifest-declared allowlist.
         network_targets: Vec::new(),
         resource_profile: template.resource_profile.clone(),
+        origin_gate_matrix: template.origin_gate_matrix.clone(),
     })
 }
 
@@ -243,7 +247,13 @@ kind = "mcp"
 transport = "http"
 url = "https://mcp.notion.com/mcp"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "notion.notion-fetch"
 description = "Fetch a Notion page"
 effects = ["dispatch_capability", "network", "use_secret"]
@@ -348,11 +358,22 @@ runtime_credentials = [
         );
     }
 
+    fn capability_provider_contracts() -> crate::HostApiContractRegistry {
+        let mut contracts = crate::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                crate::CapabilityProviderHostApiContract::new().expect("contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
+
     fn notion_package() -> ExtensionPackage {
         let manifest = ExtensionManifest::parse(
             NOTION_MANIFEST,
             ManifestSource::HostBundled,
             &HostPortCatalog::default(),
+            &capability_provider_contracts(),
         )
         .expect("valid Notion manifest");
         ExtensionPackage::from_manifest(

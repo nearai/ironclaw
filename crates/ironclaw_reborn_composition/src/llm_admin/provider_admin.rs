@@ -536,7 +536,7 @@ pub struct ProviderProbeOutcome {
 /// an inline literal) because the two crates aren't type-linked (the stub
 /// is a raw JSON string literal); `menu_entries_excludes_the_example_overlay_provider`
 /// pins them staying in sync.
-pub const EXAMPLE_OVERLAY_PROVIDER_ID: &str = "acme-openrouter";
+pub const EXAMPLE_OVERLAY_PROVIDER_ID: &str = "example-openrouter";
 
 /// One entry on the interactive `onboard` numbered provider menu — see
 /// [`RebornProviderAdmin::menu_entries`].
@@ -1019,7 +1019,7 @@ mod tests {
     }
 
     /// The tenant-pinned OpenRouter example overlay entry (same shape
-    /// `PROVIDERS_STUB` writes: id `acme-openrouter`, kind `api_key`,
+    /// `PROVIDERS_STUB` writes: id `example-openrouter`, kind `api_key`,
     /// otherwise indistinguishable from a real menu-eligible provider) must
     /// never appear on the numbered menu. Pins the id-equality filter
     /// against [`EXAMPLE_OVERLAY_PROVIDER_ID`].

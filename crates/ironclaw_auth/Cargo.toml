@@ -27,13 +27,25 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+# Compile-time Mozilla Public Suffix List: DCR issuer/resource origin binding
+# needs real eTLD+1 resolution (naive label-splitting treats every `*.co.uk`
+# as one registrable domain — the PR #6116 security-high finding). Static data
+# baked into the binary; no runtime list fetch or I/O.
+psl = "2"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 subtle = "2"
 thiserror = "2"
+rand = "0.10"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-util = "0.7"
+tracing = "0.1"
 url = "2"
+# Used by the v1-only `loopback_oauth` callback transport to decode OAuth
+# callback query parameters. Carried over with the W2.1 fold of the retired
+# `ironclaw_oauth` crate into this crate.
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
@@ -44,3 +56,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 ironclaw_auth = { path = ".", features = ["test-support"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }
+toml = "1.1"

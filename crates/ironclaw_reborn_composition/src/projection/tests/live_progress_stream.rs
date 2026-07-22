@@ -41,6 +41,113 @@ fn live_projection_fixture(label: &str) -> LiveProjectionFixture {
     }
 }
 
+// A browser keeps its opaque SSE cursor when Chat unmounts during route
+// navigation. Live cursors are process-local, however, so a deployment can
+// reset the sequence and produce the same numeric cursor again. The restarted
+// stream must discard only that stale live floor while preserving the durable
+// cursor components; otherwise all new interim text is silently filtered until
+// a full page refresh clears the browser cache.
+#[tokio::test]
+async fn webui_event_stream_rebases_live_cursor_from_prior_process_epoch() {
+    let tenant_id = TenantId::new("webui-live-restart-tenant").unwrap();
+    let user_id = UserId::new("webui-live-restart-user").unwrap();
+    let agent_id = AgentId::new("webui-live-restart-agent").unwrap();
+    let thread_id = ThreadId::new("webui-live-restart-thread").unwrap();
+    let scope = TurnScope::new(tenant_id, Some(agent_id), None, thread_id);
+    let actor = TurnActor::new(user_id.clone());
+    let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+
+    let services_before_restart = build_reborn_projection_services(
+        Arc::clone(&event_log),
+        ReplyTargetBindingRef::new("webui-live-restart-before").unwrap(),
+    );
+    let sink_before_restart = services_before_restart
+        .with_live_progress_milestone_sink_for_publisher(
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            services_before_restart.live_projection_publisher(user_id.clone()),
+        );
+    let run_id = TurnRunId::new();
+    let reasoning = |body: &str| LoopHostMilestone {
+        scope: scope.clone(),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id,
+        loop_driver_id: LoopDriverId::new("test_loop").unwrap(),
+        kind: LoopHostMilestoneKind::ModelReasoningDelta {
+            safe_delta: body.to_string(),
+        },
+    };
+    sink_before_restart
+        .publish_loop_milestone(reasoning("before restart"))
+        .await
+        .unwrap();
+    let before_restart = services_before_restart
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor: actor.clone(),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
+    let cached_cursor = before_restart
+        .iter()
+        .find(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::Thinking { body, .. }
+                            if body == "before restart"
+                    ))
+            )
+        })
+        .expect("first process must emit live reasoning")
+        .projection_cursor()
+        .clone();
+
+    // A fresh services bundle models a new server process: it shares the
+    // durable log but owns a new live-update source, sequence, and epoch.
+    let services_after_restart = build_reborn_projection_services(
+        event_log,
+        ReplyTargetBindingRef::new("webui-live-restart-after").unwrap(),
+    );
+    let sink_after_restart = services_after_restart
+        .with_live_progress_milestone_sink_for_publisher(
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            services_after_restart.live_projection_publisher(user_id),
+        );
+    sink_after_restart
+        .publish_loop_milestone(reasoning("after restart"))
+        .await
+        .unwrap();
+
+    let resumed = services_after_restart
+        .webui_event_stream()
+        .drain(ProjectionSubscriptionRequest {
+            actor,
+            scope,
+            after_cursor: Some(cached_cursor),
+        })
+        .await
+        .unwrap();
+    assert!(
+        resumed.iter().any(|event| {
+            matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionUpdate { state }
+                    if state.items.iter().any(|item| matches!(
+                        item,
+                        ProductProjectionItem::Thinking { body, .. }
+                            if body == "after restart"
+                    ))
+            )
+        }),
+        "a stale process-local live cursor must not suppress the restarted process's updates: {resumed:#?}"
+    );
+}
+
 #[tokio::test]
 async fn webui_event_stream_drains_live_reasoning_projection_from_update_source() {
     let fixture = live_projection_fixture("webui-thinking");
@@ -95,7 +202,7 @@ async fn webui_event_stream_drains_live_reasoning_projection_from_update_source(
 }
 
 #[tokio::test]
-async fn webui_event_stream_drains_live_assistant_text_projection_from_update_source() {
+async fn fresh_webui_event_stream_compacts_buffered_assistant_text_to_latest_state() {
     let fixture = live_projection_fixture("webui-text");
     let user_id = fixture.user_id.clone();
     let thread_id = fixture.thread_id.clone();
@@ -170,11 +277,8 @@ async fn webui_event_stream_drains_live_assistant_text_projection_from_update_so
 
     assert_eq!(
         text_bodies,
-        vec![
-            "partial answer".to_string(),
-            "partial answer with [redacted]".to_string()
-        ],
-        "assistant text should drain as incremental updates to one stable text item"
+        vec!["partial answer with [redacted]".to_string()],
+        "a fresh route attach must hydrate the latest text state without replaying its growth history"
     );
     let wire = serde_json::to_string(&events).unwrap();
     assert!(!wire.contains(secret_like_token));
@@ -542,6 +646,16 @@ async fn live_publishers_from_same_services_share_monotonic_sequence() {
     let user_id = fixture.user_id.clone();
     let scope = fixture.scope.clone();
     let run_id = TurnRunId::new();
+    let mut subscription = fixture
+        .services
+        .webui_event_stream()
+        .subscribe(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(user_id.clone()),
+            scope: scope.clone(),
+            after_cursor: None,
+        })
+        .await
+        .unwrap();
 
     let reasoning = |body: &str| LoopHostMilestone {
         scope: scope.clone(),
@@ -574,38 +688,34 @@ async fn live_publishers_from_same_services_share_monotonic_sequence() {
         .await
         .unwrap();
 
-    let events = fixture
-        .services
-        .webui_event_stream()
-        .drain(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(user_id),
-            scope,
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
-
-    let thinking_cursors = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.payload(),
-                ProductOutboundPayload::ProjectionUpdate { state }
-                    if state.items.iter().any(|item| matches!(
-                        item,
-                        ProductProjectionItem::Thinking { body, .. }
-                            if body == "from publisher A" || body == "from publisher B"
-                    ))
-            )
-        })
-        .map(|event| event.projection_cursor().clone())
-        .collect::<Vec<_>>();
+    let mut thinking_cursors = Vec::new();
+    for _ in 0..4 {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.next())
+            .await
+            .expect("live projection event")
+            .expect("live projection subscription remains open")
+            .expect("live projection event remains valid");
+        if matches!(
+            event.payload(),
+            ProductOutboundPayload::ProjectionUpdate { state }
+                if state.items.iter().any(|item| matches!(
+                    item,
+                    ProductProjectionItem::Thinking { body, .. }
+                        if body == "from publisher A" || body == "from publisher B"
+                ))
+        ) {
+            thinking_cursors.push(event.projection_cursor().clone());
+        }
+        if thinking_cursors.len() == 2 {
+            break;
+        }
+    }
 
     assert_eq!(
         thinking_cursors.len(),
         2,
         "both publishers' live reasoning items must reach the stream on their \
-         own cursor: {events:#?}"
+         own cursor"
     );
     assert_ne!(
         thinking_cursors[0], thinking_cursors[1],
@@ -679,9 +789,9 @@ async fn webui_event_stream_preserves_live_reasoning_and_tool_start_order() {
 
     let live_items = events
         .iter()
-        .filter_map(|event| match event.payload() {
-            ProductOutboundPayload::ProjectionUpdate { state } => state.items.first(),
-            _ => None,
+        .flat_map(|event| match event.payload() {
+            ProductOutboundPayload::ProjectionUpdate { state } => state.items.iter(),
+            _ => [].iter(),
         })
         .map(|item| match item {
             ProductProjectionItem::Thinking { body, .. } => format!("thinking:{body}"),

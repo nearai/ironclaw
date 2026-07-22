@@ -84,12 +84,11 @@ V1 semantics intentionally mirror the current WASM network import policy checks 
 
 HTTP egress rejects URL userinfo before policy, DNS, or transport so credentials cannot be smuggled through an allowlisted host URL. It resolves hostnames before dispatch and denies the request before transport when `deny_private_ip_ranges` is true and any resolved address is private, loopback, link-local, documentation, multicast, broadcast, unspecified, carrier-grade NAT, unique-local, or an IPv4-mapped IPv6 address that maps to a non-public IPv4 address. The default transport disables redirects and pins the request to the vetted resolved address set so a later DNS answer cannot silently change the destination for that request, while still allowing connector-level fallback across alternate A/AAAA answers. Caller-provided `Host` headers are rejected before transport so virtual-host routing cannot diverge from the URL host that policy validated. Runtime-visible response bodies are always bounded: omitted and oversized explicit `response_body_limit` values clamp to the V1 default in-memory cap rather than reading unbounded data.
 
-Hermetic E2E binaries may opt into the `test-support` feature and explicitly
-construct a transport from `IRONCLAW_TEST_HTTP_REWRITE_MAP`. Rewrites happen
-only after policy and DNS validation of the original destination, accept only
-HTTP(S) loopback IP targets, and replace the public DNS pins with the selected
-loopback pin. Unmapped hosts retain their original URL and vetted address set.
-Default and distribution builds do not compile or read this seam.
+Hermetic debug E2E binaries may activate the centralized transport wrapper with
+`IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP`. Rewrites happen only after policy and
+DNS validation of the original destination and accept only loopback IP socket
+targets. Unmapped hosts retain their original URL and vetted address set. A
+release binary fails startup if the test-only environment variable is set.
 
 ---
 
@@ -160,7 +159,7 @@ The crate tests cover:
 - method + URL + header byte counting for `max_egress_bytes`
 - URL userinfo denial before policy/DNS/transport
 - full resolved-address set preservation for transport fallback
-- `test-support` rewrite validation, loopback pinning, and unmapped-host preservation
+- centralized rewrite validation, loopback routing, and unmapped-host preservation
 - caller-provided `Host` header denial before transport
 - default-port target matching for URL-derived requests
 - redirects are not followed by the default transport

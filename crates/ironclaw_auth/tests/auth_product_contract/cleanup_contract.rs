@@ -1,256 +1,6 @@
 use crate::common::*;
 
 #[tokio::test]
-async fn oauth_completion_compensation_preserves_a_newer_account_generation() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let existing = services
-        .create_account(NewCredentialAccount {
-            scope: owner.clone(),
-            provider: provider(),
-            label: label("work github"),
-            status: CredentialAccountStatus::PendingSetup,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("github-old-access").unwrap()),
-            refresh_secret: None,
-            scopes: provider_scopes(&["read:user"]),
-        })
-        .await
-        .expect("existing account");
-    let first_flow = oauth_update_flow(&services, owner.clone(), &existing).await;
-    let first = services
-        .complete_oauth_callback(
-            &owner,
-            OAuthCallbackInput {
-                flow_id: first_flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: Box::new(OAuthProviderExchange {
-                        provider: provider(),
-                        account_label: label("first generation"),
-                        authorization_code_hash: code_hash("first-code"),
-                        pkce_verifier_hash: pkce_hash("pkce-hash"),
-                        access_secret: SecretHandle::new("github-first-access").unwrap(),
-                        refresh_secret: None,
-                        scopes: provider_scopes(&["repo"]),
-                        account_id: Some(existing.id),
-                        provider_identity: None,
-                    }),
-                },
-            },
-        )
-        .await
-        .expect("first callback");
-    let first_fingerprint = first
-        .credential_secret_fingerprint
-        .clone()
-        .expect("first secret fingerprint");
-    let claimed = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: first.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("first continuation claim");
-    services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: first.id,
-                expected_claimed_at: claimed.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
-        .await
-        .expect("first continuation failure");
-    let first_account = services
-        .get_account(CredentialAccountLookupRequest::new(
-            owner.clone(),
-            existing.id,
-        ))
-        .await
-        .expect("first lookup")
-        .expect("first account");
-    let second_flow = oauth_update_flow(&services, owner.clone(), &first_account).await;
-    services
-        .complete_oauth_callback(
-            &owner,
-            OAuthCallbackInput {
-                flow_id: second_flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: Box::new(OAuthProviderExchange {
-                        provider: provider(),
-                        account_label: label("second generation"),
-                        authorization_code_hash: code_hash("second-code"),
-                        pkce_verifier_hash: pkce_hash("pkce-hash"),
-                        access_secret: SecretHandle::new("github-second-access").unwrap(),
-                        refresh_secret: None,
-                        scopes: provider_scopes(&["repo"]),
-                        account_id: Some(existing.id),
-                        provider_identity: None,
-                    }),
-                },
-            },
-        )
-        .await
-        .expect("second callback");
-
-    let outcome = services
-        .compensate_oauth_completion(ironclaw_auth::OAuthCompletionCompensationRequest {
-            scope: owner.clone(),
-            flow_id: first.id,
-            provider: first.provider,
-            credential_account_id: existing.id,
-            expected_secret_fingerprint: first_fingerprint,
-        })
-        .await
-        .expect("stale compensation is safe");
-
-    assert_eq!(
-        outcome,
-        ironclaw_auth::OAuthCompletionCompensationOutcome::Superseded
-    );
-    let current = services
-        .get_account(CredentialAccountLookupRequest::new(owner, existing.id))
-        .await
-        .expect("current lookup")
-        .expect("current account");
-    assert_eq!(current.status, CredentialAccountStatus::Configured);
-    assert_eq!(
-        current.access_secret,
-        Some(SecretHandle::new("github-second-access").unwrap())
-    );
-}
-
-#[tokio::test]
-async fn oauth_completion_compensation_ignores_metadata_only_account_updates() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let existing = services
-        .create_account(NewCredentialAccount {
-            scope: owner.clone(),
-            provider: provider(),
-            label: label("work github"),
-            status: CredentialAccountStatus::PendingSetup,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("github-old-access").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
-    let flow = oauth_update_flow(&services, owner.clone(), &existing).await;
-    let completed = services
-        .complete_oauth_callback(
-            &owner,
-            OAuthCallbackInput {
-                flow_id: flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: Box::new(OAuthProviderExchange {
-                        provider: provider(),
-                        account_label: label("oauth account"),
-                        authorization_code_hash: code_hash("code-hash"),
-                        pkce_verifier_hash: pkce_hash("pkce-hash"),
-                        access_secret: SecretHandle::new("github-oauth-access").unwrap(),
-                        refresh_secret: None,
-                        scopes: provider_scopes(&["repo"]),
-                        account_id: Some(existing.id),
-                        provider_identity: None,
-                    }),
-                },
-            },
-        )
-        .await
-        .unwrap();
-    let fingerprint = completed
-        .credential_secret_fingerprint
-        .clone()
-        .expect("OAuth fingerprint");
-    let claim = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .unwrap();
-    services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claim.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
-        .await
-        .unwrap();
-    let current = services
-        .get_account(CredentialAccountLookupRequest::new(
-            owner.clone(),
-            existing.id,
-        ))
-        .await
-        .unwrap()
-        .unwrap();
-    services
-        .create_or_update_account(CredentialAccountMutation::Update(CredentialAccountUpdate {
-            account_id: current.id,
-            account: NewCredentialAccount {
-                scope: current.scope.clone(),
-                provider: current.provider.clone(),
-                label: label("renamed metadata"),
-                status: current.status,
-                ownership: current.ownership,
-                owner_extension: current.owner_extension.clone(),
-                granted_extensions: current.granted_extensions.clone(),
-                access_secret: current.access_secret.clone(),
-                refresh_secret: current.refresh_secret.clone(),
-                scopes: current.scopes.clone(),
-            },
-        }))
-        .await
-        .unwrap();
-
-    let outcome = services
-        .compensate_oauth_completion(ironclaw_auth::OAuthCompletionCompensationRequest {
-            scope: owner.clone(),
-            flow_id: completed.id,
-            provider: provider(),
-            credential_account_id: existing.id,
-            expected_secret_fingerprint: fingerprint,
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        outcome,
-        ironclaw_auth::OAuthCompletionCompensationOutcome::Compensated
-    );
-    let revoked = services
-        .get_account(CredentialAccountLookupRequest::new(owner, existing.id))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(revoked.status, CredentialAccountStatus::Revoked);
-    assert!(revoked.access_secret.is_none());
-}
-
-#[tokio::test]
 async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");
@@ -757,6 +507,229 @@ async fn cleanup_matches_owner_granularity_and_provider_selected_oauth_accounts(
     );
 }
 
+/// A credential-owner scope carrying the `Callback` surface, no session, and a
+/// fresh invocation — the shape a removal/disconnect cleanup actually arrives
+/// on (`revoke_exclusive_credentials` / `personal_credential_cleanup_request`
+/// build it via `AuthProductScope::credential_owner(.., AuthSurface::Callback)`).
+/// It deliberately differs in surface/session/invocation from the `Web`-surface
+/// scope [`scope`] mints a pending flow under, so a test that cleans up with it
+/// proves cleanup matches flows at credential-owner granularity, not by the
+/// surface/session the connect popup happened to use.
+fn callback_cleanup_scope(user: &str) -> AuthProductScope {
+    let mut cleanup = scope(user);
+    cleanup.surface = AuthSurface::Callback;
+    cleanup.session_id = None;
+    cleanup.resource.invocation_id = InvocationId::new();
+    cleanup
+}
+
+/// A3 · Removal cancels pending OAuth flows (RFC 9700 §4.7.1 + RFC 7009 §1).
+///
+/// When an extension is uninstalled mid-handshake, its pending setup flow is
+/// canceled even though the removal cleanup arrives on a *different* surface
+/// (`Callback`) than the `Web` connect popup that minted the flow; a late
+/// provider callback is then rejected, and no credential is minted from the
+/// abandoned flow. Re-expressed from `nea25/auth-oauth-parity`'s
+/// `uninstall_cancels_pending_flow_and_rejects_late_callback` onto this branch's
+/// reconciled auth structure.
+#[tokio::test]
+async fn uninstall_cancels_pending_flow_and_rejects_late_callback() {
+    let services = InMemoryAuthProductServices::new();
+    let flow_scope = scope("alice");
+    let expires_at = Utc::now() + Duration::minutes(5);
+
+    // A pending setup flow, mid-handshake (AwaitingUser), awaiting the callback,
+    // minted under the connect popup's `Web` surface + session.
+    let flow = services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: flow_scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: authorization_url("https://provider.example/oauth"),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("state")),
+            pkce_verifier_hash: Some(pkce_hash("pkce")),
+            expires_at,
+        })
+        .await
+        .expect("pending flow");
+    assert_eq!(flow.status, AuthFlowStatus::AwaitingUser);
+
+    // The extension is uninstalled while the flow is still in flight. Cleanup
+    // arrives on the `Callback`-surface credential-owner scope, exactly as
+    // `revoke_exclusive_credentials` builds it.
+    services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: callback_cleanup_scope("alice"),
+            extension_id: ExtensionId::new("github").expect("extension"),
+            provider: Some(provider()),
+            lifecycle_package: None,
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .expect("cleanup");
+
+    // The pending flow is now canceled and never bound a credential.
+    let after = services
+        .get_flow(&flow_scope, flow.id)
+        .await
+        .expect("lookup")
+        .expect("record");
+    assert_eq!(after.status, AuthFlowStatus::Canceled);
+    assert!(after.credential_account_id.is_none());
+
+    // A late provider callback for the removed extension is rejected outright,
+    // so no token exchange (and no credential mint) can proceed.
+    let late = services
+        .claim_oauth_callback(
+            &flow_scope,
+            ironclaw_auth::OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state"),
+                provider: provider(),
+                pkce_verifier_hash: pkce_hash("pkce"),
+            },
+        )
+        .await
+        .expect_err("late callback after uninstall must be rejected");
+    assert_eq!(late, AuthProductError::Canceled);
+
+    // No credential account exists for the owner+provider.
+    let accounts = services
+        .list_accounts(CredentialAccountListRequest::new(flow_scope, provider()))
+        .await
+        .expect("list accounts");
+    assert!(accounts.accounts.is_empty());
+}
+
+/// A3 breadth (owner decision 2026-07-15): cleanup cancels EVERY non-terminal
+/// flow kind for the owner+provider — connect (`SetupOnly`) *and* a blocked-tool
+/// auth gate (`TurnGateResume`) — on BOTH `Deactivate` and `Uninstall`, while a
+/// different provider's flow and an already-terminal flow are untouched. Any
+/// non-terminal flow can otherwise mint a credential on a late callback.
+#[tokio::test]
+async fn cleanup_cancels_all_pending_flow_kinds_for_provider_on_deactivate() {
+    let services = InMemoryAuthProductServices::new();
+    let flow_scope = scope("alice");
+    let expires_at = Utc::now() + Duration::minutes(5);
+    let other_provider = AuthProviderId::new("notion").expect("provider");
+
+    let make_flow = |provider: AuthProviderId, continuation: AuthContinuationRef| {
+        let services = &services;
+        let flow_scope = flow_scope.clone();
+        async move {
+            services
+                .create_flow(NewAuthFlow {
+                    id: None,
+                    scope: flow_scope,
+                    kind: AuthFlowKind::IntegrationCredential,
+                    provider,
+                    challenge: AuthChallenge::OAuthUrl {
+                        authorization_url: authorization_url("https://provider.example/oauth"),
+                        expires_at,
+                    },
+                    continuation,
+                    update_binding: None,
+                    opaque_state_hash: Some(state_hash("state")),
+                    pkce_verifier_hash: Some(pkce_hash("pkce")),
+                    expires_at,
+                })
+                .await
+                .expect("flow")
+        }
+    };
+
+    let setup = make_flow(provider(), AuthContinuationRef::SetupOnly).await;
+    let gate = make_flow(
+        provider(),
+        AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new("run-a3").expect("run ref"),
+            gate_ref: AuthGateRef::new("gate:a3").expect("gate ref"),
+        },
+    )
+    .await;
+    // A different provider's pending flow must survive a provider-scoped cleanup.
+    let bystander = make_flow(other_provider, AuthContinuationRef::SetupOnly).await;
+
+    // Deactivate (owner call: same as uninstall for flow cancellation), provider
+    // selected, arriving on the callback-surface owner scope.
+    let report = services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: callback_cleanup_scope("alice"),
+            extension_id: ExtensionId::new("github").expect("extension"),
+            provider: Some(provider()),
+            lifecycle_package: None,
+            action: SecretCleanupAction::Deactivate,
+        })
+        .await
+        .expect("cleanup");
+
+    // F2 · Exactly the canceled TURN-GATE flow is handed to the composition
+    // layer for gate denial — once, and never the `SetupOnly` connect flow.
+    assert_eq!(report.canceled_turn_gate_continuations.len(), 1);
+    let event = &report.canceled_turn_gate_continuations[0];
+    assert_eq!(event.flow_id, gate.id);
+    assert_eq!(event.provider, provider());
+    assert_eq!(event.credential_account_id, None);
+    assert!(matches!(
+        &event.continuation,
+        AuthContinuationRef::TurnGateResume { gate_ref, .. } if gate_ref.as_str() == "gate:a3"
+    ));
+
+    let status = |id| {
+        let services = &services;
+        let flow_scope = flow_scope.clone();
+        async move {
+            services
+                .get_flow(&flow_scope, id)
+                .await
+                .expect("lookup")
+                .expect("record")
+                .status
+        }
+    };
+    assert_eq!(status(setup.id).await, AuthFlowStatus::Canceled);
+    assert_eq!(status(gate.id).await, AuthFlowStatus::Canceled);
+    assert_eq!(
+        status(bystander.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "a different provider's pending flow must survive provider-scoped cleanup"
+    );
+
+    // Acknowledge the gate-denial handoff exactly as the composition dispatch
+    // loop does, so a cleanup retry cannot re-emit the same denial.
+    services
+        .mark_continuation_dispatched(&event.scope, event.flow_id, event.emitted_at)
+        .await
+        .expect("cleanup denial acknowledgement supports canceled flows");
+
+    // Idempotent: a second cleanup finds nothing live to cancel, reports no
+    // further turn-gate continuations, and still succeeds.
+    let retry = services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: callback_cleanup_scope("alice"),
+            extension_id: ExtensionId::new("github").expect("extension"),
+            provider: Some(provider()),
+            lifecycle_package: None,
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .expect("idempotent cleanup");
+    assert!(retry.canceled_turn_gate_continuations.is_empty());
+    assert_eq!(status(setup.id).await, AuthFlowStatus::Canceled);
+}
+
+/// F2 · A flow can reach a terminal state (here: `Completed`) with its
+/// `TurnGateResume` continuation still unacknowledged — completion is durable
+/// but dispatch is not. Lifecycle cleanup must still synthesize exactly one
+/// denial handoff for it (a gate cannot remain parked after its credential is
+/// removed), and acknowledging via `mark_continuation_dispatched` converges a
+/// retry to an empty report.
 #[tokio::test]
 async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() {
     let services = InMemoryAuthProductServices::new();
@@ -781,8 +754,7 @@ async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() 
                 accounts: vec![account.projection()],
             },
             continuation: AuthContinuationRef::TurnGateResume {
-                turn_run_ref: TurnRunRef::new(uuid::Uuid::new_v4().to_string())
-                    .expect("turn run ref"),
+                turn_run_ref: TurnRunRef::new("run-cleanup-completed").expect("turn run ref"),
                 gate_ref: AuthGateRef::new("gate:cleanup-completed").expect("gate ref"),
             },
             update_binding: None,
@@ -822,6 +794,15 @@ async fn completed_unacknowledged_turn_gate_cleanup_emits_once_then_converges() 
     assert_eq!(report.canceled_turn_gate_continuations.len(), 1);
     let event = &report.canceled_turn_gate_continuations[0];
     assert_eq!(event.flow_id, flow.id);
+    // Callback-wins invariant (removal/callback race): a credential minted by
+    // a flow that completed before — or raced ahead of — the removal must not
+    // survive the cleanup. The account scan runs AFTER flow cancellation, so
+    // a mint that beat the cancellation is still swept here.
+    assert_eq!(
+        report.revoked_accounts,
+        vec![account.id],
+        "the completed flow's credential is revoked by the same cleanup"
+    );
 
     services
         .mark_continuation_dispatched(&owner, flow.id, event.emitted_at)

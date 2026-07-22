@@ -457,37 +457,6 @@ async fn reqwest_transport_forwards_all_headers_to_http_client() {
     assert!(raw_request.contains("\r\nx-api-key: sk-second-header-secret\r\n"));
 }
 
-#[cfg(feature = "test-support")]
-#[tokio::test]
-async fn reqwest_transport_does_not_rewrite_unmapped_hosts() {
-    let (url, server) = single_response_server_for_host(
-        "api.example.test",
-        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
-    );
-    let transport = ReqwestNetworkTransport::new_with_test_host_rewrites(
-        Duration::from_secs(2),
-        r#"{"other.example.test":"http://127.0.0.1:43123"}"#,
-    )
-    .unwrap();
-
-    let response = transport
-        .execute(NetworkTransportRequest {
-            method: NetworkMethod::Get,
-            url,
-            headers: vec![],
-            body: vec![],
-            resolved_ips: vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
-            response_body_limit: Some(1024),
-            timeout_ms: None,
-        })
-        .await
-        .expect("an unmapped host must retain its original vetted DNS pin");
-    server.join().unwrap();
-
-    assert_eq!(response.status, 200);
-    assert_eq!(response.body, b"ok");
-}
-
 #[tokio::test]
 async fn reqwest_transport_uses_all_resolved_addresses_for_connection_fallback() {
     let (url, server) = single_response_server_for_host(

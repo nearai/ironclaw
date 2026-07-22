@@ -24,19 +24,6 @@ const MAX_REQWEST_CLIENT_CACHE_ENTRIES: usize = 128;
 pub struct ReqwestNetworkTransport {
     timeout: Duration,
     client_cache: Arc<Mutex<HashMap<ReqwestClientKey, reqwest::Client>>>,
-    #[cfg(feature = "test-support")]
-    test_host_rewrites: Arc<HashMap<String, url::Url>>,
-}
-
-#[cfg(feature = "test-support")]
-#[derive(Debug, thiserror::Error)]
-pub enum TestHostRewriteError {
-    #[error("test HTTP rewrite map must be a JSON object of host-to-URL strings")]
-    Json(#[from] serde_json::Error),
-    #[error("test HTTP rewrite source host is invalid")]
-    SourceHost,
-    #[error("test HTTP rewrite target must be an HTTP(S) loopback IP URL")]
-    Target,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,26 +53,7 @@ impl ReqwestNetworkTransport {
         Self {
             timeout,
             client_cache: Arc::new(Mutex::new(HashMap::new())),
-            #[cfg(feature = "test-support")]
-            test_host_rewrites: Arc::new(HashMap::new()),
         }
-    }
-
-    /// Build an E2E transport with an explicit, loopback-only host rewrite map.
-    ///
-    /// The caller must still pass the original destination through policy and
-    /// DNS validation before invoking this transport. This seam only changes
-    /// the final connection target after those checks have succeeded.
-    #[cfg(feature = "test-support")]
-    pub fn new_with_test_host_rewrites(
-        timeout: Duration,
-        raw_rewrites: &str,
-    ) -> Result<Self, TestHostRewriteError> {
-        Ok(Self {
-            timeout,
-            client_cache: Arc::new(Mutex::new(HashMap::new())),
-            test_host_rewrites: Arc::new(parse_test_host_rewrites(raw_rewrites)?),
-        })
     }
 
     async fn client_for(
@@ -134,70 +102,6 @@ impl ReqwestNetworkTransport {
         }
         Ok(cache.entry(key).or_insert(client).clone())
     }
-}
-
-#[cfg(feature = "test-support")]
-fn parse_test_host_rewrites(raw: &str) -> Result<HashMap<String, url::Url>, TestHostRewriteError> {
-    let entries = serde_json::from_str::<HashMap<String, String>>(raw)?;
-    entries
-        .into_iter()
-        .map(|(host, target)| {
-            let source = url::Host::parse(&host).map_err(|_| TestHostRewriteError::SourceHost)?;
-            let target = url::Url::parse(&target).map_err(|_| TestHostRewriteError::Target)?;
-            if !matches!(target.scheme(), "http" | "https")
-                || test_rewrite_loopback_ip(&target).is_none()
-                || target.username() != ""
-                || target.password().is_some()
-                || target.path() != "/"
-                || target.query().is_some()
-                || target.fragment().is_some()
-            {
-                return Err(TestHostRewriteError::Target);
-            }
-            Ok((source.to_string().to_ascii_lowercase(), target))
-        })
-        .collect()
-}
-
-#[cfg(feature = "test-support")]
-fn test_rewrite_loopback_ip(url: &url::Url) -> Option<std::net::IpAddr> {
-    match url.host()? {
-        url::Host::Ipv4(ip) if ip.is_loopback() => Some(std::net::IpAddr::V4(ip)),
-        url::Host::Ipv6(ip) if ip.is_loopback() => Some(std::net::IpAddr::V6(ip)),
-        _ => None,
-    }
-}
-
-#[cfg(feature = "test-support")]
-fn apply_test_host_rewrite(
-    rewrites: &HashMap<String, url::Url>,
-    url: &mut url::Url,
-    resolved_ips: &mut Vec<std::net::IpAddr>,
-) {
-    let Some(host) = url.host_str().map(str::to_string) else {
-        return;
-    };
-    let Some(target) = rewrites.get(&host.to_ascii_lowercase()) else {
-        return;
-    };
-    let Some(target_ip) = test_rewrite_loopback_ip(target) else {
-        return;
-    };
-    if url.set_scheme(target.scheme()).is_err()
-        || url.set_host(target.host_str()).is_err()
-        || url.set_port(target.port()).is_err()
-    {
-        return;
-    }
-    tracing::debug!(
-        original_host = host,
-        target_host = target.host_str(),
-        target_port = target.port(),
-        target_scheme = target.scheme(),
-        "applied test-support HTTP host rewrite"
-    );
-    resolved_ips.clear();
-    resolved_ips.push(target_ip);
 }
 
 fn build_reqwest_client(key: &ReqwestClientKey) -> Result<reqwest::Client, reqwest::Error> {
@@ -257,16 +161,6 @@ impl NetworkHttpTransport for ReqwestNetworkTransport {
         let request_bytes = request.body.len() as u64;
         reject_caller_host_header(&request.headers)?;
         let url = take_request_url(&mut request, request_bytes)?;
-        #[cfg(feature = "test-support")]
-        let url = {
-            let mut rewritten_url = url;
-            apply_test_host_rewrite(
-                &self.test_host_rewrites,
-                &mut rewritten_url,
-                &mut request.resolved_ips,
-            );
-            rewritten_url
-        };
         let host = url
             .host_str()
             .ok_or_else(|| NetworkHttpError::InvalidUrl {
@@ -546,56 +440,6 @@ mod tests {
             effective_request_timeout(None, Duration::from_secs(30)),
             Duration::from_secs(30)
         );
-    }
-
-    #[cfg(feature = "test-support")]
-    #[test]
-    fn test_host_rewrite_preserves_path_and_replaces_public_dns_pin() {
-        let mut rewrites = HashMap::new();
-        rewrites.insert(
-            "api.example.test".to_string(),
-            url::Url::parse("http://127.0.0.1:43123").unwrap(),
-        );
-        let mut url = url::Url::parse("https://api.example.test/v1/items?q=one").unwrap();
-        let mut resolved_ips = vec![IpAddr::V4(std::net::Ipv4Addr::new(93, 184, 216, 34))];
-
-        apply_test_host_rewrite(&rewrites, &mut url, &mut resolved_ips);
-
-        assert_eq!(url.as_str(), "http://127.0.0.1:43123/v1/items?q=one");
-        assert_eq!(
-            resolved_ips,
-            vec![IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]
-        );
-    }
-
-    #[cfg(feature = "test-support")]
-    #[test]
-    fn test_host_rewrite_parser_rejects_non_loopback_and_malformed_targets() {
-        for raw in [
-            "not-json",
-            r#"{"api.example.test":"ftp://127.0.0.1:43123"}"#,
-            r#"{"api.example.test":"https://example.com"}"#,
-            r#"{"api.example.test":"http://localhost:43123"}"#,
-            r#"{"api.example.test":"http://127.0.0.1:43123/prefix"}"#,
-            r#"{"bad source host/path":"http://127.0.0.1:43123"}"#,
-        ] {
-            assert!(parse_test_host_rewrites(raw).is_err(), "accepted {raw}");
-        }
-    }
-
-    #[cfg(feature = "test-support")]
-    #[test]
-    fn unmapped_test_host_preserves_original_url_and_dns_pins() {
-        let rewrites =
-            parse_test_host_rewrites(r#"{"other.example.test":"http://127.0.0.1:43123"}"#).unwrap();
-        let mut url = url::Url::parse("https://api.example.test/v1/items").unwrap();
-        let original_ip = IpAddr::V4(std::net::Ipv4Addr::new(93, 184, 216, 34));
-        let mut resolved_ips = vec![original_ip];
-
-        apply_test_host_rewrite(&rewrites, &mut url, &mut resolved_ips);
-
-        assert_eq!(url.as_str(), "https://api.example.test/v1/items");
-        assert_eq!(resolved_ips, vec![original_ip]);
     }
 
     #[tokio::test]

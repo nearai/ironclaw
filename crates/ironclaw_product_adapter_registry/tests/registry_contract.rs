@@ -5,13 +5,14 @@ use ironclaw_extensions::{
     ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
     ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+    ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
     InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
+use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, VirtualPath};
 use ironclaw_product_adapter_registry::{
-    ManifestHash, RegistryError, list_enabled_product_adapter_entries,
-    parse_product_adapter_manifest_record, product_adapter_sections,
+    ManifestHash, parse_product_adapter_manifest_record, product_adapter_sections,
+    register_product_adapter_host_api_contract,
 };
 
 fn extension_id() -> ExtensionId {
@@ -28,6 +29,19 @@ fn credential(value: &str) -> ExtensionCredentialHandle {
 
 fn manifest_hash(value: &str) -> ManifestHash {
     ManifestHash::new(value).unwrap()
+}
+
+async fn filesystem_store() -> FilesystemExtensionInstallationStore {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    register_product_adapter_host_api_contract(&mut contracts).unwrap();
+    FilesystemExtensionInstallationStore::load_at(
+        Arc::new(InMemoryBackend::new()),
+        VirtualPath::new("/system/extensions/.installations/test").unwrap(),
+        HostPortCatalog::empty(),
+        contracts,
+    )
+    .await
+    .unwrap()
 }
 
 fn manifest(required_credential: &str, hash: &str) -> ExtensionManifestRecord {
@@ -89,7 +103,7 @@ fn installation(state: ExtensionActivationState) -> ExtensionInstallation {
 
 #[tokio::test]
 async fn default_store_has_no_enabled_installations() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
 
     assert!(store.list_manifests().await.unwrap().is_empty());
     assert!(store.list_enabled_installations().await.unwrap().is_empty());
@@ -97,7 +111,7 @@ async fn default_store_has_no_enabled_installations() {
 
 #[tokio::test]
 async fn explicit_activation_surfaces_in_product_adapter_runtime_entries() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
@@ -115,12 +129,14 @@ async fn explicit_activation_surfaces_in_product_adapter_runtime_entries() {
     let enabled = store.list_enabled_installations().await.unwrap();
     assert_eq!(enabled.len(), 1);
 
-    let entries = list_enabled_product_adapter_entries(&store).await.unwrap();
-    assert_eq!(entries.len(), 1);
-    assert_eq!(
-        entries[0].adapter().adapter_id().as_str(),
-        "telegram-v2/inbound"
-    );
+    let manifest = store
+        .get_manifest(enabled[0].extension_id())
+        .await
+        .unwrap()
+        .expect("manifest for enabled installation");
+    let sections = product_adapter_sections(&manifest).unwrap();
+    assert_eq!(sections.len(), 1);
+    assert_eq!(sections[0].adapter_id().as_str(), "telegram-v2/inbound");
 }
 
 #[tokio::test]
@@ -138,7 +154,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/plain.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "plain-tool.do"
 description = "Do something"
 default_permission = "ask"
@@ -150,11 +172,18 @@ prompt_doc_ref = "prompts/do.md"
         schema = MANIFEST_SCHEMA_VERSION,
     );
     let plain_id = ExtensionId::new("plain-tool").unwrap();
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new().unwrap(),
+        ))
+        .unwrap();
     let plain_manifest = ExtensionManifestRecord::from_toml(
         plain_raw,
         ManifestSource::HostBundled,
         &ironclaw_host_api::HostPortCatalog::empty(),
         Some(manifest_hash("sha256:plain")),
+        &contracts,
     )
     .unwrap();
     let plain_install = ExtensionInstallation::new(
@@ -168,52 +197,20 @@ prompt_doc_ref = "prompts/do.md"
     )
     .unwrap();
 
-    let store = InMemoryExtensionInstallationStore::default();
-    store.upsert_manifest(plain_manifest).await.unwrap();
+    let store = filesystem_store().await;
+    store.upsert_manifest(plain_manifest.clone()).await.unwrap();
     store.upsert_installation(plain_install).await.unwrap();
 
-    let pa_entries = list_enabled_product_adapter_entries(&store).await.unwrap();
+    let sections = product_adapter_sections(&plain_manifest).unwrap();
     assert!(
-        pa_entries.is_empty(),
-        "plain extension should not appear in product adapter entries"
+        sections.is_empty(),
+        "plain extension should project no product adapter sections"
     );
 }
 
 #[tokio::test]
-async fn credential_binding_must_reference_declared_manifest_handle() {
-    let store = InMemoryExtensionInstallationStore::default();
-    store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
-        .await
-        .unwrap();
-
-    let invalid = ExtensionInstallation::new(
-        installation_id(),
-        extension_id(),
-        ExtensionActivationState::Enabled,
-        ExtensionManifestRef::new(extension_id(), Some(manifest_hash("sha256:abc123"))),
-        vec![ExtensionCredentialBinding::new(
-            credential("slack_bot_token"),
-            SecretHandle::new("secret_slack_bot_token").unwrap(),
-        )],
-        Utc::now(),
-        InstallationOwner::Tenant,
-    )
-    .unwrap();
-
-    store.upsert_installation(invalid).await.unwrap();
-    let err = list_enabled_product_adapter_entries(&store)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        RegistryError::UndeclaredCredentialHandle { .. }
-    ));
-}
-
-#[tokio::test]
 async fn manifest_hash_mismatch_is_rejected() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:different"))
         .await
@@ -226,31 +223,6 @@ async fn manifest_hash_mismatch_is_rejected() {
     assert!(matches!(
         err,
         ExtensionInstallationError::ManifestHashMismatch { .. }
-    ));
-}
-
-#[tokio::test]
-async fn upsert_manifest_rejects_when_existing_installation_binding_revoked() {
-    let store = InMemoryExtensionInstallationStore::default();
-    store
-        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
-        .await
-        .unwrap();
-    store
-        .upsert_installation(installation(ExtensionActivationState::Enabled))
-        .await
-        .unwrap();
-
-    store
-        .upsert_manifest(manifest("other_token", "sha256:abc123"))
-        .await
-        .unwrap();
-    let err = list_enabled_product_adapter_entries(&store)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        RegistryError::UndeclaredCredentialHandle { .. }
     ));
 }
 
@@ -306,7 +278,7 @@ fn duplicate_credential_bindings_rejected_at_construction() {
 
 #[tokio::test]
 async fn no_op_activation_transition_does_not_update_timestamp() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
@@ -343,7 +315,7 @@ async fn no_op_activation_transition_does_not_update_timestamp() {
 
 #[tokio::test]
 async fn installed_state_does_not_surface_in_enabled_installations() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
@@ -357,12 +329,6 @@ async fn installed_state_does_not_surface_in_enabled_installations() {
     assert!(
         enabled.is_empty(),
         "installed (not enabled) installation should not appear in list_enabled_installations"
-    );
-
-    let entries = list_enabled_product_adapter_entries(&store).await.unwrap();
-    assert!(
-        entries.is_empty(),
-        "installed (not enabled) installation should not appear in PA runtime entries"
     );
 }
 
@@ -449,16 +415,15 @@ handle = "outbound_token"
     )
     .unwrap();
 
-    let store = InMemoryExtensionInstallationStore::default();
-    store.upsert_manifest(multi_manifest).await.unwrap();
+    let store = filesystem_store().await;
+    store.upsert_manifest(multi_manifest.clone()).await.unwrap();
     store.upsert_installation(multi_install).await.unwrap();
 
-    let entries = list_enabled_product_adapter_entries(&store).await.unwrap();
-    assert_eq!(entries.len(), 2, "both PA sections should be surfaced");
-
-    let ids: Vec<_> = entries
+    let sections = product_adapter_sections(&multi_manifest).unwrap();
+    assert_eq!(sections.len(), 2, "both PA sections should project");
+    let ids: Vec<_> = sections
         .iter()
-        .map(|e| e.adapter().adapter_id().as_str().to_owned())
+        .map(|section| section.adapter_id().as_str().to_owned())
         .collect();
     assert!(ids.contains(&"multi-adapter/inbound".to_owned()));
     assert!(ids.contains(&"multi-adapter/outbound".to_owned()));
@@ -466,7 +431,7 @@ handle = "outbound_token"
 
 #[tokio::test]
 async fn arc_store_delegation_works() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     let arc_store: Arc<dyn ExtensionInstallationStore> = Arc::new(store);
     arc_store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
@@ -477,15 +442,13 @@ async fn arc_store_delegation_works() {
         .await
         .unwrap();
 
-    let entries = list_enabled_product_adapter_entries(arc_store.as_ref())
-        .await
-        .unwrap();
-    assert_eq!(entries.len(), 1);
+    let enabled = arc_store.list_enabled_installations().await.unwrap();
+    assert_eq!(enabled.len(), 1);
 }
 
 #[tokio::test]
 async fn update_health_uses_redacted_string() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await

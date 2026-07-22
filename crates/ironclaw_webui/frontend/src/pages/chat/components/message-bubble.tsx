@@ -7,6 +7,8 @@ import { ProjectFileChips } from "./project-file-chips";
 import { AttachmentChip } from "./attachment-chip";
 import { AttachmentPreviewModal } from "./attachment-preview";
 import { useT } from "../../../lib/i18n";
+import { fetchRunArtifact } from "../../../lib/api";
+import { saveBlob } from "../../../lib/download";
 import {
   CHAT_MESSAGE_ROLES,
   type ChatAttachment,
@@ -92,6 +94,7 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
       ? message.failureStatus
       : undefined;
   const [copied, setCopied] = React.useState(false);
+  const [artifactDownloading, setArtifactDownloading] = React.useState(false);
   // The attachment currently open in the preview modal (null when closed).
   const [previewAttachment, setPreviewAttachment] =
     React.useState<ChatAttachment | null>(null);
@@ -111,6 +114,31 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
       // clipboard unavailable — no-op
     }
   }, [content, t]);
+  const turnRunId =
+    typeof message.turnRunId === "string" ? message.turnRunId : "";
+  const downloadArtifact = React.useCallback(async () => {
+    if (!threadId || !turnRunId || artifactDownloading) return;
+    setArtifactDownloading(true);
+    try {
+      const artifact = await fetchRunArtifact({ threadId, runId: turnRunId });
+      const filenameRunId = turnRunId.replace(/[^a-zA-Z0-9._-]/g, "_");
+      saveBlob(
+        new Blob([`${JSON.stringify(artifact, null, 2)}\n`], {
+          type: "application/json",
+        }),
+        `ironclaw-run-${filenameRunId}.json`,
+      );
+    } catch (error) {
+      toast(
+        error instanceof Error
+          ? error.message
+          : t("chat.fileDownloadFailed"),
+        { tone: "error" },
+      );
+    } finally {
+      setArtifactDownloading(false);
+    }
+  }, [artifactDownloading, t, threadId, turnRunId]);
 
   if (
     role === CHAT_MESSAGE_ROLES.TOOL_ACTIVITY ||
@@ -153,6 +181,13 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
   const showActions =
     role === CHAT_MESSAGE_ROLES.USER ||
     (role === CHAT_MESSAGE_ROLES.ASSISTANT && !isOptimistic);
+  const showArtifactAction = Boolean(
+    role === CHAT_MESSAGE_ROLES.ASSISTANT &&
+    message.isFinalReply === true &&
+    !isOptimistic &&
+    threadId &&
+    turnRunId,
+  );
   const isNotice = role === CHAT_MESSAGE_ROLES.SYSTEM;
   const isError = role === CHAT_MESSAGE_ROLES.ERROR;
   const bubbleWidthClass = isUser
@@ -252,6 +287,19 @@ function MessageBubbleImpl({ message, onRetry, threadId }: MessageBubbleProps) {
                 className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100"
               >
                 <Icon name={copied ? "check" : "copy"} className="h-3.5 w-3.5" />
+              </button>
+            )}
+            {showArtifactAction && (
+              <button
+                type="button"
+                onClick={downloadArtifact}
+                disabled={artifactDownloading}
+                title={artifactDownloading ? t("common.loading") : t("common.download")}
+                aria-label={artifactDownloading ? t("common.loading") : t("common.download")}
+                data-testid="download-run-artifact"
+                className="v2-button inline-grid h-7 w-7 place-items-center rounded-md border-0 bg-transparent p-0 hover:text-iron-100 disabled:opacity-50"
+              >
+                <Icon name="download" className="h-3.5 w-3.5" />
               </button>
             )}
             {showRetryAction && (

@@ -14,10 +14,10 @@ publish = false
 layer = "kernel"
 
 [features]
-# Opt-in because the restart coverage opens real libSQL-backed turn/thread
-# stores. Kept off the default so local `cargo test -p ironclaw_runner` stays
-# fast, while CI can exercise process-restart persistence explicitly.
-libsql-restart-tests = ["dep:libsql"]
+# Exposes filesystem-backed in-memory test constructors to integration tests and
+# downstream harnesses. Off by default so production builds do not carry test
+# helpers.
+test-support = []
 
 [dependencies]
 async-trait = "0.1"
@@ -44,7 +44,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 jsonschema = { version = "0.46", default-features = false }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -54,6 +54,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
+ironclaw_runner = { path = ".", features = ["test-support"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
 chrono = "0.4"
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }

@@ -48,10 +48,15 @@ async def reborn_qa_emulate_google_server(
 ):
     """Start standalone Reborn with Google API traffic routed to Emulate."""
     home_dir = tmp_path_factory.mktemp("reborn-qa-emulate-google-home")
-    rewrite_map = {
-        "oauth2.googleapis.com": mock_llm_server,
-        "www.googleapis.com": emulate_google_server["url"],
-    }
+    mock_llm_address = urlparse(mock_llm_server)
+    emulate_google_address = urlparse(emulate_google_server["url"])
+    rewrite_map = ",".join(
+        (
+            f"oauth2.googleapis.com={mock_llm_address.hostname}:{mock_llm_address.port}",
+            f"www.googleapis.com={emulate_google_address.hostname}:"
+            f"{emulate_google_address.port}",
+        )
+    )
     proc, base_url = await start_reborn_webui_v2_server(
         ironclaw_reborn_binary=ironclaw_reborn_binary,
         mock_llm_server=mock_llm_server,
@@ -59,7 +64,7 @@ async def reborn_qa_emulate_google_server(
         profile=YOLO_PROFILE,
         log_prefix="reborn-qa-emulate-google",
         extra_env={
-            "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(rewrite_map),
+            "IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP": rewrite_map,
             "IRONCLAW_REBORN_GOOGLE_CLIENT_ID": "reborn-qa-emulate-client",
             "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI": (
                 "http://127.0.0.1/api/reborn/product-auth/oauth/google/callback"
@@ -103,15 +108,16 @@ async def _seed_google_account(base_url: str) -> None:
             timeout=30,
         )
         assert callback.is_success, callback.text
-        reconciled = await client.post(
+        flow_status = await client.get(
             f"{base_url}/api/reborn/product-auth/oauth/flow/"
-            f"{started_body['flow_id']}/reconcile",
+            f"{started_body['flow_id']}/status",
             params={
                 "invocation_id": started_body["callback_scope"]["invocation_id"]
             },
             timeout=30,
         )
-        reconciled.raise_for_status()
+        flow_status.raise_for_status()
+        assert flow_status.json()["status"] == "completed", flow_status.text
         invocation_id = started_body["callback_scope"]["invocation_id"]
         listed = await client.post(
             f"{base_url}/api/reborn/product-auth/accounts/list",

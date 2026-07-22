@@ -15,10 +15,10 @@
 //! out-of-band `None` path.
 
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
-    InboundCommandPayload, ParsedProductInbound, ProductAdapterError, ProductAttachmentDescriptor,
-    ProductAttachmentKind, ProductInboundPayload, ProductTriggerReason, ProtocolAuthEvidence,
-    UserMessagePayload,
+    AdapterInstallationId, AttachmentRef, ExternalActorRef, ExternalConversationRef,
+    ExternalEventId, InboundCommandPayload, NormalizedInboundMessage, ParsedProductInbound,
+    ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
+    ProductTriggerReason, ProtocolAuthEvidence, UserMessagePayload,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -33,7 +33,7 @@ pub const TELEGRAM_USER_ACTOR_KIND: &str = "telegram_user";
 /// Telegram private/direct chats do not require any trigger — every message
 /// is forwarded. In groups/supergroups the adapter forwards a message ONLY
 /// when one of these triggers fires, per #3285's "explicit triggers" rule.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GroupTriggerPolicy {
     /// Configured bot username (without leading `@`). Must be ASCII
     /// alphanumeric or `_`. The adapter compares mention entities against
@@ -376,6 +376,84 @@ fn slice_text_by_offset(text: &str, offset: u32, length: u32) -> Option<&str> {
     let start = byte_start?;
     let end = byte_end?;
     text.get(start..end)
+}
+
+// ── Channel-normalized parsing (generic ingress router, extension-runtime P4) ──
+
+/// One host-verified Telegram webhook update, normalized for the generic
+/// channel-adapter contract: an ignored (but authenticated) update or one
+/// plain user message. Bot-command reclassification is a host-sink concern;
+/// the message text carries the command verbatim.
+#[derive(Debug)]
+pub enum TelegramInboundEvent {
+    Ignore,
+    Message(Box<NormalizedInboundMessage>),
+}
+
+/// Parse one HOST-VERIFIED Telegram update into its normalized channel form.
+/// Pure protocol work — no I/O, no secrets; the host executed the
+/// `shared_secret_header` recipe before calling this. Applies the same
+/// forwarding rules as [`parse_telegram_update`]: private chats always
+/// forward; groups only on an explicit trigger; everything else is an
+/// authenticated no-op.
+pub fn normalize_telegram_update(
+    raw_payload: &[u8],
+    installation_id: &AdapterInstallationId,
+    group_trigger_policy: &GroupTriggerPolicy,
+) -> Result<TelegramInboundEvent, PayloadParseError> {
+    let update: TelegramUpdate =
+        serde_json::from_slice(raw_payload).map_err(|err| PayloadParseError::InvalidJson {
+            reason: err.to_string(),
+        })?;
+    let update_id = update.update_id;
+    if update_id == 0 {
+        return Err(PayloadParseError::MissingUpdateId);
+    }
+    let event_id = build_event_id(installation_id, update_id)?;
+
+    let Some(message) = update.message else {
+        return Ok(TelegramInboundEvent::Ignore);
+    };
+    if message.from.is_none() {
+        return Ok(TelegramInboundEvent::Ignore);
+    }
+    let chat_kind = TelegramChatKind::from_str(message.chat.kind.as_str());
+    let Some(trigger) = classify_trigger(&message, chat_kind, group_trigger_policy) else {
+        return Ok(TelegramInboundEvent::Ignore);
+    };
+    let actor = build_actor_ref(message.from.as_ref())?;
+    let conversation = build_conversation_ref(&message)?;
+    let attachments = collect_attachments(&message)?;
+    let text = strip_leading_mention(
+        message
+            .text
+            .clone()
+            .or_else(|| message.caption.clone())
+            .unwrap_or_default(),
+        group_trigger_policy,
+    );
+    let attachments = attachments
+        .into_iter()
+        .map(|descriptor| AttachmentRef {
+            vendor_ref: descriptor.external_file_id.clone(),
+            mime_hint: Some(descriptor.mime_type.clone()),
+            descriptor,
+        })
+        .collect();
+    Ok(TelegramInboundEvent::Message(Box::new(
+        NormalizedInboundMessage {
+            actor,
+            conversation,
+            event_id,
+            text,
+            trigger,
+            attachments,
+            // Reply routing rides the conversation ref's thread anchors
+            // (pre-coordinator delivery path); adopted when the P5 delivery
+            // coordinator consumes stored contexts.
+            reply_context: None,
+        },
+    )))
 }
 
 #[cfg(test)]

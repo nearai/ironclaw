@@ -22,7 +22,7 @@ playwright install chromium
 The tests need the ironclaw binary built with libsql support:
 
 ```bash
-cargo build --no-default-features --features libsql
+cargo build -p ironclaw
 ```
 
 ## Run tests

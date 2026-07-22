@@ -54,6 +54,16 @@ V1 installed extensions live under:
 /system/extensions/<extension_id>/
 ```
 
+Generic installation state lives in filesystem record rows under:
+
+```text
+/system/extensions/.installations/manifests/<hashed_extension_id>.json
+/system/extensions/.installations/installations/<hashed_installation_id>.json
+```
+
+The store declares exact indexes for extension id, installation id, and
+activation state, and uses row CAS for activation/health updates and deletes.
+
 Recommended package layout:
 
 ```text
@@ -86,13 +96,12 @@ Production manifests use `schema_version = "reborn.extension_manifest.v2"`.
 The older top-level `parameters_schema` manifest shape is no longer parsed on
 production discovery paths.
 
-Installed third-party manifests (`InstalledLocal` / `RegistryInstalled`) declare
-model-visible tools through `[[host_api]] id = "ironclaw.capability_provider/v1"`.
-Legacy top-level `[[capabilities]]` declarations are accepted only for
-`ManifestSource::HostBundled` packages such as host-owned built-ins and explicit
-compatibility fixtures.
+Every manifest — host-bundled exactly as installed — declares its sections
+through `[[host_api]]` contracts; tools live under
+`[[host_api]] id = "ironclaw.capability_provider/v1"`. Top-level
+`[[capabilities]]` is rejected for every manifest source.
 
-Legacy host-bundled WASM manifest:
+Host-bundled WASM manifest:
 
 ```toml
 schema_version = "reborn.extension_manifest.v2"
@@ -106,7 +115,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "echo.say"
 description = "Echo text"
 effects = ["dispatch_capability"]
@@ -116,7 +131,7 @@ input_schema_ref = "schemas/echo/say.input.v1.json"
 output_schema_ref = "schemas/echo/say.output.v1.json"
 ```
 
-Legacy host-bundled script/CLI manifest:
+Host-bundled script/CLI manifest:
 
 ```toml
 schema_version = "reborn.extension_manifest.v2"
@@ -133,7 +148,13 @@ image = "python:3.12-slim"
 command = "pytest"
 args = ["tests/"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "project-tools.pytest"
 description = "Run pytest"
 effects = ["execute_code"]
@@ -143,7 +164,7 @@ input_schema_ref = "schemas/project-tools/pytest.input.v1.json"
 output_schema_ref = "schemas/project-tools/pytest.output.v1.json"
 ```
 
-Legacy host-bundled MCP adapter manifest:
+Host-bundled MCP adapter manifest:
 
 ```toml
 schema_version = "reborn.extension_manifest.v2"
@@ -159,7 +180,13 @@ transport = "stdio"
 command = "github-mcp-server"
 args = ["--stdio"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github-mcp.search_issues"
 description = "Search GitHub issues"
 effects = ["network", "dispatch_capability"]
@@ -242,12 +269,59 @@ Rules:
 - Manifest validation is atomic: any invalid host API contract invalidates the extension manifest.
 - Runtime loading, handshakes, catalog publication, authority grants, and execution remain outside `ironclaw_extensions`.
 
-Migration rules:
+Cutover (complete):
 
-- Installed third-party extensions must move each model-visible top-level `[[capabilities]]` entry under `[[capability_provider.tools.capabilities]]` and reference it from `[[host_api]] id = "ironclaw.capability_provider/v1"`.
-- Host-bundled built-ins may keep top-level `[[capabilities]]` while first-party packaging remains synthetic/host-owned.
-- Do not mix `[[host_api]]` with top-level `[[capabilities]]` in one manifest.
-- Deprecated path scope is only legacy top-level capability declarations for installed third-party manifests; extension manifest v2 itself remains active.
+- Every manifest — host-bundled exactly as installed — declares at least one
+  `[[host_api]]` contract; there is no contract-free manifest form and no
+  contract-free parse or discovery entry point.
+- Top-level `[[capabilities]]` is rejected for every manifest source with an
+  actionable error. Capabilities are declared under
+  `[[capability_provider.tools.capabilities]]` and referenced from
+  `[[host_api]] id = "ironclaw.capability_provider/v1"`.
+- Host API contracts raise `HostApiSectionError`: this crate's own contracts
+  (capability provider) preserve typed `ManifestV2Error` variants; domain
+  crates report redacted reasons wrapped as `HostApiSectionRejected`.
+
+### Capability surfaces
+
+The extension is the top-level product object; a *capability surface* is one
+product-facing face the manifest declares. `CapabilitySurfaceKind`
+(`ironclaw_host_api`) enumerates the vocabulary: `tool`, `channel`, `auth`,
+plus reserved `trigger` and `file`. The host discovers and wires generic
+services from declared surfaces; it must not maintain a separate first-class
+channel registry beside the extension registry, and runtime kind (`wasm` /
+`mcp` / `first_party`) must never decide surface taxonomy.
+
+Rules:
+
+- Surfaces are **derived** vocabulary. The owning manifest declarations stay
+  the single source of truth; `ExtensionManifestV2::capability_surfaces()`
+  projects them on demand:
+  - each capability declaration projects one `tool` surface;
+  - each host API contract section projects the surface kinds its contract
+    declares via `HostApiManifestProjection::surfaces` (the
+    `ironclaw.product_adapter/v1` contract projects `channel` for
+    `external_channel` sections; host-native product surface kinds — `web`,
+    `cli`, `synchronous_api` — project nothing), origin-stamped with the
+    owning host API id and section path;
+  - `product_auth_account` runtime-credential sources project one `auth`
+    surface per distinct provider id. OAuth setups fold to the union of
+    declared scopes (sorted, deduplicated) and mask weaker manual-token
+    setups; a provider referenced only through retired setups surfaces as
+    retired rather than being dropped.
+- Host API contracts must not project `tool` or `auth` section surfaces —
+  those kinds have dedicated declaration paths above. Validation fails
+  closed.
+- `VendorId` is the credential
+  authority namespace, not the extension id: several extensions (gmail,
+  google-drive, ...) may share one provider (`google`).
+
+Tests: `crates/ironclaw_extensions/tests/manifest_v2_contract.rs`
+(capability surface projection block) and
+`crates/ironclaw_product_adapter_registry/tests/manifest_ingestion.rs`
+(channel-surface projection through the real product-adapter contract). Run:
+`cargo test -p ironclaw_extensions --test manifest_v2_contract` and
+`cargo test -p ironclaw_product_adapter_registry --test manifest_ingestion`.
 
 ---
 
@@ -297,8 +371,8 @@ Rules:
   (`header` or `query_param`), and optional `required` flag. The field is only
   valid when the capability declares `use_secret`; duplicate handles within one
   capability are invalid. The manifest never contains raw secret material.
-- top-level legacy capabilities must provide `input_schema_ref` and
-  `output_schema_ref`; `prompt_doc_ref` is optional lazy help metadata.
+- every capability must provide `input_schema_ref` and `output_schema_ref`;
+  `prompt_doc_ref` is optional lazy help metadata.
 - during this cutover, `CapabilityDescriptor.parameters_schema` is a projection
   placeholder of the form `{ "$ref": input_schema_ref }`. Catalog publication is
   responsible for resolving schema/doc refs into hot per-turn tool descriptors.
@@ -416,6 +490,11 @@ Local contract tests should prove:
 - discovery reads manifests via `RootFilesystem` and `/system/extensions` virtual paths.
 - discovery rejects missing manifest.
 - discovery rejects manifest ID mismatch with directory name.
+- capability-surface projection: tool-only, channel-only, and tool+channel
+  manifests project exactly their declared surfaces; auth surfaces group by
+  provider with unioned OAuth scopes; extensions sharing one provider project
+  the same provider id (distinct from their extension ids); contracts
+  projecting `tool`/`auth` section surfaces fail closed.
 
 ---
 
