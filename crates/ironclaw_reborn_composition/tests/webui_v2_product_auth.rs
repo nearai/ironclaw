@@ -29,11 +29,10 @@ use ironclaw_product_workflow::{
     EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, RebornCancelRunResponse,
     RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionInfo, RebornExtensionListResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiListThreadsRequest,
+    RebornGetRunStateResponse, RebornResolveGateResponse, RebornRetryRunResponse,
+    RebornServicesApi, RebornServicesError, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, RebornViewPage,
+    RebornViewQuery, WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     rejecting_reborn_services_error,
 };
@@ -370,14 +369,6 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 }

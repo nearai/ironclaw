@@ -258,7 +258,7 @@ pub use reborn_services::{
     SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
     SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW,
     SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, SetActiveLlmRequest, SettingsToolPermissionState,
-    SkillsProductFacade, StaticOperatorStatusService, TRACE_ACCOUNT_TRACES_VIEW,
+    SkillsProductFacade, StaticOperatorStatusService, THREADS_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
     TRACE_CREDITS_VIEW, TriggerRunThreadScope, UnavailableRebornViewProvider,
     UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
     UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,

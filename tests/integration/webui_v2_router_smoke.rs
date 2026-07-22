@@ -34,11 +34,10 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
-    RebornServicesApi, RebornServicesError, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
     WebUiSendMessageRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -145,14 +144,6 @@ impl RebornServicesApi for MinimalWebuiServices {
         _caller: WebUiAuthenticatedCaller,
         _request: RebornGetRunStateRequest,
     ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 }

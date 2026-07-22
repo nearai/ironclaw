@@ -21,12 +21,12 @@ use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, U
 use ironclaw_product_workflow::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest,
 };
 use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -890,17 +890,6 @@ impl RebornServicesApi for StubServices {
             retryable: false,
             field: None,
             validation_code: None,
-        })
-    }
-
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        Ok(RebornListThreadsResponse {
-            threads: Vec::new(),
-            next_cursor: None,
         })
     }
 }

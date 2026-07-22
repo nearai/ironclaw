@@ -15,9 +15,10 @@ use ironclaw_product_workflow::{
     AutomationListRequest, AutomationProductFacade, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
     ProductWorkflowError, RebornAutomationHoldReason, RebornAutomationRecentRunStatus,
-    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState, RebornServices,
-    RebornServicesApi, RebornServicesErrorCode, RebornServicesErrorKind,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornListThreadsResponse, RebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornViewQuery,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, THREADS_VIEW,
     WebUiAuthenticatedCaller, WebUiListThreadsRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
 };
@@ -753,15 +754,23 @@ async fn notification_thread_list_discovers_pending_approval_from_real_run_histo
     }));
 
     let response = services
-        .list_threads(
+        .query(
             webui_caller(&c),
-            WebUiListThreadsRequest {
-                needs_approval: true,
-                ..WebUiListThreadsRequest::default()
+            RebornViewQuery {
+                view_id: THREADS_VIEW.id.to_string(),
+                params: serde_json::to_value(WebUiListThreadsRequest {
+                    needs_approval: true,
+                    ..WebUiListThreadsRequest::default()
+                })
+                .expect("thread list params"),
+                cursor: None,
             },
         )
         .await
         .expect("list approval notification threads");
+    let response: RebornListThreadsResponse = serde_json::from_value(response.payload)
+        .map_err(RebornServicesError::internal_from)
+        .expect("thread list payload");
 
     assert_eq!(
         response

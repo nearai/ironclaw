@@ -75,31 +75,32 @@ use ironclaw_product_workflow::{
     RebornDeleteThreadRequest, RebornExtensionListResponse, RebornExtensionOnboardingState,
     RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
-    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornRunArtifact,
-    RebornRunArtifactRequest, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
     RebornUpdateProjectRequest, RebornViewQuery, ResolveApprovalInteractionRequest,
     ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
     ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService,
+    SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService, THREADS_VIEW,
     TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
@@ -9657,6 +9658,26 @@ async fn query_automations<S: RebornServicesApi + ?Sized>(
     serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
 }
 
+async fn query_threads<S: RebornServicesApi + ?Sized>(
+    services: &S,
+    caller: WebUiAuthenticatedCaller,
+    mut request: WebUiListThreadsRequest,
+) -> Result<RebornListThreadsResponse, RebornServicesError> {
+    let cursor = request.cursor.take();
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: THREADS_VIEW.id.to_string(),
+                params: serde_json::to_value(request)
+                    .map_err(RebornServicesError::internal_from)?,
+                cursor,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
 async fn query_extensions<S: RebornServicesApi + ?Sized>(
     services: &S,
     caller: WebUiAuthenticatedCaller,
@@ -11959,8 +11980,7 @@ async fn list_threads_unimplemented_backend_returns_service_unavailable() {
         Arc::new(FakeTurnCoordinator::default()),
     );
 
-    let error = services
-        .list_threads(caller(), WebUiListThreadsRequest::default())
+    let error = query_threads(&services, caller(), WebUiListThreadsRequest::default())
         .await
         .expect_err(
             "list_threads must fail closed when the SessionThreadService backend \
@@ -12033,8 +12053,7 @@ async fn list_threads_hides_automation_trigger_threads() {
         .await
         .expect("malformed metadata thread");
 
-    let response = services
-        .list_threads(caller, WebUiListThreadsRequest::default())
+    let response = query_threads(&services, caller, WebUiListThreadsRequest::default())
         .await
         .expect("list threads");
     let thread_ids = response
@@ -12088,13 +12107,13 @@ async fn list_threads_needs_approval_returns_only_automation_threads_with_pendin
         .await
         .expect("normal pending thread");
 
-    let response = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest::default().set_needs_approval(true),
-        )
-        .await
-        .expect("list approval threads");
+    let response = query_threads(
+        &services,
+        caller,
+        WebUiListThreadsRequest::default().set_needs_approval(true),
+    )
+    .await
+    .expect("list approval threads");
     let thread_ids = response
         .threads
         .iter()
@@ -12132,13 +12151,13 @@ async fn list_threads_needs_approval_queries_pending_with_run_scope_shape() {
     ))
     .with_approval_interactions(approval_service);
 
-    let response = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest::default().set_needs_approval(true),
-        )
-        .await
-        .expect("list approval threads");
+    let response = query_threads(
+        &services,
+        caller,
+        WebUiListThreadsRequest::default().set_needs_approval(true),
+    )
+    .await
+    .expect("list approval threads");
     let thread_ids = response
         .threads
         .iter()
@@ -12175,13 +12194,13 @@ async fn list_threads_needs_approval_uses_bounded_run_candidates() {
     .with_automation_product_facade(automation_facade.clone())
     .with_approval_interactions(approval_service);
 
-    let response = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest::default().set_needs_approval(true),
-        )
-        .await
-        .expect("list approval threads");
+    let response = query_threads(
+        &services,
+        caller,
+        WebUiListThreadsRequest::default().set_needs_approval(true),
+    )
+    .await
+    .expect("list approval threads");
 
     assert_eq!(response.threads.len(), 1);
     let list_calls = automation_facade.list_calls();
@@ -12221,13 +12240,13 @@ async fn list_threads_needs_approval_finds_legacy_ownerless_automation_thread() 
     ))
     .with_approval_interactions(approval_service);
 
-    let response = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest::default().set_needs_approval(true),
-        )
-        .await
-        .expect("list approval threads");
+    let response = query_threads(
+        &services,
+        caller,
+        WebUiListThreadsRequest::default().set_needs_approval(true),
+    )
+    .await
+    .expect("list approval threads");
     let thread_ids = response
         .threads
         .iter()
@@ -12277,13 +12296,13 @@ async fn list_threads_needs_approval_uses_automation_name_when_thread_title_miss
     ))
     .with_approval_interactions(approval_service);
 
-    let response = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest::default().set_needs_approval(true),
-        )
-        .await
-        .expect("list approval threads");
+    let response = query_threads(
+        &services,
+        caller,
+        WebUiListThreadsRequest::default().set_needs_approval(true),
+    )
+    .await
+    .expect("list approval threads");
 
     assert_eq!(response.threads.len(), 1);
     assert_eq!(
@@ -12314,15 +12333,15 @@ async fn list_threads_needs_approval_checks_candidate_automation_thread() {
     ))
     .with_approval_interactions(approval_service);
 
-    let response = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest::default()
-                .set_needs_approval(true)
-                .set_candidate_thread_id(automation_pending_thread_id.as_str()),
-        )
-        .await
-        .expect("list approval threads");
+    let response = query_threads(
+        &services,
+        caller,
+        WebUiListThreadsRequest::default()
+            .set_needs_approval(true)
+            .set_candidate_thread_id(automation_pending_thread_id.as_str()),
+    )
+    .await
+    .expect("list approval threads");
     let thread_ids = response
         .threads
         .iter()
@@ -12370,7 +12389,11 @@ async fn list_threads_breaks_out_when_cursor_does_not_advance_for_automation_thr
 
     let response = tokio::time::timeout(
         Duration::from_secs(1),
-        services.list_threads(caller, WebUiListThreadsRequest::default().set_limit(2)),
+        query_threads(
+            &services,
+            caller,
+            WebUiListThreadsRequest::default().set_limit(2),
+        ),
     )
     .await
     .expect("list_threads should terminate when backend cursor stalls")
@@ -12423,10 +12446,13 @@ async fn list_threads_caps_filtered_pages_when_automation_threads_dominate() {
         Arc::new(FakeTurnCoordinator::default()),
     );
 
-    let response = services
-        .list_threads(caller, WebUiListThreadsRequest::default().set_limit(1))
-        .await
-        .expect("list threads");
+    let response = query_threads(
+        &services,
+        caller,
+        WebUiListThreadsRequest::default().set_limit(1),
+    )
+    .await
+    .expect("list threads");
 
     assert!(
         response.threads.is_empty(),
@@ -12505,13 +12531,13 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
         .await
         .expect("automation thread");
 
-    let first_page = services
-        .list_threads(
-            caller.clone(),
-            WebUiListThreadsRequest::default().set_limit(1),
-        )
-        .await
-        .expect("list first visible page");
+    let first_page = query_threads(
+        &services,
+        caller.clone(),
+        WebUiListThreadsRequest::default().set_limit(1),
+    )
+    .await
+    .expect("list first visible page");
     assert_eq!(
         first_page
             .threads
@@ -12522,15 +12548,15 @@ async fn list_threads_skips_hidden_automation_threads_when_filling_page() {
     );
     assert_eq!(first_page.next_cursor.as_deref(), Some("thread-b-visible"));
 
-    let second_page = services
-        .list_threads(
-            caller,
-            WebUiListThreadsRequest::default()
-                .set_limit(1)
-                .set_cursor(first_page.next_cursor.expect("first visible page cursor")),
-        )
-        .await
-        .expect("list second visible page");
+    let second_page = query_threads(
+        &services,
+        caller,
+        WebUiListThreadsRequest::default()
+            .set_limit(1)
+            .set_cursor(first_page.next_cursor.expect("first visible page cursor")),
+    )
+    .await
+    .expect("list second visible page");
     assert_eq!(
         second_page
             .threads

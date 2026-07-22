@@ -73,7 +73,7 @@ use ironclaw_product_workflow::{
     RebornUpdateProjectRequest, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    SettingsToolPermissionState, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    SettingsToolPermissionState, THREADS_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
     WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
@@ -1276,13 +1276,27 @@ pub async fn list_threads(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Query(query): Query<ListThreadsQuery>,
 ) -> Result<Json<RebornListThreadsResponse>, WebUiV2HttpError> {
-    let request = WebUiListThreadsRequest {
+    let mut request = WebUiListThreadsRequest {
         limit: query.limit,
         cursor: query.cursor,
         candidate_thread_id: query.candidate_thread_id,
         needs_approval: query.needs_approval,
     };
-    let response = state.services().list_threads(caller, request).await?;
+    let cursor = request.cursor.take();
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: THREADS_VIEW.id.to_string(),
+                params: serde_json::to_value(request)
+                    .map_err(RebornServicesError::internal_from)?,
+                cursor,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 

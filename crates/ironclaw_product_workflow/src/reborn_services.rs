@@ -218,6 +218,10 @@ pub const EXTENSION_IMPORT_CAPABILITY_ID: &str = "builtin.extension_import";
 pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 pub const EXTENSION_SETUP_SUBMIT_CAPABILITY_ID: &str = "builtin.extension_setup_submit";
+pub const THREADS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "threads",
+    paginated: true,
+};
 pub const AUTOMATIONS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "automations",
     paginated: false,
@@ -2180,18 +2184,6 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// List the caller-scoped threads. Pagination is opaque: callers
-    /// echo back the `next_cursor` from a prior response to retrieve
-    /// the next page; the cursor encoding is implementation-defined.
-    ///
-    /// Returns an empty list + `next_cursor: None` when no threads
-    /// exist for the caller's scope.
-    async fn list_threads(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError>;
-
     async fn pause_automation(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2858,6 +2850,33 @@ where
             automations,
             scheduler_enabled,
         })
+    }
+
+    async fn build_threads_view(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiListThreadsRequest,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        // Reuse the same scope-construction shape the other v2 facade
+        // methods use: fail-closed when the caller has no agent
+        // binding, owner-scope to the caller's user_id so the listing
+        // is per-caller.
+        let Some(agent_id) = caller.agent_id.clone() else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let scope = ThreadScope {
+            tenant_id: caller.tenant_id.clone(),
+            agent_id,
+            project_id: caller.project_id.clone(),
+            owner_user_id: Some(caller.user_id.clone()),
+            mission_id: None,
+        };
+        self.list_visible_threads_for_scope(scope, request, caller)
+            .await
     }
 
     /// Wire the generic channel-config configure port. Without it, the
@@ -3888,6 +3907,14 @@ where
                 let response = self.build_llm_config_view(caller).await?;
                 views::view_page(response)
             }
+            id if id == THREADS_VIEW.id => {
+                let mut request: WebUiListThreadsRequest = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                request.cursor = query.cursor.or(request.cursor);
+                let response = self.build_threads_view(caller, request).await?;
+                let next_cursor = response.next_cursor.clone();
+                views::view_page_with_cursor(response, next_cursor)
+            }
             id if id == AUTOMATIONS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(RebornServicesError::internal_from)?;
@@ -4634,33 +4661,6 @@ where
             state,
             active_model.as_deref(),
         ))
-    }
-
-    async fn list_threads(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        // Reuse the same scope-construction shape the other v2 facade
-        // methods use: fail-closed when the caller has no agent
-        // binding, owner-scope to the caller's user_id so the listing
-        // is per-caller.
-        let Some(agent_id) = caller.agent_id.clone() else {
-            return Err(RebornServicesError::from_status(
-                RebornServicesErrorCode::InvalidRequest,
-                400,
-                false,
-            ));
-        };
-        let scope = ThreadScope {
-            tenant_id: caller.tenant_id.clone(),
-            agent_id,
-            project_id: caller.project_id.clone(),
-            owner_user_id: Some(caller.user_id.clone()),
-            mission_id: None,
-        };
-        self.list_visible_threads_for_scope(scope, request, caller)
-            .await
     }
 
     async fn pause_automation(

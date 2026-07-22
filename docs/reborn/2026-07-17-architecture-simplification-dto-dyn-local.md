@@ -80,9 +80,11 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   upsert/delete and active-provider selection now use API-only ProductSurface
   capabilities with `llm_config` view read-back. Automation listing now uses
   the descriptor-backed `automations` ProductSurface query while retaining the
-  existing product automation facade behind the view builder; probe and login
-  starts remain explicit follow-ups because they need typed command result
-  payloads.
+  existing product automation facade behind the view builder. Thread listing
+  now uses the descriptor-backed paginated `threads` ProductSurface query while
+  retaining hidden-automation-thread filtering and notification approval
+  shaping behind the view builder; probe and login starts remain explicit
+  follow-ups because they need typed command result payloads.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any

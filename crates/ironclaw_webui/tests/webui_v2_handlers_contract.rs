@@ -77,10 +77,11 @@ use ironclaw_product_workflow::{
     RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, rejecting_reborn_services_error,
+    THREADS_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -741,6 +742,20 @@ impl RebornServicesApi for StubServices {
                     next_cursor: None,
                 })
             }
+            id if id == THREADS_VIEW.id => {
+                let mut request: WebUiListThreadsRequest =
+                    serde_json::from_value(query.params).expect("thread list params");
+                request.cursor = query.cursor.or(request.cursor);
+                self.list_threads_calls.lock().expect("lock").push(request);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornListThreadsResponse {
+                        threads: Vec::new(),
+                        next_cursor: None,
+                    })
+                    .expect("thread list payload"),
+                    next_cursor: None,
+                })
+            }
             id if id == AUTOMATIONS_VIEW.id => {
                 let request: WebUiListAutomationsRequest =
                     serde_json::from_value(query.params).expect("automation list params");
@@ -1145,18 +1160,6 @@ impl RebornServicesApi for StubServices {
             .expect("lock")
             .pop_front()
             .expect("retry_run test stub called without queued response")
-    }
-
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        self.list_threads_calls.lock().expect("lock").push(request);
-        Ok(RebornListThreadsResponse {
-            threads: Vec::new(),
-            next_cursor: None,
-        })
     }
 
     async fn pause_automation(
@@ -5370,13 +5373,6 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: RebornGetRunStateRequest,
         ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_threads(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: WebUiListThreadsRequest,
-        ) -> Result<RebornListThreadsResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
     }

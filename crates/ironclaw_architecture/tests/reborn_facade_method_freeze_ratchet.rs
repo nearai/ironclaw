@@ -95,7 +95,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "add_project_member",
     "update_project_member_role",
     "remove_project_member",
-    "list_threads",
     // --- automations (→ Automation-origin descriptors, §5.2.1) ---
     "pause_automation",
     "resume_automation",

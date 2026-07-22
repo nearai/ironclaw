@@ -36,11 +36,10 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
-    RebornServicesApi, RebornServicesError, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
     WebUiSendMessageRequest,
 };
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
@@ -157,21 +156,6 @@ impl RebornServicesApi for StubServices {
         _request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
         unreachable!("test does not drive resolve_gate")
-    }
-
-    async fn list_threads(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        // Defensive: a future composition layer that pre-warms by
-        // listing threads would fall here rather than into the
-        // `create_thread` arm. Return an empty page instead of
-        // panicking so the test is robust to incidental calls.
-        Ok(RebornListThreadsResponse {
-            threads: Vec::new(),
-            next_cursor: None,
-        })
     }
 
     async fn delete_thread(
