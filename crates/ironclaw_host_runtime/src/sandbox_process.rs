@@ -24,6 +24,7 @@ use crate::{
 mod broker;
 mod connect;
 mod container_identity;
+mod egress_proxy;
 mod exec_transport;
 mod mounts;
 mod network_allowlist;
@@ -38,6 +39,7 @@ use mounts::RebornSandboxMountSources;
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
+pub use egress_proxy::{BoundEgressAllowlistProxy, EgressAllowlistProxy, EgressProxyError};
 pub use network_allowlist::{
     DEFAULT_SANDBOX_ALLOWED_DOMAINS, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, sandbox_allowed_domains,
     sandbox_extra_allowed_domains, sandbox_network_policy,

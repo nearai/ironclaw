@@ -123,13 +123,13 @@ pub use process_port::{
 };
 pub use production::DefaultHostRuntime;
 pub use sandbox_process::{
-    DEFAULT_SANDBOX_ALLOWED_DOMAINS, ReapSummary, RebornSandboxConfig,
-    RebornSandboxContainerIdentity, RebornSandboxNetworkBroker, RebornSandboxScopeKey,
-    RebornSandboxSecretBroker, RebornSandboxUserKey, RebornSandboxWorkspaceMode,
-    RebornScopedSandboxCommandTransport, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
-    SandboxActivityRegistry, SandboxDockerReadiness, SandboxReaper, SandboxReaperConfig,
-    connect_docker_with_retry, sandbox_allowed_domains, sandbox_docker_readiness,
-    sandbox_extra_allowed_domains, sandbox_network_policy,
+    BoundEgressAllowlistProxy, DEFAULT_SANDBOX_ALLOWED_DOMAINS, EgressAllowlistProxy,
+    EgressProxyError, ReapSummary, RebornSandboxConfig, RebornSandboxContainerIdentity,
+    RebornSandboxNetworkBroker, RebornSandboxScopeKey, RebornSandboxSecretBroker,
+    RebornSandboxUserKey, RebornSandboxWorkspaceMode, RebornScopedSandboxCommandTransport,
+    SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, SandboxActivityRegistry, SandboxDockerReadiness,
+    SandboxReaper, SandboxReaperConfig, connect_docker_with_retry, sandbox_allowed_domains,
+    sandbox_docker_readiness, sandbox_extra_allowed_domains, sandbox_network_policy,
 };
 pub use services::{
     ExtensionLaneToolBinder, ExtensionToolBindError, HostRuntimeServices,
