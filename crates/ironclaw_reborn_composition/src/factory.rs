@@ -1770,6 +1770,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         runtime_policy,
         runtime_process_binding,
         sandbox_activity,
+        sandbox_egress_proxy,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_callback,
@@ -2045,6 +2046,12 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 .clone()
                 .unwrap_or_else(|| Arc::new(ironclaw_host_runtime::SandboxActivityRegistry::new())),
             owner_user_id: sandbox_owner_user_id_for_ceiling,
+            // Phase C: the proxy `tenant_sandbox_process_binding` already
+            // spawned (and pointed the sandbox container's default proxy
+            // at), threaded here via `RebornBuildInput::sandbox_egress_proxy`
+            // so `build` takes ownership of the SAME instance rather than
+            // spawning a second one. `None` for non-sandboxed profiles.
+            egress_proxy: sandbox_egress_proxy,
         },
     )
     .await?;
@@ -4764,6 +4771,7 @@ async fn build_production_shaped(
         account_setup_descriptors: _,
         runtime_process_binding,
         sandbox_activity: _,
+        sandbox_egress_proxy: _,
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,

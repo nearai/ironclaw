@@ -19,20 +19,65 @@ use ironclaw_resources::ResourceGovernor;
 use crate::RebornBuildError;
 use crate::input::RebornLocalRuntimeIdentity;
 
-/// Reserved for Phase C (secret-broker + egress-allowlist proxy daemons).
-/// Declared now so `SandboxRuntimeBindings`'s shape does not change again
-/// when Phase C lands. Both handle structs are declared canonically here
-/// with their real fields (shutdown_tx/handle + local_addr/socket_path,
-/// mirroring `SandboxReaperRuntimeHandle`); Phase A only ever sets them to
-/// `None`. Phase C imports these types from `sandbox_composition` and
-/// constructs `Some(..)` — it does NOT redeclare same-named structs.
-// Constructed by Phase C (egress proxy / secret-lease daemon); reserved here so
-// SandboxRuntimeBindings's shape is stable.
-#[allow(dead_code)]
-pub(crate) struct SandboxEgressProxyRuntimeHandle {
+/// Owned handle to a spawned [`ironclaw_host_runtime::BoundEgressAllowlistProxy::serve`]
+/// task. Declared canonically here (not in `sandbox_egress_proxy_task.rs`)
+/// so `SandboxRuntimeBindings`'s shape is stable across Phase A/Phase C —
+/// `sandbox_egress_proxy_task::spawn_sandbox_egress_proxy` constructs one via
+/// [`SandboxEgressProxyRuntimeHandle::new`] and returns it.
+///
+/// `pub` (not `pub(crate)`, unlike [`SandboxSecretLeaseDaemonHandle`]):
+/// `tenant_sandbox_process_binding` (`sandbox_boot.rs`) spawns the
+/// production instance and hands it back on `TenantSandboxBinding` so the
+/// assembling binary (`ironclaw_reborn_cli`) can thread it, opaquely, into
+/// `RebornBuildInput` for `SandboxRuntimeBindings::build` to take ownership
+/// of later — the same round-trip-through-the-binary shape
+/// `SandboxActivityRegistry` already uses. Its fields and methods stay
+/// `pub(crate)`, so the binary can only move the value along, never
+/// construct or drive one itself.
+pub struct SandboxEgressProxyRuntimeHandle {
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
     pub(crate) local_addr: std::net::SocketAddr,
+}
+
+impl SandboxEgressProxyRuntimeHandle {
+    pub(crate) fn new(
+        shutdown_tx: tokio::sync::watch::Sender<bool>,
+        handle: tokio::task::JoinHandle<()>,
+        local_addr: std::net::SocketAddr,
+    ) -> Self {
+        Self {
+            shutdown_tx,
+            handle,
+            local_addr,
+        }
+    }
+
+    /// Signals the proxy's accept loop to stop and awaits the task,
+    /// aborting it if it has not stopped within `timeout`. Mirrors
+    /// `SandboxReaperRuntimeHandle::shutdown` exactly.
+    pub(crate) async fn shutdown(self, timeout: Duration) {
+        let _ = self.shutdown_tx.send(true);
+        let mut handle = self.handle;
+        match tokio::time::timeout(timeout, &mut handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(?error, "sandbox egress proxy task join failed");
+            }
+            Err(_) => {
+                tracing::debug!(
+                    ?timeout,
+                    "sandbox egress proxy did not stop before shutdown timeout; aborting"
+                );
+                handle.abort();
+                if let Err(error) = handle.await
+                    && error.is_panic()
+                {
+                    tracing::debug!(?error, "aborted sandbox egress proxy task panicked");
+                }
+            }
+        }
+    }
 }
 
 // Constructed by Phase C (egress proxy / secret-lease daemon); reserved here so
@@ -63,6 +108,14 @@ pub(crate) struct SandboxProfileBindingInputs<'a> {
     /// per-tenant), so one user cannot starve every other user in the
     /// tenant.
     pub(crate) owner_user_id: UserId,
+    /// An egress-allowlist proxy `tenant_sandbox_process_binding` already
+    /// spawned (and pointed the sandbox container's `default_broker_port`
+    /// at) before `build` ever runs — see `sandbox_boot::TenantSandboxBinding::egress_proxy`.
+    /// When `Some`, `build` takes ownership of this SAME instance rather
+    /// than spawning a second, orphaned proxy; when `None` (e.g. a direct
+    /// test construction of `SandboxProfileBindingInputs`, or a future
+    /// caller that never pre-spawned one), `build` spawns its own.
+    pub(crate) egress_proxy: Option<SandboxEgressProxyRuntimeHandle>,
 }
 
 pub(crate) struct SandboxRuntimeBindings {
@@ -121,10 +174,22 @@ impl SandboxRuntimeBindings {
             crate::sandbox_reaper_task::maybe_spawn_sandbox_reaper(Arc::clone(&inputs.activity))
                 .await;
 
+        // Phase C: an unbindable egress proxy means sandboxed shell egress
+        // would have no enforcement, so — unlike the best-effort reaper —
+        // spawn failure here fails this build closed rather than degrading
+        // to `None`. Reuse the proxy `tenant_sandbox_process_binding`
+        // already spawned (and pointed the container at) when the caller
+        // supplied one, rather than binding a second, orphaned proxy nobody
+        // shuts down.
+        let egress_proxy = match inputs.egress_proxy {
+            Some(handle) => Some(handle),
+            None => Some(crate::sandbox_egress_proxy_task::spawn_sandbox_egress_proxy().await?),
+        };
+
         Ok(Self {
             activity: inputs.activity,
             reaper,
-            egress_proxy: None,
+            egress_proxy,
             secret_lease: None,
         })
     }
@@ -138,8 +203,11 @@ impl SandboxRuntimeBindings {
         if let Some(reaper) = self.reaper {
             reaper.shutdown(timeout).await;
         }
-        // Phase C: egress_proxy/secret_lease daemon shutdown joins here
-        // too, once those variants are ever `Some`.
+        if let Some(egress_proxy) = self.egress_proxy {
+            egress_proxy.shutdown(timeout).await;
+        }
+        // Phase C: secret_lease daemon shutdown joins here too, once that
+        // variant is ever `Some`.
     }
 }
 
@@ -161,6 +229,7 @@ mod tests {
             resource_governor: governor(),
             activity: Arc::new(SandboxActivityRegistry::new()),
             owner_user_id: UserId::new("probe-user").unwrap(),
+            egress_proxy: None,
         })
         .await
         .expect("non-sandboxed profile never fails to build inert bindings");
@@ -181,6 +250,7 @@ mod tests {
             resource_governor: Arc::clone(&governor),
             activity: Arc::new(SandboxActivityRegistry::new()),
             owner_user_id: owner_user_id.clone(),
+            egress_proxy: None,
         })
         .await
         .expect("sandboxed profile build succeeds even with no reachable Docker daemon");

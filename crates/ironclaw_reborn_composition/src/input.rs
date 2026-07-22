@@ -191,6 +191,14 @@ pub struct RebornBuildInput {
     /// rather than a second independently constructed one. `None` for every
     /// non-sandboxed profile.
     pub(crate) sandbox_activity: Option<Arc<SandboxActivityRegistry>>,
+    /// The egress-allowlist proxy `tenant_sandbox_process_binding` already
+    /// spawned (see `sandbox_boot::TenantSandboxBinding::egress_proxy`),
+    /// when `runtime_process_binding` is a `TenantSandbox` binding.
+    /// `factory.rs` forwards this same instance into
+    /// `SandboxRuntimeBindings::build` so `shutdown_all` shuts down the
+    /// SAME proxy the container was pointed at, rather than a second,
+    /// independently spawned one. `None` for every non-sandboxed profile.
+    pub(crate) sandbox_egress_proxy: Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
@@ -733,6 +741,20 @@ impl RebornBuildInput {
         self
     }
 
+    /// Supply the egress-allowlist proxy handle a `tenant_sandbox_process_binding`
+    /// caller received alongside `TenantSandboxBinding.binding` (see
+    /// `sandbox_boot::TenantSandboxBinding::egress_proxy`), so
+    /// `build_local_runtime` can forward the SAME instance into
+    /// `SandboxRuntimeBindings::build` rather than spawning a second,
+    /// independently owned proxy.
+    pub fn with_sandbox_egress_proxy_handle(
+        mut self,
+        egress_proxy: crate::sandbox_composition::SandboxEgressProxyRuntimeHandle,
+    ) -> Self {
+        self.sandbox_egress_proxy = Some(egress_proxy);
+        self
+    }
+
     pub fn require_runtime_http_egress(mut self) -> Self {
         self.require_runtime_http_egress = true;
         self
@@ -886,6 +908,7 @@ impl RebornBuildInput {
             turn_run_wake_notifier: None,
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
             sandbox_activity: None,
+            sandbox_egress_proxy: None,
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
