@@ -298,11 +298,14 @@ fn checked_in_deployments_require_explicit_reborn_profiles() {
 
     let systemd = read_repo_file("deploy/ironclaw.service");
     let gcp_env = read_repo_file("deploy/env.example");
+    let cloud_sql_proxy = read_repo_file("deploy/cloud-sql-proxy.service");
+    let setup = read_repo_file("deploy/setup.sh");
     assert!(
         systemd.contains("EnvironmentFile=/opt/ironclaw/.env")
+            && systemd.contains("--env-file /opt/ironclaw/.env")
             && systemd.contains("IRONCLAW_REBORN_PROFILE=production")
             && systemd.contains("docs/reborn/deployment-profile-operator-checklist.md"),
-        "the GCP systemd unit must document its external production profile contract"
+        "the GCP systemd unit must hand the external production profile environment to Docker"
     );
     assert_eq!(
         gcp_env
@@ -311,6 +314,63 @@ fn checked_in_deployments_require_explicit_reborn_profiles() {
             .count(),
         1,
         "the GCP environment example must contain exactly one active production profile assignment"
+    );
+    assert_eq!(
+        gcp_env
+            .lines()
+            .filter(|line| line.trim() == "IRONCLAW_VERSION=CHANGE_ME")
+            .count(),
+        1,
+        "the GCP environment example must require an explicit image version"
+    );
+    assert!(
+        !systemd.contains(":-latest")
+            && systemd.matches("${IRONCLAW_VERSION:?").count() == 2
+            && systemd.contains("latest|CHANGE_ME"),
+        "the GCP systemd unit must fail closed when IRONCLAW_VERSION is unset"
+    );
+    assert!(
+        cloud_sql_proxy.contains("--unix-socket=/run/cloud-sql-proxy")
+            && cloud_sql_proxy.contains("RuntimeDirectoryMode=0770")
+            && cloud_sql_proxy.contains("RuntimeDirectoryPreserve=restart")
+            && cloud_sql_proxy.contains("UMask=0007")
+            && systemd.contains("--mount type=bind,src=/run/cloud-sql-proxy,dst=/cloudsql")
+            && systemd.contains("--group-add \"$(stat -c %g /run/cloud-sql-proxy)\"")
+            && gcp_env.contains("@%2Fcloudsql%2Fironclaw-prod%3Aus-central1%3Aironclaw-db/")
+            && gcp_env.contains("sslmode=disable")
+            && !systemd.contains("--network=host")
+            && !systemd.contains("-p 5432")
+            && !cloud_sql_proxy.contains("--port"),
+        "the GCP container must reach Cloud SQL through the scoped Unix socket without host networking"
+    );
+    #[cfg(unix)]
+    {
+        use tokio_postgres::config::{Host, SslMode};
+
+        let postgres_url = gcp_env
+            .lines()
+            .find_map(|line| line.strip_prefix("IRONCLAW_REBORN_POSTGRES_URL="))
+            .expect("the GCP environment example must define a Postgres URL");
+        let postgres_config = postgres_url
+            .parse::<tokio_postgres::Config>()
+            .expect("the GCP Postgres URL must parse");
+        assert_eq!(
+            postgres_config.get_hosts(),
+            &[Host::Unix(PathBuf::from(
+                "/cloudsql/ironclaw-prod:us-central1:ironclaw-db"
+            ))],
+            "the GCP Postgres URL must resolve to the mounted proxy socket directory"
+        );
+        assert_eq!(
+            postgres_config.get_ssl_mode(),
+            SslMode::Disable,
+            "the local proxy socket must not attempt a second TLS handshake"
+        );
+    }
+    assert!(
+        systemd.contains("--mount type=bind,src=/opt/ironclaw/data,dst=/data/ironclaw-reborn")
+            && setup.contains("install -d -m 0700 -o 1000 -g 1000 /opt/ironclaw/data"),
+        "the GCP deployment must persist Reborn home with ownership matching the image user"
     );
 
     for (path, profile) in [

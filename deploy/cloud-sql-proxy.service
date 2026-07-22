@@ -5,7 +5,14 @@ After=network.target
 [Service]
 Type=simple
 DynamicUser=yes
-ExecStart=/usr/local/bin/cloud-sql-proxy ironclaw-prod:us-central1:ironclaw-db --port=5432
+# Keep the database handoff off TCP entirely. The runtime directory is shared
+# only with the IronClaw container, whose supplementary group is derived from
+# this directory when docker run starts.
+RuntimeDirectory=cloud-sql-proxy
+RuntimeDirectoryMode=0770
+RuntimeDirectoryPreserve=restart
+UMask=0007
+ExecStart=/usr/local/bin/cloud-sql-proxy ironclaw-prod:us-central1:ironclaw-db --unix-socket=/run/cloud-sql-proxy
 Restart=always
 RestartSec=5
 

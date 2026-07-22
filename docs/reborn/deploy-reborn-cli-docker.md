@@ -207,10 +207,24 @@ IRONCLAW_REBORN_PROFILE=production
 ```
 
 The production profile requires `IRONCLAW_REBORN_POSTGRES_URL` and
-`IRONCLAW_REBORN_SECRET_MASTER_KEY`; the example routes PostgreSQL through the
-Cloud SQL Auth Proxy. Keep the secret values only in the root-readable external
-environment file. Before enabling or restarting the unit, complete the GCP
-section of the [operator checklist](deployment-profile-operator-checklist.md).
+`IRONCLAW_REBORN_SECRET_MASTER_KEY`. The checked-in services route PostgreSQL
+through a Cloud SQL Auth Proxy Unix socket: `cloud-sql-proxy.service` creates the
+socket below `/run/cloud-sql-proxy`, and `ironclaw.service` mounts that directory
+at `/cloudsql` inside the container. The percent-encoded socket path in
+`deploy/env.example` is parsed as a local Unix socket; `sslmode=disable` applies
+only to that local hop, while the proxy encrypts the connection to Cloud SQL.
+No PostgreSQL TCP port is exposed to the VM or its network.
+
+The unit also bind-mounts the host directory `/opt/ironclaw/data` at
+`/data/ironclaw-reborn`. `deploy/setup.sh` creates it as UID/GID `1000:1000`
+with mode `0700`, matching the non-root user baked into the image. Back up this
+host directory, and verify a restore before treating the deployment as durable.
+
+Keep secret values only in the root-readable external environment file, and
+replace `IRONCLAW_VERSION=CHANGE_ME` with a pinned release tag; the unit fails
+closed instead of falling back to `latest`. Before enabling or restarting the
+unit, complete the GCP section of the
+[operator checklist](deployment-profile-operator-checklist.md).
 
 ## Slack
 

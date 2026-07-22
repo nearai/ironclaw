@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **GCP container deployment:** route PostgreSQL through a scoped Cloud SQL
+  Proxy Unix socket, persist the Reborn home on the VM, and reject unset,
+  placeholder, or `latest` image versions before Docker starts.
 - **Hosted MCP discovery:** bound overlong valid tool descriptions at the
   generic MCP boundary instead of rejecting the provider's entire catalog.
 - **Channel delivery:** keep live source-route observers attached for normal

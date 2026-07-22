@@ -65,19 +65,28 @@ Before enabling or restarting `ironclaw.service`:
 
 - [ ] Start from `deploy/env.example`; replace every `CHANGE_ME` value in the
   root-readable `/opt/ironclaw/.env` without committing that file.
+- [ ] Confirm `IRONCLAW_VERSION` is an explicit immutable release tag and is
+  neither empty nor `latest`; an unset value must prevent the unit from starting.
 - [ ] Confirm the file contains exactly one active
   `IRONCLAW_REBORN_PROFILE=production` assignment.
-- [ ] Confirm the PostgreSQL URL points at the intended Cloud SQL Auth Proxy
-  endpoint and the independent secret master key is present, without printing
-  either value.
+- [ ] Confirm the PostgreSQL URL uses the intended percent-encoded `/cloudsql/`
+  Unix socket path and the independent secret master key is present, without
+  printing either value. Do not expose a Cloud SQL Proxy TCP port.
 - [ ] Confirm `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`, the WebUI authentication
   variables are present, and the image version is pinned.
 - [ ] Confirm `/opt/ironclaw/.env` remains root-owned and mode `0600`.
+- [ ] Confirm `/opt/ironclaw/data` is owned by UID/GID `1000:1000`, has mode
+  `0700`, and is included in a tested backup/restore procedure.
 - [ ] Confirm `cloud-sql-proxy.service` is active before starting IronClaw.
+- [ ] Confirm the GCP firewall or trusted reverse proxy exposes only the intended
+  WebUI port; `docker inspect ironclaw` must show no published PostgreSQL port.
 
 After a safe deployment or restart:
 
 - [ ] Confirm `systemctl is-active cloud-sql-proxy ironclaw` succeeds.
+- [ ] Confirm the proxy socket exists below
+  `/run/cloud-sql-proxy/ironclaw-prod:us-central1:ironclaw-db/` and the IronClaw
+  container has both `/cloudsql` and `/data/ironclaw-reborn` bind mounts.
 - [ ] Confirm `curl --fail http://127.0.0.1:3000/api/health` succeeds from the
   VM.
 - [ ] Inspect the bounded, redacted service logs for the intended profile and
