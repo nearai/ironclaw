@@ -31,8 +31,16 @@ use crate::extension_host::{
     gsuite::{
         ProductAuthRuntimeGsuiteCredentialStager, register_bundled_gsuite_first_party_handlers,
     },
+    operator_config_capability::{
+        extend_builtin_first_party_package as extend_builtin_operator_config_package,
+        insert_handler as insert_operator_config_handler,
+    },
     provider_instance_readiness::{
         ProviderInstanceReadinessInput, provider_instance_readiness_map,
+    },
+    skill_auto_activate_capability::{
+        extend_builtin_first_party_package as extend_builtin_skill_auto_activate_package,
+        insert_handler as insert_skill_auto_activate_handler,
     },
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
@@ -40,6 +48,10 @@ use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_au
 use crate::local_dev_mounts::{
     ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
     skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+};
+use crate::outbound::outbound_preferences_capability::{
+    extend_builtin_first_party_package as extend_builtin_outbound_preferences_package,
+    insert_handler as insert_outbound_preferences_handler,
 };
 use crate::product_auth::credentials::product_auth_providers::{
     OAuthProviderComposition, compose_provider_client,
@@ -116,7 +128,7 @@ use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRu
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::{
     ExtensionAccountSetupRegistry, LifecycleProductSurfaceContext,
-    ProductAuthTurnGateResumeDispatcher, ProjectService,
+    OutboundPreferencesProductFacade, ProductAuthTurnGateResumeDispatcher, ProjectService,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::FilesystemBudgetGateStore;
@@ -1409,8 +1421,8 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// `RebornRuntime::generic_channel_connection_facade`) or by the
     /// channel-connection test bundle over a services-only harness.
     /// Fail-closed contract: a composition that leaves the slot empty cannot
-    /// remove a channel+auth extension — the removal path surfaces a typed
-    /// retryable error instead of skipping the per-caller disconnect (see
+    /// remove a channel extension — the removal path surfaces a typed
+    /// retryable error instead of skipping OAuth or pairing cleanup (see
     /// `RebornLocalExtensionManagementPort::channel_disconnect_slot`).
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>,
@@ -2270,9 +2282,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         .with_account_setup_registry(account_setups.clone())
         .with_removal_cleanup_registry(removal_cleanup)
         .with_provider_instance_readiness(provider_instance_readiness)
-        // Removal of a channel+auth extension disconnects the caller through
-        // the facade this late-bound slot carries once composition (runtime
-        // build or the channel-connection test bundle) fills it.
+        // Removal of any channel extension disconnects the caller through the
+        // facade this late-bound slot carries once composition (runtime build
+        // or the channel-connection test bundle) fills it. The facade chooses
+        // OAuth cleanup or proof-code unpairing from its generic registries.
         .with_channel_disconnect_slot(Arc::clone(
             &store_graph.local_runtime.channel_disconnect_slot,
         )),
@@ -2392,6 +2405,30 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("admin configuration handler is invalid: {error}"),
+    })?;
+    let operator_auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
+        store_graph.local_runtime.auto_approve_settings.clone();
+    insert_operator_config_handler(&mut first_party_registry, operator_auto_approve_settings)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("operator configuration handler is invalid: {error}"),
+        })?;
+    let outbound_target_provider = Arc::clone(&store_graph.local_runtime.outbound_delivery_targets)
+        as Arc<dyn crate::outbound::OutboundDeliveryTargetProvider>;
+    let outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade> =
+        Arc::new(crate::outbound::RebornOutboundPreferencesFacade::new(
+            Arc::clone(&store_graph.local_runtime.outbound_preferences),
+            outbound_target_provider,
+        ));
+    insert_outbound_preferences_handler(&mut first_party_registry, outbound_preferences_facade)
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("outbound preferences handler is invalid: {error}"),
+        })?;
+    insert_skill_auto_activate_handler(
+        &mut first_party_registry,
+        Arc::clone(&store_graph.local_runtime.skill_auto_activate_learned),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("skill auto-activation handler is invalid: {error}"),
     })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
@@ -4483,6 +4520,21 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
             reason: format!("local-dev administrator configuration package is invalid: {error}"),
         }
     })?;
+    let package = extend_builtin_operator_config_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev operator configuration package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_outbound_preferences_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev outbound preferences package is invalid: {error}"),
+        }
+    })?;
+    let package = extend_builtin_skill_auto_activate_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev skill auto-activation package is invalid: {error}"),
+        }
+    })?;
     registry
         .insert(package)
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -5198,7 +5250,7 @@ where
     .await
 }
 
-fn production_skill_management_mount_view(
+pub(crate) fn production_skill_management_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
     MountView::new(vec![

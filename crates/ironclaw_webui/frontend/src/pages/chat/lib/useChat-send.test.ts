@@ -129,6 +129,7 @@ function runUseChatSource(context) {
   if (!context.startExtensionOauth) {
     context.startExtensionOauth = async () => ({ success: false });
   }
+  if (!context.useT) context.useT = () => (key) => key;
   if (!("touchThreadInCache" in context)) context.touchThreadInCache = () => {};
   if (!("upsertThreadInCache" in context)) context.upsertThreadInCache = () => {};
   vm.runInNewContext(useChatSourceForTest(), context);
@@ -4308,6 +4309,81 @@ test("useChat: a channel-connected event from elsewhere clears the panel and ref
   }
 });
 
+test("useChat: in-chat OAuth start failures use localized messages", async () => {
+  const cases = [
+    {
+      name: "blocked popup",
+      expectedKey: "authGate.popupBlocked",
+      openPopup: () => null,
+      startExtensionOauth: async () => {
+        throw new Error("OAuth must not start when the popup is blocked");
+      },
+    },
+    {
+      name: "setup failure",
+      expectedKey: "extensions.oauthSetupFailed",
+      openPopup: () => ({ closed: false, close() { this.closed = true; } }),
+      startExtensionOauth: async () => ({ success: false }),
+    },
+    {
+      name: "invalid authorization URL",
+      expectedKey: "extensions.oauthInvalidAuthorizationUrl",
+      openPopup: () => ({ closed: false, close() { this.closed = true; } }),
+      startExtensionOauth: async () => ({
+        flow_id: "flow-invalid-url",
+        authorization_url: "http://example.test/oauth",
+      }),
+    },
+  ];
+
+  for (const scenario of cases) {
+    const threadId = `thread-chat-oauth-${scenario.name.replaceAll(" ", "-")}`;
+    const context = channelConnectionContext({
+      threadId,
+      messages: [channelConnectionRequiredCard()],
+      stateUpdates: [],
+      initialByIndex: new Map([
+        [
+          STATE_SLOT.pendingOnboarding,
+          {
+            extensionName: "slack",
+            state: "pairing_required",
+            threadId,
+            sourceMessageId: "tool-slack-oauth-start-error",
+            strategy: "oauth",
+          },
+        ],
+      ]),
+      fetchExtensionSetup: async () => ({
+        secrets: [
+          {
+            provider: "slack",
+            setup: { kind: "oauth", invocation_id: "invocation-slack" },
+          },
+        ],
+      }),
+      startExtensionOauth: scenario.startExtensionOauth,
+      windowObject: {
+        open: scenario.openPopup,
+        localStorage: { getItem: () => null, setItem: () => {} },
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        setInterval: () => 1,
+        clearInterval: () => {},
+      },
+    });
+    context.useT = () => (key) => `localized:${key}`;
+
+    runUseChatSource(context);
+    const chat = context.globalThis.__testExports.useChat(threadId);
+    await assert.rejects(
+      chat.startOnboardingOAuth(),
+      { message: `localized:${scenario.expectedKey}` },
+      scenario.name,
+    );
+  }
+});
+
 test("useChat: Slack OAuth completion consumes the in-chat connection card", async () => {
   const threadId = "thread-chat-oauth-complete";
   const sourceMessageId = "tool-slack-oauth-complete";
@@ -4556,6 +4632,7 @@ test("useChat: a failed Slack OAuth signal surfaces a retryable error on the con
     },
     windowObject,
   });
+  context.useT = () => (key) => `localized:${key}`;
 
   runUseChatSource(context);
   const chat = context.globalThis.__testExports.useChat(threadId);
@@ -4589,8 +4666,7 @@ test("useChat: a failed Slack OAuth signal surfaces a retryable error on the con
     stateUpdates.some(
       (update) =>
         update.index === STATE_SLOT.pendingOnboarding &&
-        typeof update.value?.oauthError === "string" &&
-        /authorization failed/i.test(update.value.oauthError),
+        update.value?.oauthError === "localized:extensions.oauthFailed",
     ),
     "a flow-matched failure must surface a retryable error on the card",
   );
@@ -4685,6 +4761,7 @@ test("useChat: an abandoned Slack OAuth flow times out instead of polling foreve
     windowObject,
   });
   context.Date = FakeDate;
+  context.useT = () => (key) => `localized:${key}`;
 
   runUseChatSource(context);
   const chat = context.globalThis.__testExports.useChat(threadId);
@@ -4704,8 +4781,7 @@ test("useChat: an abandoned Slack OAuth flow times out instead of polling foreve
     stateUpdates.some(
       (update) =>
         update.index === STATE_SLOT.pendingOnboarding &&
-        typeof update.value?.oauthError === "string" &&
-        /timed out/i.test(update.value.oauthError),
+        update.value?.oauthError === "localized:extensions.oauthTimedOut",
     ),
     "an expired flow must surface a retryable timeout error",
   );

@@ -119,145 +119,20 @@ impl RebornServicesApi for RecordingServices {
         unreachable!("not exercised by this test")
     }
 
-    async fn list_threads(
+    async fn query(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListThreadsRequest,
-    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn list_automations(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn get_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn list_outbound_delivery_targets(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn install_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn read_skill_content(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn update_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn remove_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn install_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn remove_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn setup_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-        _request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn get_operator_config_key(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        key: String,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        if query.view_id != OPERATOR_CONFIG_KEY_VIEW.id {
+            unreachable!("not exercised by this test");
+        }
+        let key = query
+            .params
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .expect("operator config key param")
+            .to_string();
         self.calls
             .lock()
             .expect("lock")
@@ -282,7 +157,7 @@ impl RebornServicesApi for RecordingServices {
     }
 }
 
-fn router_with(services: Arc<dyn RebornServicesApi>) -> Router {
+fn router_with(services: Arc<dyn ProductSurface>) -> Router {
     webui_v2_router(WebUiV2State::new(
         services,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,

@@ -1,67 +1,22 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use static_assertions::const_assert;
+#[cfg(test)]
 use tokio::sync::Semaphore;
 
-use super::runtime_adapters::wasm_error_kind;
+use super::wasm_blocking::run_wasm_execution_blocking;
+#[cfg(test)]
+use super::wasm_blocking::{
+    MAX_CONCURRENT_WASM_EXEC, MAX_CONCURRENT_WASM_PREPARE, WASM_EXEC_SEMAPHORE,
+    WASM_PREPARE_SEMAPHORE, WasmBlockingError, run_wasm_prepare_blocking,
+};
 use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
     CapabilityId, DispatchError, PreparedWitTool, ResourceGovernor, ResourceReservationId,
     ResourceUsage, RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind,
-    RuntimeLaneRequest, WasmError, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
+    RuntimeLaneRequest, WasmError, WitToolHost, WitToolRuntime,
 };
 use ironclaw_host_api::ResourceReceipt;
-
-/// Upper bound on WASM tool executions running concurrently inside
-/// `spawn_blocking`.
-///
-/// Each WASM tool call runs a synchronous wasmtime guest call. We offload it to
-/// the blocking thread pool (see [`execute_prepared_wasm`]) so it never parks a
-/// tokio *worker* thread, but the blocking pool is itself finite. Without a
-/// bound, a burst of concurrent turns (the incident: ~40 turns fanning out at
-/// once) could occupy every blocking thread, starving every other
-/// `spawn_blocking` user (DB, filesystem, etc.) and re-creating the runtime
-/// wedge one layer down. This semaphore caps in-flight native WASM executions
-/// well below the default blocking-pool ceiling (512) while staying far above
-/// steady-state demand, so normal load never waits and a storm degrades to
-/// queuing instead of pool exhaustion.
-const MAX_CONCURRENT_WASM_EXEC: usize = 64;
-
-// Enforce the bound invariant at compile time: it must be positive and stay
-// below tokio's default blocking-pool ceiling (512) so native WASM execution
-// can never monopolize the pool and starve other `spawn_blocking` users.
-// `const_assert!` is evaluated at compile time and cannot panic at runtime.
-const_assert!(MAX_CONCURRENT_WASM_EXEC > 0 && MAX_CONCURRENT_WASM_EXEC < 512);
-
-/// Upper bound on WASM component compilations running concurrently inside
-/// `spawn_blocking`.
-///
-/// Preparation (wasmtime `Component::new`) is capped at one quarter of the
-/// execution bound so that a cold-compile storm cannot starve already-prepared
-/// hot executions waiting on [`WASM_EXEC_SEMAPHORE`]. The two gates are
-/// independent, so total blocking-pool usage is bounded by their sum
-/// (16 + 64 = 80) — still far below tokio's default blocking-pool ceiling (512).
-const MAX_CONCURRENT_WASM_PREPARE: usize = 16;
-
-// Enforce the prepare bound at compile time: positive, smaller than the exec
-// bound (so compiles cannot crowd out hot executions), and far below the pool
-// ceiling. `const_assert!` is evaluated at compile time and cannot panic at runtime.
-const_assert!(
-    MAX_CONCURRENT_WASM_PREPARE > 0 && MAX_CONCURRENT_WASM_PREPARE < MAX_CONCURRENT_WASM_EXEC
-);
-
-/// Process-wide gate over concurrent native WASM execution. Shared across all
-/// `WasmRuntimeAdapter` instances because they all draw from the same blocking
-/// thread pool.
-static WASM_EXEC_SEMAPHORE: std::sync::LazyLock<Arc<Semaphore>> =
-    std::sync::LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_WASM_EXEC)));
-
-/// Process-wide gate over concurrent WASM component compilations. Independent
-/// of [`WASM_EXEC_SEMAPHORE`] so a cold-compile storm cannot consume all
-/// execution permits and starve already-prepared hot executions.
-static WASM_PREPARE_SEMAPHORE: std::sync::LazyLock<Arc<Semaphore>> =
-    std::sync::LazyLock::new(|| Arc::new(Semaphore::new(MAX_CONCURRENT_WASM_PREPARE)));
 
 /// RAII guard over an in-flight `ResourceGovernor` reservation.
 ///
@@ -259,17 +214,17 @@ where
     {
         Ok(execution) => execution,
         Err(error) => {
-            log_wasm_runtime_error(request.capability_id, &error);
+            log_wasm_runtime_error(request.capability_id, error.source());
             // `preserved_wasm_error_usage` returns `Some` only for accountable
             // `ExecutionFailed` usage; `account_failed` then reconciles, and
             // otherwise releases — matching the prior reserve/account split.
             guard.account_failed(
-                preserved_wasm_error_usage(&error).as_ref(),
+                preserved_wasm_error_usage(error.source()).as_ref(),
                 wasm_resource_error,
             )?;
             return Err(DispatchError::Wasm {
-                kind: wasm_error_kind(&error),
-                model_visible_cause: Some(error.to_string()),
+                kind: error.kind(),
+                model_visible_cause: Some(error.source().to_string()),
             });
         }
     };
@@ -303,74 +258,6 @@ where
         usage: execution.usage,
         receipt,
     })
-}
-
-/// Run the synchronous wasmtime guest call on the blocking thread pool.
-///
-/// The owned `runtime`/`prepared`/`host` are all cheap-to-move (`WitToolRuntime`
-/// is a cheap `Clone` that shares its `Engine` by reference count; `prepared` is
-/// an `Arc`; `WitToolHost` is `Clone`), so the closure is `Send + 'static`. A
-/// semaphore permit is acquired here and then moved into the `spawn_blocking`
-/// closure so its lifetime is tied to the blocking thread, not the outer async
-/// future — cancellation of the caller does not release the slot early. A
-/// `JoinError` (panic or cancellation of the blocking task) is surfaced as an
-/// execution failure.
-pub(super) async fn run_wasm_execution_blocking(
-    runtime: WitToolRuntime,
-    prepared: Arc<PreparedWitTool>,
-    host: WitToolHost,
-    input_json: String,
-    context_json: String,
-) -> Result<WitToolExecution, WasmError> {
-    let permit = WASM_EXEC_SEMAPHORE
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| WasmError::execution_failed("wasm execution gate closed".to_string()))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        runtime.execute(
-            &prepared,
-            host,
-            WitToolRequest::new(input_json).with_context(context_json),
-        )
-    })
-    .await
-    .map_err(|_| WasmError::execution_failed("wasm execution task panicked".to_string()))?
-}
-
-/// Run the synchronous wasmtime component compilation on the blocking thread pool.
-///
-/// `WitToolRuntime::prepare` performs `Component::new` (wasmtime compilation) plus
-/// metadata extraction — CPU-heavy and blocking, exactly like guest execution.
-/// Running it inline on the async worker would park that worker for the full
-/// compile; a burst of cold-cache misses (cold start or cache eviction) could then
-/// pin every async worker and re-create the runtime wedge that offloading
-/// execution fixes. So `prepare` is offloaded to the blocking pool behind the
-/// dedicated, smaller [`WASM_PREPARE_SEMAPHORE`] — separate from
-/// [`WASM_EXEC_SEMAPHORE`] — so a cold-compile storm cannot starve
-/// already-prepared hot executions that are waiting on their own gate. The owned
-/// `runtime` is a cheap `Clone` (shared `Engine`) and `wasm_bytes` is moved in,
-/// so the closure is `Send + 'static`. The semaphore permit is moved into the
-/// `spawn_blocking` closure so its lifetime is tied to the blocking thread, not
-/// the outer async future. A `JoinError` (panic or cancellation of the blocking
-/// task) is surfaced as an execution failure.
-pub(super) async fn run_wasm_prepare_blocking(
-    runtime: WitToolRuntime,
-    package_id: String,
-    wasm_bytes: Vec<u8>,
-) -> Result<PreparedWitTool, WasmError> {
-    let permit = WASM_PREPARE_SEMAPHORE
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|_| WasmError::execution_failed("wasm preparation gate closed".to_string()))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        runtime.prepare(&package_id, &wasm_bytes)
-    })
-    .await
-    .map_err(|_| WasmError::execution_failed("wasm preparation task panicked".to_string()))?
 }
 
 fn wasm_invocation_context(capability_id: &CapabilityId) -> String {
@@ -1005,13 +892,22 @@ mod tests {
         )
         .await;
 
-        // The JoinError from the panic must map to WasmError::ExecutionFailed
-        // with the static message — NOT the panic payload.
+        // The JoinError from the panic must retain host-executor provenance
+        // while preserving the static WasmError message — NOT the panic payload.
         assert!(
-            matches!(result, Err(WasmError::ExecutionFailed { .. })),
-            "expected Err(WasmError::ExecutionFailed), got: {result:?}"
+            matches!(
+                result.as_ref().map_err(WasmBlockingError::source),
+                Err(WasmError::ExecutionFailed { .. })
+            ),
+            "expected an execution-failed source, got: {result:?}"
         );
-        if let Err(WasmError::ExecutionFailed { message, .. }) = &result {
+        let error = result.as_ref().expect_err("panicking task must fail");
+        assert_eq!(
+            error.kind(),
+            RuntimeDispatchErrorKind::Executor,
+            "blocking-task panics are host executor failures, not guest traps"
+        );
+        if let WasmError::ExecutionFailed { message, .. } = error.source() {
             assert_eq!(
                 message, "wasm execution task panicked",
                 "panic message must be the static string, not the JoinError payload"
@@ -1335,13 +1231,16 @@ mod tests {
         let result = run_wasm_prepare_blocking(runtime, "invalid".to_string(), invalid_bytes).await;
 
         assert!(
-            matches!(result, Err(WasmError::CompilationFailed(_))),
+            matches!(
+                result.as_ref().map_err(WasmBlockingError::source),
+                Err(WasmError::CompilationFailed(_))
+            ),
             "invalid wasm bytes must surface as WasmError::CompilationFailed, got: {result:?}"
         );
         // Confirm the dispatch-path mapping is preserved end to end.
         if let Err(error) = &result {
             assert_eq!(
-                wasm_error_kind(error),
+                error.kind(),
                 RuntimeDispatchErrorKind::Manifest,
                 "compilation failure must map to the Manifest dispatch kind"
             );

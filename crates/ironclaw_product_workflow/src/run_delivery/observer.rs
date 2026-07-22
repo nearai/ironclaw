@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use tokio::time::Instant;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -516,7 +516,7 @@ impl RunDeliveryObserver {
         delivered_blocked_marker: Option<&BlockedActionableMarker>,
         working_message: &mut Option<DeliveredChannelMessage>,
     ) -> Result<TurnRunState, RunDeliveryError> {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let mut poll_interval = self.settings.poll_interval;
         loop {
             let state = self

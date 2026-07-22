@@ -461,9 +461,10 @@ possible.
    keys / installation config. After migration no `slack`-named state root is
    read outside migration code.
 5. **Installation lifecycle records** → standard state enum backfill.
-6. **Webhook URL:** `/webhooks/slack/events` becomes a forwarding alias to
-   `/webhooks/extensions/slack/events` for **one release**, then is deleted.
-   OAuth callback paths are unchanged — no vendor reconfiguration.
+6. **Webhook URL:** `/webhooks/slack/events` forwarded to
+   `/webhooks/extensions/slack/events` for the cutover release and is now
+   deleted. OAuth callback paths remain on the generic product-auth route;
+   operators must configure the canonical Events URL.
 7. **First-party manifests:** rewrite all 11 packages v2 → v3 in one PR, with
    a projection-equality test (derived surfaces, capability ids, scopes,
    credentials identical before/after) — plus the new explicit `[auth.*]` and

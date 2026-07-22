@@ -16,6 +16,7 @@ import {
   readLatestProductAuthOAuthCompletion,
   subscribeProductAuthOAuthCompletion,
 } from "../../../lib/product-auth-oauth-events";
+import { useT } from "../../../lib/i18n";
 import { queryClient } from "../../../lib/query-client";
 import {
   fetchExtensionSetup,
@@ -34,9 +35,17 @@ const DISMISSED_ONBOARDING_STORAGE_LIMIT = 100;
 // an abandoned popup cannot leave the card polling the server forever.
 const CHAT_OAUTH_TIMEOUT_MS = 10 * 60 * 1000;
 const CHAT_OAUTH_POLL_MS = 2000;
-const CHAT_OAUTH_FAILED_MESSAGE = "Authorization failed. Try connecting again.";
-const CHAT_OAUTH_TIMED_OUT_MESSAGE =
-  "Authorization timed out. Try connecting again.";
+const CHAT_OAUTH_STATUS_ERROR_KEYS = Object.freeze({
+  failed: "extensions.oauthFailed",
+  canceled: "extensions.oauthCanceled",
+  expired: "extensions.oauthExpired",
+});
+
+function authPopupFailureMessage(reason, t) {
+  return reason === "popup_blocked"
+    ? t("authGate.popupBlocked")
+    : t("extensions.oauthInvalidAuthorizationUrl");
+}
 
 // A pairing panel is per-thread. Exported because `useChat`'s send-admission and
 // visible-panel computation share this exact rule with the onboarding hook.
@@ -205,6 +214,7 @@ export function useChannelOnboarding(
   threadId,
   { messages, messagesThreadId, pendingGate, pendingGateRef, setPendingGate, setIsProcessing, sendRef },
 ) {
+  const t = useT();
   const [pendingOnboarding, setPendingOnboardingState] = React.useState(null);
   const pendingOnboardingRef = React.useRef(pendingOnboarding);
   // This surface owns one current onboarding OAuth flow. A monotonically
@@ -416,7 +426,7 @@ export function useChannelOnboarding(
         // is available; the status poll below is the authoritative terminal
         // signal and also resumes cleanup after a service restart.
         if (!pending.invocationId) {
-          failOauthFlow(pending, CHAT_OAUTH_FAILED_MESSAGE);
+          failOauthFlow(pending, t("extensions.oauthFailed"));
         }
         return;
       }
@@ -438,8 +448,9 @@ export function useChannelOnboarding(
         .then((result) => {
           if (!flowSnapshotIsCurrent(pending)) return null;
           if (result?.status === "completed") return finishCompletion(pending);
-          if (["failed", "canceled", "expired"].includes(result?.status)) {
-            failOauthFlow(pending, CHAT_OAUTH_FAILED_MESSAGE);
+          const statusErrorKey = CHAT_OAUTH_STATUS_ERROR_KEYS[result?.status];
+          if (statusErrorKey) {
+            failOauthFlow(pending, t(statusErrorKey));
             return null;
           }
           return fetchExtensions();
@@ -471,7 +482,7 @@ export function useChannelOnboarding(
         pending.startedAt &&
         Date.now() - pending.startedAt > CHAT_OAUTH_TIMEOUT_MS
       ) {
-        failOauthFlow(pending, CHAT_OAUTH_TIMED_OUT_MESSAGE);
+        failOauthFlow(pending, t("extensions.oauthTimedOut"));
         return;
       }
       handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
@@ -481,7 +492,7 @@ export function useChannelOnboarding(
       browserWindow.clearInterval(timer);
       unsubscribe();
     };
-  }, [clearOnboardingAfterChannelConnected, setPendingOnboarding, threadId]);
+  }, [clearOnboardingAfterChannelConnected, setPendingOnboarding, t, threadId]);
 
   React.useEffect(() => {
     return subscribeChannelConnected((event) => {
@@ -635,7 +646,7 @@ export function useChannelOnboarding(
     // even on success per spec), a null here reliably means the browser
     // blocked the popup — surface it before burning the flow start.
     if (!popup) {
-      throw new Error("Authorization popup was blocked.");
+      throw new Error(t("authGate.popupBlocked"));
     }
     try {
       const setup =
@@ -653,7 +664,7 @@ export function useChannelOnboarding(
         (item) => (item?.setup?.kind || "manual_token") === "oauth",
       );
       if (!secret) {
-        throw new Error("OAuth setup is unavailable for this channel");
+        throw new Error(t("extensions.oauthSetupFailed"));
       }
       const response = await startExtensionOauth(packageRef, secret);
       if (generation !== onboardingOauthGenerationRef.current) {
@@ -661,21 +672,17 @@ export function useChannelOnboarding(
         return null;
       }
       if (response?.success === false) {
-        throw new Error(response.message || "OAuth setup failed");
+        throw new Error(response.message || t("extensions.oauthSetupFailed"));
       }
       if (!response?.authorization_url) {
-        throw new Error("OAuth setup did not return an authorization URL");
+        throw new Error(t("extensions.oauthSetupFailed"));
       }
       if (!response?.flow_id) {
-        throw new Error("OAuth setup did not return a flow id");
+        throw new Error(t("extensions.oauthSetupFailed"));
       }
       const opened = openAuthPopup(response.authorization_url, popup);
       if (!opened.ok) {
-        throw new Error(
-          opened.reason === "popup_blocked"
-            ? "Authorization popup was blocked."
-            : "Authorization URL must use HTTPS.",
-        );
+        throw new Error(authPopupFailureMessage(opened.reason, t));
       }
       // A retry after a failed/timed-out attempt clears the stale card error.
       setPendingOnboarding((current) =>
@@ -697,7 +704,7 @@ export function useChannelOnboarding(
       if (popup && !popup.closed) popup.close();
       throw error;
     }
-  }, [threadId, setPendingOnboarding]);
+  }, [threadId, setPendingOnboarding, t]);
 
   const dismissOnboardingPairing = React.useCallback(() => {
     // Dismissing the card also abandons any in-flight OAuth flow it started —

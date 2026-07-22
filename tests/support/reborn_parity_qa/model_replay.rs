@@ -542,7 +542,7 @@ async fn provider_tool_calls_response(
             .find(|definition| definition.capability_id == call.capability_id)
             .ok_or_else(|| {
                 HostManagedModelError::safe(
-                    HostManagedModelErrorKind::InvalidRequest,
+                    HostManagedModelErrorKind::InvalidOutput,
                     format!(
                         "scripted capability {} was not advertised to the model",
                         call.capability_id.as_str()

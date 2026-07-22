@@ -1111,6 +1111,8 @@ registerPack("fr", {
   "admin.users.member": "Membre",
   "admin.users.admin": "Administrateur",
   "admin.users.suspend": "Suspendre",
+  "admin.users.actionFailed": "Échec de l’action : {message}",
+  "admin.users.lastAdminRequired": "Au moins un administrateur actif est requis. Ajoutez ou activez un autre administrateur avant de modifier cet utilisateur.",
   "admin.users.activate": "Activer",
   "admin.users.promote": "Promouvoir",
   "admin.users.demote": "Rétrograder",
@@ -1253,6 +1255,13 @@ registerPack("fr", {
   "extensions.removeFailed": "Échec de la suppression",
   "extensions.openingAuth": "Ouverture de l'authentification...",
   "extensions.configurationRequired": "Configuration requise",
+  "extensions.setupFailed": "Échec de la configuration",
+  "extensions.oauthSetupFailed": "Échec de la configuration OAuth",
+  "extensions.oauthInvalidAuthorizationUrl": "L'URL d'autorisation doit utiliser HTTPS.",
+  "extensions.oauthFailed": "L'autorisation a échoué. Réessayez de vous connecter.",
+  "extensions.oauthExpired": "L'autorisation a expiré. Réessayez de vous connecter.",
+  "extensions.oauthCanceled": "L'autorisation a été annulée. Réessayez de vous connecter.",
+  "extensions.oauthTimedOut": "Le délai d'autorisation a expiré. Réessayez de vous connecter.",
   "extensions.getCredentials": "Obtenir les identifiants",
   "extensions.keepSecretPlaceholder": "••••••• (laisser vide pour conserver)",
   "extensions.runtime.wasm": "Outil WASM",
@@ -1361,6 +1370,10 @@ registerPack("fr", {
 
 registerPack("fr", {
   "app.checkingSession": "Vérification de la session...",
+  "app.sessionCheckFailedTitle": "Impossible de vérifier votre session",
+  "app.sessionCheckFailedDescription":
+    "Impossible de vérifier votre session pour le moment. Vos informations de connexion restent enregistrées. Réessayez dans quelques instants.",
+  "app.retrySession": "Réessayer",
   "common.close": "Fermer",
   "common.download": "Télécharger",
   "common.copy": "Copier",

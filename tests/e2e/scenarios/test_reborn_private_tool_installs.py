@@ -30,6 +30,7 @@ import httpx
 
 from reborn_webui_harness import (
     create_thread,
+    enable_reborn_global_auto_approve,
     reborn_bearer_headers,
     reborn_v2_private_installs_yolo_server,  # noqa: F401 - imported fixture
     send_and_settle,
@@ -107,22 +108,28 @@ async def test_private_tool_installs_full_path(
     reborn_v2_private_installs_yolo_server, test_tool_zips
 ):
     base_url = reborn_v2_private_installs_yolo_server
-
-    async with httpx.AsyncClient(
-        base_url=base_url, headers=reborn_bearer_headers(), timeout=15
-    ) as operator:
-        # 1. Operator imports the three test-tools/ fixture bundles.
-        for tool_id in ("ascii-renderer", "hacker-news", "market-data"):
-            await _import_tool(operator, base_url, test_tool_zips[tool_id])
-
-        # 2. Operator installs + activates ascii-renderer tenant-wide.
-        await _install_and_activate(operator, base_url, "ascii-renderer")
-
-        # 3. Operator creates alice and bob.
-        alice = await _create_member_user(operator, base_url, display_name="Alice")
-        bob = await _create_member_user(operator, base_url, display_name="Bob")
-
+    alice = None
+    bob = None
     try:
+        async with httpx.AsyncClient(
+            base_url=base_url, headers=reborn_bearer_headers(), timeout=15
+        ) as operator:
+            # 1. Operator imports the three test-tools/ fixture bundles.
+            for tool_id in ("ascii-renderer", "hacker-news", "market-data"):
+                await _import_tool(operator, base_url, test_tool_zips[tool_id])
+
+            # 2. Operator installs + activates ascii-renderer tenant-wide.
+            await _install_and_activate(operator, base_url, "ascii-renderer")
+
+            # 3. Operator creates alice and bob.
+            alice = await _create_member_user(operator, base_url, display_name="Alice")
+            bob = await _create_member_user(operator, base_url, display_name="Bob")
+
+            # Auto-approve is caller-scoped, so the fixture's operator setting does
+            # not grant it to newly-created members.
+            await enable_reborn_global_auto_approve(base_url, token=alice["token"])
+            await enable_reborn_global_auto_approve(base_url, token=bob["token"])
+
         async with _user_client(base_url, alice["token"]) as alice_client:
             # 4. Alice privately installs + activates hacker-news.
             await _install_and_activate(alice_client, base_url, "hacker-news")
@@ -207,11 +214,13 @@ async def test_private_tool_installs_full_path(
         async with httpx.AsyncClient(
             base_url=base_url, headers=reborn_bearer_headers(), timeout=15
         ) as operator:
-            alice_delete = await operator.delete(
-                f"{base_url}{ADMIN_BASE}/users/{alice['user_id']}"
-            )
-            bob_delete = await operator.delete(
-                f"{base_url}{ADMIN_BASE}/users/{bob['user_id']}"
-            )
-            assert alice_delete.status_code == 200, alice_delete.text
-            assert bob_delete.status_code == 200, bob_delete.text
+            if alice is not None:
+                alice_delete = await operator.delete(
+                    f"{base_url}{ADMIN_BASE}/users/{alice['user_id']}"
+                )
+                assert alice_delete.status_code == 200, alice_delete.text
+            if bob is not None:
+                bob_delete = await operator.delete(
+                    f"{base_url}{ADMIN_BASE}/users/{bob['user_id']}"
+                )
+                assert bob_delete.status_code == 200, bob_delete.text

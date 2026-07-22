@@ -1049,6 +1049,7 @@ fn triggered_request_from_fire(
         creator_user_id: fire.creator_user_id.clone(),
         project_scoped: fire.project_id.is_some(),
         prompt: fire.prompt.clone(),
+        delivery_target: None,
         trigger_context: ironclaw_outbound::TriggerCommunicationContext {
             trigger_origin_ref: ironclaw_outbound::TriggerOriginRef::new(
                 fire.identity.trigger_id().to_string(),
@@ -4259,6 +4260,7 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         Arc::clone(&harness.assembly),
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
+        Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default()),
     );
 
     let fire = TriggerFire {
@@ -4343,6 +4345,115 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         record.outcome,
         ironclaw_outbound::TriggeredRunDeliveryOutcomeKind::Failed,
         "an undecodable stored target fails closed"
+    );
+}
+
+/// A trigger's own target id is resolved at fire time through the same
+/// creator-scoped registry used during creation, then delivered without a
+/// user-global preference. This is the whole composition path used by
+/// Telegram, Slack, and future manifest-driven channel providers.
+#[tokio::test]
+async fn generic_triggered_hook_honors_per_trigger_target_without_global_default() {
+    let harness = build_harness(TurnMode::Running).await;
+    save_outbound_target_config(&harness).await;
+    let dm_targets = generic_dm_target_store();
+    let user = UserId::new(USER).expect("user"); // safety: static test user id is valid.
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &user,
+            SLACK_USER.to_string(),
+            dm_target_payload(Some(TEAM), CHANNEL),
+        )
+        .await
+        .expect("provision DM target");
+    let provider = Arc::new(generic_outbound_target_provider(&harness, dm_targets));
+    let listed = provider
+        .list_outbound_delivery_targets(&operator_caller())
+        .await
+        .expect("list targets");
+    let target_id = listed
+        .iter()
+        .find(|entry| entry.summary.target_id.as_str().contains("personal-dm"))
+        .expect("personal target")
+        .summary
+        .target_id
+        .as_str()
+        .to_string();
+    let registry = Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
+    registry
+        .register_provider(
+            "channel",
+            provider as Arc<dyn OutboundDeliveryTargetProvider>,
+        )
+        .expect("register target provider");
+
+    let scope = foreign_run_scope();
+    harness.ensure_scope_thread(&scope).await;
+    let run_id = TurnRunId::new();
+    harness
+        .coordinator
+        .complete_run(
+            scope.clone(),
+            TurnActor::new(user.clone()),
+            run_id,
+            "scheduled result",
+        )
+        .await
+        .expect("seed completed trigger run");
+
+    let delivery_store = Arc::new(in_memory_backed_outbound_state_store());
+    let hook = GenericTriggeredRunDeliveryHook::new(
+        Arc::clone(&harness.assembly),
+        Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
+        harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
+        registry,
+    );
+    let fire = TriggerFire {
+        identity: TriggerFireIdentity::new(
+            TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
+            TriggerId::new(),
+            chrono::Utc::now(),
+        ),
+        creator_user_id: user,
+        agent_id: Some(AgentId::new(AGENT).expect("agent")), // safety: static test agent id is valid.
+        project_id: None,
+        prompt: "scheduled result to this DM".to_string(),
+        delivery_target: Some(
+            ironclaw_triggers::TriggerDeliveryTargetId::new(target_id).expect("target id"),
+        ),
+    };
+    use crate::automation::trigger_poller::PostSubmitDeliveryHook as _;
+    hook.on_trigger_submitted(fire, run_id, scope).await;
+
+    for _ in 0..200 {
+        if delivery_store
+            .load_triggered_run_delivery(run_id)
+            .await
+            .expect("load outcome")
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let record = delivery_store
+        .load_triggered_run_delivery(run_id)
+        .await
+        .expect("load outcome")
+        .expect("delivery outcome");
+    assert_eq!(
+        record.outcome,
+        ironclaw_outbound::TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+    let messages = harness.slack_messages();
+    assert_eq!(messages.len(), 1, "one per-trigger result: {messages:?}");
+    assert_eq!(messages[0]["channel"], CHANNEL);
+    assert!(
+        messages[0]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("scheduled result")),
+        "final result reaches the selected target: {messages:?}"
     );
 }
 // arch-exempt: large_file, channel host end-to-end coverage remains centralized, plan #6175

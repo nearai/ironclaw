@@ -123,7 +123,8 @@ use super::product_workflow::RebornProductWorkflowHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
-    ErrLlm, ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm, scripted_trace_llm,
+    ErrLlm, ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailureScript,
+    SCRIPTED_MODEL_NAME, parking_trace_llm, recoverable_failure_trace_llm, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -1111,23 +1112,26 @@ pub struct RebornThreadBuilder<'g> {
 }
 
 /// A thread's model-call behavior: exactly one of normal scripted playback,
-/// parked-until-released, or unconditional failure. One enum instead of an
-/// `Option<ParkingModelGate>` + `bool` pair (mirrors `ShellMode` in
-/// `builder.rs`) so the three modes are mutually exclusive BY CONSTRUCTION —
+/// parked-until-released, bounded recoverable failure, or unconditional
+/// failure. One enum instead of an `Option<ParkingModelGate>` + `bool` pair
+/// (mirrors `ShellMode` in `builder.rs`) so the four modes are mutually exclusive BY CONSTRUCTION —
 /// no tuple-priority rule needed at the dispatch site, and no state can
 /// silently ask for "parked AND failing" at once.
 #[derive(Default)]
-enum ThreadModelMode {
+pub(crate) enum ThreadModelMode {
     /// Normal scripted playback (the default).
     #[default]
     Normal,
     /// This thread's model call parks until the gate is released (E-GATEWAY
     /// seam), enabling a mid-turn cancel test.
     Parked(ParkingModelGate),
+    /// Reports a recoverable provider failure a bounded number of times, then
+    /// resumes normal scripted playback.
+    Recoverable(RecoverableModelFailureScript),
     /// This thread's model call always fails with a fixed non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
     /// `replies`. See [`super::scripted_provider::ErrLlm`].
-    Failing,
+    Failing(ErrLlmKind),
 }
 
 impl<'g> RebornThreadBuilder<'g> {
@@ -1138,21 +1142,16 @@ impl<'g> RebornThreadBuilder<'g> {
         self
     }
 
+    pub(crate) fn model_mode(mut self, mode: ThreadModelMode) -> Self {
+        self.model_mode = mode;
+        self
+    }
+
     /// Park this thread's model call until `gate` is released (E-GATEWAY seam).
     /// The parking provider sits at the same vendor-SDK seam as the scripted
     /// provider, so the real decorator chain still runs on top.
-    pub fn park_model(self, gate: ParkingModelGate) -> Self {
-        self.park_model_opt(Some(gate))
-    }
-
-    /// Internal: set the optional park gate (used by the flat builder to thread
-    /// its own park gate through the degenerate one-thread group). A `Some`
-    /// gate always wins, matching the old tuple-priority contract, even if
-    /// `fail_model_opt` is called first.
-    pub(crate) fn park_model_opt(mut self, gate: Option<ParkingModelGate>) -> Self {
-        if let Some(gate) = gate {
-            self.model_mode = ThreadModelMode::Parked(gate);
-        }
+    pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
+        self.model_mode = ThreadModelMode::Parked(gate);
         self
     }
 
@@ -1169,18 +1168,17 @@ impl<'g> RebornThreadBuilder<'g> {
     /// Fail this thread's model call unconditionally with a fixed, non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS — provider-`Err` failure category).
     /// Sits at the same vendor-SDK seam as `park_model`/scripted playback.
-    pub fn fail_model(self) -> Self {
-        self.fail_model_opt(true)
+    pub fn fail_model(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::ContextLength);
+        self
     }
 
-    /// Internal: set the fail-model flag (used by the flat builder to thread
-    /// its own knob through the degenerate one-thread group). Never downgrades
-    /// an already-`Parked` mode, matching the old tuple-priority contract
-    /// (`park_model` always wins over `fail_model`).
-    pub(crate) fn fail_model_opt(mut self, fail: bool) -> Self {
-        if fail && !matches!(self.model_mode, ThreadModelMode::Parked(_)) {
-            self.model_mode = ThreadModelMode::Failing;
-        }
+    /// Credentials arm of [`Self::fail_model`]: the model call always fails
+    /// with non-retryable `LlmError::AuthFailed`, driving the pinned
+    /// `model_credentials_unavailable` failure category through the real
+    /// provider-error mapping.
+    pub fn fail_model_auth(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::AuthFailed);
         self
     }
 
@@ -1248,15 +1246,28 @@ impl<'g> RebornThreadBuilder<'g> {
         // way.
         let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
         // C-ERRORS: `Failing` swaps in `ErrLlm` at the same vendor-SDK seam;
-        // `Parked` swaps in the parking wrapper. `ThreadModelMode` makes the
-        // three modes mutually exclusive by construction — no priority rule
-        // needed here.
-        let raw: Arc<dyn LlmProvider> = match self.model_mode {
-            ThreadModelMode::Parked(gate) => {
-                Arc::new(parking_trace_llm(gate, scripted_llm.clone()))
+        // `Parked` swaps in the parking wrapper. `ThreadModelMode` keeps all
+        // provider modes mutually exclusive by construction — no priority
+        // rule is needed here.
+        let (raw, model_provider_call_probe): (
+            Arc<dyn LlmProvider>,
+            Option<ModelProviderCallProbe>,
+        ) = match self.model_mode {
+            ThreadModelMode::Parked(gate) => (
+                Arc::new(parking_trace_llm(gate, scripted_llm.clone())),
+                None,
+            ),
+            ThreadModelMode::Recoverable(script) => {
+                let (provider, probe) = recoverable_failure_trace_llm(
+                    script.failure,
+                    script.successful_calls_before_failures,
+                    script.failures,
+                    scripted_llm.clone(),
+                );
+                (Arc::new(provider), Some(probe))
             }
-            ThreadModelMode::Failing => Arc::new(ErrLlm),
-            ThreadModelMode::Normal => scripted_llm.clone(),
+            ThreadModelMode::Failing(kind) => (Arc::new(ErrLlm::new(kind)), None),
+            ThreadModelMode::Normal => (scripted_llm.clone(), None),
         };
         let session = create_session_manager(SessionConfig {
             session_path: shared
@@ -1380,6 +1391,7 @@ impl<'g> RebornThreadBuilder<'g> {
             event_seq: AtomicU64::new(1),
             capability_recorder,
             scripted_llm,
+            model_provider_call_probe,
             _shared: Arc::clone(&shared),
             baseline_invocation_count,
             baseline_egress_count,

@@ -96,6 +96,19 @@ impl HarnessCapabilityRecorder {
         }
     }
 
+    pub(crate) fn install_network_response_script(
+        &self,
+        status: u16,
+        body: Vec<u8>,
+    ) -> HarnessResult<()> {
+        match self {
+            Self::Recording(_) => {
+                Err("recording capability port has no network response script".into())
+            }
+            Self::HostRuntime(harness) => harness.install_network_response_script(status, body),
+        }
+    }
+
     /// S1 seam: requests that reached the real-egress-pipeline's wire-level
     /// transport recorder. Empty for every backend but
     /// `BuiltinHttpToolsRealEgress`.

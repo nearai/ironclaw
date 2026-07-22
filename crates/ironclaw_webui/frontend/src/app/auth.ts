@@ -140,6 +140,8 @@ export function useAuthSession() {
   const [isSessionChecking, setIsSessionChecking] = React.useState(
     () => Boolean(!loginTicket && readStoredToken()),
   );
+  const [sessionCheckFailed, setSessionCheckFailed] = React.useState(false);
+  const [sessionCheckAttempt, setSessionCheckAttempt] = React.useState(0);
 
   React.useEffect(() => {
     if (!loginTicket) {
@@ -172,10 +174,12 @@ export function useAuthSession() {
     if (!token || isExchanging) {
       setSession(null);
       setIsSessionChecking(false);
+      setSessionCheckFailed(false);
       return undefined;
     }
     let cancelled = false;
     setIsSessionChecking(true);
+    setSessionCheckFailed(false);
     fetchSession()
       .then((nextSession) => {
         if (cancelled) return;
@@ -184,19 +188,24 @@ export function useAuthSession() {
       })
       .catch((err) => {
         if (cancelled) return;
-        setSession(null);
         setIsSessionChecking(false);
         if (err?.status === 401 || err?.status === 403) {
+          setSession(null);
           storeToken("");
           setToken("");
           setError("Your session expired. Please sign in again.");
           queryClient.clear();
+        } else {
+          // Keep the bearer, but fail closed until the server resolves its
+          // identity. Rendering authenticated children here would let their
+          // client-side stores initialize under the anonymous scope.
+          setSessionCheckFailed(true);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [token, isExchanging]);
+  }, [token, isExchanging, sessionCheckAttempt]);
 
   // Set the cache scope synchronously during render, before authenticated
   // children mount. Stores that read scoped storage on their first render
@@ -234,10 +243,17 @@ export function useAuthSession() {
   const signIn = React.useCallback((nextToken) => {
     storeToken(nextToken);
     setIsSessionChecking(Boolean(nextToken));
+    setSessionCheckFailed(false);
     setToken(nextToken);
     setSession(null);
     setError("");
     queryClient.clear();
+  }, []);
+
+  const retrySessionCheck = React.useCallback(() => {
+    setSessionCheckFailed(false);
+    setIsSessionChecking(true);
+    setSessionCheckAttempt((attempt) => attempt + 1);
   }, []);
 
   const signOut = React.useCallback(() => {
@@ -249,6 +265,7 @@ export function useAuthSession() {
     logoutRequest().catch(() => {});
     storeToken("");
     setIsSessionChecking(false);
+    setSessionCheckFailed(false);
     setToken("");
     setSession(null);
     setError("");
@@ -268,7 +285,9 @@ export function useAuthSession() {
     error,
     setError,
     isChecking: isExchanging || isSessionChecking,
-    isAuthenticated: Boolean(token),
+    sessionCheckFailed,
+    retrySessionCheck,
+    isAuthenticated: Boolean(token && session),
     isAdmin: Boolean(session?.capabilities?.operator_webui_config),
     // Deployment feature gate (not a per-user capability): the Reborn
     // Projects surface is hidden until the server sets

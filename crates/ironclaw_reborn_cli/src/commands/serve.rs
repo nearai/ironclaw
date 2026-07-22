@@ -35,24 +35,6 @@ const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
 /// year: this is a long-lived programmatic credential, not a browser session.
 const ADMIN_API_TOKEN_LIFETIME_DAYS: i64 = 365;
 
-struct LegacyExtensionIngressAlias {
-    legacy_path: &'static str,
-    route_id: &'static str,
-    extension_id: &'static str,
-    route_suffix: &'static str,
-}
-
-/// REMOVAL NOTE (extension-runtime MIG-5): delete this binary-edge
-/// compatibility entry in the first release after operators have moved their
-/// Slack Events API URL to `/webhooks/extensions/slack/events`.
-const LEGACY_EXTENSION_INGRESS_ALIASES: &[LegacyExtensionIngressAlias] =
-    &[LegacyExtensionIngressAlias {
-        legacy_path: "/webhooks/slack/events",
-        route_id: "slack.events.compat",
-        extension_id: "slack",
-        route_suffix: "events",
-    }];
-
 /// Read an env var, distinguishing "unset" from "set but not valid UTF-8".
 ///
 /// `std::env::var(name).ok()` collapses both `VarError::NotPresent` and
@@ -592,18 +574,6 @@ impl ServeCommand {
                     ironclaw_reborn_composition::extension_ingress_route_mount(&ingress_parts)
                         .context("failed to compose the extension ingress route mount")?;
                 serve_config = serve_config.with_public_route_mount(ingress_mount);
-                for alias in LEGACY_EXTENSION_INGRESS_ALIASES {
-                    let alias_mount =
-                        ironclaw_reborn_composition::extension_ingress_alias_route_mount(
-                            &ingress_parts,
-                            alias.route_id,
-                            alias.legacy_path,
-                            alias.extension_id,
-                            alias.route_suffix,
-                        )
-                        .context("failed to compose legacy extension ingress alias")?;
-                    serve_config = serve_config.with_public_route_mount(alias_mount);
-                }
             }
             // The generic post-OAuth channel identity binding: installed
             // channel extensions bind through generic discovery over the

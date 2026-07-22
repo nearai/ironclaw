@@ -60,7 +60,7 @@ pub use triggered::{
 };
 
 const MAX_RUN_POLL_INTERVAL: Duration = Duration::from_secs(5);
-const DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_RUN_DELIVERY_MAX_WAIT: Duration = Duration::from_secs(30 * 60);
 const RUN_POLL_JITTER_BUCKETS: u32 = 5;
 
 /// Maximum number of (conversation, external_event_id) pairs remembered for
@@ -93,20 +93,18 @@ impl Default for RunDeliverySettings {
     fn default() -> Self {
         Self {
             poll_interval: Duration::from_millis(250),
-            max_wait: Duration::from_secs(120),
+            max_wait: DEFAULT_RUN_DELIVERY_MAX_WAIT,
             max_concurrent_deliveries: NonZeroUsize::new(64).expect("non-zero literal"), // safety: static default literal is non-zero.
             max_pending_deliveries: NonZeroUsize::new(256).expect("non-zero literal"), // safety: static default literal is non-zero.
         }
     }
 }
 
-/// Triggered-path default: proactive runs may legitimately take far longer
-/// than a live conversational turn before parking or completing.
+/// Compatibility constructor for the triggered path. Live and proactive runs
+/// share the same long-running watcher budget because either may legitimately
+/// exceed the former two-minute cutoff before parking or completing.
 pub fn triggered_run_delivery_settings() -> RunDeliverySettings {
-    RunDeliverySettings {
-        max_wait: DEFAULT_TRIGGERED_RUN_DELIVERY_MAX_WAIT,
-        ..RunDeliverySettings::default()
-    }
+    RunDeliverySettings::default()
 }
 
 /// Approval-gate context enrichment: resolves WHAT is being approved
@@ -261,7 +259,7 @@ pub(crate) async fn wait_for_actionable_state(
     settings: &RunDeliverySettings,
     delivered_blocked_marker: Option<&BlockedActionableMarker>,
 ) -> Result<TurnRunState, RunDeliveryError> {
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
     let mut poll_interval = settings.poll_interval;
     loop {
         let state = turn_coordinator

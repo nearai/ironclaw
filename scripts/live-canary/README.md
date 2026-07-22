@@ -144,6 +144,18 @@ Artifacts are written under:
 artifacts/live-canary/<lane>/<provider>/<timestamp>/
 ```
 
+Before upload, strict scrubbing removes only bundled system-skill copies whose
+managed marker, stable content hash, file set, and bytes match the
+source-controlled bundle from the tested commit. Unverified or unmanaged system
+skills and all other run-specific artifacts remain present and are scanned for
+secret material. Non-strict scrubbing is report-only and does not prune them.
+Strict scrubbing also removes source-byte-verified first-party extension
+manifests, whose static credential schema fields otherwise look like live
+secrets. The dynamically rendered NEAR AI manifest is instead verified against
+a trusted runtime template after normalizing only the repository-owned
+`cloud-api.near.ai` and `private.near.ai` MCP endpoints. Changed or unrecognized
+manifests remain subject to the fail-closed scanner.
+
 ## Secrets And Account Material
 
 Public live LLM lane secrets and variables are documented in
