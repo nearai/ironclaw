@@ -487,17 +487,14 @@ impl ServeCommand {
             // Only SSO-enabled WebUI needs the canonical Reborn identity
             // resolver: an env-bearer-only deployment resolves its single
             // configured user without any identity store, so skip opening (and
-            // its legacy migration) when SSO is disabled. `None` also covers
-            // the case where the runtime carries no local-runtime substrate;
-            // the auth surface fails closed when SSO is configured but no
-            // resolver is available.
+            // its legacy migration) when SSO is disabled.
             let identity_resolver = if sso_startup.is_some() {
-                match runtime.open_reborn_identity_resolver(&tenant_id).await {
-                    Some(result) => {
-                        Some(result.context("failed to initialize the Reborn identity resolver")?)
-                    }
-                    None => None,
-                }
+                Some(
+                    runtime
+                        .open_reborn_identity_resolver(&tenant_id)
+                        .await
+                        .context("failed to initialize the Reborn identity resolver")?,
+                )
             } else {
                 None
             };
@@ -1624,7 +1621,7 @@ slack_user_id = "U123"
         assert!(
             runtime
                 .product_auth_for_test()
-                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+                .as_auth_challenge_provider()
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
@@ -1654,7 +1651,7 @@ slack_user_id = "U123"
         assert!(
             runtime
                 .product_auth_for_test()
-                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+                .as_auth_challenge_provider()
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );
@@ -1695,7 +1692,7 @@ slack_user_id = "U123"
         assert!(
             runtime
                 .product_auth_for_test()
-                .and_then(|product_auth| product_auth.as_auth_challenge_provider())
+                .as_auth_challenge_provider()
                 .is_some(),
             "serve wiring must expose the DCR-backed auth challenge provider"
         );

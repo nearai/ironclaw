@@ -120,48 +120,10 @@ fn build_runtime_substrate_uses_filesystem_resource_governor() {
 }
 
 #[test]
-fn extension_installation_state_path_stays_legacy_for_local_dev() {
-    let path =
-        local_dev_extension_installation_state_path(RebornCompositionProfile::LocalDev, None)
-            .expect("state path");
+fn extension_installation_state_path_is_single_runtime_default() {
+    let path = FilesystemExtensionInstallationStore::default_state_path().expect("state path");
 
     assert_eq!(path.as_str(), "/system/extensions/.installations");
-}
-
-#[test]
-fn extension_installation_state_path_uses_durable_tenant_root_for_hosted() {
-    let identity = RebornLocalRuntimeIdentity {
-        tenant_id: TenantId::new("acme").expect("tenant id"),
-        agent_id: ironclaw_host_api::AgentId::new("agent").expect("agent id"),
-    };
-    let path = local_dev_extension_installation_state_path(
-        RebornCompositionProfile::HostedSingleTenant,
-        Some(&identity),
-    )
-    .expect("state path");
-
-    assert_eq!(
-        path.as_str(),
-        "/tenants/acme/system/extensions/.installations"
-    );
-}
-
-#[test]
-fn extension_installation_state_path_uses_durable_tenant_root_for_hosted_volume() {
-    let identity = RebornLocalRuntimeIdentity {
-        tenant_id: TenantId::new("acme").expect("tenant id"),
-        agent_id: ironclaw_host_api::AgentId::new("agent").expect("agent id"),
-    };
-    let path = local_dev_extension_installation_state_path(
-        RebornCompositionProfile::HostedSingleTenantVolume,
-        Some(&identity),
-    )
-    .expect("state path");
-
-    assert_eq!(
-        path.as_str(),
-        "/tenants/acme/system/extensions/.installations"
-    );
 }
 
 struct FailingConversationActorPairingService;
@@ -1323,8 +1285,7 @@ fn hosted_single_tenant_nearai_mcp_bootstrap_scope_uses_runtime_identity() {
         agent_id: ironclaw_host_api::AgentId::new("hosted-nearai-agent").expect("agent"),
     };
 
-    let scope = local_dev_nearai_mcp_owner_scope(owner.clone(), Some(&identity))
-        .expect("hosted NEAR AI bootstrap scope");
+    let scope = configured_runtime_owner_scope(owner.clone(), &identity);
 
     assert_eq!(scope.tenant_id, identity.tenant_id);
     assert_eq!(scope.user_id, owner);
@@ -1774,8 +1735,7 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     assert_eq!(search.runtime_credentials[0].audience.port, None);
 
     let auth_scope = AuthProductScope::new(
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope"),
         AuthSurface::Api,
     );
     let accounts = services
@@ -1833,8 +1793,7 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
     let root = dir.path().join("local-dev");
     let owner = "local-dev-nearai-mcp-idempotent-owner";
     let auth_scope = AuthProductScope::new(
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope"),
         AuthSurface::Api,
     );
 
@@ -1942,8 +1901,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
         ),
         &services.product_auth,
         extension_management,
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
+        default_runtime_owner_scope(UserId::new(owner).unwrap()).expect("NEAR AI MCP owner scope"),
     )
     .await
     .expect("bootstrap should reinstall discovered extension");

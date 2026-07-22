@@ -51,12 +51,7 @@ async fn local_dev_runtime_auth_interactions_are_unavailable_without_flow_record
     .await
     .expect("runtime builds");
     assert!(
-        runtime
-            .product_auth
-            .as_ref()
-            .expect("product auth")
-            .flow_record_source()
-            .is_none(),
+        runtime.product_auth.flow_record_source().is_none(),
         "custom product-auth ports intentionally do not imply a WebUI read projection"
     );
     let conversation = runtime.new_conversation().await.expect("conversation");

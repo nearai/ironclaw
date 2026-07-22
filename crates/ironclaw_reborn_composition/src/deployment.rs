@@ -82,15 +82,12 @@ impl RebornReadinessDiagnostic {
 
 /// Which runtime substrate a deployment assembles.
 ///
-/// Replaces the `requires_production_shape` / `uses_local_runtime_substrate`
-/// profile predicates as the value `build_runtime_substrate` dispatches on: a
+/// Replaces profile predicates as the value `build_runtime_substrate` dispatches on: a
 /// deployment selects a substrate, it does not *have a mode that implies one*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSubstrate {
     /// No runtime is assembled — the facades report disabled.
     None,
-    /// The local runtime substrate (in-memory / on-disk / libSQL volume).
-    Local,
     /// The production-shaped substrate (libSQL or PostgreSQL store graph).
     ProductionShaped,
 }
@@ -251,7 +248,7 @@ impl DeploymentConfig {
                 yolo_disclosure_acknowledged: false,
                 org_policy: OrgPolicyConstraints::default(),
             }),
-            substrate: RuntimeSubstrate::Local,
+            substrate: RuntimeSubstrate::ProductionShaped,
             traffic: TrafficPolicy::Serve {
                 required_readiness: RebornReadinessState::DevOnly,
                 veto_on_production_blocking_diagnostic: false,
@@ -297,7 +294,7 @@ impl DeploymentConfig {
                 yolo_disclosure_acknowledged: false,
                 org_policy: OrgPolicyConstraints::default(),
             }),
-            substrate: RuntimeSubstrate::Local,
+            substrate: RuntimeSubstrate::ProductionShaped,
             traffic: TrafficPolicy::Serve {
                 required_readiness: RebornReadinessState::HostedSingleTenantValidated,
                 veto_on_production_blocking_diagnostic: false,
@@ -691,22 +688,22 @@ mod tests {
             ),
             (
                 RebornCompositionProfile::LocalDev,
-                RuntimeSubstrate::Local,
+                RuntimeSubstrate::ProductionShaped,
                 true,
             ),
             (
                 RebornCompositionProfile::LocalDevYolo,
-                RuntimeSubstrate::Local,
+                RuntimeSubstrate::ProductionShaped,
                 true,
             ),
             (
                 RebornCompositionProfile::HostedSingleTenant,
-                RuntimeSubstrate::Local,
+                RuntimeSubstrate::ProductionShaped,
                 true,
             ),
             (
                 RebornCompositionProfile::HostedSingleTenantVolume,
-                RuntimeSubstrate::Local,
+                RuntimeSubstrate::ProductionShaped,
                 true,
             ),
             (
@@ -740,14 +737,6 @@ mod tests {
             assert_eq!(
                 profile.to_event_store_profile(),
                 config.event_store_profile()
-            );
-            assert_eq!(
-                profile.requires_production_shape(),
-                substrate == RuntimeSubstrate::ProductionShaped
-            );
-            assert_eq!(
-                profile.uses_local_runtime_substrate(),
-                substrate == RuntimeSubstrate::Local
             );
         }
     }

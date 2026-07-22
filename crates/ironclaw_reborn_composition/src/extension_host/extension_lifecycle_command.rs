@@ -3,6 +3,7 @@ use ironclaw_product_workflow::{
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductWorkflowError,
 };
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::extension_host::lifecycle::RebornLocalLifecycleFacade;
@@ -28,22 +29,18 @@ pub async fn execute_reborn_extension_lifecycle_command(
     runtime: &RebornRuntime,
     command: RebornExtensionLifecycleCommand,
 ) -> Result<LifecycleProductResponse, RebornExtensionLifecycleCommandError> {
-    let skill_management = runtime
-        .skill_management
-        .as_ref()
-        .ok_or(RebornExtensionLifecycleCommandError::LocalRuntimeUnavailable)?;
-    let mut facade = RebornLocalLifecycleFacade::new(skill_management.clone());
+    let mut facade = RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
     if let Some(extension_management) = &runtime.extension_management {
         facade = facade.with_extension_management(extension_management.clone());
     }
     if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
         facade = facade.with_runtime_http_egress(runtime_http_egress.clone());
     }
-    if let Some(product_auth) = &runtime.product_auth {
-        facade = facade.with_runtime_credential_accounts(
-            product_auth.runtime_credential_account_selection_service(),
-        );
-    }
+    facade = facade.with_runtime_credential_accounts(
+        runtime
+            .product_auth
+            .runtime_credential_account_selection_service(),
+    );
     let context = LifecycleProductContext::Surface(
         runtime
             .extension_lifecycle_surface_context
@@ -200,10 +197,12 @@ mod tests {
         let tenant = "extension-lifecycle-command-tenant";
         let agent = "extension-lifecycle-command-agent";
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_build_input(RebornBuildInput::local_dev(
-                owner,
-                dir.path().join("local-dev"),
-            ))
+            RebornRuntimeInput::from_build_input(
+                RebornBuildInput::local_dev(owner, dir.path().join("local-dev"))
+                    .with_runtime_policy(
+                        crate::local_dev_runtime_policy().expect("local-dev policy resolves"),
+                    ),
+            )
             .with_identity(crate::RebornRuntimeIdentity {
                 tenant_id: tenant.to_string(),
                 agent_id: agent.to_string(),
@@ -213,10 +212,7 @@ mod tests {
         )
         .await
         .expect("local-dev runtime builds");
-        let product_auth = runtime
-            .product_auth
-            .as_ref()
-            .expect("local-dev composes product auth");
+        let product_auth = &runtime.product_auth;
         let scope = AuthProductScope::new(
             ResourceScope {
                 tenant_id: TenantId::new(tenant).expect("tenant"),

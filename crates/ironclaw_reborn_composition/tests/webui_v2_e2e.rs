@@ -1538,10 +1538,7 @@ async fn webui_v2_sse_streams_first_assistant_text_update_before_model_completio
 #[tokio::test]
 async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
     let harness = build_harness().await;
-    let product_auth = harness
-        .runtime
-        .product_auth_for_test()
-        .expect("local-dev runtime wires product auth");
+    let product_auth = harness.runtime.product_auth_for_test();
     product_auth
         .credential_account_service()
         .create_account(NewCredentialAccount {

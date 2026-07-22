@@ -243,19 +243,13 @@ pub(crate) fn build_webui_services_with_channel_connection(
     )
     .with_approval_interactions(runtime.webui_approval_interaction_service())
     .with_auth_interactions(runtime.webui_auth_interaction_service());
-    // Admin user-management surface: wired only when the identity directory,
-    // the admin secret provisioner, and a token minter are all available.
-    // Otherwise the fail-closed RejectingAdminUserService default stands and
-    // admin routes report the service unavailable.
-    if let (Some(directory), Some(provisioner), Some(minter)) = (
-        runtime.reborn_user_directory(),
-        runtime.reborn_admin_secret_provisioner(),
-        runtime.reborn_admin_token_minter(),
-    ) {
+    // Admin user-management surface: the directory and secret provisioner are
+    // core runtime handles; only token minting is deployment-supplied.
+    if let Some(minter) = runtime.reborn_admin_token_minter() {
         api = api.with_admin_user_service(Arc::new(
             crate::admin_user_directory::RebornAdminUserDirectory::new(
-                directory,
-                provisioner,
+                runtime.reborn_user_directory(),
+                runtime.reborn_admin_secret_provisioner(),
                 minter,
             ),
         ));
@@ -319,13 +313,11 @@ pub(crate) fn build_webui_services_with_channel_connection(
         Some(auto_approve_settings),
         Some(persistent_approval_policies),
         Some(extension_registry),
-        Some(skill_management),
     ) = (
         runtime.tool_permission_overrides.as_ref(),
         runtime.auto_approve_settings.as_ref(),
         runtime.persistent_approval_policies.as_ref(),
         runtime.extension_registry.as_ref(),
-        runtime.skill_management.as_ref(),
     ) {
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
             tool_permission_overrides.clone();
@@ -368,7 +360,8 @@ pub(crate) fn build_webui_services_with_channel_connection(
                 runtime.extension_management.clone(),
             )),
         );
-        let mut lifecycle_facade = RebornLocalLifecycleFacade::new(Arc::clone(skill_management));
+        let mut lifecycle_facade =
+            RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
         if let Some(extension_management) = &runtime.extension_management {
             lifecycle_facade =
                 lifecycle_facade.with_extension_management(extension_management.clone());
@@ -380,11 +373,11 @@ pub(crate) fn build_webui_services_with_channel_connection(
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
         }
-        if let Some(product_auth) = &runtime.product_auth {
-            lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(
-                product_auth.runtime_credential_account_selection_service(),
-            );
-        }
+        lifecycle_facade = lifecycle_facade.with_runtime_credential_accounts(
+            runtime
+                .product_auth
+                .runtime_credential_account_selection_service(),
+        );
         api = api.with_lifecycle_product_facade(Arc::new(lifecycle_facade));
     }
     // The generic channel-config configure port: the setup facade renders
@@ -397,25 +390,17 @@ pub(crate) fn build_webui_services_with_channel_connection(
             ),
         ));
     }
-    if let Some(skill_management) = &runtime.skill_management {
-        // Share the activation selector's live master switch so a Settings
-        // toggle here changes the next turn's selection. Only the local-dev
-        // runtime builds a selector that reads this flag, so it is wired only
-        // when `runtime_surfaces` is present. When absent (e.g. the production
-        // assembly, which has no flag-reading selector), the facade gets `None`
-        // and the toggle reports unavailable rather than silently writing to an
-        // orphan flag that controls nothing.
-        let auto_activate_flag = runtime.skill_auto_activate_learned.clone();
-        api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
-            Arc::clone(skill_management),
-            auto_activate_flag,
-        )));
-    }
-    if let Some(product_auth) = &runtime.product_auth {
-        api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
-            Arc::clone(product_auth),
-        )));
-    }
+    // Share the activation selector's live master switch when the selected skill
+    // context reads it. Deployments without that selector pass `None`, so the
+    // toggle reports unavailable rather than writing to an orphan flag.
+    let auto_activate_flag = runtime.skill_auto_activate_learned.clone();
+    api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
+        Arc::clone(&runtime.skill_management),
+        auto_activate_flag,
+    )));
+    api = api.with_extension_credentials(Arc::new(ProductAuthExtensionCredentialSetup::new(
+        Arc::clone(&runtime.product_auth),
+    )));
     let backing = automation_backing(runtime);
     let active_run_lookup: Arc<dyn ironclaw_triggers::TriggerActiveRunLookup> = Arc::new(
         crate::automation::trigger_poller::SnapshotActiveRunLookup::new(backing.snapshot_source),
@@ -425,12 +410,8 @@ pub(crate) fn build_webui_services_with_channel_connection(
             .with_scheduler_enabled(runtime.readiness.workers.trigger_poller),
     ));
     // First-class projects + membership (ACL). Built once per runtime over the
-    // scoped substrate — local-dev from `runtime_surfaces`, production-shaped from
-    // the production store graph — via the shared `reborn_project_service`
-    // accessor so both build paths wire the same access-controlled facade.
-    if let Some(project_service) = runtime.reborn_project_service() {
-        api = api.with_project_service(project_service);
-    }
+    // scoped substrate and shared by every deployment path.
+    api = api.with_project_service(runtime.reborn_project_service());
     if let Some(outbound_preferences) = &runtime.outbound_preferences {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
             Arc::clone(outbound_preferences),
@@ -478,7 +459,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
 
     Ok(RebornWebuiBundle {
         api: Arc::new(api),
-        product_auth: runtime.product_auth.clone(),
+        product_auth: Some(Arc::clone(&runtime.product_auth)),
         readiness: runtime.readiness.clone(),
     })
 }

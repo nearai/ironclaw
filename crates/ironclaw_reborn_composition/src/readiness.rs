@@ -297,7 +297,7 @@ impl RebornReadinessDiagnostic {
         component: RebornReadinessDiagnosticComponent,
         reason: RebornReadinessDiagnosticReason,
     ) -> Option<Self> {
-        if !profile.requires_production_shape() {
+        if !profile.is_active() {
             return None;
         }
         Some(Self {
@@ -313,7 +313,7 @@ impl RebornReadinessDiagnostic {
         profile: RebornCompositionProfile,
         report: &ProductionWiringReport,
     ) -> Vec<Self> {
-        if !profile.requires_production_shape() {
+        if !profile.is_active() {
             return Vec::new();
         }
 

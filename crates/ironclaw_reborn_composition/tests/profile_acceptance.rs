@@ -76,26 +76,7 @@ fn profile_parse_accepts_kebab_and_snake_case() {
 }
 
 #[test]
-fn full_graph_profiles_match_production_strictness() {
-    assert!(!RebornCompositionProfile::Disabled.requires_production_shape());
-    assert!(!RebornCompositionProfile::LocalDev.requires_production_shape());
-    assert!(!RebornCompositionProfile::LocalDevYolo.requires_production_shape());
-    assert!(!RebornCompositionProfile::HostedSingleTenant.requires_production_shape());
-    assert!(!RebornCompositionProfile::HostedSingleTenantVolume.requires_production_shape());
-    assert!(RebornCompositionProfile::Production.requires_production_shape());
-    assert!(RebornCompositionProfile::MigrationDryRun.requires_production_shape());
-}
-
-#[test]
-fn profile_predicates_capture_hosted_volume_substrate_contract() {
-    assert!(!RebornCompositionProfile::Disabled.uses_local_runtime_substrate());
-    assert!(RebornCompositionProfile::LocalDev.uses_local_runtime_substrate());
-    assert!(RebornCompositionProfile::LocalDevYolo.uses_local_runtime_substrate());
-    assert!(RebornCompositionProfile::HostedSingleTenant.uses_local_runtime_substrate());
-    assert!(RebornCompositionProfile::HostedSingleTenantVolume.uses_local_runtime_substrate());
-    assert!(!RebornCompositionProfile::Production.uses_local_runtime_substrate());
-    assert!(!RebornCompositionProfile::MigrationDryRun.uses_local_runtime_substrate());
-
+fn profile_predicates_capture_storage_contract() {
     assert!(!RebornCompositionProfile::Disabled.uses_local_dev_storage_input());
     assert!(RebornCompositionProfile::LocalDev.uses_local_dev_storage_input());
     assert!(RebornCompositionProfile::LocalDevYolo.uses_local_dev_storage_input());
@@ -379,21 +360,32 @@ fn readiness_diagnostic_round_trips_through_serde() {
 }
 
 #[test]
-fn production_blocker_rejects_non_production_shaped_profiles() {
-    for profile in [
+fn production_blocker_rejects_disabled_profile_only() {
+    let diagnostic = RebornReadinessDiagnostic::production_blocker(
         RebornCompositionProfile::Disabled,
+        RebornReadinessDiagnosticComponent::RuntimeBackend,
+        RebornReadinessDiagnosticReason::Missing,
+    );
+
+    assert_eq!(diagnostic, None);
+
+    for profile in [
         RebornCompositionProfile::LocalDev,
         RebornCompositionProfile::LocalDevYolo,
         RebornCompositionProfile::HostedSingleTenant,
         RebornCompositionProfile::HostedSingleTenantVolume,
+        RebornCompositionProfile::Production,
+        RebornCompositionProfile::MigrationDryRun,
     ] {
-        let diagnostic = RebornReadinessDiagnostic::production_blocker(
-            profile,
-            RebornReadinessDiagnosticComponent::RuntimeBackend,
-            RebornReadinessDiagnosticReason::Missing,
+        assert!(
+            RebornReadinessDiagnostic::production_blocker(
+                profile,
+                RebornReadinessDiagnosticComponent::RuntimeBackend,
+                RebornReadinessDiagnosticReason::Missing,
+            )
+            .is_some(),
+            "profile: {profile:?}"
         );
-
-        assert_eq!(diagnostic, None, "profile: {profile:?}");
     }
 }
 
@@ -474,11 +466,14 @@ async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnost
 #[tokio::test]
 async fn local_dev_factory_readiness_includes_non_production_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = build_runtime_for_test(RebornBuildInput::local_dev(
+    let input = local_runtime_build_input_with_options(
+        RebornCompositionProfile::LocalDev,
         "readiness-contract-owner",
         dir.path().to_path_buf(),
-    ))
-    .await;
+        Default::default(),
+    )
+    .unwrap();
+    let runtime = build_runtime_for_test(input).await;
     let readiness = runtime.readiness();
 
     assert_eq!(readiness.profile, RebornCompositionProfile::LocalDev);
@@ -624,23 +619,19 @@ fn production_wiring_report_with_no_issues_returns_empty_diagnostics() {
 }
 
 #[test]
-fn production_wiring_report_skipped_for_non_production_profiles() {
+fn production_wiring_report_skipped_for_disabled_profile_only() {
     let report = ProductionWiringReport::for_test(vec![ProductionWiringIssue::for_test(
         ProductionWiringComponent::SecretStore,
         ProductionWiringIssueKind::Missing,
     )]);
 
-    for profile in [
-        RebornCompositionProfile::Disabled,
-        RebornCompositionProfile::LocalDev,
-        RebornCompositionProfile::LocalDevYolo,
-        RebornCompositionProfile::HostedSingleTenant,
-        RebornCompositionProfile::HostedSingleTenantVolume,
-    ] {
-        assert!(
-            RebornReadinessDiagnostic::from_production_wiring_report(profile, &report).is_empty()
-        );
-    }
+    assert!(
+        RebornReadinessDiagnostic::from_production_wiring_report(
+            RebornCompositionProfile::Disabled,
+            &report,
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -689,13 +680,11 @@ fn production_wiring_report_maps_through_public_readiness_entrypoint() {
         )));
     }
 
-    assert!(
-        RebornReadinessDiagnostic::from_production_wiring_report(
-            RebornCompositionProfile::LocalDev,
-            &report,
-        )
-        .is_empty()
+    let diagnostics = RebornReadinessDiagnostic::from_production_wiring_report(
+        RebornCompositionProfile::LocalDev,
+        &report,
     );
+    assert_eq!(diagnostics.len(), 3);
 }
 
 fn readiness_for_contract(

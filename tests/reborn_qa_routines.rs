@@ -342,9 +342,7 @@ async fn reborn_qa_routine_created_by_tool_fires_and_runs_routine_prompt() {
     );
     assert_eq!(created["trigger"]["state"], json!("scheduled"));
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(QA_TENANT).expect("tenant id");
     let trigger_id = TriggerId::parse(
         created["trigger"]["trigger_id"]
@@ -496,9 +494,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
     .await;
     assert_eq!(created["trigger"]["state"], json!("scheduled"));
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(QA_TENANT).expect("tenant id");
     let trigger_id = TriggerId::parse(
         created["trigger"]["trigger_id"]

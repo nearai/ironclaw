@@ -42,9 +42,7 @@ async fn local_dev_product_auth_refresh_is_provider_backed_not_stub() {
     .await
     .expect("local-dev runtime should build");
 
-    let product_auth = runtime
-        .product_auth_for_test()
-        .expect("local-dev composition must expose product-auth services");
+    let product_auth = runtime.product_auth_for_test();
     let account_service = product_auth.credential_account_service();
 
     let scope = AuthProductScope::new(

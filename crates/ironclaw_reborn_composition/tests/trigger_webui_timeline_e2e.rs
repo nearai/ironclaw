@@ -350,7 +350,7 @@ async fn fire_trigger_and_get_run_thread_id(
     agent_id: &AgentId,
     trigger_name: &str,
 ) -> (TriggerId, String) {
-    let repo = runtime.trigger_repository().expect("trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("conversation pairing");

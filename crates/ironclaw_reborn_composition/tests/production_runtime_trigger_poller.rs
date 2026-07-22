@@ -202,16 +202,7 @@ async fn production_runtime_trigger_poller_fires_due_scheduled_trigger() {
 
     let runtime = build_production_runtime_with_poller(&dir, Arc::clone(&recording_gateway)).await;
 
-    // The production-shaped runtime exposes its trigger repository only through
-    // the test-support production accessor (`trigger_repository()` covers the
-    // local substrate, which production does not have).
-    assert!(
-        runtime.trigger_repository().is_none(),
-        "production runtime has no local-substrate trigger repository"
-    );
-    let repo = runtime
-        .production_trigger_repository_for_test()
-        .expect("production runtime exposes its store-graph trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("poller-enabled production runtime exposes conversation pairing service");

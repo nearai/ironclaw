@@ -550,9 +550,7 @@ async fn trigger_poller_drives_trusted_ingress_for_due_scheduled_trigger() {
     )
     .await;
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("trigger poller runtime exposes conversation pairing service");
@@ -731,9 +729,7 @@ async fn builtin_trigger_create_pairs_creator_and_poller_submits_turn() {
     assert!(created["trigger"]["tenant_id"].is_null());
     assert!(created["trigger"]["creator_user_id"].is_null());
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let user_id = UserId::new(USER).expect("user id");
     let trigger_id = TriggerId::parse(
@@ -842,9 +838,7 @@ async fn builtin_created_recurring_trigger_fires_again_after_first_run_settles()
     )
     .await;
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let trigger_id = TriggerId::parse(
         created["trigger"]["trigger_id"]
@@ -925,10 +919,7 @@ async fn trigger_conversation_pairing_returns_none_when_poller_disabled() {
     .await;
 
     // The trigger repository is built regardless of poller state.
-    assert!(
-        runtime.trigger_repository().is_some(),
-        "trigger repository should be present even when poller is disabled"
-    );
+    let _repo = runtime.trigger_repository();
 
     // When the poller is disabled, no conversation pairing service is wired.
     assert!(
@@ -955,9 +946,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
     )
     .await;
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("trigger poller runtime exposes conversation pairing service");
@@ -1073,9 +1062,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     )
     .await;
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
 
     // Intentionally do NOT call pair_external_actor — the actor is unpaired.
 
@@ -1182,9 +1169,7 @@ async fn trigger_poller_fires_recurring_trigger_and_leaves_it_scheduled() {
     )
     .await;
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let pairing = runtime
         .trigger_conversation_pairing()
         .expect("trigger poller runtime exposes conversation pairing service");
@@ -1402,9 +1387,7 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         json!("trigger-e2e-self-create-guard")
     );
 
-    let repo = runtime
-        .trigger_repository()
-        .expect("local-dev runtime exposes trigger repository");
+    let repo = runtime.trigger_repository();
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let trigger_id = TriggerId::parse(
         created["trigger"]["trigger_id"]

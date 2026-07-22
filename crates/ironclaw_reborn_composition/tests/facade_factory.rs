@@ -483,7 +483,7 @@ async fn assert_production_services_ready_with_first_party_runtime(services: &Re
         RebornReadinessState::ProductionValidated
     );
     let _turn_coordinator = services.turn_coordinator_for_test();
-    assert!(services.product_auth_for_test().is_some());
+    let _product_auth = services.product_auth_for_test();
 
     let runtime = services
         .host_runtime_for_test()
@@ -605,10 +605,12 @@ async fn disabled_returns_empty_services() {
 #[tokio::test]
 async fn local_dev_builds_facades_without_production_claim() {
     let dir = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(RebornBuildInput::local_dev(
-        "test-owner",
-        dir.path().to_path_buf(),
-    ))
+    let services = build_runtime_for_test(
+        RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf()).with_runtime_policy(
+            ironclaw_reborn_composition::local_dev_runtime_policy()
+                .expect("local-dev runtime policy resolves"),
+        ),
+    )
     .await
     .unwrap();
 
@@ -618,7 +620,7 @@ async fn local_dev_builds_facades_without_production_claim() {
     assert!(services.readiness().facades.host_runtime);
     assert!(services.readiness().facades.turn_coordinator);
     assert!(services.readiness().facades.product_auth);
-    assert!(services.product_auth_for_test().is_some());
+    let _product_auth = services.product_auth_for_test();
 }
 
 #[tokio::test]
@@ -681,15 +683,15 @@ impl ironclaw_host_runtime::SandboxCommandTransport for ProductionReadySandboxTr
 #[tokio::test]
 async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
     let dir = tempfile::tempdir().unwrap();
-    let services = build_runtime_for_test(RebornBuildInput::local_dev(
-        "test-owner",
-        dir.path().to_path_buf(),
-    ))
+    let services = build_runtime_for_test(
+        RebornBuildInput::local_dev("test-owner", dir.path().to_path_buf()).with_runtime_policy(
+            ironclaw_reborn_composition::local_dev_runtime_policy()
+                .expect("local-dev runtime policy resolves"),
+        ),
+    )
     .await
     .unwrap();
-    let product_auth = services
-        .product_auth_for_test()
-        .expect("local-dev composes product auth");
+    let product_auth = services.product_auth_for_test();
     let scope = auth_scope("alice");
     let provider = ironclaw_auth::AuthProviderId::new("github").unwrap();
     let label = ironclaw_auth::CredentialAccountLabel::new("work github").unwrap();
@@ -821,14 +823,17 @@ async fn production_requires_configured_trust_policy() {
     let dir = tempfile::tempdir().unwrap();
     let db = libsql_db_at(dir.path().join("reborn.db")).await;
 
-    let result = build_runtime_for_test(RebornBuildInput::libsql(
-        RebornCompositionProfile::Production,
-        "test-owner",
-        db,
-        dir.path().join("events.db").to_string_lossy(),
-        None,
-        test_master_key(),
-    ))
+    let result = build_runtime_for_test(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_runtime_policy(production_runtime_policy()),
+    )
     .await;
 
     assert!(matches!(
@@ -871,7 +876,7 @@ async fn production_google_oauth_config_uses_factory_built_product_auth_ports() 
     handle.shutdown().await;
 
     let services = result.expect("production Google OAuth should use durable product-auth ports");
-    assert!(services.product_auth_for_test().is_some());
+    let _product_auth = services.product_auth_for_test();
 }
 
 #[tokio::test]
@@ -897,9 +902,7 @@ async fn production_factory_built_product_auth_manual_token_round_trips() {
     .await
     .expect("production services should build durable product-auth ports");
 
-    let product_auth = services
-        .product_auth_for_test()
-        .expect("production composes product auth");
+    let product_auth = services.product_auth_for_test();
     let scope = auth_scope("alice");
     let provider = ironclaw_auth::AuthProviderId::new("manual-provider").unwrap();
     let label = ironclaw_auth::CredentialAccountLabel::new("manual production").unwrap();
@@ -956,6 +959,7 @@ async fn production_rejects_empty_trust_policy() {
             test_master_key(),
         )
         .with_production_trust_policy(empty_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
     )
     .await;
@@ -1021,10 +1025,13 @@ async fn production_requires_runtime_policy() {
 
     handle.shutdown().await;
 
-    assert!(matches!(
-        result,
-        Err(RebornBuildError::MissingRuntimePolicy)
-    ));
+    let Err(RebornBuildError::InvalidConfig { reason }) = result else {
+        panic!("expected production runtime build without a runtime policy to fail closed");
+    };
+    assert!(
+        reason.contains("resolved runtime policy"),
+        "expected missing resolved runtime policy error, got: {reason}"
+    );
 }
 
 #[tokio::test]

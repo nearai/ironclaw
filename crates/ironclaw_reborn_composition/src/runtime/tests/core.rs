@@ -1974,7 +1974,7 @@ async fn nearai_mcp_runtime_access_secret(
     runtime: &super::RebornRuntime,
     owner_scope: ResourceScope,
 ) -> String {
-    let product_auth = runtime.product_auth.as_ref().expect("product auth");
+    let product_auth = &runtime.product_auth;
     let auth_scope = ironclaw_auth::AuthProductScope::credential_owner(
         &owner_scope,
         ironclaw_auth::AuthSurface::Api,
@@ -5365,7 +5365,7 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
 }
 
 #[tokio::test]
-async fn build_webui_services_without_local_runtime_returns_503_on_list_automations() {
+async fn build_webui_services_without_local_runtime_still_lists_automations_from_core_store() {
     let root = tempfile::tempdir().expect("tempdir");
     let gateway = Arc::new(RecordingGateway {
         reply: "unused".to_string(),
@@ -5397,16 +5397,14 @@ async fn build_webui_services_without_local_runtime_returns_503_on_list_automati
         None,
     );
 
-    let error = bundle
+    let response = bundle
         .api
         .list_automations(caller, WebUiListAutomationsRequest::default())
         .await
-        .expect_err("missing host runtime should leave automation facade unavailable");
+        .expect("automation facade reads the core trigger repository");
 
-    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-    assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
-    assert_eq!(error.status_code, 503);
-    assert!(error.retryable);
+    assert!(response.automations.is_empty());
+    assert!(!response.scheduler_enabled);
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
@@ -5957,13 +5955,9 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
         .as_ref()
         .expect("extension management")
         .clone();
-    let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-        runtime
-            .skill_management
-            .as_ref()
-            .expect("skill management")
-            .clone(),
-    )
+    let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+        &runtime.skill_management,
+    ))
     .with_extension_management(extension_management)
     .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));
     facade_slot

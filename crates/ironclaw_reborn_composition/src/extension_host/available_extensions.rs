@@ -413,25 +413,6 @@ impl AvailableExtensionCatalog {
         ))
     }
 
-    /// Test-support only: discover filesystem packages with the
-    /// `HostBundled` stamp, so integration fixtures that model host-bundled
-    /// extensions (the invented-vendor fixture, overview §8) may assert
-    /// first-party trust. Production discovery always stamps
-    /// `InstalledLocal` (#5459: a restart must never launder an uploaded
-    /// bundle into first-party trust).
-    #[cfg(feature = "test-support")]
-    pub(crate) async fn from_filesystem_root_trusting_fixtures_for_test<F>(
-        fs: &F,
-        root: &VirtualPath,
-    ) -> Result<Self, ProductWorkflowError>
-    where
-        F: RootFilesystem + ?Sized,
-    {
-        Ok(Self::from_packages(
-            load_filesystem_packages(fs, root, ManifestSource::HostBundled).await?,
-        ))
-    }
-
     pub(crate) fn search<'a>(
         &'a self,
         query: &str,

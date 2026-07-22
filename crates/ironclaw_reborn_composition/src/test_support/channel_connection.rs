@@ -107,14 +107,10 @@ pub fn build_channel_connection_for_test(
     // generic discovery over the durable installation store, connected =
     // identity binding under the extension's installation prefix, disconnect
     // clears credentials, vendor residue, and bindings.
-    let credential_cleanup = runtime
-        .product_auth
-        .clone()
-        .map(|auth| auth as Arc<dyn ChannelCredentialCleanup>);
-    let account_status_reader = runtime
-        .product_auth
-        .clone()
-        .map(|auth| auth as Arc<dyn ChannelAccountStatusReader>);
+    let credential_cleanup =
+        Some(Arc::clone(&runtime.product_auth) as Arc<dyn ChannelCredentialCleanup>);
+    let account_status_reader =
+        Some(Arc::clone(&runtime.product_auth) as Arc<dyn ChannelAccountStatusReader>);
     let facade: Arc<dyn ChannelConnectionFacade> = Arc::new(GenericChannelConnectionFacade::new(
         tenant_id.clone(),
         Vec::new(),

@@ -237,7 +237,7 @@ struct RuntimeStoreParts {
     subagent_await_edge_writer: Arc<dyn AwaitEdgeWriter>,
     subagent_await_edge_settler: Arc<dyn AwaitEdgeSettler>,
     subagent_await_edge_evidence: Arc<dyn AwaitDependentRunEvidenceStore>,
-    trigger_repository: Option<Arc<dyn ironclaw_triggers::TriggerRepository>>,
+    trigger_repository: Arc<dyn ironclaw_triggers::TriggerRepository>,
     /// Unified turn-run snapshot source for the substrate-agnostic trigger
     /// poller's active-run lookup. Every substrate now provides the same typed
     /// turn-state row store.
@@ -270,7 +270,6 @@ fn runtime_store_parts(
     let checkpoint_state_store = Arc::clone(&services.checkpoint_state_store);
     let loop_checkpoint_store = Arc::clone(&services.loop_checkpoint_store);
     let thread_service = Arc::clone(&services.thread_service);
-    let trigger_repository = Some(Arc::clone(&services.trigger_repository));
     let resource_governor = Arc::clone(&services.resource_governor);
     let budget_gate_store = Arc::clone(&services.budget_gate_store);
     let broadcast_budget_event_sink = Arc::clone(&services.broadcast_budget_event_sink);
@@ -320,7 +319,7 @@ fn runtime_store_parts(
         subagent_await_edge_writer,
         subagent_await_edge_settler,
         subagent_await_edge_evidence,
-        trigger_repository,
+        trigger_repository: Arc::clone(&services.trigger_repository),
         turn_run_snapshot_source: turn_state as Arc<dyn TurnRunSnapshotSource>,
         admin_secret_provisioner,
         project_service,
@@ -548,9 +547,9 @@ impl From<DefaultPlannedRuntimeBuildError> for RebornRuntimeError {
 /// or worker machinery: it talks to the runtime through task-level methods.
 pub struct RebornRuntime {
     pub(crate) host_runtime: Arc<dyn HostRuntime>,
-    pub(crate) product_auth: Option<Arc<RebornProductAuthServices>>,
+    pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
-    pub(crate) skill_management: Option<Arc<RebornLocalSkillManagementPort>>,
+    pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
     pub(crate) extension_lifecycle_surface_context: Option<LifecycleProductSurfaceContext>,
     pub(crate) secret_store: Arc<dyn SecretStore>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
@@ -1269,8 +1268,8 @@ impl RebornRuntime {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn product_auth_for_test(&self) -> Option<Arc<RebornProductAuthServices>> {
-        self.product_auth.as_ref().map(Arc::clone)
+    pub fn product_auth_for_test(&self) -> Arc<RebornProductAuthServices> {
+        Arc::clone(&self.product_auth)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1628,28 +1627,14 @@ impl RebornRuntime {
 
     /// Test-only accessor for the composition-owned trigger repository so
     /// integration tests can seed `TriggerRecord` rows that the spawned
-    /// trigger poller will observe through its production read path. Returns
-    /// `None` when the runtime was built without a local-runtime substrate
-    /// (e.g. production-shape profiles that haven't been wired end-to-end
-    /// yet). Gated behind `test-support` so the substrate handle never leaks
-    /// into production builds. Mirrors the production read path exercised by
-    /// the spawned trigger poller worker, which calls
+    /// trigger poller will observe. Gated behind `test-support` so the
+    /// substrate handle never leaks into production builds. Mirrors the read
+    /// path exercised by the spawned trigger poller worker, which calls
     /// `TriggerRepository::list_due_triggers` on every tick and the
     /// per-trigger `claim_due_fire` / `mark_fire_*` mutation methods.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn trigger_repository(&self) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
-        Some(Arc::clone(&self.trigger_repository))
-    }
-
-    /// Test-only accessor for the trigger repository backing a runtime without
-    /// the local auxiliary substrate. Integration tests use this to seed due
-    /// `TriggerRecord` rows before driving the poller. Gated behind
-    /// `test-support` so the store handle never leaks into production builds.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn production_trigger_repository_for_test(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
-        Some(Arc::clone(&self.trigger_repository))
+    pub fn trigger_repository(&self) -> Arc<dyn ironclaw_triggers::TriggerRepository> {
+        Arc::clone(&self.trigger_repository)
     }
 
     /// Test-only accessor for the SAME `ConversationActorPairingService`
@@ -1670,19 +1655,15 @@ impl RebornRuntime {
     }
 
     /// Open the SSO/admin identity resolver over the host-owned identity substrate.
-    /// `None` only when the runtime has no durable identity substrate, so
-    /// callers fail closed instead of synthesizing a second identity store. The
-    /// selected deployment substrate builds the canonical filesystem-backed
-    /// identity store; libSQL graphs additionally expose the one-time legacy
-    /// WebUI identity fold hook. See #5013.
+    /// A built `RebornRuntime` always carries the canonical filesystem-backed
+    /// scoped substrate; callers should not synthesize a second identity store.
+    /// See #5013.
     pub async fn open_reborn_identity_resolver(
         &self,
         _tenant_id: &TenantId,
-    ) -> Option<
-        Result<
-            Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>,
-            ironclaw_reborn_identity::RebornIdentityError,
-        >,
+    ) -> Result<
+        Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver>,
+        ironclaw_reborn_identity::RebornIdentityError,
     > {
         let store = filesystem_reborn_identity_store(
             Arc::clone(&self.scoped_filesystem),
@@ -1691,27 +1672,25 @@ impl RebornRuntime {
             self.thread_scope.agent_id.clone(),
             self.thread_scope.project_id.clone(),
         );
-        Some(Ok(store))
+        Ok(store)
     }
 
     /// Open the admin user-directory surface over the host-owned identity
     /// substrate. Same store [`open_reborn_identity_resolver`] uses
     /// (`FilesystemRebornIdentityStore` implements both traits), so admin CRUD
-    /// enumerates exactly the users SSO login persists. `None` only when the
-    /// runtime has no durable substrate at all — neither a local-runtime nor a
-    /// production store graph (fail closed). Synchronous and fold-free (the legacy
-    /// fold seeds identity/index records, not `StoredUser` rows the directory
-    /// reads), so `build_webui_services` can call it directly.
+    /// enumerates exactly the users SSO login persists. Synchronous and fold-free
+    /// (the legacy fold seeds identity/index records, not `StoredUser` rows the
+    /// directory reads), so `build_webui_services` can call it directly.
     pub(crate) fn reborn_user_directory(
         &self,
-    ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
-        Some(filesystem_reborn_identity_store(
+    ) -> Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> {
+        filesystem_reborn_identity_store(
             Arc::clone(&self.scoped_filesystem),
             self.thread_scope.tenant_id.clone(),
             self.actor_user_id.clone(),
             self.thread_scope.agent_id.clone(),
             self.thread_scope.project_id.clone(),
-        ))
+        )
     }
 
     /// Test-only accessor for the admin user directory the WebUI facade wires.
@@ -1722,29 +1701,25 @@ impl RebornRuntime {
     #[cfg(any(test, feature = "test-support"))]
     pub fn reborn_user_directory_for_tests(
         &self,
-    ) -> Option<Arc<dyn ironclaw_reborn_identity::RebornUserDirectory>> {
+    ) -> Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> {
         self.reborn_user_directory()
     }
 
     /// Admin per-user secret provisioner over the host-owned secret substrate,
-    /// scoped to an arbitrary target user (not the runtime owner). `None` only
-    /// when no durable secret store was built (a no-storage local build).
-    /// Production-shaped builds source it from the production store graph.
-    /// See `admin_secrets.rs`.
+    /// scoped to an arbitrary target user (not the runtime owner). See
+    /// `admin_secrets.rs`.
     pub(crate) fn reborn_admin_secret_provisioner(
         &self,
-    ) -> Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>> {
-        Some(Arc::clone(&self.admin_secret_provisioner))
+    ) -> Arc<dyn crate::admin_secrets::AdminSecretProvisioner> {
+        Arc::clone(&self.admin_secret_provisioner)
     }
 
     /// First-class projects + membership (ACL) facade over the host-owned scoped
-    /// substrate, backing the WebUI project surface. `None` only when the runtime
-    /// has no durable substrate at all (neither a local-runtime nor a production
-    /// store graph). Production-shaped builds source it from the production graph.
+    /// substrate, backing the WebUI project surface.
     pub(crate) fn reborn_project_service(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::ProjectService>> {
-        Some(Arc::clone(&self.project_service))
+    ) -> Arc<dyn ironclaw_product_workflow::ProjectService> {
+        Arc::clone(&self.project_service)
     }
 
     /// The admin API-token minter supplied via
@@ -1861,13 +1836,10 @@ impl RebornRuntime {
             .extension_management
             .as_ref()
             .map(|management| management.installation_store_handle());
-        let credential_cleanup = self.product_auth.clone().map(|services| {
-            services as Arc<dyn crate::extension_host::channel_connection::ChannelCredentialCleanup>
-        });
-        let account_status_reader = self.product_auth.clone().map(|services| {
-            services
-                as Arc<dyn crate::extension_host::channel_connection::ChannelAccountStatusReader>
-        });
+        let credential_cleanup = Some(Arc::clone(&self.product_auth)
+            as Arc<dyn crate::extension_host::channel_connection::ChannelCredentialCleanup>);
+        let account_status_reader = Some(Arc::clone(&self.product_auth)
+            as Arc<dyn crate::extension_host::channel_connection::ChannelAccountStatusReader>);
         Some(Arc::new(
             crate::extension_host::channel_connection::GenericChannelConnectionFacade::new(
                 self.thread_scope.tenant_id.clone(),
@@ -3287,43 +3259,46 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         project_service,
         trigger_conversation_services,
     } = runtime_parts;
+    let filesystem_skill_context_runtime = filesystem_skill_context_runtime(&services);
+    let (skill_context_source, skill_activation_source, skill_execution_adapter) = match (
+        configured_skill_context_source,
+        filesystem_skill_context_runtime,
+    ) {
+        (Some(source), _) => (Some(source), None, None),
+        (None, Some(runtime)) => {
+            let local_dev_skills = local_dev_filesystem_skill_context_source(
+                runtime,
+                &validated_identity.tenant_id,
+                regex_skill_activation_enabled,
+            )?;
+            let skill_warm_scope = ResourceScope {
+                tenant_id: validated_identity.tenant_id.clone(),
+                user_id: actor_user_id.clone(),
+                agent_id: Some(validated_identity.agent_id.clone()),
+                project_id: default_project_id.clone(),
+                mission_id: None,
+                thread_id: None,
+                invocation_id: InvocationId::new(),
+            };
+            local_dev_skills
+                .bundle_source
+                .warm_system_root_descriptor_cache(&skill_warm_scope)
+                .await
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("first-party skills warmup: {error}"),
+                })?;
+            (
+                Some(local_dev_skills.source),
+                Some(local_dev_skills.activation_source),
+                Some(local_dev_skills.execution_adapter),
+            )
+        }
+        (None, None) => (None, None, None),
+    };
     let local_runtime = services
         .extension_lifecycle_surface_context
         .as_ref()
         .map(|_| &services);
-    let (skill_context_source, skill_activation_source, skill_execution_adapter) =
-        match (configured_skill_context_source, local_runtime) {
-            (Some(source), _) => (Some(source), None, None),
-            (None, Some(local_runtime)) => {
-                let local_dev_skills = local_dev_filesystem_skill_context_source(
-                    local_runtime,
-                    &validated_identity.tenant_id,
-                    regex_skill_activation_enabled,
-                )?;
-                let skill_warm_scope = ResourceScope {
-                    tenant_id: validated_identity.tenant_id.clone(),
-                    user_id: actor_user_id.clone(),
-                    agent_id: Some(validated_identity.agent_id.clone()),
-                    project_id: default_project_id.clone(),
-                    mission_id: None,
-                    thread_id: None,
-                    invocation_id: InvocationId::new(),
-                };
-                local_dev_skills
-                    .bundle_source
-                    .warm_system_root_descriptor_cache(&skill_warm_scope)
-                    .await
-                    .map_err(|error| RebornRuntimeError::InvalidArgument {
-                        reason: format!("first-party skills warmup: {error}"),
-                    })?;
-                (
-                    Some(local_dev_skills.source),
-                    Some(local_dev_skills.activation_source),
-                    Some(local_dev_skills.execution_adapter),
-                )
-            }
-            (None, None) => (None, None, None),
-        };
 
     let tenant_id = validated_identity.tenant_id.clone();
     let agent_id = validated_identity.agent_id.clone();
@@ -3867,17 +3842,11 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         cancellation_factory: None,
         skill_context_source,
         input_queue: None,
-        identity_context_source: match local_runtime {
-            Some(local_runtime) => {
-                let local_dev_storage_root = local_runtime
-                    .local_dev_storage_root
-                    .clone()
-                    .ok_or_else(|| missing_runtime_field("local_dev_storage_root"))?;
-                let default_system_prompt_path =
-                    local_runtime
-                        .default_system_prompt_path
-                        .clone()
-                        .ok_or_else(|| missing_runtime_field("default_system_prompt_path"))?;
+        identity_context_source: match (
+            services.local_dev_storage_root.clone(),
+            services.default_system_prompt_path.clone(),
+        ) {
+            (Some(local_dev_storage_root), Some(default_system_prompt_path)) => {
                 Arc::new(
                     // Local-dev seeding validates the prompt path first, so non-file prompt paths fail
                     // as build errors before this runtime-level identity-source guard is reached.
@@ -3891,7 +3860,15 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
                     })?,
                 ) as Arc<dyn HostIdentityContextSource>
             }
-            None => Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>,
+            (None, None) => {
+                Arc::new(EmptyIdentityContextSource) as Arc<dyn HostIdentityContextSource>
+            }
+            _ => {
+                return Err(RebornRuntimeError::InvalidArgument {
+                    reason: "assembled runtime must provide local storage root and default system prompt path together"
+                        .to_string(),
+                });
+            }
         },
         // Resolve the per-user agent-context profile (timezone/locale/location) from
         // `context/profile.json` via the workspace filesystem. When a local-dev workspace
@@ -3987,7 +3964,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         };
     let auth_interaction_service = if let Some(local_runtime) = local_runtime {
         build_webui_auth_interaction_service(
-            Some(services.product_auth.as_ref()),
+            services.product_auth.as_ref(),
             Arc::clone(&local_runtime.turn_state),
             Arc::clone(&planned_turn_coordinator),
         )
@@ -4197,16 +4174,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         )?;
         let active_run_lookup =
             build_trigger_active_run_lookup(Arc::clone(&turn_run_snapshot_source));
-        // Fail closed if the substrate produced no trigger repository (both the
-        // local and production parts always set `Some`; a `None` here means the
-        // runtime was assembled without a substrate, which the poller cannot
-        // service).
-        let trigger_repository =
-            trigger_repository
-                .clone()
-                .ok_or(RebornRuntimeError::InvalidArgument {
-                    reason: "trigger poller enabled but no trigger repository present".to_string(),
-                })?;
+        let trigger_repository = trigger_repository.clone();
         #[cfg(any(test, feature = "test-support"))]
         {
             trigger_conversation_pairing_value =
@@ -4341,19 +4309,15 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
 
     let runtime = RebornRuntime {
         host_runtime: services.host_runtime.clone(),
-        product_auth: Some(services.product_auth.clone()),
+        product_auth: services.product_auth.clone(),
         readiness: services.readiness.clone(),
-        skill_management: Some(services.skill_management.clone()),
+        skill_management: services.skill_management.clone(),
         extension_lifecycle_surface_context: services.extension_lifecycle_surface_context.clone(),
         secret_store: services.secret_store(),
         scoped_filesystem,
         admin_secret_provisioner,
         project_service,
-        trigger_repository: trigger_repository.clone().ok_or(
-            RebornRuntimeError::InvalidArgument {
-                reason: "runtime assembled without trigger repository".to_string(),
-            },
-        )?,
+        trigger_repository: trigger_repository.clone(),
         resource_governor,
         budget_gate_store,
         broadcast_budget_event_sink,
@@ -4453,7 +4417,7 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
 /// `build_webui_auth_interaction_service_with_turn_run_source` using
 /// `turn_state_store` as the turn-run snapshot source.
 fn build_webui_auth_interaction_service(
-    product_auth: Option<&RebornProductAuthServices>,
+    product_auth: &RebornProductAuthServices,
     turn_state_store: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 ) -> Arc<dyn AuthInteractionService> {
@@ -4470,7 +4434,7 @@ fn build_webui_auth_interaction_service(
 /// `build_approval_interaction_service_with_turn_run_source`'s doc
 /// for why this seam exists.
 fn build_webui_auth_interaction_service_with_turn_run_source(
-    product_auth: Option<&RebornProductAuthServices>,
+    product_auth: &RebornProductAuthServices,
     turn_run_source: Arc<dyn TurnRunSnapshotSource>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
 ) -> Arc<dyn AuthInteractionService> {
@@ -4479,9 +4443,6 @@ fn build_webui_auth_interaction_service_with_turn_run_source(
     // manager itself. Local-dev can render pending WebUI auth interactions only
     // when the bundle explicitly exposes this scoped projection; otherwise the
     // WebUI surface fails closed with a stable unavailable error.
-    let Some(product_auth) = product_auth else {
-        return Arc::new(auth_interaction::UnavailableAuthInteractionService);
-    };
     let Some(flow_records) = product_auth.flow_record_source() else {
         return Arc::new(auth_interaction::UnavailableAuthInteractionService);
     };
@@ -4647,6 +4608,15 @@ fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRu
             ),
         }),
     }
+}
+
+fn filesystem_skill_context_runtime(
+    runtime: &RebornRuntimeSubstrate,
+) -> Option<&RebornRuntimeSubstrate> {
+    runtime.skill_filesystem.as_ref()?;
+    runtime.workspace_filesystem.as_ref()?;
+    runtime.skill_auto_activate_learned.as_ref()?;
+    Some(runtime)
 }
 
 fn local_dev_filesystem_skill_context_source(
