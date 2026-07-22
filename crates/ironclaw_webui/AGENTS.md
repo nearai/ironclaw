@@ -22,7 +22,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 1. **WebChat v2 route surface + SPA** (`src/webui_v2/`, folded from the former
    `ironclaw_webui_v2` crate): axum handlers dispatching to
-   `ironclaw_product_workflow::RebornServicesApi`, the `webui_v2_router` builder,
+   `ironclaw_product_workflow::ProductSurface`, the `webui_v2_router` builder,
    the `webui_v2_routes()` descriptor table, the `WebUiV2HttpError` redacted wire
    shape, SSE + WebSocket streaming with a shared `SseCapacity` budget, and the
    Vite SPA under `frontend/` (built by `build.rs`, served from
@@ -42,7 +42,7 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
 
 ## Do not move in here
 
-- **Product/API business logic.** Handlers consume only `RebornServicesApi`;
+- **Product/API business logic.** Handlers consume only `ProductSurface`;
   the facade, projections, and domain services stay behind that seam in
   `ironclaw_product_workflow` / `ironclaw_reborn_composition`.
 - **A direct `ironclaw_product_adapters` dependency**, or any lower substrate /
@@ -54,13 +54,13 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
   channel code, no v1 secrets / settings / DB. This is a Path A native host
   surface (`docs/reborn/how-to-port-channel-to-reborn.md`).
 - **Business/durable state.** Everything the gateway needs flows through
-  `RebornServicesApi`; this crate stores no threads, transcripts, or projections.
+  `ProductSurface`; this crate stores no threads, transcripts, or projections.
 
 ## Allowed dependencies
 
 `ironclaw_reborn_composition` (the composed `RebornWebuiBundle` + product-auth
 mount builders + `WebuiAuthenticator` trait + mount vocabulary),
-`ironclaw_product_workflow` (`RebornServicesApi` + wire DTOs), `ironclaw_host_api`
+`ironclaw_product_workflow` (`ProductSurface` + wire DTOs), `ironclaw_host_api`
 (identity newtypes), and `ironclaw_reborn_openai_compat`. Plus infra crates: `axum`, `tokio`, `tower*`,
 `tracing`, `thiserror`, `async-trait`, `secrecy`, `subtle`, `jsonwebtoken`, etc.
 
@@ -88,7 +88,7 @@ update (`tests/reborn_dependency_boundaries.rs`) plus explicit PR rationale.
   `src/auth/<provider>.rs` (providers must not depend on each other) and add
   caller-level route tests mirroring `tests/google_oauth_routes.rs`.
 - **Streaming / events:** never broadcast durable-looking state directly from a
-  handler; project through `RebornServicesApi` into the redacted
+  handler; project through `ProductSurface` into the redacted
   `WebChatV2EventFrame` first (see `.claude/rules/gateway-events.md`).
 
 ## Validation

@@ -27,11 +27,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_workflow::{
     EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, ProductSurface,
-    RebornCommandRequest, RebornCommandResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornServicesApi, RebornServicesError,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
+    RebornCommandRequest, RebornCommandResponse, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornServicesError, RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
     rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
@@ -280,7 +277,7 @@ impl UnusedServices {
 }
 
 #[async_trait]
-impl RebornServicesApi for UnusedServices {
+impl ProductSurface for UnusedServices {
     async fn query(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -298,41 +295,6 @@ impl RebornServicesApi for UnusedServices {
         }
     }
 
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn stream_events(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-}
-
-#[async_trait]
-impl ProductSurface for UnusedServices {
     async fn execute_command(
         &self,
         _caller: WebUiAuthenticatedCaller,

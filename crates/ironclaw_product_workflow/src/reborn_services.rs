@@ -4,7 +4,7 @@
 //! instead of reaching into turn coordination, thread stores, runtime lanes, DB
 //! stores, dispatchers, or capability hosts directly.
 
-// arch-exempt: large_file, holds the ~70-method RebornServicesApi god interface awaiting the JIT domain-port split, plan #5985
+// arch-exempt: large_file, holds the ProductSurface facade awaiting the JIT domain-port split, plan #5985
 
 use std::{
     collections::{HashMap, HashSet},
@@ -1635,7 +1635,7 @@ fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
 
 /// Wire enum for the WebUI settings/tools permission request body.
 ///
-/// Request-side vocabulary on the RebornServicesApi contract surface: the
+/// Request-side vocabulary on the ProductSurface contract surface: the
 /// three resolved [`ToolPermissionState`] values plus `default`, which clears
 /// the stored per-capability override. The serialized strings must stay
 /// byte-identical to what [`parse_tool_permission_state`] accepts and
@@ -2054,18 +2054,24 @@ fn operator_diagnostics_surface_status(
 }
 
 #[async_trait]
-pub trait RebornServicesApi: Send + Sync {
+pub trait ProductSurface: Send + Sync {
     async fn delete_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError>;
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     async fn get_timeline(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError>;
+    ) -> Result<RebornTimelineResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     /// Return the effective global auto-approve toggle for the authenticated
     /// caller. This is a narrow session-bootstrap read, not the operator
@@ -2115,7 +2121,10 @@ pub trait RebornServicesApi: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError>;
+    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     fn supports_stream_events_subscription(&self) -> bool {
         false
@@ -2138,7 +2147,10 @@ pub trait RebornServicesApi: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError>;
+    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
 
     /// List a directory under the thread's project workspace.
     ///
@@ -2422,16 +2434,7 @@ pub trait RebornServicesApi: Send + Sync {
         let _ = (caller, user_id, handle);
         Err(RebornServicesError::service_unavailable(false))
     }
-}
 
-/// Transitional name for the §5.2 product boundary.
-///
-/// `RebornServicesApi` is the current proto-ProductSurface while the migration
-/// ratchet shrinks per-feature methods into capability descriptors and view
-/// descriptors. Product adapters should depend on this trait name so the
-/// eventual method-set collapse is localized to the facade owner.
-#[async_trait]
-pub trait ProductSurface: RebornServicesApi {
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2606,7 +2609,7 @@ pub trait InboundAttachmentReader: Send + Sync {
     ) -> Result<Vec<u8>, RebornServicesError>;
 }
 
-/// Product-side command membrane for the generic [`RebornServicesApi::invoke`]
+/// Product-side command membrane for the generic [`ProductSurface::invoke`]
 /// conduit.
 ///
 /// The concrete execution adapter lives in composition: this crate owns the
@@ -5342,7 +5345,7 @@ where
 }
 
 #[async_trait]
-impl<I, V> RebornServicesApi for RebornServices<I, V>
+impl<I, V> ProductSurface for RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
@@ -5637,14 +5640,7 @@ where
     ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
         RebornServices::delete_admin_user_secret(self, caller, user_id, handle).await
     }
-}
 
-#[async_trait]
-impl<I, V> ProductSurface for RebornServices<I, V>
-where
-    I: ProductCapabilityInvoker + Clone + 'static,
-    V: RebornViewProvider + Clone + 'static,
-{
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -6529,7 +6525,7 @@ where
     ///
     /// The project must never be trusted from the request body alone: the
     /// proposed id is authorized through the same access-controlled
-    /// [`get_project`](RebornServicesApi::get_project) read the project detail
+    /// [`get_project`](ProductSurface::get_project) read the project detail
     /// route uses (`Ok` only when the caller can access the project, otherwise a
     /// not-found/denied error). Without a proposed project the caller's default
     /// scope is returned unchanged.
@@ -7179,7 +7175,7 @@ fn thread_operation_key(scope: &TurnScope) -> String {
     )
 }
 
-/// Default page size for [`RebornServicesApi::get_timeline`] when the
+/// Default page size for [`ProductSurface::get_timeline`] when the
 /// caller does not supply one. Sized to cover a typical chat history
 /// without forcing a multi-megabyte JSON response on first load.
 pub(crate) const TIMELINE_DEFAULT_PAGE_SIZE: u32 = 100;

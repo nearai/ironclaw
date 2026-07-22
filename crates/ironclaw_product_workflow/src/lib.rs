@@ -278,7 +278,7 @@ pub use reborn_services::{
     RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
     RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact,
     RebornRunArtifactRequest, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
     RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,

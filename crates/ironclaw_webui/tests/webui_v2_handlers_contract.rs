@@ -2,7 +2,7 @@
 //!
 //! Per `.claude/rules/testing.md` "Test Through the Caller", these tests
 //! drive a real axum [`Router`] (built from [`webui_v2_router`]) against a
-//! stub [`RebornServicesApi`] so the regression target is the wire
+//! stub [`ProductSurface`] so the regression target is the wire
 //! contract — body shape, path/query plumbing, error mapping — not just
 //! the facade method bodies that are already covered in
 //! `ironclaw_product_workflow`.
@@ -90,7 +90,7 @@ use ironclaw_product_workflow::{
     RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
     RebornProjectState, RebornRemoveMemberRequest, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
@@ -1619,7 +1619,7 @@ impl StubServices {
 }
 
 #[async_trait]
-impl RebornServicesApi for StubServices {
+impl ProductSurface for StubServices {
     async fn global_auto_approve_enabled(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1792,10 +1792,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
         StubServices::run_operator_setup(self, caller, request).await
     }
-}
 
-#[async_trait]
-impl ProductSurface for StubServices {
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -6318,7 +6315,7 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
     struct StallingServices;
 
     #[async_trait]
-    impl RebornServicesApi for StallingServices {
+    impl ProductSurface for StallingServices {
         async fn delete_thread(
             &self,
             _caller: WebUiAuthenticatedCaller,
@@ -6349,9 +6346,6 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             unreachable!("not exercised by this test")
         }
     }
-
-    #[async_trait]
-    impl ProductSurface for StallingServices {}
 
     // Cap of 1 so we can observe slot release directly: a second open
     // returns 429 while the first is held, and 200 once it's released.
@@ -6881,7 +6875,7 @@ fn assert_no_adapter_metadata(json: &Value) {
 }
 
 // Regression for the "SSE facade error event path is untested" review
-// (Medium). When `RebornServicesApi::stream_events` returns Err, the
+// (Medium). When `ProductSurface::stream_events` returns Err, the
 // handler must emit one SSE `error` frame carrying only the redacted
 // `error` code + `retryable` flag (no `field`, no internal `detail`),
 // then close the stream — never propagate an HTTP error on a long-lived

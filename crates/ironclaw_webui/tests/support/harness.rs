@@ -3,11 +3,11 @@
 //! `network_limits_contract.rs`).
 //!
 //! Each of those files used to carry its own byte-identical copy of the
-//! ~230-line `StubServices` `RebornServicesApi` impl plus the shared
+//! ~230-line `StubServices` `ProductSurface` impl plus the shared
 //! `with_peer` helper and tenant/agent/project constants. They are
 //! consolidated here and pulled in via
 //! `#[path = "support/harness.rs"] mod harness;` so a new
-//! `RebornServicesApi` method only has to be stubbed once. This file is
+//! `ProductSurface` method only has to be stubbed once. This file is
 //! NOT a test binary (it lives under `tests/support/`), and it is
 //! deliberately not referenced from `support/mod.rs`, so the OAuth-route
 //! tests' `mod support;` does not compile it.
@@ -28,10 +28,8 @@ use axum::http::Request;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     ProductSurface, RebornCommandId, RebornCommandRequest, RebornCommandResponse,
-    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornServicesApi, RebornServicesError,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
+    RebornCreateThreadResponse, RebornServicesError, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 
@@ -42,7 +40,7 @@ pub const AGENT: &str = "agent-default";
 /// Default project stamped onto every authenticated caller.
 pub const PROJECT: &str = "project-default";
 
-/// `RebornServicesApi` stub for the audit suite. `create_thread` and
+/// `ProductSurface` stub for the audit suite. `create_thread` and
 /// `stream_events` record their callers so a test can assert the facade
 /// was (or was not) reached and which `UserId` the bearer / `?token=`
 /// resolved to; `list_threads` returns an empty page defensively; every
@@ -89,17 +87,6 @@ impl StubServices {
             },
         })
     }
-}
-
-#[async_trait]
-impl RebornServicesApi for StubServices {
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        unreachable!("audit suite does not drive get_timeline")
-    }
 
     async fn stream_events(
         &self,
@@ -117,25 +104,18 @@ impl RebornServicesApi for StubServices {
             .push(caller);
         Ok(RebornStreamEventsResponse { events: Vec::new() })
     }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        unreachable!("audit suite does not drive get_run_state")
-    }
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        unreachable!("audit suite does not drive delete_thread")
-    }
 }
 
 #[async_trait]
 impl ProductSurface for StubServices {
+    async fn stream_events(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        StubServices::stream_events(self, caller, request).await
+    }
+
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,

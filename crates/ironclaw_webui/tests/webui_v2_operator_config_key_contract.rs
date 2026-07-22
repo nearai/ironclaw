@@ -45,62 +45,6 @@ struct RecordingServices {
     calls: Mutex<Vec<OperatorConfigCall>>,
 }
 
-#[async_trait]
-impl RebornServicesApi for RecordingServices {
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn stream_events(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn query(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
-        if query.view_id != OPERATOR_CONFIG_KEY_VIEW.id {
-            unreachable!("not exercised by this test");
-        }
-        let key = query
-            .params
-            .get("key")
-            .and_then(serde_json::Value::as_str)
-            .expect("operator config key param")
-            .to_string();
-        self.calls
-            .lock()
-            .expect("lock")
-            .push(OperatorConfigCall::Get { key });
-        Err(service_unavailable_error())
-    }
-}
-
 impl RecordingServices {
     async fn set_operator_config_key(
         &self,
@@ -121,6 +65,27 @@ impl RecordingServices {
 
 #[async_trait]
 impl ProductSurface for RecordingServices {
+    async fn query(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        if query.view_id != OPERATOR_CONFIG_KEY_VIEW.id {
+            unreachable!("not exercised by this test");
+        }
+        let key = query
+            .params
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .expect("operator config key param")
+            .to_string();
+        self.calls
+            .lock()
+            .expect("lock")
+            .push(OperatorConfigCall::Get { key });
+        Err(service_unavailable_error())
+    }
+
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,

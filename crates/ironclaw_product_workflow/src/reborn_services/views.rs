@@ -348,7 +348,7 @@ pub(super) fn view_page_with_cursor<T: Serialize>(
 /// One composition-supplied implementation behind the generic view conduit.
 ///
 /// Product features register descriptors and providers instead of growing
-/// `RebornServicesApi` with feature-specific read methods.
+/// `ProductSurface` with feature-specific read methods.
 #[async_trait]
 pub trait RebornViewProvider: Send + Sync {
     fn descriptor(&self) -> RebornViewDescriptor;

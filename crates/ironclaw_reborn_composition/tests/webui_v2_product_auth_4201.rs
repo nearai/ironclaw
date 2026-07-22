@@ -23,7 +23,7 @@ use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantI
 use ironclaw_product_workflow::{
     ProductSurface, RebornCommandRequest, RebornCommandResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornServicesApi, RebornServicesError, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornServicesError, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller,
     rejecting_reborn_services_error,
 };
@@ -75,7 +75,7 @@ impl RebornAuthContinuationDispatcher for NoopAuthDispatcher {
 struct UnusedServices;
 
 #[async_trait]
-impl RebornServicesApi for UnusedServices {
+impl ProductSurface for UnusedServices {
     async fn get_timeline(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -107,10 +107,6 @@ impl RebornServicesApi for UnusedServices {
     ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
-}
-
-#[async_trait]
-impl ProductSurface for UnusedServices {
     async fn execute_command(
         &self,
         _caller: WebUiAuthenticatedCaller,

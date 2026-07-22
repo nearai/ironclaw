@@ -1,4 +1,4 @@
-// arch-exempt: large_file, WebUI facade DTOs live with their contract awaiting the RebornServicesApi domain-port split, plan #5985
+// arch-exempt: large_file, WebUI facade DTOs live with their contract awaiting the ProductSurface domain-port split, plan #5985
 use chrono::{DateTime, Utc};
 use ironclaw_auth::{AuthAccountLastError, AuthAccountState};
 use ironclaw_common::llm_costs::RunCost;
@@ -379,7 +379,7 @@ pub struct RebornAttachmentRequest {
 }
 
 /// Raw bytes of one landed attachment plus the metadata a browser needs to
-/// render or download it. Returned by [`super::RebornServicesApi::read_attachment`].
+/// render or download it. Returned by [`super::ATTACHMENT_READ_COMMAND`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornAttachmentBytes {
     pub mime_type: String,

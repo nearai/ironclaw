@@ -5,7 +5,7 @@
 //! Regression for the bucket-2 production-parity gap (#5013 / audit #6389).
 //! Production profiles have `local_runtime: None`; `build_webui_services` only
 //! called `with_project_service` for the local substrate, so on production the
-//! WebUI project surface fell through to the `RebornServicesApi` default, which
+//! WebUI project surface fell through to the `ProductSurface` default, which
 //! returns `service_unavailable` for `create_project` / `list_projects`. The
 //! provisioner-style production fallback now sources the project service from
 //! the production store graph (`RebornProjectService` over
@@ -136,7 +136,7 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     );
 
     // (1) THE WIRING. Before the production fallback, the facade fell through to
-    // the `RebornServicesApi` default and this returned
+    // the `ProductSurface` default and this returned
     // `service_unavailable`. A successful create proves `with_project_service`
     // was wired from the production store graph.
     let created = PROJECT_CREATE_COMMAND

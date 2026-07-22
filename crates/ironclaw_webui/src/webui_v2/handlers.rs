@@ -5,12 +5,12 @@
 //! 1. Receives an authenticated caller as an `Extension<WebUiAuthenticatedCaller>`.
 //!    Host composition is responsible for running the bearer-token middleware
 //!    that builds that extension; the handler never sees a raw bearer token.
-//! 2. Dispatches through [`RebornServicesApi`]. No direct access to the
+//! 2. Dispatches through [`ProductSurface`]. No direct access to the
 //!    dispatcher, `HostRuntime`, run-state, DB stores, or any runtime lane.
 //! 3. Maps every error through [`WebUiV2HttpError`] so the wire shape stays
 //!    redacted and stable.
 //!
-//! [`RebornServicesApi`]: ironclaw_product_workflow::RebornServicesApi
+//! [`ProductSurface`]: ironclaw_product_workflow::ProductSurface
 
 // arch-exempt: large_file, ProductSurface facade-collapse routes stay in the existing WebUI handler table until the WebUI route split lands, plan #5985
 
@@ -1149,10 +1149,10 @@ fn sse_poll_interval_for_idle_polls(idle_polls: u32) -> Duration {
 ///
 /// When the facade supports subscriptions, the handler forwards that live
 /// stream directly. Older compositions fall back to drain/poll semantics,
-/// documented on [`RebornServicesApi::stream_events`].
+/// documented on [`ProductSurface::stream_events`].
 ///
 /// [`WebChatV2EventFrame`]: crate::webui_v2::schema::WebChatV2EventFrame
-/// [`RebornServicesApi::stream_events`]: ironclaw_product_workflow::RebornServicesApi::stream_events
+/// [`ProductSurface::stream_events`]: ironclaw_product_workflow::ProductSurface::stream_events
 /// [`SSE_MAX_LIFETIME`]: crate::webui_v2::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
     State(state): State<WebUiV2State>,
@@ -3738,7 +3738,7 @@ fn extension_package_ref_for_request(
 /// `GET /api/webchat/v2/threads/{thread_id}/ws`
 ///
 /// WebSocket transport variant of [`stream_events`]. The handler
-/// accepts the WS upgrade, drains the same `RebornServicesApi::
+/// accepts the WS upgrade, drains the same `ProductSurface::
 /// stream_events` facade as the SSE handler, and writes each event as
 /// a JSON text frame. Same lifetime + per-caller concurrency caps as
 /// SSE.

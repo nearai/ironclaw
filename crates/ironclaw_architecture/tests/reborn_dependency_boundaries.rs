@@ -2821,7 +2821,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // the axum serve loop for the composed v2 Router. Since the
             // `ironclaw_webui_v2` route surface was folded into this crate
             // (as its `webui_v2` module), it now legitimately consumes the
-            // `ironclaw_product_workflow` `RebornServicesApi` facade the v2
+            // `ironclaw_product_workflow` `ProductSurface` facade the v2
             // handlers dispatch through. It still must not pull lower
             // substrate handles, product adapters, or v1 surface code into
             // the binary path. Reaches the rest of Reborn through

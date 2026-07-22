@@ -17,17 +17,24 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    ActivityId, AgentId, CapabilityId, InstallationState, NetworkMethod, Outcome, OutcomeRefs,
+    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId,
+    TerminateHint, ThreadId, ToolVerdict, UserId,
+};
 use ironclaw_product_workflow::{
-    ProductSurface, RebornCancelRunResponse, RebornCommandId, RebornCommandRequest,
-    RebornCommandResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
+    LifecyclePackageRef, ProductCapabilityInput, ProductSurface, RebornCancelRunResponse,
+    RebornCommandId, RebornCommandRequest, RebornCommandResponse, RebornCreateThreadResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
+    RebornRetryRunResponse, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornViewPage, RebornViewQuery, THREAD_DELETE_CAPABILITY_ID,
+    THREADS_VIEW, TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest,
 };
 use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -159,6 +166,64 @@ impl WebuiAuthenticator for FixedUserToken {
         } else {
             None
         }
+    }
+}
+
+fn successful_resolution(activity_id: ActivityId) -> Resolution {
+    Resolution::Done(Outcome {
+        refs: OutcomeRefs {
+            result: ResultRef::from_uuid(activity_id.as_uuid()),
+            byte_len: 0,
+            preview: None,
+            preview_meta: ResultPreviewMeta::default(),
+            origin: None,
+            output_digest: None,
+        },
+        verdict: ToolVerdict::Success,
+        summary: SafeSummary::new("ok").expect("static summary is redaction-safe"),
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    })
+}
+
+fn trace_credits_response(caller: &WebUiAuthenticatedCaller) -> RebornTraceCreditsResponse {
+    let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+    );
+    let enrolled =
+        ironclaw_reborn_traces::contribution::read_trace_policy_for_scope(Some(scope.as_str()))
+            .map(|policy| policy.enabled)
+            .unwrap_or(false);
+    RebornTraceCreditsResponse {
+        enrolled,
+        pending_credit: 0.0,
+        final_credit: 0.0,
+        delayed_credit_delta: 0.0,
+        submissions_total: 0,
+        submissions_submitted: 0,
+        submissions_accepted: 0,
+        submissions_revoked: 0,
+        submissions_expired: 0,
+        credit_events_total: 0,
+        last_submission_at: None,
+        last_credit_sync_at: None,
+        recent_explanations: Vec::new(),
+        manual_review_hold_count: 0,
+        holds: Vec::new(),
+        note: "Local view as of last sync; authoritative ledger is server-side.".to_string(),
+    }
+}
+
+fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
+    RebornSetupExtensionResponse {
+        package_ref,
+        phase: InstallationState::Unsupported,
+        blockers: Vec::new(),
+        payload: None,
+        secrets: Vec::new(),
+        fields: Vec::new(),
+        onboarding: None,
     }
 }
 
@@ -832,7 +897,83 @@ impl StubServices {
 }
 
 #[async_trait]
-impl RebornServicesApi for StubServices {
+impl ProductSurface for StubServices {
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: ProductCapabilityInput,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        if capability.as_str() == THREAD_DELETE_CAPABILITY_ID {
+            let request = serde_json::from_value(input.into_json()?)
+                .map_err(RebornServicesError::internal_from)?;
+            self.delete_thread(caller, request).await?;
+            return Ok(successful_resolution(activity_id));
+        }
+        if capability.as_str() == EXTENSION_SETUP_SUBMIT_CAPABILITY_ID {
+            let _ = (caller, input);
+            return Ok(successful_resolution(activity_id));
+        }
+        Err(RebornServicesError {
+            code: RebornServicesErrorCode::Internal,
+            kind: RebornServicesErrorKind::Internal,
+            status_code: 500,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        })
+    }
+
+    async fn query(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        match query.view_id.as_str() {
+            id if id == THREADS_VIEW.id => {
+                let mut request: WebUiListThreadsRequest = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                request.cursor = query.cursor.or(request.cursor);
+                let _ = request;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornListThreadsResponse {
+                        threads: Vec::new(),
+                        next_cursor: None,
+                    })
+                    .map_err(RebornServicesError::internal_from)?,
+                    next_cursor: None,
+                })
+            }
+            id if id == TRACE_CREDITS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(trace_credits_response(&caller))
+                    .map_err(RebornServicesError::internal_from)?,
+                next_cursor: None,
+            }),
+            id if id == EXTENSION_SETUP_VIEW.id => {
+                let package_id = query.params["package_id"]
+                    .as_str()
+                    .ok_or_else(|| RebornServicesError::internal_from("missing package_id"))?;
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+                        .map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(extension_setup_response(package_ref))
+                        .map_err(RebornServicesError::internal_from)?,
+                    next_cursor: None,
+                })
+            }
+            _ => Err(RebornServicesError {
+                code: RebornServicesErrorCode::Internal,
+                kind: RebornServicesErrorKind::Internal,
+                status_code: 500,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            }),
+        }
+    }
+
     async fn delete_thread(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -895,10 +1036,7 @@ impl RebornServicesApi for StubServices {
             validation_code: None,
         })
     }
-}
 
-#[async_trait]
-impl ProductSurface for StubServices {
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,

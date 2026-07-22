@@ -1,6 +1,6 @@
 //! Contract tests for WebUI-facing RebornServices facade.
 
-// arch-exempt: large_file, contract suite tracks the RebornServicesApi facade one seam per test; splits with the domain-port decomposition, plan #5985
+// arch-exempt: large_file, contract suite tracks the ProductSurface facade one seam per test; splits with the domain-port decomposition, plan #5985
 
 use std::{
     collections::{HashMap, HashSet},
@@ -77,7 +77,7 @@ use ironclaw_product_workflow::{
     PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID,
     PROJECT_MEMBER_REMOVE_CAPABILITY_ID, PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW,
     PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductCapabilityInput, ProductCapabilityInvoker,
+    ProductAgentBoundCaller, ProductCapabilityInput, ProductCapabilityInvoker, ProductSurface,
     ProductWorkflowError, ProjectCaller, ProjectFilesystemReader, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
     ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
@@ -109,22 +109,22 @@ use ironclaw_product_workflow::{
     RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
     RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
     RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
-    RebornServiceLifecycleState, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
-    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductFacade,
-    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    RebornServiceLifecycleState, RebornServices, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
+    SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
@@ -10436,7 +10436,7 @@ fn operator_config_entry_value<'a>(
         .value
 }
 
-async fn query_operator_config_list<S: RebornServicesApi + ?Sized>(
+async fn query_operator_config_list<S: ProductSurface + ?Sized>(
     services: &S,
     caller: WebUiAuthenticatedCaller,
 ) -> RebornOperatorConfigListResponse {
@@ -10454,7 +10454,7 @@ async fn query_operator_config_list<S: RebornServicesApi + ?Sized>(
     serde_json::from_value(page.payload).expect("operator config list payload")
 }
 
-async fn query_operator_config_key<S: RebornServicesApi + ?Sized>(
+async fn query_operator_config_key<S: ProductSurface + ?Sized>(
     services: &S,
     caller: WebUiAuthenticatedCaller,
     key: &str,
@@ -10472,7 +10472,7 @@ async fn query_operator_config_key<S: RebornServicesApi + ?Sized>(
     serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
 }
 
-async fn query_operator_setup<S: RebornServicesApi + ?Sized>(
+async fn query_operator_setup<S: ProductSurface + ?Sized>(
     services: &S,
     caller: WebUiAuthenticatedCaller,
 ) -> Result<ironclaw_product_workflow::RebornOperatorSetupResponse, RebornServicesError> {
@@ -10489,7 +10489,7 @@ async fn query_operator_setup<S: RebornServicesApi + ?Sized>(
     serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
 }
 
-async fn query_automations<S: RebornServicesApi + ?Sized>(
+async fn query_automations<S: ProductSurface + ?Sized>(
     services: &S,
     caller: WebUiAuthenticatedCaller,
     request: WebUiListAutomationsRequest,
@@ -10500,7 +10500,7 @@ async fn query_automations<S: RebornServicesApi + ?Sized>(
     AUTOMATIONS_VIEW.decode_page(page)
 }
 
-async fn query_threads<S: RebornServicesApi + ?Sized>(
+async fn query_threads<S: ProductSurface + ?Sized>(
     services: &S,
     caller: WebUiAuthenticatedCaller,
     mut request: WebUiListThreadsRequest,
@@ -10512,7 +10512,7 @@ async fn query_threads<S: RebornServicesApi + ?Sized>(
     THREADS_VIEW.decode_page(page)
 }
 
-async fn query_extensions<S: RebornServicesApi + ?Sized>(
+async fn query_extensions<S: ProductSurface + ?Sized>(
     services: &S,
     caller: WebUiAuthenticatedCaller,
 ) -> Result<RebornExtensionListResponse, RebornServicesError> {
@@ -10529,7 +10529,7 @@ async fn query_extensions<S: RebornServicesApi + ?Sized>(
     serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
 }
 
-async fn query_extension_setup<S: RebornServicesApi + ?Sized>(
+async fn query_extension_setup<S: ProductSurface + ?Sized>(
     services: &S,
     caller: WebUiAuthenticatedCaller,
     package_id: &str,
@@ -10547,7 +10547,7 @@ async fn query_extension_setup<S: RebornServicesApi + ?Sized>(
     serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
 }
 
-async fn invoke_extension_setup_submit<S: RebornServicesApi + ?Sized>(
+async fn invoke_extension_setup_submit<S: ProductSurface + ?Sized>(
     services: &S,
     caller: WebUiAuthenticatedCaller,
     package_id: &str,
@@ -10571,7 +10571,7 @@ async fn invoke_extension_setup_submit<S: RebornServicesApi + ?Sized>(
         .await
 }
 
-async fn submit_extension_setup_and_query<S: RebornServicesApi + ?Sized>(
+async fn submit_extension_setup_and_query<S: ProductSurface + ?Sized>(
     services: &S,
     caller: WebUiAuthenticatedCaller,
     package_id: &str,

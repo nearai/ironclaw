@@ -2,7 +2,7 @@
 //! Lane 7 end-to-end coverage for the WebChat v2 HTTP surface.
 //!
 //! Unlike [`webui_v2_serve`], which drives the composed router against a
-//! stub `RebornServicesApi`, this test stands up a real local-dev
+//! stub `ProductSurface`, this test stands up a real local-dev
 //! `RebornRuntime`, overrides its LLM gateway with a scripted
 //! tool-calling fake, composes the v2 router through
 //! [`build_webui_services`] + [`webui_v2_app`], and exercises it from
