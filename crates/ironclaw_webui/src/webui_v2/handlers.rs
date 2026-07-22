@@ -2222,6 +2222,14 @@ fn require_operator_webui_config(
     .into())
 }
 
+fn operator_webui_config_caller(
+    caller: WebUiAuthenticatedCaller,
+    capabilities: WebUiV2Capabilities,
+) -> Result<WebUiAuthenticatedCaller, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    Ok(caller.with_operator_webui_config(true))
+}
+
 #[derive(Deserialize)]
 pub struct ExtensionAdminConfigurationPath {
     pub group_id: String,
@@ -2253,7 +2261,7 @@ pub async fn list_extension_admin_configuration(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let payload = query_extension_admin_configuration(&state, caller).await?;
     Ok(Json(payload))
 }
@@ -2271,7 +2279,7 @@ pub async fn replace_extension_admin_configuration(
     Path(path): Path<ExtensionAdminConfigurationPath>,
     Json(body): Json<ReplaceExtensionAdminConfigurationBody>,
 ) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let activity_id =
         admin_configuration_activity_id(&caller, &path.group_id, &body.idempotency_key)?;
     let expected_revision = body.expected_revision;
@@ -2632,7 +2640,7 @@ pub async fn get_operator_setup(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorSetupResponse>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let page = state
         .services()
         .query(
@@ -2917,7 +2925,7 @@ pub async fn get_operator_diagnostics(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let page = state
         .services()
         .query(
@@ -2940,7 +2948,7 @@ pub async fn get_operator_status(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let page = state
         .services()
         .query(
@@ -2967,7 +2975,7 @@ pub async fn query_operator_logs(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Query(mut query): Query<RebornOperatorLogsQuery>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let cursor = query.cursor.take();
     let params = serde_json::to_value(query).map_err(RebornServicesError::internal_from)?;
     let page = state
@@ -3056,7 +3064,7 @@ pub async fn get_llm_config(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
 }
@@ -3116,7 +3124,7 @@ pub async fn upsert_llm_provider(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<UpsertLlmProviderRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let activity_id = llm_provider_upsert_activity_id(&caller, &body)?;
     let resolution = state
         .services()
@@ -3139,7 +3147,7 @@ pub async fn delete_llm_provider(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Path(LlmProviderPath { provider_id }): Path<LlmProviderPath>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),
@@ -3159,7 +3167,7 @@ pub async fn set_active_llm(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<SetActiveLlmRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
+    let caller = operator_webui_config_caller(caller, capabilities)?;
     let resolution = invoke_product_capability(
         state.services(),
         caller.clone(),

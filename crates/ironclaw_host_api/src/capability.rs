@@ -440,8 +440,8 @@ mod origin_gate_wire_tests {
     #[test]
     fn product_consent_only_is_for_product_api_capabilities() {
         let matrix = OriginGateMatrix::product_consent_only();
-        assert_eq!(matrix.loop_run, OriginGatePolicy::Forbidden);
-        assert_eq!(matrix.product, OriginGatePolicy::ConsentSufficient);
-        assert_eq!(matrix.automation, OriginGatePolicy::Forbidden);
+        assert_eq!(matrix.loop_run, OriginGatePolicy::Forbidden); // safety: test-only ratchet assertion.
+        assert_eq!(matrix.product, OriginGatePolicy::ConsentSufficient); // safety: test-only ratchet assertion.
+        assert_eq!(matrix.automation, OriginGatePolicy::Forbidden); // safety: test-only ratchet assertion.
     }
 }

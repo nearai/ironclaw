@@ -211,10 +211,15 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
             "{}: ConsentSufficient is Product-only; not valid on automation",
             descriptor.id
         );
+        let expected_product =
+            if product_surface_builtin_capabilities().contains(&descriptor.id.as_str()) {
+                OriginGatePolicy::ConsentSufficient
+            } else {
+                OriginGatePolicy::Forbidden
+            };
         assert_eq!(
-            matrix.product,
-            OriginGatePolicy::Forbidden,
-            "{} product must be deny-by-default",
+            matrix.product, expected_product,
+            "{} product origin policy mismatch",
             descriptor.id
         );
         assert_eq!(
@@ -270,6 +275,15 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
             "{gated}"
         );
     }
+}
+
+fn product_surface_builtin_capabilities() -> &'static [&'static str] {
+    &[
+        SKILL_INSTALL_CAPABILITY_ID,
+        "builtin.skill_update",
+        "builtin.skill_auto_activate_set",
+        SKILL_REMOVE_CAPABILITY_ID,
+    ]
 }
 
 #[tokio::test]
