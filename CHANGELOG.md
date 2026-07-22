@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Model recovery:** preserve typed, sanitized context-overflow,
+  content-filter, and invalid-output recovery controls across checkpoints so a
+  restarted turn can still ask the model to recover without exposing provider
+  diagnostics or granting an unbounded retry budget.
 - **Hosted MCP discovery:** bound overlong valid tool descriptions at the
   generic MCP boundary instead of rejecting the provider's entire catalog.
 - **Channel delivery:** keep live source-route observers attached for normal
