@@ -19,9 +19,8 @@ use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
-    DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
-    RuntimeCredentialAccountResolver, RuntimeFailureKind,
+    DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome, RuntimeCredentialAccessSecret,
+    RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver, RuntimeFailureKind,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{
@@ -1001,7 +1000,7 @@ async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_
     .with_builtin_obligation_handler();
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context(CapabilitySet::default()),
             capability_id(),
             ResourceEstimate::default(),
@@ -1045,7 +1044,7 @@ async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
     .with_builtin_obligation_handler();
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context(CapabilitySet::default()),
             capability_id(),
             ResourceEstimate::default().set_usd(1.into()),
@@ -1075,7 +1074,7 @@ async fn default_host_runtime_installs_configured_obligation_handler() {
     .with_obligation_handler(handler);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context(CapabilitySet::default()),
             capability_id(),
             ResourceEstimate::default(),

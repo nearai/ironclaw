@@ -289,7 +289,7 @@ impl RegisterProviderToolCallRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilityInvocation {
+pub struct LoopRequest {
     /// Stable activity identity for this invocation. Runtime hosts derive
     /// their execution identity from it rather than minting a second id.
     pub activity_id: CapabilityActivityId,
@@ -371,8 +371,8 @@ pub struct CapabilityAuthResume {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilityBatchInvocation {
-    pub invocations: Vec<CapabilityInvocation>,
+pub struct LoopRequestBatch {
+    pub invocations: Vec<LoopRequest>,
     pub stop_on_first_suspension: bool,
 }
 
@@ -662,12 +662,12 @@ pub trait LoopCapabilityPort: Send + Sync {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError>;
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError>;
 }
 
@@ -694,14 +694,14 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
+            _request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             unreachable!("not used by this test")
         }
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
+            _request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             unreachable!("not used by this test")
         }

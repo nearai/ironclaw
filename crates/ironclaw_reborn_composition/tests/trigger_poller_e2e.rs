@@ -20,8 +20,8 @@ use ironclaw_host_api::{
     ProviderToolName, ResourceEstimate, RunId, RuntimeKind, TenantId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
@@ -481,7 +481,7 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
         .as_deref()
         .expect("runtime exposes host runtime");
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             trigger_management_execution_context(),
             CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
             ResourceEstimate::default(),

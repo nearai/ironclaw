@@ -35,8 +35,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, builtin_first_party_handlers,
-    builtin_first_party_package,
+    RuntimeFailureKind, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -350,7 +349,7 @@ pub async fn invoke_with_context(
     context: ExecutionContext,
 ) -> Result<Value, RuntimeFailureKind> {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),

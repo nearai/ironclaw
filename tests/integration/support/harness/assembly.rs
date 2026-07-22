@@ -21,9 +21,9 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     BUILTIN_FIRST_PARTY_PROVIDER, CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest,
     CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus, RuntimeCapabilityAuthResumeRequest,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeProcessPort, RuntimeStatusRequest, TriggerCreateHook,
+    HostRuntimeHealth, HostRuntimeServices, HostRuntimeStatus, RuntimeApprovalResume,
+    RuntimeAuthResume, RuntimeCapabilityOutcome, RuntimeInvocation, RuntimeProcessPort,
+    RuntimeStatusRequest, TriggerCreateHook,
     VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface, builtin_first_party_handlers,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
@@ -203,9 +203,9 @@ impl TriggerActiveRunLookupHostRuntime {
 impl HostRuntime for TriggerActiveRunLookupHostRuntime {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        if request.capability_id == self.trigger_list_capability_id {
+        if request.1 == self.trigger_list_capability_id {
             self.trigger_runtime.invoke_capability(request).await
         } else {
             self.inner.invoke_capability(request).await
@@ -217,28 +217,28 @@ impl HostRuntime for TriggerActiveRunLookupHostRuntime {
     // unconditionally — mirrors `ParkingHostRuntime`'s forwarding shape.
     async fn spawn_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.inner.spawn_capability(request).await
     }
 
     async fn resume_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.inner.resume_capability(request).await
     }
 
     async fn auth_resume_capability(
         &self,
-        request: RuntimeCapabilityAuthResumeRequest,
+        request: RuntimeAuthResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.inner.auth_resume_capability(request).await
     }
 
     async fn resume_spawn_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.inner.resume_spawn_capability(request).await
     }

@@ -106,18 +106,18 @@ Verified request types on the down-path, with what each hop actually adds or dro
 
 | Hop | Type (crate) | Fields | Change vs. previous |
 | --- | --- | --- | --- |
-| 1 | `CapabilityInvocation` (`ironclaw_turns`) | `activity_id, surface_version, capability_id, input_ref, approval_resume?, auth_resume?` | the loop's vocabulary — input by **ref**, resume tokens, pre-trust |
+| 1 | `LoopRequest` (`ironclaw_turns`) | `activity_id, surface_version, capability_id, input_ref, approval_resume?, auth_resume?` | the loop's vocabulary — input by **ref**, resume tokens, pre-trust |
 | 2 | `RuntimeCapabilityRequest` (`ironclaw_host_runtime`) | `context, capability_id, estimate, input, idempotency_key?, trust_decision` | deref `input_ref`→raw `input`; +`estimate`, +`context`; +2 **dead** fields |
 | 3 | `CapabilityInvocationRequest` (`ironclaw_capabilities`) | `context, capability_id, estimate, input, trust_decision` | **identical to hop 2 minus `idempotency_key`** — zero new info |
 | 4 | `CapabilityDispatchRequest` (`ironclaw_host_api`) | `capability_id, scope, authenticated_actor_user_id?, estimate, mounts?, resource_reservation?, input` | decompose `context`→`scope`+`actor`; **drop `trust_decision`**; **+`mounts`, +`resource_reservation`** (authorization outputs) |
-| 5 | `RuntimeAdapterRequest<'a, F, G>` (`ironclaw_dispatcher`) | hop 4 + `package, descriptor, filesystem&, governor&, runtime_policy` | + resolved substrate handles for the lane |
+| 5 | `RuntimeLaneRequest<'a, F, G>` (`ironclaw_dispatcher`) | hop 4 + `package, descriptor, filesystem&, governor&, runtime_policy` | + resolved substrate handles for the lane |
 | — | lane requests (`ScriptExecutionRequest` / `WitToolRequest` / `FirstPartyCapabilityRequest`) | per-lane shapes | final re-wrap into the lane's own type |
 
 Definitions (verified against HEAD, 2026-07-17; cite the symbol — line numbers drift):
-`CapabilityInvocation` `ironclaw_turns/src/run_profile/host.rs:1722`, `RuntimeCapabilityRequest`
+`LoopRequest` `ironclaw_turns/src/run_profile/host.rs:1722`, `RuntimeCapabilityRequest`
 `ironclaw_host_runtime/src/lib.rs:322`, `CapabilityInvocationRequest`
 `ironclaw_capabilities/src/requests.rs:8`, `CapabilityDispatchRequest`
-`ironclaw_host_api/src/dispatch.rs:22`, `RuntimeAdapterRequest` `ironclaw_dispatcher/src/lib.rs:56`.
+`ironclaw_host_api/src/dispatch.rs:22`, `RuntimeLaneRequest` `ironclaw_dispatcher/src/lib.rs:56`.
 The `dyn` impl counts (§1.3) and the 30-day window (`merged:>=2026-06-17`, §1.5) were derived
 the same way.
 
@@ -158,7 +158,7 @@ Four mechanisms produce this, each visible in the code above:
 
 `CapabilityDispatchRequest` already living in `ironclaw_host_api` is the key
 signal: the canonical shape *can* live at the bottom. And
-`RuntimeAdapterRequest<'a, F, G>` — generic over closures with a lifetime — is a
+`RuntimeLaneRequest<'a, F, G>` — generic over closures with a lifetime — is a
 complexity tell: the seam is parameterized for flexibility production wiring does
 not exercise.
 
@@ -404,7 +404,7 @@ fn abort    (auth: Authorized) -> Result<(), HostFailure>;                // not
 - The loop expresses a `LoopRequest` (input by **ref**, resume tokens, pre-trust); the host
   `resolve`s it to `Invocation` at the membrane — the one genuine loop→host transition
   (§1.1). Below that, `RuntimeCapabilityRequest`, `CapabilityInvocationRequest`,
-  `CapabilityDispatchRequest`, and `RuntimeAdapterRequest` disappear — they were `Invocation`
+  `CapabilityDispatchRequest`, and `RuntimeLaneRequest` disappear — they were `Invocation`
   plus fields now carried inside `Authorized`.
 - Because `host_api` is the bottom crate, putting the vocabulary there *satisfies* the
   boundary rule (Golden Boundary #1: `host_api` stays vocabulary-only) — finishing a move
@@ -459,9 +459,9 @@ the dead fields disappear with them:
 
 | Real state | Carried as | Replaces |
 | --- | --- | --- |
-| loop-expressed (pre-trust) | `LoopRequest` (input by ref, resume tokens, `activity_id`) | `CapabilityInvocation` |
+| loop-expressed (pre-trust) | `LoopRequest` (input by ref, resume tokens, `activity_id`) | the old loop invocation mirror |
 | authorized | `Authorized` (the resolved `Invocation` bound to trust/approval/reservation/mounts) | `RuntimeCapabilityRequest`, `CapabilityInvocationRequest`, `CapabilityDispatchRequest` |
-| resolved-for-a-lane | `Authorized` + resolved handles (package, descriptor, filesystem, governor) | `RuntimeAdapterRequest` |
+| resolved-for-a-lane | `Authorized` + resolved handles (package, descriptor, filesystem, governor) | `RuntimeLaneRequest` |
 
 Mechanism 1 (DAG re-declaration) dies because the one authorized shape lives in
 `host_api` and both `host_runtime` and `capabilities` reference it. Mechanism 3's dead
@@ -1138,7 +1138,7 @@ and the new vocabulary must carry all of it:
 | `AwaitDependentRun { .. }` | `Resolution::Suspended(Suspension::DependentRun)` | |
 | `ExternalToolPending { .. }` | `Resolution::Suspended(Suspension::ExternalTool)` | host never dispatches; control returns to the API client |
 
-Batch invocation (`CapabilityBatchInvocation`, `stop_on_first_suspension`) is
+Batch invocation (`LoopRequestBatch`, `stop_on_first_suspension`) is
 **not** a tenth row — it is a fold over per-invocation resolutions with its own
 resume state, modeled in §11.1 (the #6137 bug class lives there, not in the
 single-invocation vocabulary).
@@ -1904,7 +1904,7 @@ states where the bugs live*.
 
 - **Turn/run lifecycle:** `Queued → Running → {BlockedApproval | BlockedAuth | WaitingProcess} → Queued(resume) → … → {Completed | Failed | Cancelled}`, plus lease-expiry and crash/recover edges.
 - **Capability invocation:** `LoopRequest → resolve → authorize → {Authorized | Denied | Blocked} → dispatch → {Done | Blocked(Auth) | Suspended | HostFailure}` (§5.3), with resume / auth-resume re-entry, `abort` on the not-dispatched path, and `Uncertain` on crash-mid-dispatch (§11.3).
-- **Batch invocation (#6137's home):** `CapabilityBatchInvocation { invocations, stop_on_first_suspension }` is a fold over per-invocation machines with an explicit batch-resume state: when invocation *k* gates, invocations *k+1..n* are recorded pending; gate resolution re-enters the **batch**, which must redispatch every pending member — not only the first — under their original `activity_id`s. The mixed-resolution states (some `Done`, one `Blocked`, rest pending) are enumerated like any other state; #6137 is the regression test.
+- **Batch invocation (#6137's home):** `LoopRequestBatch { invocations, stop_on_first_suspension }` is a fold over per-invocation machines with an explicit batch-resume state: when invocation *k* gates, invocations *k+1..n* are recorded pending; gate resolution re-enters the **batch**, which must redispatch every pending member — not only the first — under their original `activity_id`s. The mixed-resolution states (some `Done`, one `Blocked`, rest pending) are enumerated like any other state; #6137 is the regression test.
 - **Lease:** `unclaimed → claimed(runner, token) → heartbeat* → {released | expired}`; expiry terminal.
 - **Gate/resume:** `blocked(gate_ref, checkpoint) → resolved → requeue(same run/checkpoint)`.
 
@@ -2274,12 +2274,14 @@ loop-facing capability result and every result mirror is deleted.
 
 ### Not started
 
-- **Slice C down-path (request-side) — the remaining capability-DTO collapse.**
-  The result side is done (above); the **9 request-side mirrors** still stand
-  (`FROZEN_COLLAPSE_DTOS`): `CapabilityInvocation` (turns),
-  `RuntimeCapability{,Resume,AuthResume}Request` (host_runtime),
-  `Capability{Invocation,Resume,AuthResume}Request` (capabilities),
-  `CapabilityDispatchRequest` (host_api), `RuntimeAdapterRequest` (dispatcher).
+- **Slice C down-path (request-side) — retired capability request DTOs.**
+  The result side is done (above); the request-side collapse has also retired
+  the old loop invocation name, the host-runtime invocation/resume/auth-resume
+  request structs, the capabilities invocation/resume/auth-resume request
+  structs, and the private runtime adapter request name. The live shape keeps
+  `LoopRequest` at the loop membrane, passes tuple parts through the object-safe
+  host-runtime facade, calls `CapabilityHost` with direct parameters, and uses
+  `RuntimeLaneRequest` only as a private lane-local assembly value.
 
   **Feasibility finding (2026-07-20, three independent probes — no code changed).**
   An attempt to slice the retirement per-hop (invoke / resume / dispatch, in

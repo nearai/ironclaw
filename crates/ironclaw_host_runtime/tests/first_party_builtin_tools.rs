@@ -30,8 +30,8 @@ use ironclaw_host_runtime::{
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_READ_CAPABILITY_ID,
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError,
-    RuntimeProcessPort, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
+    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
     TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
     TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
@@ -2505,7 +2505,7 @@ async fn builtin_trigger_list_maps_batch_run_history_repository_error_to_backend
 #[tokio::test]
 async fn builtin_rejects_oversized_inputs_before_dispatch() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -2523,7 +2523,7 @@ async fn builtin_rejects_oversized_inputs_before_dispatch() {
 #[tokio::test]
 async fn builtin_rejects_oversized_outputs_before_return() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -3362,7 +3362,7 @@ async fn builtin_spawn_subagent_authorization_invokes_through_host_runtime() {
 #[tokio::test]
 async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
             capability_id(SHELL_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -3992,7 +3992,7 @@ async fn builtin_json_stringify_rejects_invalid_json_strings() {
 #[tokio::test]
 async fn builtin_json_rejects_v1_tool_output_stash_refs_without_leaking_input() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context([JSON_CAPABILITY_ID]),
             capability_id(JSON_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -6151,16 +6151,11 @@ async fn builtin_skill_install_url_path_accounts_wall_clock_time() {
     });
     let runtime = runtime_with_filesystem_and_http_egress(filesystem, egress);
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            execution_context_with_mounts_and_network(
+        .invoke_capability((execution_context_with_mounts_and_network(
                 [SKILL_INSTALL_CAPABILITY_ID],
                 mounts,
                 http_test_policy(),
-            ),
-            capability_id(SKILL_INSTALL_CAPABILITY_ID),
-            ResourceEstimate::default(),
-            json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"})
-        ))
+            ), capability_id(SKILL_INSTALL_CAPABILITY_ID), ResourceEstimate::default(), json!({"url": "https://raw.githubusercontent.com/Pika-Labs/Pika-Skills/main/slow-helper/SKILL.md"})))
         .await
         .unwrap();
 
@@ -6200,7 +6195,7 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
     let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), network_denied_policy());
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
             capability_id(HTTP_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -8164,7 +8159,7 @@ async fn builtin_coding_write_is_denied_by_read_only_mount() {
 #[tokio::test]
 async fn builtin_missing_grant_denies_before_handler_dispatch() {
     let outcome = runtime()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context(std::iter::empty::<&str>()),
             capability_id(ECHO_CAPABILITY_ID),
             ResourceEstimate::default(),
@@ -8202,7 +8197,7 @@ async fn invoke_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> Result<Value, RuntimeFailureKind> {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),
@@ -8224,7 +8219,7 @@ async fn invoke_failure_with_context<R: HostRuntime + ?Sized>(
     context: ExecutionContext,
 ) -> RuntimeCapabilityFailure {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),

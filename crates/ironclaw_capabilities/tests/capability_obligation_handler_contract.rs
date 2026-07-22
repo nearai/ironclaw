@@ -25,12 +25,12 @@ async fn capability_host_uses_obligation_handler_before_dispatch() {
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let result = host
-        .invoke_json(CapabilityInvocationRequest {
-            context: execution_context(CapabilitySet::default()),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "handled"}),
-        })
+        .invoke_json(
+            execution_context(CapabilitySet::default()),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "handled"}),
+        )
         .await
         .unwrap();
 
@@ -55,12 +55,12 @@ async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
-            context: execution_context(CapabilitySet::default()),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "must not dispatch"}),
-        })
+        .invoke_json(
+            execution_context(CapabilitySet::default()),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "must not dispatch"}),
+        )
         .await
         .unwrap_err();
 
@@ -108,12 +108,12 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
     let host =
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
-    host.invoke_json(CapabilityInvocationRequest {
+    host.invoke_json(
         context,
-        capability_id: capability_id(),
-        estimate: estimate.clone(),
-        input: json!({"message": "prepared effects"}),
-    })
+        capability_id(),
+        estimate.clone(),
+        json!({"message": "prepared effects"}),
+    )
     .await
     .unwrap();
 
@@ -145,12 +145,12 @@ async fn capability_host_completes_post_dispatch_obligations_before_returning() 
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let result = host
-        .invoke_json(CapabilityInvocationRequest {
-            context: execution_context(CapabilitySet::default()),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "post dispatch"}),
-        })
+        .invoke_json(
+            execution_context(CapabilitySet::default()),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "post dispatch"}),
+        )
         .await
         .unwrap();
 
@@ -186,12 +186,12 @@ async fn capability_host_aborts_staged_obligations_when_completion_fails() {
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
+            capability_id(),
             estimate,
-            input: json!({"message": "completion fails"}),
-        })
+            json!({"message": "completion fails"}),
+        )
         .await
         .unwrap_err();
 
@@ -340,12 +340,12 @@ async fn invoke_dispatch_carries_witness_none_mounts_verbatim_not_a_default() {
     let host =
         capability_host(&registry, &dispatcher, &authorizer).with_obligation_handler(&handler);
 
-    host.invoke_json(CapabilityInvocationRequest {
+    host.invoke_json(
         context,
-        capability_id: capability_id(),
-        estimate: estimate.clone(),
-        input: json!({"message": "none mounts"}),
-    })
+        capability_id(),
+        estimate.clone(),
+        json!({"message": "none mounts"}),
+    )
     .await
     .unwrap();
 
@@ -434,12 +434,12 @@ async fn invoke_fails_closed_and_releases_reservation_when_witness_expired() {
             .with_obligation_handler(&handler);
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
+            capability_id(),
             estimate,
-            input: json!({"message": "expired witness"}),
-        })
+            json!({"message": "expired witness"}),
+        )
         .await
         .unwrap_err();
 

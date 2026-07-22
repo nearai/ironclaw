@@ -53,8 +53,8 @@ use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
     GateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation, LoopCapabilityPort,
-        LoopHostMilestoneSink, LoopRunContext,
+        AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopHostMilestoneSink,
+        LoopRequest, LoopRunContext,
     },
 };
 
@@ -225,7 +225,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     provider_id: ExtensionId,
     additional_provider_trust: Vec<(ExtensionId, Vec<EffectKind>)>,
     user_id: UserId,
-    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    invocations: Arc<Mutex<Vec<LoopRequest>>>,
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
@@ -1003,7 +1003,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
-    fn invocations(&self) -> Vec<CapabilityInvocation> {
+    fn invocations(&self) -> Vec<LoopRequest> {
         self.invocations.lock().unwrap().clone()
     }
 

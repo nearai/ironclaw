@@ -73,13 +73,7 @@ async fn auth_resume_json_accepts_blocked_auth_run_and_dispatches() {
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
     let result = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id(),
-            estimate,
-            input,
-            approval_request_id: None,
-        })
+        .auth_resume_json(context, capability_id(), estimate, input, None)
         .await
         .unwrap();
 
@@ -122,13 +116,13 @@ async fn auth_resume_preserves_original_actor_and_rejects_forged_actor() {
     forged_context.authenticated_actor_user_id =
         Some(UserId::new("slack-bob").expect("valid forged authenticated actor user id"));
     let forged_error = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: forged_context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "resume"}),
-            approval_request_id: None,
-        })
+        .auth_resume_json(
+            forged_context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "resume"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -144,13 +138,13 @@ async fn auth_resume_preserves_original_actor_and_rejects_forged_actor() {
     );
     assert_eq!(dispatcher.call_count(), 0);
 
-    host.auth_resume_json(CapabilityAuthResumeRequest {
-        context: alice_context,
-        capability_id: capability_id(),
-        estimate: ResourceEstimate::default(),
-        input: json!({"message": "resume"}),
-        approval_request_id: None,
-    })
+    host.auth_resume_json(
+        alice_context,
+        capability_id(),
+        ResourceEstimate::default(),
+        json!({"message": "resume"}),
+        None,
+    )
     .await
     .expect("the original authenticated actor can resume");
 
@@ -184,12 +178,12 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
     let invocation_id = context.invocation_id;
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs approval"}),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs approval"}),
+        )
         .await
         .unwrap_err();
 
@@ -201,13 +195,13 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
     let auth_host =
         capability_host(&registry, &dispatcher, &auth_authorizer).with_run_state(&run_state);
     let err = auth_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs approval"}),
-            approval_request_id: None,
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs approval"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -254,13 +248,13 @@ async fn auth_resume_json_rejects_run_in_running_status() {
 
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "try to resume running"}),
-            approval_request_id: None,
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "try to resume running"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -302,12 +296,12 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
     let original_input = json!({"message": "original approved input"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: original_input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            original_input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -338,13 +332,13 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: original_context,
-            capability_id: capability_id(),
+        .auth_resume_json(
+            original_context,
+            capability_id(),
             estimate,
-            input: json!({"message": "MUTATED input"}),
-            approval_request_id: Some(approval_id),
-        })
+            json!({"message": "MUTATED input"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -396,12 +390,12 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
     let input = json!({"message": "needs both approval and auth"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -439,13 +433,13 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
         .with_capability_leases(&leases);
 
     let result = resume_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
             estimate,
             input,
-            approval_request_id: Some(approval_id),
-        })
+            Some(approval_id),
+        )
         .await
         .unwrap();
 
@@ -516,13 +510,13 @@ async fn auth_resume_json_rejects_capability_id_mismatch_against_run_record() {
     // pre-authorization; the unknown-capability precedence is covered separately.)
     let different_id = other_capability_id();
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: different_id,
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "mismatch"}),
-            approval_request_id: None,
-        })
+            different_id,
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "mismatch"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -609,13 +603,13 @@ async fn auth_resume_json_rejects_approval_not_yet_approved() {
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "pending approval"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "pending approval"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -683,13 +677,13 @@ async fn auth_resume_json_returns_store_missing_when_approval_requests_absent() 
 
     let approval_id = ApprovalRequestId::new();
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "needs approval store"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "needs approval store"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -748,13 +742,7 @@ async fn auth_resume_json_without_approval_request_id_skips_lease_path_and_dispa
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
     let result = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id(),
-            estimate,
-            input,
-            approval_request_id: None, // no prior approval
-        })
+        .auth_resume_json(context, capability_id(), estimate, input, None)
         .await
         .unwrap();
 
@@ -816,12 +804,12 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
     let input = json!({"message": "needs approval then auth"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -877,13 +865,13 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
         .with_capability_leases(&leases);
 
     let resume_err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: resume_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            resume_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -924,13 +912,13 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
 
     // ── Assertion (b): auth_resume_json succeeds ─────────────────────────────
     let auth_result = auth_resume_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_or_else(|e| {
             panic!(
@@ -1021,12 +1009,12 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
     let input = json!({"message": "terminal fail test"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1058,13 +1046,13 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
         .with_capability_leases(&leases);
 
     let _ = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: resume_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            resume_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1084,13 +1072,13 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
         .with_capability_leases(&leases);
 
     let err = auth_resume_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -1141,12 +1129,12 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
     let input = json!({"message": "non-terminal auth bounce"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1177,13 +1165,13 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
         .with_capability_leases(&leases);
 
     let _ = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: resume_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            resume_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1205,13 +1193,13 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
         .with_capability_leases(&leases);
 
     let err = auth_resume_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -1375,12 +1363,12 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     let input = json!({"message": "concurrent claim race"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1419,13 +1407,13 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -1501,13 +1489,13 @@ async fn auth_resume_json_returns_store_missing_when_capability_leases_absent() 
 
     let approval_id = ApprovalRequestId::new();
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "needs lease store"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "needs lease store"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -1619,13 +1607,13 @@ async fn auth_resume_json_rejected_prior_approval_fails_blocked_auth_run() {
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "denied approval"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "denied approval"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -1875,12 +1863,12 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     let input = json!({"message": "real concurrent dispatch reuse race"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1910,13 +1898,13 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             .with_approval_requests(&*approval_requests)
             .with_capability_leases(&*leases);
         resume_host
-            .resume_json(CapabilityResumeRequest {
-                context: resume_context.clone(),
-                approval_request_id: approval_id,
-                capability_id: capability_id(),
-                estimate: estimate.clone(),
-                input: input.clone(),
-            })
+            .resume_json(
+                resume_context.clone(),
+                approval_id,
+                capability_id(),
+                estimate.clone(),
+                input.clone(),
+            )
             .await
             .unwrap_err();
     }
@@ -1967,13 +1955,13 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             .with_run_state(&*task_a_run_state)
             .with_approval_requests(&*task_a_approval_requests)
             .with_capability_leases(&*task_a_leases);
-        host.auth_resume_json(CapabilityAuthResumeRequest {
-            context: task_a_context,
-            capability_id: capability_id(),
-            estimate: task_a_estimate,
-            input: task_a_input,
-            approval_request_id: Some(approval_id),
-        })
+        host.auth_resume_json(
+            task_a_context,
+            capability_id(),
+            task_a_estimate,
+            task_a_input,
+            Some(approval_id),
+        )
         .await
     });
 
@@ -1995,13 +1983,13 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             .with_run_state(&*task_b_run_state)
             .with_approval_requests(&*task_b_approval_requests)
             .with_capability_leases(&*task_b_leases);
-        host.auth_resume_json(CapabilityAuthResumeRequest {
-            context: task_b_context,
-            capability_id: capability_id(),
-            estimate: task_b_estimate,
-            input: task_b_input,
-            approval_request_id: Some(approval_id),
-        })
+        host.auth_resume_json(
+            task_b_context,
+            capability_id(),
+            task_b_estimate,
+            task_b_input,
+            Some(approval_id),
+        )
         .await
     });
 
@@ -2125,12 +2113,12 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
     let input = json!({"message": "deny-after-claimed test"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -2162,13 +2150,13 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
         .with_capability_leases(&leases);
 
     resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: resume_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            resume_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -2193,13 +2181,13 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
         .with_capability_leases(&leases);
 
     let err = deny_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -2259,12 +2247,12 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
     let input = json!({"message": "require-approval-after-claimed test"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -2295,13 +2283,13 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
         .with_capability_leases(&leases);
 
     resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: resume_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            resume_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -2329,13 +2317,13 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
     .with_capability_leases(&leases);
 
     let err = req_approval_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -2385,15 +2373,15 @@ async fn auth_resume_json_returns_store_missing_when_run_state_absent() {
     // Do NOT call .with_run_state(...).
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: execution_context(CapabilitySet {
+        .auth_resume_json(
+            execution_context(CapabilitySet {
                 grants: vec![dispatch_grant()],
             }),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "no run_state store"}),
-            approval_request_id: None,
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "no run_state store"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -2438,13 +2426,13 @@ async fn auth_resume_json_unknown_invocation_when_run_record_missing() {
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "no run record seeded"}),
-            approval_request_id: None,
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "no run record seeded"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -2557,13 +2545,13 @@ async fn auth_resume_json_approval_request_mismatch_action() {
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "action mismatch"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "action mismatch"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -2645,13 +2633,13 @@ async fn auth_resume_json_approval_request_mismatch_correlation_id() {
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "correlation_id mismatch"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "correlation_id mismatch"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -2728,13 +2716,13 @@ async fn auth_resume_json_approval_request_mismatch_requested_by() {
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "requested_by mismatch"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "requested_by mismatch"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -2949,12 +2937,12 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     let input = json!({"message": "fresh active lease concurrent race"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -3007,13 +2995,13 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
             .with_run_state(&*task_a_run_state)
             .with_approval_requests(&*task_a_approval_requests)
             .with_capability_leases(&*task_a_leases);
-        host.auth_resume_json(CapabilityAuthResumeRequest {
-            context: task_a_context,
-            capability_id: capability_id(),
-            estimate: task_a_estimate,
-            input: task_a_input,
-            approval_request_id: Some(approval_id),
-        })
+        host.auth_resume_json(
+            task_a_context,
+            capability_id(),
+            task_a_estimate,
+            task_a_input,
+            Some(approval_id),
+        )
         .await
     });
 
@@ -3033,13 +3021,13 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
         .with_run_state(&*run_state)
         .with_approval_requests(&*approval_requests)
         .with_capability_leases(&*leases)
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: winner_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            winner_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await;
 
     winner_result.unwrap_or_else(|e| panic!("concurrent winner (B) must succeed, got {e:?}"));
@@ -3224,13 +3212,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id(),
-            estimate,
-            input,
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(context, capability_id(), estimate, input, Some(approval_id))
         .await
         .unwrap_err();
 
@@ -3365,13 +3347,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_le
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id(),
-            estimate,
-            input,
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(context, capability_id(), estimate, input, Some(approval_id))
         .await
         .unwrap_err();
 

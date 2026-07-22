@@ -22,9 +22,8 @@ use ironclaw_approvals::{
 };
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
-    CapabilityAuthResumeRequest, CapabilityHost, CapabilityInvocationError,
-    CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityObligationHandler,
-    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityHost, CapabilityInvocationError, CapabilityInvocationResult,
+    CapabilityObligationHandler, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
@@ -98,12 +97,12 @@ fn trace_capability_latency_error<E: ?Sized>(
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
-    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
+    RuntimeAuthGate, RuntimeAuthResume, RuntimeBackendHealth, RuntimeBlockedReason,
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
-    RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, obligations::secret_owner_scope, surface::CapabilityCatalog,
+    RuntimeFailureKind, RuntimeGateId, RuntimeInvocation, RuntimeStatusRequest, RuntimeWorkId,
+    RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    obligations::secret_owner_scope, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -410,14 +409,9 @@ impl DefaultHostRuntime {
 impl HostRuntime for DefaultHostRuntime {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityRequest {
-            context,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, capability_id, estimate, input) = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let total_started_at = live_latency_started_at();
@@ -426,7 +420,7 @@ impl HostRuntime for DefaultHostRuntime {
 
         // Validate the execution context before the kernel's credential pre-flight
         // queries the secret store. Without this guard a malformed
-        // RuntimeCapabilityRequest could probe secret-store presence under a forged
+        // HostRuntime::invoke_capability could probe secret-store presence under a forged
         // resource_scope that does not match the top-level
         // tenant/user/agent/project fields. Trust classification and runtime-policy
         // planning now run inside the kernel's `authorize()` fold — no host_runtime
@@ -445,15 +439,11 @@ impl HostRuntime for DefaultHostRuntime {
 
         let host = self.capability_host(&registry);
 
-        let invocation = CapabilityInvocationRequest {
-            context,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-        };
-
         let dispatch_started_at = live_latency_started_at();
-        match host.invoke_json(invocation).await {
+        match host
+            .invoke_json(context, capability_id.clone(), estimate, input)
+            .await
+        {
             Ok(result) => {
                 trace_capability_latency_ok(
                     "capability_host_invoke_json",
@@ -514,14 +504,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn spawn_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityRequest {
-            context,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, capability_id, estimate, input) = request;
         let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
             SpawnInputPreparation::Ready(input) => input,
             SpawnInputPreparation::ModelInputRejected(failure) => {
@@ -539,7 +524,7 @@ impl HostRuntime for DefaultHostRuntime {
 
         // Validate the execution context before the kernel's credential pre-flight
         // queries the secret store. Without this guard a malformed
-        // RuntimeCapabilityRequest could probe secret-store presence under a forged
+        // HostRuntime::spawn_capability could probe secret-store presence under a forged
         // resource_scope that does not match the top-level
         // tenant/user/agent/project fields. Trust classification and runtime-policy
         // planning now run inside the kernel's spawn authorize fold — no
@@ -580,15 +565,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn resume_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, approval_request_id, capability_id, estimate, input) = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -601,15 +580,16 @@ impl HostRuntime for DefaultHostRuntime {
         // host_runtime pre-authorization + `context.trust` stamp).
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
-        let resume = CapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-        };
-
-        match host.resume_json(resume).await {
+        match host
+            .resume_json(
+                context,
+                approval_request_id,
+                capability_id.clone(),
+                estimate,
+                input,
+            )
+            .await
+        {
             Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 completed_outcome_from(result, capability_id),
             ))),
@@ -643,15 +623,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn auth_resume_capability(
         &self,
-        request: RuntimeCapabilityAuthResumeRequest,
+        request: RuntimeAuthResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityAuthResumeRequest {
-            context,
-            capability_id,
-            estimate,
-            input,
-            approval_request_id,
-        } = request;
+        let (context, capability_id, estimate, input, approval_request_id) = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -669,15 +643,16 @@ impl HostRuntime for DefaultHostRuntime {
         // stamp.
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
-        let auth_resume = CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-            approval_request_id,
-        };
-
-        match host.auth_resume_json(auth_resume).await {
+        match host
+            .auth_resume_json(
+                context,
+                capability_id.clone(),
+                estimate,
+                input,
+                approval_request_id,
+            )
+            .await
+        {
             Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 completed_outcome_from(result, capability_id),
             ))),
@@ -708,15 +683,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn resume_spawn_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, approval_request_id, capability_id, estimate, input) = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -740,15 +709,16 @@ impl HostRuntime for DefaultHostRuntime {
         // stamp.
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
-        let resume = CapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-        };
-
-        match host.resume_spawn_json(resume).await {
+        match host
+            .resume_spawn_json(
+                context,
+                approval_request_id,
+                capability_id.clone(),
+                estimate,
+                input,
+            )
+            .await
+        {
             Ok(result) => Ok(RuntimeCapabilityOutcome::SpawnedProcess(
                 spawned_process_outcome_from(result, capability_id),
             )),

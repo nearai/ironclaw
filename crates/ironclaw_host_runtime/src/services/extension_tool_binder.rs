@@ -25,7 +25,7 @@ use ironclaw_host_api::{
 use ironclaw_resources::ResourceGovernor;
 
 use super::RootFilesystem;
-use super::runtime_adapters::{RuntimeAdapterRequest, RuntimeLaneExecutor};
+use super::runtime_adapters::{RuntimeLaneExecutor, RuntimeLaneRequest};
 
 /// Binds extension packages to their runtime lanes, yielding one
 /// [`ToolAdapter`] per extension (the adapter routes internally by
@@ -146,7 +146,7 @@ where
             .executor
             .dispatch_json(
                 self.lane,
-                RuntimeAdapterRequest {
+                RuntimeLaneRequest {
                     package: &self.package,
                     descriptor,
                     filesystem: self.filesystem.as_ref(),

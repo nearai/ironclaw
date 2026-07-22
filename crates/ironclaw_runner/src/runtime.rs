@@ -919,9 +919,9 @@ mod tests {
     use ironclaw_turns::{
         InMemoryRunProfileResolver, RunProfileResolver, TurnId, TurnRunId, TurnScope,
         run_profile::{
-            AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-            CapabilityDescriptorView, CapabilityInvocation, CapabilitySurfaceVersion,
-            ConcurrencyHint, LoopCapabilityPort, LoopRunContext, RunProfileResolutionRequest,
+            AgentLoopHostError, AgentLoopHostErrorKind, CapabilityDescriptorView,
+            CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopRequest,
+            LoopRequestBatch, LoopRunContext, RunProfileResolutionRequest,
             VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
@@ -1061,7 +1061,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
+            _request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -1071,7 +1071,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
+            _request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -1117,7 +1117,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            request: CapabilityInvocation,
+            request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             self.log.lock().unwrap().push(self.label);
             self.inner.invoke_capability(request).await
@@ -1125,7 +1125,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            request: CapabilityBatchInvocation,
+            request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             self.log.lock().unwrap().push(self.label);
             self.inner.invoke_capability_batch(request).await
@@ -1244,7 +1244,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
+            _request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -1254,7 +1254,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
+            _request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,

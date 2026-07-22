@@ -6,7 +6,7 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_capabilities::{ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError};
 use ironclaw_host_api::{
-    CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
+    ApprovalRequestId, CapabilityDisplayOutputPreview, CapabilityId, CapabilitySet, CorrelationId,
     DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, EffectKind,
     ExecutionContext, ExtensionId, GateRecord, GateRef, InvocationId, InvocationOrigin, MountView,
     Principal, ProviderToolName, Resolution, ResolutionBatch, ResourceEstimate, ResourceScope,
@@ -14,9 +14,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CapabilityFailureDisposition, HostRuntime, HostRuntimeError, IdempotencyKey,
-    RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest, RuntimeCapabilityFailure,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind,
+    RuntimeBlockedReason, RuntimeCapabilityFailure, RuntimeCapabilityOutcome, RuntimeFailureKind,
 };
 use ironclaw_process_sandbox::{SandboxProcessPlan, ValidatedSandboxProcessPlan};
 use ironclaw_run_state::{GateRecordStore, RunStateError};
@@ -24,11 +22,11 @@ use ironclaw_turns::{
     CapabilityActivityId, LoopGateRef, LoopResultRef,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityApprovalResume, CapabilityAuthResume,
-        CapabilityBatchInvocation, CapabilityDeniedReasonKind, CapabilityDescriptorView,
-        CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue, CapabilityInputRef,
-        CapabilityInvocation, CapabilityResumeToken, ConcurrencyHint, ContentDigest,
-        LoopCapabilityPort, LoopHostMilestone, LoopHostMilestoneKind, LoopHostMilestoneSink,
-        LoopProcessRef, LoopRunContext, LoopSafeSummary, ModelVisibleToolObservation,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureDetail,
+        CapabilityFailureKind, CapabilityInputIssue, CapabilityInputRef, CapabilityResumeToken,
+        ConcurrencyHint, ContentDigest, LoopCapabilityPort, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopProcessRef, LoopRequest,
+        LoopRequestBatch, LoopRunContext, LoopSafeSummary, ModelVisibleToolObservation,
         ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolCallReplay,
         ProviderToolDefinition, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
@@ -1520,7 +1518,7 @@ impl HostRuntimeLoopCapabilityPort {
 
     async fn invoke_synthetic_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
         capability: SyntheticSurfaceCapabilitySnapshot,
         snapshot: SurfaceSnapshot,
     ) -> Result<GatedResolution, AgentLoopHostError> {
@@ -1785,7 +1783,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         // §5.3 Stage 2b (collapse complete): dispatch produces the host_api
         // `Resolution` directly, paired with the durable `GateRecord` its channel
@@ -1809,7 +1807,7 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
@@ -1855,7 +1853,7 @@ impl HostRuntimeLoopCapabilityPort {
     /// `InvalidInvocation` from dispatch, never a spurious payload-missing error.
     async fn persist_gate_record_for_mapped(
         &self,
-        request: &CapabilityInvocation,
+        request: &LoopRequest,
         gated: GatedResolution,
     ) -> Result<Resolution, AgentLoopHostError> {
         let Some(record) = gated.gate_record.as_ref() else {
@@ -2108,7 +2106,7 @@ impl HostRuntimeLoopCapabilityPort {
     /// the `invoke_capability` seam and dispatch compute the SAME key.
     async fn resume_replay_payload(
         &self,
-        request: &CapabilityInvocation,
+        request: &LoopRequest,
     ) -> Result<Option<ReplayPayload>, AgentLoopHostError> {
         let invocation_id = match (
             request.approval_resume.as_ref(),
@@ -2147,7 +2145,7 @@ impl HostRuntimeLoopCapabilityPort {
 
     async fn invoke_capability_dispatch(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<GatedResolution, AgentLoopHostError> {
         let requested_invocation_id = InvocationId::from_uuid(request.activity_id.as_uuid());
         // Normalize resume mode and validate token/activity identity before
@@ -2524,14 +2522,15 @@ impl HostRuntimeLoopCapabilityPort {
         let is_fresh_dispatch = matches!(resume_mode, ResolvedResumeMode::None);
         let outcome = match resume_mode {
             ResolvedResumeMode::Approval { resume, .. } => {
-                let runtime_request = RuntimeCapabilityResumeRequest::new(
+                dispatch_runtime_capability_resume(
+                    self.runtime.as_ref(),
                     invocation_context,
                     resume.approval_request_id,
                     request.capability_id,
                     estimate.clone(),
                     input.clone(),
-                );
-                dispatch_runtime_capability_resume(self.runtime.as_ref(), runtime_request).await
+                )
+                .await
             }
             ResolvedResumeMode::Auth {
                 resume: auth_resume,
@@ -2547,24 +2546,25 @@ impl HostRuntimeLoopCapabilityPort {
                     approval_request_id = prior_approval_id.map(|id| id.to_string()).as_deref().unwrap_or("none"),
                     "capability auth-resume re-dispatch with preserved invocation identity"
                 );
-                let runtime_request = RuntimeCapabilityAuthResumeRequest::new(
+                dispatch_runtime_capability_auth_resume(
+                    self.runtime.as_ref(),
                     invocation_context,
                     request.capability_id,
                     estimate.clone(),
                     input.clone(),
                     prior_approval_id,
-                );
-                dispatch_runtime_capability_auth_resume(self.runtime.as_ref(), runtime_request)
-                    .await
+                )
+                .await
             }
             ResolvedResumeMode::None => {
-                let runtime_request = RuntimeCapabilityRequest::new(
+                dispatch_runtime_capability(
+                    self.runtime.as_ref(),
                     invocation_context,
                     request.capability_id,
                     estimate.clone(),
                     input.clone(),
-                );
-                dispatch_runtime_capability(self.runtime.as_ref(), runtime_request).await
+                )
+                .await
             }
         };
         let outcome = match outcome {
@@ -2754,23 +2754,38 @@ impl ReplayPayloadStore for NoopReplayPayloadStore {
 
 async fn dispatch_runtime_capability(
     runtime: &(dyn HostRuntime + Send + Sync),
-    request: RuntimeCapabilityRequest,
+    context: ExecutionContext,
+    capability_id: CapabilityId,
+    estimate: ResourceEstimate,
+    input: serde_json::Value,
 ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-    if is_process_sandbox_capability(&request.capability_id) {
-        runtime.spawn_capability(request).await
+    if is_process_sandbox_capability(&capability_id) {
+        runtime
+            .spawn_capability((context, capability_id, estimate, input))
+            .await
     } else {
-        runtime.invoke_capability(request).await
+        runtime
+            .invoke_capability((context, capability_id, estimate, input))
+            .await
     }
 }
 
 async fn dispatch_runtime_capability_resume(
     runtime: &(dyn HostRuntime + Send + Sync),
-    request: RuntimeCapabilityResumeRequest,
+    context: ExecutionContext,
+    approval_request_id: ApprovalRequestId,
+    capability_id: CapabilityId,
+    estimate: ResourceEstimate,
+    input: serde_json::Value,
 ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-    if is_process_sandbox_capability(&request.capability_id) {
-        runtime.resume_spawn_capability(request).await
+    if is_process_sandbox_capability(&capability_id) {
+        runtime
+            .resume_spawn_capability((context, approval_request_id, capability_id, estimate, input))
+            .await
     } else {
-        runtime.resume_capability(request).await
+        runtime
+            .resume_capability((context, approval_request_id, capability_id, estimate, input))
+            .await
     }
 }
 
@@ -2778,9 +2793,15 @@ async fn dispatch_runtime_capability_resume(
 /// variant; sandbox spawns do not go through approval/auth gates).
 async fn dispatch_runtime_capability_auth_resume(
     runtime: &(dyn HostRuntime + Send + Sync),
-    request: RuntimeCapabilityAuthResumeRequest,
+    context: ExecutionContext,
+    capability_id: CapabilityId,
+    estimate: ResourceEstimate,
+    input: serde_json::Value,
+    approval_request_id: Option<ApprovalRequestId>,
 ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-    runtime.auth_resume_capability(request).await
+    runtime
+        .auth_resume_capability((context, capability_id, estimate, input, approval_request_id))
+        .await
 }
 
 fn host_runtime_input_for_capability(
@@ -3130,7 +3151,7 @@ fn effects_are_covered(required: &[EffectKind], allowed: &[EffectKind]) -> bool 
 
 fn invocation_idempotency_key(
     run_context: &LoopRunContext,
-    request: &CapabilityInvocation,
+    request: &LoopRequest,
     input_ref: &CapabilityInputRef,
 ) -> Result<IdempotencyKey, AgentLoopHostError> {
     // Each mode must hash to a distinct key: a colliding key would replay the
@@ -3820,9 +3841,10 @@ mod tests {
     };
     use ironclaw_host_runtime::{
         CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
-        HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
-        RuntimeCapabilityResumeRequest, RuntimeCapabilityUnknown, RuntimeStatusRequest,
-        SurfaceKind, VisibleCapability, VisibleCapabilityAccess, VisibleCapabilitySurface,
+        HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalResume, RuntimeCapabilityCompleted,
+        RuntimeCapabilityFailure, RuntimeCapabilityUnknown, RuntimeInvocation,
+        RuntimeStatusRequest, SurfaceKind, VisibleCapability, VisibleCapabilityAccess,
+        VisibleCapabilitySurface,
     };
     use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
     use ironclaw_turns::{
@@ -5982,7 +6004,7 @@ mod tests {
             capability_info::CAPABILITY_ID
         );
 
-        let invocation = CapabilityInvocation {
+        let invocation = LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: surface.version,
             capability_id: candidate.capability_id,
@@ -5995,7 +6017,7 @@ mod tests {
             .await
             .expect("capability_info invocation succeeds");
         let replayed_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: invocation.activity_id,
                 surface_version: invocation.surface_version,
                 capability_id: invocation.capability_id,
@@ -6048,7 +6070,7 @@ mod tests {
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
             .await
             .expect("capability_info call should register");
-        let invocation = CapabilityInvocation {
+        let invocation = LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: surface.version,
             capability_id: candidate.capability_id,
@@ -6114,7 +6136,7 @@ mod tests {
         );
 
         let first_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: first.activity_id,
                 surface_version: surface.version.clone(),
                 capability_id: first.capability_id.clone(),
@@ -6125,7 +6147,7 @@ mod tests {
             .await
             .expect("first invocation succeeds");
         let replayed_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: second.activity_id,
                 surface_version: surface.version,
                 capability_id: second.capability_id,
@@ -6188,7 +6210,7 @@ mod tests {
         );
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id,
                 surface_version: surface.version,
                 capability_id: candidate.capability_id,
@@ -6256,7 +6278,7 @@ mod tests {
             .expect("password/traceback reasoning text must register, not be staged as a failure");
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: surface.version,
                 capability_id: candidate.capability_id,
@@ -6369,7 +6391,7 @@ mod tests {
         };
 
         let error = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: mismatched_activity_id,
                 surface_version: surface.version.clone(),
                 capability_id: candidate.capability_id.clone(),
@@ -6387,7 +6409,7 @@ mod tests {
         );
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: surface.version,
                 capability_id: candidate.capability_id,
@@ -6435,7 +6457,7 @@ mod tests {
             .await
             .expect("first provider tool call registers");
         let first_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: first.activity_id,
                 surface_version: surface.version.clone(),
                 capability_id: first.capability_id.clone(),
@@ -6470,7 +6492,7 @@ mod tests {
         );
 
         let replayed_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: second.activity_id,
                 surface_version: surface.version,
                 capability_id: second.capability_id,
@@ -6538,7 +6560,7 @@ mod tests {
             ],
             "known target should include both capability_info and target ids"
         );
-        port.invoke_capability(CapabilityInvocation {
+        port.invoke_capability(LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: surface.version,
             capability_id: candidate.capability_id,
@@ -6616,7 +6638,7 @@ mod tests {
             );
 
             let outcome = port
-                .invoke_capability(CapabilityInvocation {
+                .invoke_capability(LoopRequest {
                     activity_id: candidate.activity_id,
                     surface_version: surface.version.clone(),
                     capability_id: candidate.capability_id,
@@ -6697,7 +6719,7 @@ mod tests {
             );
 
             let outcome = port
-                .invoke_capability(CapabilityInvocation {
+                .invoke_capability(LoopRequest {
                     activity_id: candidate.activity_id,
                     surface_version: surface.version.clone(),
                     capability_id: candidate.capability_id,
@@ -6777,7 +6799,7 @@ mod tests {
         );
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: surface.version,
                 capability_id: candidate.capability_id,
@@ -6839,7 +6861,7 @@ mod tests {
         );
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(capability_info::CAPABILITY_ID)
@@ -6924,7 +6946,7 @@ mod tests {
             .expect("staged provider tool call");
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id,
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(capability_info::CAPABILITY_ID)
@@ -7002,7 +7024,7 @@ mod tests {
         };
 
         let error = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: mismatched_activity_id,
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(capability_info::CAPABILITY_ID)
@@ -7024,7 +7046,7 @@ mod tests {
         assert!(runtime.take_requests().is_empty());
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: registered_activity_id,
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(capability_info::CAPABILITY_ID)
@@ -7286,7 +7308,7 @@ mod tests {
                 .register_provider_tool_call(RegisterProviderToolCallRequest::new(call))
                 .await
                 .expect("capability_info call should register");
-            port.invoke_capability(CapabilityInvocation {
+            port.invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: surface.version.clone(),
                 capability_id: candidate.capability_id,
@@ -7352,7 +7374,7 @@ mod tests {
             .visible_capabilities(VisibleCapabilityRequest {})
             .await
             .expect("visible capabilities load");
-        port.invoke_capability(CapabilityInvocation {
+        port.invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
@@ -7366,7 +7388,7 @@ mod tests {
 
         let requests = runtime.take_requests();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].capability_id, capability_id);
+        assert_eq!(requests[0].1, capability_id);
     }
 
     #[tokio::test]
@@ -7409,7 +7431,7 @@ mod tests {
 
         let requests = runtime.take_requests();
         assert_eq!(requests.len(), 1);
-        let recorded = &requests[0].context;
+        let recorded = &requests[0].0;
         assert_eq!(recorded.resource_scope.user_id.as_str(), "shared-subject");
         assert_eq!(
             recorded
@@ -7524,7 +7546,7 @@ mod tests {
             .expect("visible capabilities load");
         let input_ref = CapabilityInputRef::new("input:mount-test").expect("valid input ref");
 
-        port.invoke_capability(CapabilityInvocation {
+        port.invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version.clone(),
             capability_id: override_id.clone(),
@@ -7534,7 +7556,7 @@ mod tests {
         })
         .await
         .expect("override invocation succeeds");
-        port.invoke_capability(CapabilityInvocation {
+        port.invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: default_id.clone(),
@@ -7547,10 +7569,10 @@ mod tests {
 
         let requests = runtime.take_requests();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].capability_id, override_id);
-        assert_eq!(requests[0].context.mounts, override_mounts);
-        assert_eq!(requests[1].capability_id, default_id);
-        assert_eq!(requests[1].context.mounts, default_mounts);
+        assert_eq!(requests[0].1, override_id);
+        assert_eq!(requests[0].0.mounts, override_mounts);
+        assert_eq!(requests[1].1, default_id);
+        assert_eq!(requests[1].0.mounts, default_mounts);
     }
 
     #[tokio::test]
@@ -7595,7 +7617,7 @@ mod tests {
             .expect("visible capabilities load");
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: capability_id.clone(),
@@ -7617,9 +7639,9 @@ mod tests {
         );
         let spawn_requests = runtime.take_spawn_requests();
         assert_eq!(spawn_requests.len(), 1);
-        assert_eq!(spawn_requests[0].capability_id, capability_id);
+        assert_eq!(spawn_requests[0].1, capability_id);
         assert_eq!(
-            serde_json::from_value::<SandboxProcessPlan>(spawn_requests[0].input.clone())
+            serde_json::from_value::<SandboxProcessPlan>(spawn_requests[0].3.clone())
                 .expect("spawn input is a typed sandbox process plan")
                 .run
                 .command,
@@ -7652,7 +7674,7 @@ mod tests {
         assert!(matches!(&outcome, Resolution::Done(o) if o.verdict.is_success()));
         let requests = runtime.take_requests();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].capability_id, capability_id);
+        assert_eq!(requests[0].1, capability_id);
         assert!(
             runtime.take_spawn_requests().is_empty(),
             "non-sandbox capability must not use spawn dispatch"
@@ -7698,7 +7720,7 @@ mod tests {
             .expect("visible capabilities load");
 
         let error = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id,
@@ -7774,7 +7796,7 @@ mod tests {
         );
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: surface.version,
                 capability_id,
@@ -7870,7 +7892,7 @@ mod tests {
             .expect("schema-invalid provider calls should register");
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: surface.version,
                 capability_id,
@@ -7967,7 +7989,7 @@ mod tests {
             .expect("schema-invalid provider calls should register");
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: candidate.activity_id,
                 surface_version: surface.version,
                 capability_id,
@@ -8046,7 +8068,7 @@ mod tests {
             .await
             .expect("visible capabilities load");
 
-        port.invoke_capability(CapabilityInvocation {
+        port.invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -8059,7 +8081,7 @@ mod tests {
 
         let requests = runtime.take_requests();
         assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].input, serde_json::json!({"limit": 10}));
+        assert_eq!(requests[0].3, serde_json::json!({"limit": 10}));
     }
 
     #[tokio::test]
@@ -8103,7 +8125,7 @@ mod tests {
             .expect("visible capabilities load");
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id,
@@ -8166,7 +8188,7 @@ mod tests {
             .expect("visible capabilities load");
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id,
@@ -8498,7 +8520,7 @@ mod tests {
         assert_eq!(invocation_context.grants.grants.len(), 1);
     }
 
-    /// Guard: a `CapabilityInvocation` with both `approval_resume` and `auth_resume` set
+    /// Guard: a `LoopRequest` with both `approval_resume` and `auth_resume` set
     /// must be rejected fail-closed with `InvalidInvocation` — the two resume modes are
     /// mutually exclusive and simultaneous presence indicates a malformed invocation.
     #[tokio::test]
@@ -8527,7 +8549,7 @@ mod tests {
 
         let resume_token =
             CapabilityResumeToken::new(InvocationId::new().to_string()).expect("valid token");
-        let dual_resume_invocation = CapabilityInvocation {
+        let dual_resume_invocation = LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: invocation.surface_version,
             capability_id: invocation.capability_id,
@@ -8586,7 +8608,7 @@ mod tests {
 
         let invocation = visible_runtime_invocation(&port).await;
         let err = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: invocation.activity_id,
                 surface_version: invocation.surface_version,
                 capability_id: invocation.capability_id,
@@ -8669,7 +8691,7 @@ mod tests {
             },
         );
         let err = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: mismatched_activity_id,
                 surface_version: surface.version,
                 capability_id: candidate.capability_id,
@@ -8744,7 +8766,7 @@ mod tests {
             input_ref: invocation.input_ref.clone(),
         };
         let first_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: invocation.activity_id,
                 surface_version: invocation.surface_version.clone(),
                 capability_id: invocation.capability_id.clone(),
@@ -8764,7 +8786,7 @@ mod tests {
             }
         };
         let err = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: mismatched_activity_id,
                 surface_version: invocation.surface_version,
                 capability_id: invocation.capability_id,
@@ -8810,7 +8832,7 @@ mod tests {
 
         let invocation = visible_runtime_invocation(&port).await;
         let err = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: invocation.activity_id,
                 surface_version: invocation.surface_version,
                 capability_id: invocation.capability_id,
@@ -8871,7 +8893,7 @@ mod tests {
             input_ref: invocation.input_ref.clone(),
         };
         let err = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: invocation.activity_id,
                 surface_version: invocation.surface_version,
                 capability_id: invocation.capability_id,
@@ -8958,7 +8980,7 @@ mod tests {
             .expect("valid resume token");
         let correlation_id = CorrelationId::new();
         let first = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: invocation.activity_id,
                 surface_version: invocation.surface_version.clone(),
                 capability_id: invocation.capability_id.clone(),
@@ -8980,7 +9002,7 @@ mod tests {
         let requests = runtime.resume_requests();
         assert_eq!(requests.len(), 1, "resume dispatched to the runtime once");
         assert_eq!(
-            requests[0].input, original_input,
+            requests[0].4, original_input,
             "resume must dispatch the STORE-reconstituted input, not re-resolve the stale loop ref"
         );
 
@@ -8991,7 +9013,7 @@ mod tests {
         let other_stale_ref =
             CapabilityInputRef::new("input:other-stale-loop-supplied").expect("valid input ref");
         let replayed = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: invocation.activity_id,
                 surface_version: invocation.surface_version,
                 capability_id: invocation.capability_id,
@@ -9075,7 +9097,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
+            _request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -9085,7 +9107,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
+            _request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::Unavailable,
@@ -9132,7 +9154,7 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            request: CapabilityInvocation,
+            request: LoopRequest,
         ) -> Result<Resolution, AgentLoopHostError> {
             self.log.lock().expect("log lock").push(self.label);
             self.inner.invoke_capability(request).await
@@ -9140,7 +9162,7 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            request: CapabilityBatchInvocation,
+            request: LoopRequestBatch,
         ) -> Result<ResolutionBatch, AgentLoopHostError> {
             self.log.lock().expect("log lock").push(self.label);
             self.inner.invoke_capability_batch(request).await
@@ -9910,9 +9932,7 @@ mod tests {
         );
     }
 
-    async fn visible_runtime_invocation(
-        port: &HostRuntimeLoopCapabilityPort,
-    ) -> CapabilityInvocation {
+    async fn visible_runtime_invocation(port: &HostRuntimeLoopCapabilityPort) -> LoopRequest {
         let surface = port
             .visible_capabilities(VisibleCapabilityRequest {})
             .await
@@ -9921,7 +9941,7 @@ mod tests {
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(provider_tool_call()))
             .await
             .expect("provider tool call registers");
-        CapabilityInvocation {
+        LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: surface.version,
             capability_id: candidate.capability_id,
@@ -9952,8 +9972,8 @@ mod tests {
 
     struct RecordingHostRuntime {
         capabilities: Mutex<Vec<VisibleCapability>>,
-        requests: Mutex<Vec<RuntimeCapabilityRequest>>,
-        spawn_requests: Mutex<Vec<RuntimeCapabilityRequest>>,
+        requests: Mutex<Vec<RuntimeInvocation>>,
+        spawn_requests: Mutex<Vec<RuntimeInvocation>>,
     }
 
     impl RecordingHostRuntime {
@@ -9969,11 +9989,11 @@ mod tests {
             *self.capabilities.lock().expect("capabilities lock") = capabilities;
         }
 
-        fn take_requests(&self) -> Vec<RuntimeCapabilityRequest> {
+        fn take_requests(&self) -> Vec<RuntimeInvocation> {
             self.requests.lock().expect("requests lock").clone()
         }
 
-        fn take_spawn_requests(&self) -> Vec<RuntimeCapabilityRequest> {
+        fn take_spawn_requests(&self) -> Vec<RuntimeInvocation> {
             self.spawn_requests
                 .lock()
                 .expect("spawn requests lock")
@@ -9985,7 +10005,7 @@ mod tests {
     impl HostRuntime for RecordingHostRuntime {
         async fn invoke_capability(
             &self,
-            request: RuntimeCapabilityRequest,
+            request: RuntimeInvocation,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             self.requests
                 .lock()
@@ -9993,7 +10013,7 @@ mod tests {
                 .push(request.clone());
             Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 RuntimeCapabilityCompleted {
-                    capability_id: request.capability_id,
+                    capability_id: request.1,
                     output: serde_json::json!({"ok": true}),
                     display_preview: None,
                     usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
@@ -10003,7 +10023,7 @@ mod tests {
 
         async fn spawn_capability(
             &self,
-            request: RuntimeCapabilityRequest,
+            request: RuntimeInvocation,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             self.spawn_requests
                 .lock()
@@ -10012,14 +10032,14 @@ mod tests {
             Ok(RuntimeCapabilityOutcome::SpawnedProcess(
                 ironclaw_host_runtime::RuntimeProcessHandle {
                     process_id: ironclaw_host_api::ProcessId::new(),
-                    capability_id: request.capability_id,
+                    capability_id: request.1,
                 },
             ))
         }
 
         async fn resume_capability(
             &self,
-            _request: RuntimeCapabilityResumeRequest,
+            _request: RuntimeApprovalResume,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             unreachable!("recording host runtime should not resume")
         }
@@ -10055,7 +10075,7 @@ mod tests {
 
     struct RecordingResumeHostRuntime {
         capabilities: Vec<VisibleCapability>,
-        resume_requests: Mutex<Vec<RuntimeCapabilityResumeRequest>>,
+        resume_requests: Mutex<Vec<RuntimeApprovalResume>>,
     }
 
     impl RecordingResumeHostRuntime {
@@ -10073,7 +10093,7 @@ mod tests {
                 .len()
         }
 
-        fn resume_requests(&self) -> Vec<RuntimeCapabilityResumeRequest> {
+        fn resume_requests(&self) -> Vec<RuntimeApprovalResume> {
             self.resume_requests
                 .lock()
                 .expect("resume requests lock")
@@ -10085,14 +10105,14 @@ mod tests {
     impl HostRuntime for RecordingResumeHostRuntime {
         async fn invoke_capability(
             &self,
-            _request: RuntimeCapabilityRequest,
+            _request: RuntimeInvocation,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             unreachable!("recording resume runtime should not fresh-dispatch")
         }
 
         async fn resume_capability(
             &self,
-            request: RuntimeCapabilityResumeRequest,
+            request: RuntimeApprovalResume,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             self.resume_requests
                 .lock()
@@ -10100,7 +10120,7 @@ mod tests {
                 .push(request.clone());
             Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 RuntimeCapabilityCompleted {
-                    capability_id: request.capability_id,
+                    capability_id: request.2,
                     output: serde_json::json!({"resumed": true}),
                     display_preview: None,
                     usage: ResourceUsage::default().set_output_bytes(RECORDING_OUTPUT_BYTES),
@@ -10158,7 +10178,7 @@ mod tests {
     impl HostRuntime for QueuedHostRuntime {
         async fn invoke_capability(
             &self,
-            _request: RuntimeCapabilityRequest,
+            _request: RuntimeInvocation,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             self.outcomes
                 .lock()
@@ -10169,7 +10189,7 @@ mod tests {
 
         async fn resume_capability(
             &self,
-            _request: RuntimeCapabilityResumeRequest,
+            _request: RuntimeApprovalResume,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             unreachable!("queued host runtime should not resume")
         }
@@ -10427,14 +10447,14 @@ mod tests {
     impl HostRuntime for NoopHostRuntime {
         async fn invoke_capability(
             &self,
-            _request: RuntimeCapabilityRequest,
+            _request: RuntimeInvocation,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             unreachable!("noop host runtime should not be called")
         }
 
         async fn resume_capability(
             &self,
-            _request: RuntimeCapabilityResumeRequest,
+            _request: RuntimeApprovalResume,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             unreachable!("noop host runtime should not be called")
         }

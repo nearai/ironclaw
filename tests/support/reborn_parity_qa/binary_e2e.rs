@@ -66,9 +66,8 @@ use ironclaw_turns::{
     SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId,
     TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
-        CapabilityCallCandidate, CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion, LoopHostMilestone, LoopHostMilestoneKind, ParentLoopOutput,
-        ProviderToolCallReplay,
+        CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopRequest, ParentLoopOutput, ProviderToolCallReplay,
     },
 };
 use serde_json::json;
@@ -1341,7 +1340,7 @@ impl RebornBinaryE2EHarness {
         self.model_gateway.assert_exhausted();
     }
 
-    pub fn capability_invocations(&self) -> Vec<CapabilityInvocation> {
+    pub fn capability_invocations(&self) -> Vec<LoopRequest> {
         self.capability_recorder.invocations()
     }
 

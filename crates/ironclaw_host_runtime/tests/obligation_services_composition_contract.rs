@@ -11,7 +11,7 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityOutcome,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -86,7 +86,7 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
         .await
         .unwrap();
 
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context,
         capability_id(),
         ResourceEstimate::default(),

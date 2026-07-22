@@ -22,9 +22,9 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, RuntimeFailureKind, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
+    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
@@ -1270,7 +1270,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .host_runtime
         .as_ref()
         .expect("host runtime")
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new("notion.notion-search").unwrap(),
             ResourceEstimate::default(),
@@ -1327,7 +1327,7 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
         .host_runtime
         .as_ref()
         .expect("host runtime")
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new("web-access.search").unwrap(),
             ResourceEstimate::default(),

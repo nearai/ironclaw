@@ -8,9 +8,8 @@ use super::runtime_adapters::wasm_error_kind;
 use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
     CapabilityId, DispatchError, PreparedWitTool, ResourceGovernor, ResourceReservationId,
-    ResourceUsage, RootFilesystem, RuntimeAdapterRequest, RuntimeAdapterResult,
-    RuntimeDispatchErrorKind, WasmError, WitToolExecution, WitToolHost, WitToolRequest,
-    WitToolRuntime,
+    ResourceUsage, RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind,
+    RuntimeLaneRequest, WasmError, WitToolExecution, WitToolHost, WitToolRequest, WitToolRuntime,
 };
 use ironclaw_host_api::ResourceReceipt;
 
@@ -206,7 +205,7 @@ pub(super) async fn execute_prepared_wasm<G>(
     runtime: WitToolRuntime,
     prepared: Arc<PreparedWitTool>,
     host: WitToolHost,
-    request: RuntimeAdapterRequest<'_, impl RootFilesystem, G>,
+    request: RuntimeLaneRequest<'_, impl RootFilesystem, G>,
 ) -> Result<RuntimeAdapterResult, DispatchError>
 where
     G: ResourceGovernor,

@@ -19,7 +19,7 @@ use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem, Scope
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
+    RuntimeFailureKind,
 };
 use ironclaw_processes::{
     FilesystemProcessResultStore, FilesystemProcessStore, ProcessExecutionRequest,
@@ -96,7 +96,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     let resumed = second
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -170,7 +170,7 @@ async fn approval_resume_survives_filesystem_service_restart_and_consumes_lease_
     let second_resume = third
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -244,7 +244,7 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
     let resumed = second
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -318,7 +318,7 @@ async fn approval_resume_survives_durable_libsql_reopen_and_consumes_lease_once(
     let second_resume = third
         .services
         .host_runtime_for_local_testing()
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -419,7 +419,7 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -727,12 +727,7 @@ async fn block_for_approval(
     input: Value,
 ) -> ironclaw_host_runtime::RuntimeApprovalGate {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 

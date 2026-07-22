@@ -64,7 +64,7 @@ struct EchoLane {
 impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoLane {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeLaneRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let output = request.input;
         let usage = ResourceUsage {

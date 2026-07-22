@@ -18,7 +18,7 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
+    RuntimeCapabilityOutcome, RuntimeFailureKind,
 };
 use ironclaw_resources::{
     InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
@@ -65,12 +65,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
     let input = json!({"message":"through host runtime"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            capability_id(),
-            estimate.clone(),
-            input.clone(),
-        ))
+        .invoke_capability((context, capability_id(), estimate.clone(), input.clone()))
         .await
         .unwrap();
 
@@ -130,7 +125,7 @@ async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispa
     let invocation_id = context.invocation_id;
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),

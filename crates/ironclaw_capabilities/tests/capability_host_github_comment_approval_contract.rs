@@ -66,13 +66,13 @@ async fn capability_host_resumes_approved_github_comment_issue_and_dispatches_on
     .with_obligation_handler(&obligation_handler);
 
     let result = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: fixture.context.clone(),
-            approval_request_id: fixture.approval_id,
-            capability_id: github_comment_capability_id(),
-            estimate: fixture.estimate.clone(),
-            input: fixture.input.clone(),
-        })
+        .resume_json(
+            fixture.context.clone(),
+            fixture.approval_id,
+            github_comment_capability_id(),
+            fixture.estimate.clone(),
+            fixture.input.clone(),
+        )
         .await
         .unwrap();
 
@@ -114,18 +114,18 @@ async fn capability_host_rejects_mutated_github_comment_issue_replay_before_disp
         .with_obligation_handler(&obligation_handler);
 
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: fixture.context.clone(),
-            approval_request_id: fixture.approval_id,
-            capability_id: github_comment_capability_id(),
-            estimate: fixture.estimate.clone(),
-            input: json!({
+        .resume_json(
+            fixture.context.clone(),
+            fixture.approval_id,
+            github_comment_capability_id(),
+            fixture.estimate.clone(),
+            json!({
                 "owner": "nearai",
                 "repo": "ironclaw",
                 "issue_number": 3806,
                 "body": "mutated approved comment"
             }),
-        })
+        )
         .await
         .unwrap_err();
 
@@ -183,12 +183,12 @@ async fn blocked_github_comment_fixture() -> GitHubCommentApprovalFixture {
     });
 
     let err = block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: github_comment_capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            github_comment_capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 

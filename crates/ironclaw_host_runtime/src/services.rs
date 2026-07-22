@@ -103,7 +103,7 @@ pub use production_wiring::{
 #[cfg(test)]
 use runtime_adapters::RuntimeAdapter;
 use runtime_adapters::{
-    FirstPartyRuntimeAdapter, McpRuntimeAdapter, RuntimeAdapterRequest, RuntimeLaneExecutor,
+    FirstPartyRuntimeAdapter, McpRuntimeAdapter, RuntimeLaneExecutor, RuntimeLaneRequest,
     ScriptRuntimeAdapter, ServiceResolvedRuntimeAdapter, WasmRuntimeAdapter,
 };
 use tool_resolver::RegistryLaneToolResolver;

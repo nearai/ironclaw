@@ -36,7 +36,4 @@ pub use process_authorization::{
 pub use replay_payload::{
     FilesystemReplayPayloadStore, ReplayPayload, ReplayPayloadStore, ReplayPayloadStoreError,
 };
-pub use requests::{
-    CapabilityAuthResumeRequest, CapabilityInvocationRequest, CapabilityInvocationResult,
-    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
-};
+pub use requests::{CapabilityInvocationResult, CapabilitySpawnRequest, CapabilitySpawnResult};

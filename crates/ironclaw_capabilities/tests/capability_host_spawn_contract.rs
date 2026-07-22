@@ -229,13 +229,13 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     let mut forged_context = context.clone();
     forged_context.authenticated_actor_user_id = Some(UserId::new("slack-bob").unwrap());
     let forged_error = resume_host
-        .resume_spawn_json(CapabilityResumeRequest {
-            context: forged_context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_spawn_json(
+            forged_context,
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -262,13 +262,13 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     );
 
     let result = resume_host
-        .resume_spawn_json(CapabilityResumeRequest {
-            context: context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
+        .resume_spawn_json(
+            context.clone(),
+            approval_id,
+            capability_id(),
             estimate,
             input,
-        })
+        )
         .await
         .unwrap();
 

@@ -39,7 +39,7 @@ use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime, HostRuntime,
     HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
     ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
+    RuntimeFailureKind, RuntimeInvocation, RuntimeProcessError, RuntimeProcessPort,
     SandboxCommandTransport, builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
@@ -172,7 +172,7 @@ pub(crate) async fn assert_services_use_combined_store_for_atomic_approval_block
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_without_grants();
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -529,12 +529,7 @@ pub(crate) async fn block_for_approval(
     input: serde_json::Value,
 ) -> ironclaw_host_runtime::RuntimeApprovalGate {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -1969,10 +1964,8 @@ pub(crate) fn process_sandbox_start(process_id: ProcessId, scope: ResourceScope)
     }
 }
 
-pub(crate) fn process_sandbox_runtime_request_for_scope(
-    scope: ResourceScope,
-) -> RuntimeCapabilityRequest {
-    RuntimeCapabilityRequest::new(
+pub(crate) fn process_sandbox_runtime_request_for_scope(scope: ResourceScope) -> RuntimeInvocation {
+    (
         execution_context_with_effect_grants_for_scope(
             process_sandbox_capability_id(),
             scope,
@@ -2154,7 +2147,7 @@ pub(crate) fn governor_with_default_limit(account: ResourceAccount) -> InMemoryR
 pub(crate) fn wasm_runtime_request(
     capability_id: CapabilityId,
     input: serde_json::Value,
-) -> RuntimeCapabilityRequest {
+) -> RuntimeInvocation {
     let scope = sample_scope(InvocationId::new());
     wasm_runtime_request_for_scope(capability_id, scope, input)
 }
@@ -2163,9 +2156,9 @@ pub(crate) fn wasm_runtime_request_for_scope(
     capability_id: CapabilityId,
     scope: ResourceScope,
     input: serde_json::Value,
-) -> RuntimeCapabilityRequest {
+) -> RuntimeInvocation {
     let context = execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope);
-    RuntimeCapabilityRequest::new(context, capability_id, wasm_http_estimate(), input)
+    (context, capability_id, wasm_http_estimate(), input)
 }
 
 pub(crate) fn wasm_http_estimate() -> ResourceEstimate {

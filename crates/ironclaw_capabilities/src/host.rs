@@ -35,12 +35,11 @@ use crate::helpers::{
 use crate::obligations::post_dispatch_obligations;
 use crate::ports::{CredentialPresence, HostPolicyFacts, PolicyAction};
 use crate::{
-    CapabilityAuthResumeRequest, CapabilityInvocationError, CapabilityInvocationRequest,
-    CapabilityInvocationResult, CapabilityObligationAbortRequest,
+    CapabilityInvocationError, CapabilityInvocationResult, CapabilityObligationAbortRequest,
     CapabilityObligationCompletionRequest, CapabilityObligationError,
     CapabilityObligationFailureKind, CapabilityObligationHandler, CapabilityObligationOutcome,
-    CapabilityObligationPhase, CapabilityObligationRequest, CapabilityResumeRequest,
-    CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityObligationPhase, CapabilityObligationRequest, CapabilitySpawnRequest,
+    CapabilitySpawnResult,
 };
 
 pub struct CapabilityHost<'a, D>
@@ -143,6 +142,29 @@ struct ResumedDispatchParams<'r> {
     descriptor: &'r CapabilityDescriptor,
     /// Approval-lease state for this resume.  See [`ResumedLeaseState`].
     lease_state: ResumedLeaseState<'r>,
+}
+
+struct InvocationInput {
+    context: ExecutionContext,
+    capability_id: CapabilityId,
+    estimate: ResourceEstimate,
+    input: serde_json::Value,
+}
+
+struct ApprovalResumeInput {
+    context: ExecutionContext,
+    approval_request_id: ApprovalRequestId,
+    capability_id: CapabilityId,
+    estimate: ResourceEstimate,
+    input: serde_json::Value,
+}
+
+struct AuthResumeInput {
+    context: ExecutionContext,
+    capability_id: CapabilityId,
+    estimate: ResourceEstimate,
+    input: serde_json::Value,
+    approval_request_id: Option<ApprovalRequestId>,
 }
 
 /// Outcome of the extracted `authorize()` fold (arch-simplification §5.3.2,
@@ -344,17 +366,26 @@ where
 
     #[tracing::instrument(
         level = "debug",
-        skip(self, request),
+        skip(self, input),
         fields(
-            invocation_id = %request.context.invocation_id,
-            capability_id = %request.capability_id,
-            scope = ?request.context.resource_scope,
+            invocation_id = %context.invocation_id,
+            capability_id = %capability_id,
+            scope = ?context.resource_scope,
         )
     )]
     pub async fn invoke_json(
         &self,
-        request: CapabilityInvocationRequest,
+        context: ExecutionContext,
+        capability_id: CapabilityId,
+        estimate: ResourceEstimate,
+        input: serde_json::Value,
     ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+        let request = InvocationInput {
+            context,
+            capability_id,
+            estimate,
+            input,
+        };
         let invocation_id = request.context.invocation_id;
         let capability_id = request.capability_id.clone();
         let scope = request.context.resource_scope.clone();
@@ -637,7 +668,7 @@ where
 
     async fn authorize(
         &self,
-        request: &CapabilityInvocationRequest,
+        request: &InvocationInput,
     ) -> Result<AuthorizeFold, CapabilityInvocationError> {
         let invocation_id = request.context.invocation_id;
         let scope = request.context.resource_scope.clone();
@@ -1107,8 +1138,19 @@ where
 
     pub async fn resume_json(
         &self,
-        request: CapabilityResumeRequest,
+        context: ExecutionContext,
+        approval_request_id: ApprovalRequestId,
+        capability_id: CapabilityId,
+        estimate: ResourceEstimate,
+        input: serde_json::Value,
     ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+        let request = ApprovalResumeInput {
+            context,
+            approval_request_id,
+            capability_id,
+            estimate,
+            input,
+        };
         let run_state =
             self.run_state
                 .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
@@ -1318,8 +1360,19 @@ where
     /// and the path falls through to normal authorization + dispatch.
     pub async fn auth_resume_json(
         &self,
-        request: CapabilityAuthResumeRequest,
+        context: ExecutionContext,
+        capability_id: CapabilityId,
+        estimate: ResourceEstimate,
+        input: serde_json::Value,
+        approval_request_id: Option<ApprovalRequestId>,
     ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+        let request = AuthResumeInput {
+            context,
+            capability_id,
+            estimate,
+            input,
+            approval_request_id,
+        };
         let run_state =
             self.run_state
                 .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
@@ -1649,8 +1702,19 @@ where
 
     pub async fn resume_spawn_json(
         &self,
-        request: CapabilityResumeRequest,
+        context: ExecutionContext,
+        approval_request_id: ApprovalRequestId,
+        capability_id: CapabilityId,
+        estimate: ResourceEstimate,
+        input: serde_json::Value,
     ) -> Result<CapabilitySpawnResult, CapabilityInvocationError> {
+        let request = ApprovalResumeInput {
+            context,
+            approval_request_id,
+            capability_id,
+            estimate,
+            input,
+        };
         let process_manager = self.process_manager.ok_or_else(|| {
             CapabilityInvocationError::ProcessManagerMissing {
                 capability: request.capability_id.clone(),
@@ -3843,7 +3907,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         registry
     }
 
-    fn allow_request() -> CapabilityInvocationRequest {
+    fn allow_request() -> InvocationInput {
         use ironclaw_host_api::{CapabilitySet, MountView, RuntimeKind, TrustClass, UserId};
         let mut context = ExecutionContext::local_default(
             UserId::new("user").unwrap(),
@@ -3860,7 +3924,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
         context.origin = Some(ironclaw_host_api::InvocationOrigin::Product(
             ironclaw_host_api::ProductKind::new("settings").unwrap(),
         ));
-        CapabilityInvocationRequest {
+        InvocationInput {
             context,
             capability_id: CapabilityId::new("echo.say").unwrap(),
             estimate: ResourceEstimate::default(),

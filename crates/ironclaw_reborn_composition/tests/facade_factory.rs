@@ -21,9 +21,8 @@ use ironclaw_host_api::{
     UserId,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeFailureKind, SHELL_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind,
-    VisibleCapabilityRequest,
+    CapabilitySurfacePolicy, RuntimeCapabilityOutcome, RuntimeFailureKind, SHELL_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, SurfaceKind, VisibleCapabilityRequest,
 };
 use ironclaw_reborn_composition::RebornRuntimeProcessBinding;
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile, RebornServices};
@@ -353,7 +352,7 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
     );
 
     let shell_outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             production_process_capability_execution_context(),
             CapabilityId::new(SHELL_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
@@ -369,7 +368,7 @@ async fn assert_process_capabilities_unavailable_for_processless_runtime(
     );
 
     let spawn_outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             production_process_capability_execution_context(),
             CapabilityId::new(SPAWN_SUBAGENT_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
@@ -409,7 +408,7 @@ async fn invoke_trigger_management(
     input: Value,
 ) -> Value {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             trigger_management_execution_context(),
             CapabilityId::new(capability).unwrap(),
             ResourceEstimate::default(),

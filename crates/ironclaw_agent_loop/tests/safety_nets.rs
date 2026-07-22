@@ -13,9 +13,9 @@ use ironclaw_agent_loop::{
 use ironclaw_turns::{
     CapabilityActivityId, LoopExit, LoopFailureKind,
     run_profile::{
-        AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityInputRef,
-        CapabilityInvocation, ContentDigest, LoopCancelReasonKind, LoopCancellationPort,
-        LoopCancellationSignal, LoopCapabilityPort, LoopRunInfoPort,
+        AgentLoopHostErrorKind, CapabilityInputRef, ContentDigest, LoopCancelReasonKind,
+        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopRequest,
+        LoopRequestBatch, LoopRunInfoPort,
     },
 };
 
@@ -41,8 +41,8 @@ async fn cancel_after_capability_batch_is_consumed_once() {
         })
         .cancel_after_capability_batch(first_signal.clone())
         .build();
-    let request = CapabilityBatchInvocation {
-        invocations: vec![CapabilityInvocation {
+    let request = LoopRequestBatch {
+        invocations: vec![LoopRequest {
             surface_version: surface_version(),
             capability_id: capability_id("demo.echo"),
             activity_id: CapabilityActivityId::new(),
