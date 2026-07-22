@@ -2015,11 +2015,12 @@ async fn byte_state_fork_recovers_to_model_snapshot() {
 /// it deterministically (identically to the never-crashed reference model),
 /// with any cause preserved.
 ///
-/// The crash itself preserves the durable `Running` state. A later lease-recovery
-/// pass resolves both the row store and its reference model identically. The
-/// caller-level tests below separately prove the two current #6284 outcomes:
-/// checkpointless work is requeued while its reclaim budget remains, and it
-/// terminal-fails with `crash_retry_exhausted` once that bound is reached.
+/// The crash itself preserves the durable `Running` state. This test reopens the
+/// row store, reads that state, and compares its durable prefix with the
+/// never-crashed reference model. The caller-level tests below separately prove
+/// the two current #6284 lease-recovery outcomes: checkpointless work is requeued
+/// while its reclaim budget remains, and it terminal-fails with
+/// `crash_retry_exhausted` once that bound is reached.
 #[tokio::test]
 async fn crash_mid_run_recovers_identically_to_model_and_preserves_cause() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
