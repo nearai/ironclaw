@@ -349,7 +349,7 @@ pub struct RebornAdminCreateUserRequest {
 
 /// Response for `POST /admin/users` — carries the one-time API token in
 /// plaintext. This is the ONLY response that ever exposes it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminUserCreatedResponse {
     pub user: AdminUserRecord,
     pub api_token: String,

@@ -1397,6 +1397,11 @@ pub struct RebornVendorAuthAccounts {
     pub accounts: Vec<RebornAuthAccount>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornTraceHoldAuthorizeProductRequest {
+    pub submission_id: String,
+}
+
 /// One connected account for a vendor. `state` is the shared §6.3 auth-account
 /// state machine, exposed exactly — no vendor- or extension-specific state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1793,6 +1798,12 @@ impl Serialize for RebornOperatorConfigEntry {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RebornOperatorConfigSetRequest {
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RebornOperatorConfigSetProductRequest {
+    pub key: String,
     pub value: serde_json::Value,
 }
 

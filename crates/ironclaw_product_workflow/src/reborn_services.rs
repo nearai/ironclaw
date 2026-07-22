@@ -45,7 +45,7 @@ use ironclaw_turns::{
     SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use url::Url;
 use uuid::Uuid;
@@ -179,13 +179,13 @@ pub use types::{
     RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
     RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
     RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
-    RebornOperatorSetupRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
-    RebornOperatorSetupStep, RebornOperatorSetupStepStatus, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
+    RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
+    RebornOperatorStatusCheck, RebornOperatorStatusResponse, RebornOperatorStatusSeverity,
+    RebornOperatorStatusState, RebornOperatorSurfaceStatus, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetChannel,
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetDisplayName,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
@@ -199,11 +199,12 @@ pub use types::{
     RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornVendorAuthAccounts,
+    RebornTraceHoldAuthorizeProductRequest, RebornVendorAuthAccounts,
 };
 pub use views::{
-    ProductView, RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
-    UnavailableRebornViewProvider,
+    ProductSurfaceCommand, ProductView, RebornCommandId, RebornCommandRequest,
+    RebornCommandResponse, RebornViewDescriptor, RebornViewPage, RebornViewProvider,
+    RebornViewQuery, UnavailableRebornViewProvider,
 };
 
 type SkillActivationRecorder =
@@ -299,6 +300,70 @@ pub const AUTOMATION_RENAME_CAPABILITY: ProductCapabilityDescriptor =
 pub const AUTOMATION_DELETE_CAPABILITY_ID: &str = "builtin.automation_delete";
 pub const AUTOMATION_DELETE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_DELETE_CAPABILITY_ID);
+pub const CREATE_THREAD_COMMAND: ProductSurfaceCommand<
+    WebUiCreateThreadRequest,
+    RebornCreateThreadResponse,
+> = ProductSurfaceCommand::new(RebornCommandId::CreateThread);
+pub const SUBMIT_TURN_COMMAND: ProductSurfaceCommand<
+    WebUiSendMessageRequest,
+    RebornSubmitTurnResponse,
+> = ProductSurfaceCommand::new(RebornCommandId::SubmitTurn);
+pub const CANCEL_RUN_COMMAND: ProductSurfaceCommand<
+    WebUiCancelRunRequest,
+    RebornCancelRunResponse,
+> = ProductSurfaceCommand::new(RebornCommandId::CancelRun);
+pub const RESOLVE_GATE_COMMAND: ProductSurfaceCommand<
+    WebUiResolveGateRequest,
+    RebornResolveGateResponse,
+> = ProductSurfaceCommand::new(RebornCommandId::ResolveGate);
+pub const RETRY_RUN_COMMAND: ProductSurfaceCommand<WebUiRetryRunRequest, RebornRetryRunResponse> =
+    ProductSurfaceCommand::new(RebornCommandId::RetryRun);
+pub const PROJECT_CREATE_COMMAND: ProductSurfaceCommand<
+    RebornCreateProjectRequest,
+    RebornProjectResponse,
+> = ProductSurfaceCommand::new(RebornCommandId::ProjectCreate);
+pub const PROJECT_FS_READ_COMMAND: ProductSurfaceCommand<
+    RebornProjectFsReadRequest,
+    ProjectFsFile,
+> = ProductSurfaceCommand::new(RebornCommandId::ProjectFsRead);
+pub const FS_READ_COMMAND: ProductSurfaceCommand<RebornFsReadRequest, ProjectFsFile> =
+    ProductSurfaceCommand::new(RebornCommandId::FsRead);
+pub const ATTACHMENT_READ_COMMAND: ProductSurfaceCommand<
+    RebornAttachmentRequest,
+    RebornAttachmentBytes,
+> = ProductSurfaceCommand::new(RebornCommandId::AttachmentRead);
+pub const TRACE_ACCOUNT_LOGIN_LINK_COMMAND: ProductSurfaceCommand<
+    serde_json::Value,
+    RebornAccountLoginLinkResponse,
+> = ProductSurfaceCommand::new(RebornCommandId::TraceAccountLoginLink);
+pub const TRACE_HOLD_AUTHORIZE_COMMAND: ProductSurfaceCommand<
+    RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse,
+> = ProductSurfaceCommand::new(RebornCommandId::TraceHoldAuthorize);
+pub const OPERATOR_CONFIG_SET_KEY_COMMAND: ProductSurfaceCommand<
+    RebornOperatorConfigSetProductRequest,
+    RebornOperatorConfigGetResponse,
+> = ProductSurfaceCommand::new(RebornCommandId::OperatorConfigSetKey);
+pub const OPERATOR_SERVICE_LIFECYCLE_COMMAND: ProductSurfaceCommand<
+    RebornOperatorServiceLifecycleRequest,
+    RebornOperatorCommandPlaneResponse,
+> = ProductSurfaceCommand::new(RebornCommandId::OperatorServiceLifecycle);
+pub const LLM_TEST_CONNECTION_COMMAND: ProductSurfaceCommand<serde_json::Value, LlmProbeResult> =
+    ProductSurfaceCommand::new(RebornCommandId::LlmTestConnection);
+pub const LLM_LIST_MODELS_COMMAND: ProductSurfaceCommand<serde_json::Value, LlmModelsResult> =
+    ProductSurfaceCommand::new(RebornCommandId::LlmListModels);
+pub const LLM_NEARAI_LOGIN_COMMAND: ProductSurfaceCommand<serde_json::Value, NearAiLoginStart> =
+    ProductSurfaceCommand::new(RebornCommandId::LlmNearAiLogin);
+pub const LLM_NEARAI_WALLET_LOGIN_COMMAND: ProductSurfaceCommand<
+    serde_json::Value,
+    NearAiWalletLoginResult,
+> = ProductSurfaceCommand::new(RebornCommandId::LlmNearAiWalletLogin);
+pub const LLM_CODEX_LOGIN_COMMAND: ProductSurfaceCommand<serde_json::Value, CodexLoginStart> =
+    ProductSurfaceCommand::new(RebornCommandId::LlmCodexLogin);
+pub const ADMIN_USER_CREATE_COMMAND: ProductSurfaceCommand<
+    RebornAdminCreateUserRequest,
+    RebornAdminUserCreatedResponse,
+> = ProductSurfaceCommand::new(RebornCommandId::AdminUserCreate);
 pub const THREADS_VIEW: ProductView<WebUiListThreadsRequest, RebornListThreadsResponse> =
     ProductView::paginated("threads");
 pub const TIMELINE_VIEW: ProductView<RebornTimelineRequest, RebornTimelineResponse> =
@@ -1922,6 +1987,108 @@ pub trait RebornServicesApi: Send + Sync {
     ) -> Result<RebornViewPage, RebornServicesError> {
         let _ = (caller, query);
         Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Execute one descriptor-declared, result-bearing product command.
+    ///
+    /// This is the result-bearing sibling of [`Self::invoke`]: commands keep
+    /// legacy HTTP response bodies intact while the WebUI stops naming concrete
+    /// facade methods directly.
+    async fn command(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCommandRequest,
+    ) -> Result<RebornCommandResponse, RebornServicesError> {
+        let command_id = RebornCommandId::parse(request.command_id.as_str())
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+        match command_id {
+            RebornCommandId::CreateThread => RebornCommandResponse::json(
+                self.create_thread(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::SubmitTurn => RebornCommandResponse::json(
+                self.submit_turn(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::CancelRun => RebornCommandResponse::json(
+                self.cancel_run(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::ResolveGate => RebornCommandResponse::json(
+                self.resolve_gate(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::RetryRun => RebornCommandResponse::json(
+                self.retry_run(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::ProjectCreate => RebornCommandResponse::json(
+                self.create_project(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::ProjectFsRead => Ok(RebornCommandResponse::project_file(
+                self.read_project_file(caller, product_command_input(request.input)?)
+                    .await?,
+            )),
+            RebornCommandId::FsRead => Ok(RebornCommandResponse::project_file(
+                self.read_fs_file(caller, product_command_input(request.input)?)
+                    .await?,
+            )),
+            RebornCommandId::AttachmentRead => Ok(RebornCommandResponse::attachment(
+                self.read_attachment(caller, product_command_input(request.input)?)
+                    .await?,
+            )),
+            RebornCommandId::TraceAccountLoginLink => {
+                RebornCommandResponse::json(self.trace_account_login_link(caller).await?)
+            }
+            RebornCommandId::TraceHoldAuthorize => {
+                let input: RebornTraceHoldAuthorizeProductRequest =
+                    product_command_input(request.input)?;
+                RebornCommandResponse::json(
+                    self.authorize_trace_hold(caller, input.submission_id)
+                        .await?,
+                )
+            }
+            RebornCommandId::OperatorConfigSetKey => {
+                let input: RebornOperatorConfigSetProductRequest =
+                    product_command_input(request.input)?;
+                RebornCommandResponse::json(
+                    self.set_operator_config_key(
+                        caller,
+                        input.key,
+                        RebornOperatorConfigSetRequest { value: input.value },
+                    )
+                    .await?,
+                )
+            }
+            RebornCommandId::OperatorServiceLifecycle => RebornCommandResponse::json(
+                self.run_operator_service_lifecycle(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::LlmTestConnection => RebornCommandResponse::json(
+                self.test_llm_connection(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::LlmListModels => RebornCommandResponse::json(
+                self.list_llm_models(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::LlmNearAiLogin => RebornCommandResponse::json(
+                self.start_nearai_login(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::LlmNearAiWalletLogin => RebornCommandResponse::json(
+                self.complete_nearai_wallet_login(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::LlmCodexLogin => {
+                RebornCommandResponse::json(self.start_codex_login(caller).await?)
+            }
+            RebornCommandId::AdminUserCreate => RebornCommandResponse::json(
+                self.create_admin_user(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+        }
     }
 
     /// Read the raw bytes of one landed attachment so the browser can render an
@@ -6355,6 +6522,13 @@ fn product_capability_input_error(field: &'static str) -> RebornServicesError {
         field,
         WebUiInboundValidationCode::InvalidValue,
     ))
+}
+
+fn product_command_input<T>(input: serde_json::Value) -> Result<T, RebornServicesError>
+where
+    T: DeserializeOwned,
+{
+    serde_json::from_value(input).map_err(|_| product_capability_input_error("input"))
 }
 
 fn map_project_service_error(error: ProjectServiceError) -> RebornServicesError {

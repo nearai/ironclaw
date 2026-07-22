@@ -18,7 +18,8 @@ use ironclaw_approvals::{
     AutoApproveSettingInput, AutoApproveSettingKey, AutoApproveSettingRecord,
     AutoApproveSettingStore, CapabilityPermissionStoreError, PersistentApprovalAction,
     PersistentApprovalPolicy, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
 };
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
@@ -48,7 +49,7 @@ use ironclaw_product_workflow::{
     ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductFacade,
-    ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
+    CREATE_THREAD_COMMAND, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
     ChannelConnectionRequirement, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
@@ -67,27 +68,27 @@ use ironclaw_product_workflow::{
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, OperatorLogsService,
-    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
-    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
-    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
-    PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
-    PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller, ProjectFilesystemReader,
-    ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
-    ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
+    OperatorStatusService, OutboundPreferencesProductFacade, PROJECT_DELETE_CAPABILITY_ID,
+    PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID,
+    PROJECT_MEMBER_REMOVE_CAPABILITY_ID, PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW,
+    PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView,
+    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
+    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
     RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionSurface, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsStatRequest,
-    RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCommandId,
+    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionSurface,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
     RebornListProjectsResponse, RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest,
@@ -121,9 +122,10 @@ use ironclaw_product_workflow::{
     THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
     TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -3182,6 +3184,17 @@ fn product_surface_descriptor_helpers_keep_view_and_capability_declarations_type
 
     assert!(response.threads.is_empty());
     assert_eq!(response.next_cursor.as_deref(), Some("cursor-2"));
+
+    let command = CREATE_THREAD_COMMAND
+        .request(WebUiCreateThreadRequest {
+            client_action_id: Some("action-1".to_string()),
+            requested_thread_id: None,
+            project_id: None,
+        })
+        .expect("create thread command");
+    assert_eq!(command.command_id, RebornCommandId::CreateThread.as_str());
+    assert_eq!(command.input["client_action_id"], "action-1");
+
     assert_eq!(
         OUTBOUND_PREFERENCES_SET_CAPABILITY
             .capability_id()
@@ -10096,6 +10109,9 @@ type OperatorConfigServices = RebornServices<OperatorConfigAutoApproveInvoker>;
 #[derive(Clone)]
 struct OperatorConfigAutoApproveInvoker {
     auto_approve: Arc<dyn AutoApproveSettingStore>,
+    overrides: Arc<dyn ToolPermissionOverrideStore>,
+    persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
+    tools: Arc<Vec<RebornOperatorToolInfo>>,
 }
 
 #[async_trait]
@@ -10107,10 +10123,26 @@ impl ProductCapabilityInvoker for OperatorConfigAutoApproveInvoker {
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
-        assert_eq!(
-            capability.as_str(),
-            OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID
-        );
+        match capability.as_str() {
+            OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID => {
+                self.invoke_auto_approve(caller, input, activity_id).await
+            }
+            OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID => {
+                self.invoke_tool_permission(caller, input, activity_id)
+                    .await
+            }
+            capability => panic!("unexpected operator config capability {capability}"),
+        }
+    }
+}
+
+impl OperatorConfigAutoApproveInvoker {
+    async fn invoke_auto_approve(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
         let enabled = input
             .get("enabled")
             .and_then(serde_json::Value::as_bool)
@@ -10134,6 +10166,122 @@ impl ProductCapabilityInvoker for OperatorConfigAutoApproveInvoker {
             .await
             .map_err(RebornServicesError::internal_from)?;
         Ok(operator_config_success_resolution(activity_id))
+    }
+
+    async fn invoke_tool_permission(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        let capability_id = input
+            .get("capability_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("tool-permission capability input must carry capability_id");
+        let state = input
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .expect("tool-permission capability input must carry state");
+        let tool_capability_id = CapabilityId::new(capability_id).expect("capability id");
+        let tool = self
+            .tools
+            .iter()
+            .find(|tool| tool.capability_id == tool_capability_id)
+            .unwrap_or_else(|| panic!("operator tool {capability_id}"));
+        let scope = ResourceScope {
+            tenant_id: caller.tenant_id.clone(),
+            user_id: caller.user_id.clone(),
+            agent_id: caller.agent_id.clone(),
+            project_id: caller.project_id.clone(),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::from_uuid(activity_id.as_uuid()),
+        }
+        .tenant_user_settings_scope();
+        let override_key = ToolPermissionOverrideKey::new(&scope, tool.capability_id.clone());
+        let policy_key = PersistentApprovalPolicyKey::new(
+            &scope,
+            PersistentApprovalAction::Dispatch,
+            tool.capability_id.clone(),
+            Principal::Extension(tool.provider.clone()),
+        );
+
+        match state {
+            "default" => {
+                self.revoke_tool_policy(&policy_key).await?;
+                self.overrides
+                    .clear(&override_key)
+                    .await
+                    .map_err(RebornServicesError::internal_from)?;
+            }
+            "always_allow" => {
+                if tool.default_permission == PermissionMode::Deny
+                    || tool
+                        .effects
+                        .iter()
+                        .any(|effect| matches!(effect, EffectKind::Financial))
+                {
+                    return Err(RebornServicesError::from(WebUiInboundValidationError::new(
+                        "state",
+                        WebUiInboundValidationCode::InvalidValue,
+                    )));
+                }
+                self.persistent_policies
+                    .allow(PersistentApprovalPolicyInput {
+                        scope: scope.clone(),
+                        action: PersistentApprovalAction::Dispatch,
+                        capability_id: tool.capability_id.clone(),
+                        grantee: Principal::Extension(tool.provider.clone()),
+                        approved_by: Principal::User(caller.user_id.clone()),
+                        constraints: ironclaw_host_api::GrantConstraints {
+                            allowed_effects: tool.effects.as_ref().to_vec(),
+                            mounts: Default::default(),
+                            network: Default::default(),
+                            secrets: Vec::new(),
+                            resource_ceiling: None,
+                            expires_at: None,
+                            max_invocations: None,
+                        },
+                        source_approval_request_id: None,
+                    })
+                    .await
+                    .map_err(RebornServicesError::internal_from)?;
+                self.overrides
+                    .clear(&override_key)
+                    .await
+                    .map_err(RebornServicesError::internal_from)?;
+            }
+            "ask_each_time" | "disabled" => {
+                self.revoke_tool_policy(&policy_key).await?;
+                let state = match state {
+                    "ask_each_time" => ToolPermissionOverride::AskEachTime,
+                    "disabled" => ToolPermissionOverride::Disabled,
+                    _ => unreachable!("state matched above"),
+                };
+                self.overrides
+                    .set(ToolPermissionOverrideInput {
+                        scope,
+                        capability_id: tool.capability_id.clone(),
+                        state,
+                        updated_by: Principal::User(caller.user_id.clone()),
+                    })
+                    .await
+                    .map_err(RebornServicesError::internal_from)?;
+            }
+            state => panic!("unexpected tool-permission state {state}"),
+        }
+
+        Ok(operator_config_success_resolution(activity_id))
+    }
+
+    async fn revoke_tool_policy(
+        &self,
+        policy_key: &PersistentApprovalPolicyKey,
+    ) -> Result<(), RebornServicesError> {
+        match self.persistent_policies.revoke(policy_key).await {
+            Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => Ok(()),
+            Err(error) => Err(RebornServicesError::internal_from(error)),
+        }
     }
 }
 
@@ -10188,75 +10336,82 @@ fn services_with_operator_approval_config_stores(
     auto_approve: Arc<dyn AutoApproveSettingStore>,
     persistent_policies: Arc<dyn PersistentApprovalPolicyStore>,
 ) -> OperatorConfigServices {
+    let overrides: Arc<dyn ToolPermissionOverrideStore> = Arc::new(
+        ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(),
+    );
+    let tools = Arc::new(operator_config_test_tools());
     RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
         OperatorConfigAutoApproveInvoker {
             auto_approve: Arc::clone(&auto_approve),
+            overrides: Arc::clone(&overrides),
+            persistent_policies: Arc::clone(&persistent_policies),
+            tools: Arc::clone(&tools),
         },
     )
     .with_operator_approval_config(
-        Arc::new(
-            ironclaw_approvals::test_support::in_memory_backed_capability_permission_override_store(
-            ),
-        ),
+        overrides,
         auto_approve,
         persistent_policies.clone(),
         Arc::new(StaticOperatorToolCatalogForTest {
-            tools: vec![
-                RebornOperatorToolInfo {
-                    capability_id: CapabilityId::new("tool.alpha").expect("capability id"),
-                    provider: ExtensionId::new("extension.alpha").expect("extension id"),
-                    description: Arc::from("Alpha tool"),
-                    default_permission: PermissionMode::Ask,
-                    effects: Arc::from([EffectKind::ExecuteCode]),
-                },
-                RebornOperatorToolInfo {
-                    capability_id: CapabilityId::new("tool.default_allow").expect("capability id"),
-                    provider: ExtensionId::new("extension.default_allow").expect("extension id"),
-                    description: Arc::from("Default-allow tool"),
-                    default_permission: PermissionMode::Allow,
-                    effects: Arc::from([EffectKind::DispatchCapability]),
-                },
-                RebornOperatorToolInfo {
-                    capability_id: CapabilityId::new("tool.locked").expect("capability id"),
-                    provider: ExtensionId::new("extension.locked").expect("extension id"),
-                    description: Arc::from("Locked tool"),
-                    default_permission: PermissionMode::Deny,
-                    effects: Arc::from([]),
-                },
-                RebornOperatorToolInfo {
-                    capability_id: CapabilityId::new("tool.financial").expect("capability id"),
-                    provider: ExtensionId::new("extension.financial").expect("extension id"),
-                    description: Arc::from("Financial tool"),
-                    default_permission: PermissionMode::Ask,
-                    effects: Arc::from([EffectKind::Financial]),
-                },
-                RebornOperatorToolInfo {
-                    capability_id: CapabilityId::new("nearai.web_search").expect("capability id"),
-                    provider: ExtensionId::new("nearai").expect("extension id"),
-                    description: Arc::from("Search through the NEAR AI MCP server."),
-                    default_permission: PermissionMode::Ask,
-                    effects: Arc::from([EffectKind::DispatchCapability]),
-                },
-                RebornOperatorToolInfo {
-                    capability_id: CapabilityId::new("github.get_repo").expect("capability id"),
-                    provider: ExtensionId::new("github").expect("extension id"),
-                    description: Arc::from("Read GitHub repository metadata."),
-                    default_permission: PermissionMode::Ask,
-                    effects: Arc::from([EffectKind::DispatchCapability]),
-                },
-                RebornOperatorToolInfo {
-                    capability_id: CapabilityId::new("google-calendar.list_events")
-                        .expect("capability id"),
-                    provider: ExtensionId::new("google-calendar").expect("extension id"),
-                    description: Arc::from("List Google Calendar events."),
-                    default_permission: PermissionMode::Ask,
-                    effects: Arc::from([EffectKind::DispatchCapability]),
-                },
-            ],
+            tools: tools.as_ref().clone(),
         }),
     )
+}
+
+fn operator_config_test_tools() -> Vec<RebornOperatorToolInfo> {
+    vec![
+        RebornOperatorToolInfo {
+            capability_id: CapabilityId::new("tool.alpha").expect("capability id"),
+            provider: ExtensionId::new("extension.alpha").expect("extension id"),
+            description: Arc::from("Alpha tool"),
+            default_permission: PermissionMode::Ask,
+            effects: Arc::from([EffectKind::ExecuteCode]),
+        },
+        RebornOperatorToolInfo {
+            capability_id: CapabilityId::new("tool.default_allow").expect("capability id"),
+            provider: ExtensionId::new("extension.default_allow").expect("extension id"),
+            description: Arc::from("Default-allow tool"),
+            default_permission: PermissionMode::Allow,
+            effects: Arc::from([EffectKind::DispatchCapability]),
+        },
+        RebornOperatorToolInfo {
+            capability_id: CapabilityId::new("tool.locked").expect("capability id"),
+            provider: ExtensionId::new("extension.locked").expect("extension id"),
+            description: Arc::from("Locked tool"),
+            default_permission: PermissionMode::Deny,
+            effects: Arc::from([]),
+        },
+        RebornOperatorToolInfo {
+            capability_id: CapabilityId::new("tool.financial").expect("capability id"),
+            provider: ExtensionId::new("extension.financial").expect("extension id"),
+            description: Arc::from("Financial tool"),
+            default_permission: PermissionMode::Ask,
+            effects: Arc::from([EffectKind::Financial]),
+        },
+        RebornOperatorToolInfo {
+            capability_id: CapabilityId::new("nearai.web_search").expect("capability id"),
+            provider: ExtensionId::new("nearai").expect("extension id"),
+            description: Arc::from("Search through the NEAR AI MCP server."),
+            default_permission: PermissionMode::Ask,
+            effects: Arc::from([EffectKind::DispatchCapability]),
+        },
+        RebornOperatorToolInfo {
+            capability_id: CapabilityId::new("github.get_repo").expect("capability id"),
+            provider: ExtensionId::new("github").expect("extension id"),
+            description: Arc::from("Read GitHub repository metadata."),
+            default_permission: PermissionMode::Ask,
+            effects: Arc::from([EffectKind::DispatchCapability]),
+        },
+        RebornOperatorToolInfo {
+            capability_id: CapabilityId::new("google-calendar.list_events").expect("capability id"),
+            provider: ExtensionId::new("google-calendar").expect("extension id"),
+            description: Arc::from("List Google Calendar events."),
+            default_permission: PermissionMode::Ask,
+            effects: Arc::from([EffectKind::DispatchCapability]),
+        },
+    ]
 }
 
 fn operator_config_entry_value<'a>(

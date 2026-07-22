@@ -30,29 +30,34 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_DELETE_CAPABILITY,
-    ADMIN_USER_DELETE_SECRET_CAPABILITY, ADMIN_USER_PUT_SECRET_CAPABILITY, ADMIN_USER_SECRETS_VIEW,
-    ADMIN_USER_SET_ROLE_CAPABILITY, ADMIN_USER_SET_STATUS_CAPABILITY, ADMIN_USER_UPDATE_CAPABILITY,
-    ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATION_DELETE_CAPABILITY, AUTOMATION_LIST_MAX_PAGE_SIZE,
-    AUTOMATION_PAUSE_CAPABILITY, AUTOMATION_RENAME_CAPABILITY, AUTOMATION_RESUME_CAPABILITY,
-    AUTOMATIONS_VIEW, CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_IMPORT_CAPABILITY,
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_COMMAND,
+    ADMIN_USER_DELETE_CAPABILITY, ADMIN_USER_DELETE_SECRET_CAPABILITY,
+    ADMIN_USER_PUT_SECRET_CAPABILITY, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY,
+    ADMIN_USER_SET_STATUS_CAPABILITY, ADMIN_USER_UPDATE_CAPABILITY, ADMIN_USER_VIEW,
+    ADMIN_USERS_VIEW, ATTACHMENT_READ_COMMAND, AUTOMATION_DELETE_CAPABILITY,
+    AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY, AUTOMATION_RENAME_CAPABILITY,
+    AUTOMATION_RESUME_CAPABILITY, AUTOMATIONS_VIEW, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND,
+    CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_IMPORT_CAPABILITY,
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
     EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
-    FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY,
-    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY, LLM_PROVIDER_UPSERT_CAPABILITY, LOGS_VIEW,
-    LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND,
+    LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
+    LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW, LifecyclePackageKind,
+    LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
     NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, PROJECT_DELETE_CAPABILITY,
-    PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY,
-    PROJECT_MEMBER_REMOVE_CAPABILITY, PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW,
-    PROJECT_UPDATE_CAPABILITY, PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityDescriptor,
-    ProductOutboundEnvelope, ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_KEY_COMMAND,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW,
+    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
+    OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND, PROJECT_DELETE_CAPABILITY,
+    PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
+    PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
+    PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
+    PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityDescriptor, ProductOutboundEnvelope,
+    ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor, RESOLVE_GATE_COMMAND,
+    RETRY_RUN_COMMAND, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
     RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
     RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
     RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
@@ -70,9 +75,10 @@ use ironclaw_product_workflow::{
     RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
     RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetProductRequest,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
     RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
@@ -82,17 +88,18 @@ use ironclaw_product_workflow::{
     RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
     RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
+    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
     SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
-    SettingsToolPermissionState, THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, WebUiAttachmentCapabilities,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    webui_attachment_capabilities,
+    SUBMIT_TURN_COMMAND, SettingsToolPermissionState, THREAD_DELETE_CAPABILITY, THREADS_VIEW,
+    TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    TRACE_HOLD_AUTHORIZE_COMMAND, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -209,7 +216,9 @@ pub async fn create_thread(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<WebUiCreateThreadRequest>,
 ) -> Result<Json<RebornCreateThreadResponse>, WebUiV2HttpError> {
-    let response = state.services().create_thread(caller, body).await?;
+    let response = CREATE_THREAD_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
+        .await?;
     Ok(Json(response))
 }
 
@@ -312,9 +321,10 @@ pub async fn admin_create_user(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<RebornAdminCreateUserRequest>,
 ) -> Result<Json<RebornAdminUserCreatedResponse>, WebUiV2HttpError> {
-    Ok(Json(
-        state.services().create_admin_user(caller, body).await?,
-    ))
+    let response = ADMIN_USER_CREATE_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
+        .await?;
+    Ok(Json(response))
 }
 
 /// `GET /api/webchat/v2/admin/users/{user_id}`
@@ -536,7 +546,9 @@ pub async fn send_message(
     Json(mut body): Json<WebUiSendMessageRequest>,
 ) -> Result<Json<RebornSubmitTurnResponse>, WebUiV2HttpError> {
     body.thread_id = Some(thread_id);
-    let response = state.services().submit_turn(caller, body).await?;
+    let response = SUBMIT_TURN_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
+        .await?;
     Ok(Json(response))
 }
 
@@ -647,7 +659,9 @@ pub async fn read_project_file(
         thread_id,
         path: require_project_fs_path(query.path)?,
     };
-    let file = state.services().read_project_file(caller, request).await?;
+    let file = PROJECT_FS_READ_COMMAND
+        .execute_file_on(state.services().as_ref(), caller, request)
+        .await?;
     project_fs_download_response(file)
 }
 
@@ -769,7 +783,9 @@ pub async fn read_fs_file(
         path: require_fs_browse_path(query.path)?,
         project_id: query.project_id,
     };
-    let file = state.services().read_fs_file(caller, request).await?;
+    let file = FS_READ_COMMAND
+        .execute_file_on(state.services().as_ref(), caller, request)
+        .await?;
     project_fs_download_response(file)
 }
 
@@ -836,7 +852,9 @@ pub async fn create_project(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<RebornCreateProjectRequest>,
 ) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
-    let response = state.services().create_project(caller, body).await?;
+    let response = PROJECT_CREATE_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
+        .await?;
     Ok(Json(response))
 }
 
@@ -1061,9 +1079,9 @@ pub async fn get_attachment(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path((thread_id, message_id, attachment_id)): Path<(String, String, String)>,
 ) -> Result<Response, WebUiV2HttpError> {
-    let attachment = state
-        .services()
-        .read_attachment(
+    let attachment = ATTACHMENT_READ_COMMAND
+        .execute_attachment_on(
+            state.services().as_ref(),
             caller,
             RebornAttachmentRequest {
                 thread_id,
@@ -1497,7 +1515,9 @@ pub async fn cancel_run(
 ) -> Result<Json<RebornCancelRunResponse>, WebUiV2HttpError> {
     body.thread_id = Some(thread_id);
     body.run_id = Some(run_id);
-    let response = state.services().cancel_run(caller, body).await?;
+    let response = CANCEL_RUN_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
+        .await?;
     Ok(Json(response))
 }
 
@@ -1524,7 +1544,9 @@ pub async fn resolve_gate(
     body.thread_id = Some(thread_id);
     body.run_id = Some(run_id);
     body.gate_ref = Some(gate_ref);
-    let response = state.services().resolve_gate(caller, body).await?;
+    let response = RESOLVE_GATE_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
+        .await?;
     Ok(Json(response))
 }
 
@@ -1547,7 +1569,9 @@ pub async fn retry_run(
 ) -> Result<Json<RebornRetryRunResponse>, WebUiV2HttpError> {
     body.thread_id = Some(thread_id);
     body.run_id = Some(run_id);
-    let response = state.services().retry_run(caller, body).await?;
+    let response = RETRY_RUN_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
+        .await?;
     Ok(Json(response))
 }
 
@@ -1812,7 +1836,9 @@ pub async fn trace_account_login_link(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornAccountLoginLinkResponse>, WebUiV2HttpError> {
-    let response = state.services().trace_account_login_link(caller).await?;
+    let response = TRACE_ACCOUNT_LOGIN_LINK_COMMAND
+        .execute_on(state.services().as_ref(), caller, serde_json::json!({}))
+        .await?;
     Ok(Json(response))
 }
 
@@ -1827,9 +1853,12 @@ pub async fn authorize_trace_hold(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(submission_id): Path<String>,
 ) -> Result<Json<RebornTraceHoldAuthorizeResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .authorize_trace_hold(caller, submission_id)
+    let response = TRACE_HOLD_AUTHORIZE_COMMAND
+        .execute_on(
+            state.services().as_ref(),
+            caller,
+            RebornTraceHoldAuthorizeProductRequest { submission_id },
+        )
         .await?;
     Ok(Json(response))
 }
@@ -3023,12 +3052,12 @@ pub async fn set_settings_tool_permission(
     validate_settings_tool_capability_id(&capability_id)?;
     let key =
         validate_operator_config_key(format!("{SETTINGS_TOOL_CONFIG_PREFIX}{capability_id}"))?;
-    let response = state
-        .services()
-        .set_operator_config_key(
+    let response = OPERATOR_CONFIG_SET_KEY_COMMAND
+        .execute_on(
+            state.services().as_ref(),
             caller,
-            key,
-            RebornOperatorConfigSetRequest {
+            RebornOperatorConfigSetProductRequest {
+                key,
                 value: serde_json::json!({ "state": body.state }),
             },
         )
@@ -3161,9 +3190,15 @@ pub async fn set_operator_config_key(
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let key = validate_operator_config_key(key)?;
-    let response = state
-        .services()
-        .set_operator_config_key(caller, key, body)
+    let response = OPERATOR_CONFIG_SET_KEY_COMMAND
+        .execute_on(
+            state.services().as_ref(),
+            caller,
+            RebornOperatorConfigSetProductRequest {
+                key,
+                value: body.value,
+            },
+        )
         .await?;
     Ok(Json(response))
 }
@@ -3332,9 +3367,8 @@ pub async fn run_operator_service_lifecycle(
     Json(body): Json<RebornOperatorServiceLifecycleRequest>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state
-        .services()
-        .run_operator_service_lifecycle(caller, body)
+    let response = OPERATOR_SERVICE_LIFECYCLE_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
 }
@@ -3472,10 +3506,12 @@ pub async fn test_llm_connection(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<LlmProbeRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<LlmProbeResult>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state.services().test_llm_connection(caller, body).await?;
+    let response = LLM_TEST_CONNECTION_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
+        .await?;
     Ok(Json(response))
 }
 
@@ -3484,10 +3520,12 @@ pub async fn list_llm_models(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<LlmProbeRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<LlmModelsResult>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state.services().list_llm_models(caller, body).await?;
+    let response = LLM_LIST_MODELS_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
+        .await?;
     Ok(Json(response))
 }
 
@@ -3497,7 +3535,7 @@ pub async fn start_nearai_login(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
     headers: HeaderMap,
-    Json(mut body): Json<NearAiLoginRequest>,
+    Json(mut body): Json<serde_json::Value>,
 ) -> Result<Json<NearAiLoginStart>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     // The NEAR AI callback carries the login token in its redirect, so the
@@ -3510,9 +3548,21 @@ pub async fn start_nearai_login(
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
     {
-        body.origin = origin.to_string();
+        body.as_object_mut()
+            .ok_or_else(|| {
+                RebornServicesError::from(WebUiInboundValidationError::new(
+                    "body",
+                    WebUiInboundValidationCode::InvalidValue,
+                ))
+            })?
+            .insert(
+                "origin".to_string(),
+                serde_json::Value::String(origin.to_string()),
+            );
     }
-    let response = state.services().start_nearai_login(caller, body).await?;
+    let response = LLM_NEARAI_LOGIN_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
+        .await?;
     Ok(Json(response))
 }
 
@@ -3525,12 +3575,11 @@ pub async fn complete_nearai_wallet_login(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<NearAiWalletLoginRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<NearAiWalletLoginResult>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state
-        .services()
-        .complete_nearai_wallet_login(caller, body)
+    let response = LLM_NEARAI_WALLET_LOGIN_COMMAND
+        .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
 }
@@ -3545,7 +3594,9 @@ pub async fn start_codex_login(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<CodexLoginStart>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state.services().start_codex_login(caller).await?;
+    let response = LLM_CODEX_LOGIN_COMMAND
+        .execute_on(state.services().as_ref(), caller, serde_json::json!({}))
+        .await?;
     Ok(Json(response))
 }
 
