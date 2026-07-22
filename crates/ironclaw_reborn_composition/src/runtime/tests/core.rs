@@ -612,10 +612,10 @@ use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleReadinessBlocker,
     RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSkillListResponse, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillListResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_skills::SkillTrust;
@@ -5194,6 +5194,58 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
+async fn query_webui_extension_setup(
+    api: &dyn ironclaw_product_workflow::ProductSurface,
+    caller: WebUiAuthenticatedCaller,
+    package_id: &str,
+) -> RebornSetupExtensionResponse {
+    let page = api
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::EXTENSION_SETUP_VIEW
+                    .id
+                    .to_string(),
+                params: serde_json::json!({ "package_id": package_id }),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("setup extension lifecycle projection");
+    serde_json::from_value(page.payload).expect("setup extension payload")
+}
+
+async fn submit_webui_extension_setup(
+    api: &dyn ironclaw_product_workflow::ProductSurface,
+    caller: WebUiAuthenticatedCaller,
+    package_id: &str,
+    request: WebUiSetupExtensionRequest,
+) -> RebornSetupExtensionResponse {
+    let mut input = serde_json::to_value(request).expect("setup request serializes");
+    input
+        .as_object_mut()
+        .expect("setup request serializes as object")
+        .insert(
+            "extension_id".to_string(),
+            serde_json::Value::String(package_id.to_string()),
+        );
+    let resolution = api
+        .invoke(
+            caller.clone(),
+            CapabilityId::new(ironclaw_product_workflow::EXTENSION_SETUP_SUBMIT_CAPABILITY_ID)
+                .expect("setup submit capability id"),
+            input,
+            ActivityId::new(),
+        )
+        .await
+        .expect("submit extension setup");
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => {}
+        other => panic!("extension setup submit did not succeed: {other:?}"),
+    }
+    query_webui_extension_setup(api, caller, package_id).await
+}
+
 #[tokio::test]
 async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -5229,16 +5281,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         None,
     );
 
-    let setup = bundle
-        .api
-        .setup_extension(
-            caller.clone(),
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
-                .expect("valid package ref"),
-            WebUiSetupExtensionRequest::default(),
-        )
-        .await
-        .expect("setup extension lifecycle projection");
+    let setup = query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "github").await;
 
     assert_eq!(setup.package_ref.id.as_str(), "github");
     assert_eq!(setup.phase, InstallationState::Installed);
@@ -5252,16 +5295,8 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         setup.secrets[0].setup,
         RebornExtensionCredentialSetup::ManualToken
     ));
-    let google_setup = bundle
-        .api
-        .setup_extension(
-            caller.clone(),
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
-                .expect("valid package ref"),
-            WebUiSetupExtensionRequest::default(),
-        )
-        .await
-        .expect("google setup extension lifecycle projection");
+    let google_setup =
+        query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "google-calendar").await;
     assert_eq!(google_setup.secrets.len(), 1);
     let google_secret = &google_setup.secrets[0];
     assert_eq!(google_secret.provider, "google");
@@ -5706,25 +5741,21 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         Some(AgentId::new("runtime-webui-credential-agent").unwrap()),
         None,
     );
-    let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
-
-    let first = bundle
-        .api
-        .setup_extension(
-            caller.clone(),
-            package_ref.clone(),
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(serde_json::json!({
-                    "secrets": {
-                        "github_runtime_token": "ghp_first_token"
-                    },
-                    "fields": {}
-                })),
-            },
-        )
-        .await
-        .expect("submit github runtime token");
+    let first = submit_webui_extension_setup(
+        bundle.api.as_ref(),
+        caller.clone(),
+        "github",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(serde_json::json!({
+                "secrets": {
+                    "github_runtime_token": "ghp_first_token"
+                },
+                "fields": {}
+            })),
+        },
+    )
+    .await;
     assert_eq!(first.secrets.len(), 1);
     assert!(first.secrets[0].provided);
     let first_credential_ref = first.secrets[0]
@@ -5732,23 +5763,21 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         .clone()
         .expect("credential ref");
 
-    let second = bundle
-        .api
-        .setup_extension(
-            caller,
-            package_ref,
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(serde_json::json!({
-                    "secrets": {
-                        "github_runtime_token": "ghp_second_token"
-                    },
-                    "fields": {}
-                })),
-            },
-        )
-        .await
-        .expect("rotate github runtime token");
+    let second = submit_webui_extension_setup(
+        bundle.api.as_ref(),
+        caller,
+        "github",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(serde_json::json!({
+                "secrets": {
+                    "github_runtime_token": "ghp_second_token"
+                },
+                "fields": {}
+            })),
+        },
+    )
+    .await;
     assert_eq!(second.secrets.len(), 1);
     assert!(second.secrets[0].provided);
     assert_eq!(

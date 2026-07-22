@@ -25,8 +25,9 @@ use ironclaw_auth::{
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
     ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, FailureKind, GrantConstraints,
-    InvocationId, PermissionMode, Principal, ProjectId, Resolution, ResourceScope, SecretHandle,
-    TenantId, ThreadId, UserId,
+    InvocationId, Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution,
+    ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle,
+    TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -51,15 +52,14 @@ use uuid::Uuid;
 
 use crate::{
     ApprovalInteractionDecision, ApprovalInteractionService, AuthInteractionDecision,
-    AuthInteractionRejectionKind, AuthInteractionService, LifecyclePackageRef,
-    LifecycleProductFacade, ListPendingApprovalsRequest, ProductWorkflowError,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse,
-    UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    AuthInteractionRejectionKind, AuthInteractionService, LifecycleProductFacade,
+    ListPendingApprovalsRequest, ProductWorkflowError, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, UnsupportedLifecycleProductFacade, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution, WebUiInboundCommand,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest,
     approval_interaction::RejectingApprovalInteractionService,
     auth_interaction::RejectingAuthInteractionService,
     binding_ref::{
@@ -213,6 +213,7 @@ pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_prefe
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
 pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
+pub const EXTENSION_SETUP_SUBMIT_CAPABILITY_ID: &str = "builtin.extension_setup_submit";
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
 pub const SKILL_UPDATE_CAPABILITY_ID: &str = "builtin.skill_update";
 pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
@@ -2289,25 +2290,6 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// Run a step in a v2-native extension onboarding flow. Today the
-    /// facade returns
-    /// [`RebornSetupExtensionStatus::NotImplemented`](types::RebornSetupExtensionStatus::NotImplemented)
-    /// because the underlying extension lifecycle is still v1-only.
-    /// The route exists so the WebUI v2 entrypoint inventory is
-    /// complete and so future onboarding port work has a fixed surface
-    /// to fill in.
-    ///
-    /// `package_ref` is the validated lifecycle package identity from
-    /// the route path or request body. The browser can still render
-    /// display names from registry metadata, but lifecycle side effects
-    /// use package refs end to end.
-    async fn setup_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-        request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
-
     /// Add or update a custom LLM provider (and optionally its key / active state).
     ///
     /// LLM-config mutations, probes, and login starts default to "service
@@ -2869,6 +2851,27 @@ where
             .await
     }
 
+    fn api_capability_success(
+        &self,
+        activity_id: ActivityId,
+        summary: &'static str,
+    ) -> Result<Resolution, RebornServicesError> {
+        Ok(Resolution::Done(Outcome {
+            refs: OutcomeRefs {
+                result: ResultRef::from_uuid(activity_id.as_uuid()),
+                byte_len: 0,
+                preview: None,
+                preview_meta: ResultPreviewMeta::default(),
+                origin: None,
+                output_digest: None,
+            },
+            verdict: ToolVerdict::Success,
+            summary: SafeSummary::new(summary).map_err(RebornServicesError::internal_from)?,
+            progress: ResultProgress::MadeProgress,
+            terminate_hint: TerminateHint::Continue,
+        }))
+    }
+
     /// Wire the generic channel-config configure port. Without it, the
     /// setup facade renders no channel-config fields and rejects
     /// channel-config submissions as unavailable.
@@ -3108,6 +3111,17 @@ where
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
+        if capability.as_str() == EXTENSION_SETUP_SUBMIT_CAPABILITY_ID {
+            lifecycle_setup::submit_extension_setup_capability(
+                self.lifecycle_facade.as_ref(),
+                self.extension_credentials.as_deref(),
+                self.channel_config_facade.as_deref(),
+                caller,
+                input,
+            )
+            .await?;
+            return self.api_capability_success(activity_id, "extension setup updated");
+        }
         self.product_capability_invoker
             .invoke(caller, capability, input, activity_id)
             .await
@@ -4746,23 +4760,6 @@ where
         bundle: Vec<u8>,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         extensions::import_extension(self.lifecycle_facade.as_ref(), caller, bundle).await
-    }
-
-    async fn setup_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-        request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        lifecycle_setup::setup_extension(
-            self.lifecycle_facade.as_ref(),
-            self.extension_credentials.as_deref(),
-            self.channel_config_facade.as_deref(),
-            caller,
-            package_ref,
-            request,
-        )
-        .await
     }
 
     async fn run_operator_service_lifecycle(

@@ -30,24 +30,25 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
-    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
-    LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
-    ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
+    EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageKind,
+    LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductSurface,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
+    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
@@ -76,7 +77,7 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    WebUiSendMessageRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -1329,15 +1330,6 @@ impl RebornServicesApi for StubServices {
             .expect("lock")
             .push(bundle);
         Ok(extension_action_response("discovered"))
-    }
-
-    async fn setup_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-        _request: WebUiSetupExtensionRequest,
-    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Ok(extension_setup_response(package_ref))
     }
 
     async fn upsert_llm_provider(
@@ -4836,9 +4828,10 @@ async fn get_extension_setup_queries_product_surface_view() {
 // handler/facade boundary. A well-formed package id reaches the facade
 // and round-trips into the response.
 #[tokio::test]
-async fn setup_extension_dispatches_package_ref_to_facade() {
+async fn setup_extension_invokes_product_surface_capability() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
 
     let response = router
         .oneshot(
@@ -4863,6 +4856,28 @@ async fn setup_extension_dispatches_package_ref_to_facade() {
     assert!(
         body.get("status").is_none(),
         "setup_extension must not expose legacy status aliases: {body}"
+    );
+
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0,
+        CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({
+            "extension_id": "telegram",
+            "action": "begin"
+        })
+    );
+    let queries = services.view_queries.lock().expect("lock");
+    assert!(
+        queries
+            .iter()
+            .any(|query| query.view_id == EXTENSION_SETUP_VIEW.id
+                && query.params == serde_json::json!({ "package_id": "telegram" })),
+        "POST setup must read back through the ProductSurface extension_setup view: {queries:?}",
     );
 }
 
@@ -5436,14 +5451,6 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: WebUiListAutomationsRequest,
         ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn setup_extension(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _package_ref: LifecyclePackageRef,
-            _request: WebUiSetupExtensionRequest,
-        ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
     }

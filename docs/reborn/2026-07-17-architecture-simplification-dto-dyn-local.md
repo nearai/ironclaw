@@ -73,9 +73,10 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   capability invocations from the WebUI ProductSurface path; activation keeps a
   query read-back for active state and maps auth-blocked outcomes onto the
   existing extension onboarding response shape. Extension setup read now uses
-  the descriptor-backed `extension_setup` ProductSurface view; setup submit and
-  zip import remain explicit follow-ups because they need setup/upload-specific
-  capability shapes.
+  the descriptor-backed `extension_setup` ProductSurface view, and setup submit
+  uses `builtin.extension_setup_submit` with the same query read-back. Zip
+  import remains an explicit follow-up because it needs an upload-specific
+  capability shape.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -2379,13 +2380,15 @@ loop-facing capability result and every result mirror is deleted.
   `builtin.extension_activate`, reads back `EXTENSIONS_VIEW` for active state
   after success, and maps auth-blocked outcomes onto the existing extension
   onboarding response shape. Extension setup read now flows through the
-  descriptor-backed `extension_setup` view; zip import and setup submit remain
-  explicit follow-ups because they need upload/setup-specific API capability
-  shapes. The migrated legacy
+  descriptor-backed `extension_setup` view, and setup submit now invokes
+  `builtin.extension_setup_submit` before reading back that view. Zip import
+  remains an explicit follow-up because it needs an upload-specific API
+  capability shape. The migrated legacy
   `RebornServicesApi` methods were removed from the ratchet allowlist. This is
   the migration pattern for product mutations: authenticated product gesture ->
-  `ProductSurface::invoke` -> descriptor-declared first-party handler ->
-  authoritative `query` read-back where an authoritative read model exists.
+  `ProductSurface::invoke` -> descriptor-declared first-party handler or
+  product-workflow-owned API capability -> authoritative `query` read-back where
+  an authoritative read model exists.
   Remaining facade methods still need migration or explicit turn-lifecycle
   classification before the trait can collapse to the §5.2 end state.
 

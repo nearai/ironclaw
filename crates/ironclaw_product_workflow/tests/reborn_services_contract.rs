@@ -42,37 +42,37 @@ use ironclaw_product_workflow::{
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
-    ChannelConnectionRequirement, CodexLoginStart, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, FilesystemBrowseReader, FsMount, InboundAttachmentLander,
-    InboundAttachmentReader, LLM_CONFIG_VIEW, LOGS_VIEW, LifecycleChannelDirections,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
-    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
-    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
-    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionSurface, RebornFsListRequest,
-    RebornGetProjectRequest, RebornGetRunStateRequest, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    ChannelConnectionRequirement, CodexLoginStart, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID,
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, ExtensionCredentialSetupService,
+    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
+    FsMount, InboundAttachmentLander, InboundAttachmentReader, LLM_CONFIG_VIEW, LOGS_VIEW,
+    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, OperatorLogsService,
+    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
+    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
+    ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
+    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornExtensionListResponse, RebornExtensionOnboardingState,
+    RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
@@ -5185,13 +5185,7 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
     )
     .with_lifecycle_product_facade(lifecycle_facade.clone());
 
-    let response = services
-        .setup_extension(
-            caller(),
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
-                .expect("valid package ref"),
-            WebUiSetupExtensionRequest::default(),
-        )
+    let response = query_extension_setup(&services, caller(), "github")
         .await
         .expect("setup extension response");
 
@@ -8742,12 +8736,7 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
         ),
     ));
 
-    let response = services
-        .setup_extension(
-            caller(),
-            lifecycle_package_ref("github"),
-            WebUiSetupExtensionRequest::default(),
-        )
+    let response = query_extension_setup(&services, caller(), "github")
         .await
         .expect("setup extension response");
 
@@ -8770,21 +8759,21 @@ async fn setup_extension_rejects_blank_required_manual_secret() {
         setup_services_with_requirements(vec![manual_credential_requirement("api_token", true)])
             .with_extension_credentials(credentials.clone());
 
-    let err = services
-        .setup_extension(
-            caller(),
-            lifecycle_package_ref("github"),
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(json!({
-                    "secrets": {
-                        "api_token": "   "
-                    }
-                })),
-            },
-        )
-        .await
-        .expect_err("blank required token is rejected");
+    let err = invoke_extension_setup_submit(
+        &services,
+        caller(),
+        "github",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(json!({
+                "secrets": {
+                    "api_token": "   "
+                }
+            })),
+        },
+    )
+    .await
+    .expect_err("blank required token is rejected");
 
     assert_setup_validation(err, "secrets", WebUiInboundValidationCode::Blank);
     assert_eq!(credentials.status_count(), 1);
@@ -8798,21 +8787,21 @@ async fn setup_extension_rejects_unknown_secret_name() {
         setup_services_with_requirements(vec![manual_credential_requirement("api_token", true)])
             .with_extension_credentials(credentials.clone());
 
-    let err = services
-        .setup_extension(
-            caller(),
-            lifecycle_package_ref("github"),
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(json!({
-                    "secrets": {
-                        "unknown_name": "value"
-                    }
-                })),
-            },
-        )
-        .await
-        .expect_err("unknown secret name is rejected");
+    let err = invoke_extension_setup_submit(
+        &services,
+        caller(),
+        "github",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(json!({
+                "secrets": {
+                    "unknown_name": "value"
+                }
+            })),
+        },
+    )
+    .await
+    .expect_err("unknown secret name is rejected");
 
     assert_setup_validation(err, "secrets", WebUiInboundValidationCode::InvalidValue);
     assert_eq!(credentials.status_count(), 0);
@@ -8826,21 +8815,21 @@ async fn setup_extension_rejects_oauth_secret_via_manual_submit() {
         setup_services_with_requirements(vec![oauth_credential_requirement("google_oauth", true)])
             .with_extension_credentials(credentials.clone());
 
-    let err = services
-        .setup_extension(
-            caller(),
-            lifecycle_package_ref("google"),
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(json!({
-                    "secrets": {
-                        "google_oauth": "value"
-                    }
-                })),
-            },
-        )
-        .await
-        .expect_err("oauth credential cannot be submitted as a manual token");
+    let err = invoke_extension_setup_submit(
+        &services,
+        caller(),
+        "google",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(json!({
+                "secrets": {
+                    "google_oauth": "value"
+                }
+            })),
+        },
+    )
+    .await
+    .expect_err("oauth credential cannot be submitted as a manual token");
 
     assert_setup_validation(err, "secrets", WebUiInboundValidationCode::InvalidValue);
     assert_eq!(credentials.status_count(), 0);
@@ -8921,12 +8910,7 @@ async fn setup_extension_projects_and_routes_channel_config_values() {
 
     // View: fields from the non-secret descriptors, secret channel fields in
     // the secrets list (presence only, manual-token shape).
-    let view = services
-        .setup_extension(
-            caller(),
-            lifecycle_package_ref("github"),
-            WebUiSetupExtensionRequest::default(),
-        )
+    let view = query_extension_setup(&services, caller(), "github")
         .await
         .expect("setup view");
     assert_eq!(view.fields.len(), 1);
@@ -8946,25 +8930,25 @@ async fn setup_extension_projects_and_routes_channel_config_values() {
 
     // Submit: channel values route to the configure port; the credential
     // secret stays on the credential path.
-    let response = services
-        .setup_extension(
-            caller(),
-            lifecycle_package_ref("github"),
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(json!({
-                    "secrets": {
-                        "bot_token": "xbt-123",
-                        "api_token": "cred-456"
-                    },
-                    "fields": {
-                        "public_url": "https://hooks.example.test/updates"
-                    }
-                })),
-            },
-        )
-        .await
-        .expect("setup submit");
+    let response = submit_extension_setup_and_query(
+        &services,
+        caller(),
+        "github",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(json!({
+                "secrets": {
+                    "bot_token": "xbt-123",
+                    "api_token": "cred-456"
+                },
+                "fields": {
+                    "public_url": "https://hooks.example.test/updates"
+                }
+            })),
+        },
+    )
+    .await
+    .expect("setup submit");
     assert_eq!(response.fields.len(), 1);
     let saves = channel_config.saves();
     assert_eq!(saves.len(), 1);
@@ -9001,21 +8985,21 @@ async fn setup_extension_rejects_unknown_channel_config_field() {
         .with_extension_credentials(credentials.clone())
         .with_channel_config_facade(channel_config.clone());
 
-    let err = services
-        .setup_extension(
-            caller(),
-            lifecycle_package_ref("github"),
-            WebUiSetupExtensionRequest {
-                action: Some("submit".to_string()),
-                payload: Some(json!({
-                    "fields": {
-                        "unknown_field": "value"
-                    }
-                })),
-            },
-        )
-        .await
-        .expect_err("unknown field handle is rejected");
+    let err = invoke_extension_setup_submit(
+        &services,
+        caller(),
+        "github",
+        WebUiSetupExtensionRequest {
+            action: Some("submit".to_string()),
+            payload: Some(json!({
+                "fields": {
+                    "unknown_field": "value"
+                }
+            })),
+        },
+    )
+    .await
+    .expect_err("unknown field handle is rejected");
 
     assert_setup_validation(err, "fields", WebUiInboundValidationCode::InvalidValue);
     assert!(channel_config.saves().is_empty());
@@ -9660,6 +9644,41 @@ async fn query_extension_setup<S: RebornServicesApi + ?Sized>(
         )
         .await?;
     serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
+async fn invoke_extension_setup_submit<S: RebornServicesApi + ?Sized>(
+    services: &S,
+    caller: WebUiAuthenticatedCaller,
+    package_id: &str,
+    request: WebUiSetupExtensionRequest,
+) -> Result<Resolution, RebornServicesError> {
+    let mut input = serde_json::to_value(request).map_err(RebornServicesError::internal_from)?;
+    input
+        .as_object_mut()
+        .expect("setup request serializes as object")
+        .insert(
+            "extension_id".to_string(),
+            serde_json::Value::String(package_id.to_string()),
+        );
+    services
+        .invoke(
+            caller,
+            CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID).expect("capability id"),
+            input,
+            ActivityId::new(),
+        )
+        .await
+}
+
+async fn submit_extension_setup_and_query<S: RebornServicesApi + ?Sized>(
+    services: &S,
+    caller: WebUiAuthenticatedCaller,
+    package_id: &str,
+    request: WebUiSetupExtensionRequest,
+) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
+    let caller_for_query = caller.clone();
+    invoke_extension_setup_submit(services, caller, package_id, request).await?;
+    query_extension_setup(services, caller_for_query, package_id).await
 }
 
 #[tokio::test]
