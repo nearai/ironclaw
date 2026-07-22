@@ -5696,7 +5696,15 @@ async fn build_webui_services_without_local_runtime_returns_503_on_list_automati
 
     let error = bundle
         .api
-        .list_automations(caller, WebUiListAutomationsRequest::default())
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::AUTOMATIONS_VIEW.id.to_string(),
+                params: serde_json::to_value(WebUiListAutomationsRequest::default())
+                    .expect("automation list params"),
+                cursor: None,
+            },
+        )
         .await
         .expect_err("missing host runtime should leave automation facade unavailable");
 

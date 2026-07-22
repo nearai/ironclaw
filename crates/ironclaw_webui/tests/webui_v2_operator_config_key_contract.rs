@@ -127,14 +127,6 @@ impl RebornServicesApi for RecordingServices {
         unreachable!("not exercised by this test")
     }
 
-    async fn list_automations(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
     async fn query(
         &self,
         _caller: WebUiAuthenticatedCaller,

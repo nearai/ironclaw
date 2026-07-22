@@ -32,7 +32,7 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
+    AUTOMATIONS_VIEW, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
     LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
@@ -741,6 +741,34 @@ impl RebornServicesApi for StubServices {
                     next_cursor: None,
                 })
             }
+            id if id == AUTOMATIONS_VIEW.id => {
+                let request: WebUiListAutomationsRequest =
+                    serde_json::from_value(query.params).expect("automation list params");
+                self.list_automations_calls
+                    .lock()
+                    .expect("lock")
+                    .push(request);
+                if let Some(error) = self
+                    .next_list_automations_error
+                    .lock()
+                    .expect("lock")
+                    .take()
+                {
+                    return Err(error);
+                }
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornListAutomationsResponse {
+                        automations: vec![automation_info(
+                            "automation-listed",
+                            "Daily status",
+                            "0 9 * * *",
+                        )],
+                        scheduler_enabled: true,
+                    })
+                    .expect("automation list payload"),
+                    next_cursor: None,
+                })
+            }
             id if id == OUTBOUND_PREFERENCES_VIEW.id => {
                 *self.get_outbound_preferences_calls.lock().expect("lock") += 1;
                 Ok(RebornViewPage {
@@ -1128,33 +1156,6 @@ impl RebornServicesApi for StubServices {
         Ok(RebornListThreadsResponse {
             threads: Vec::new(),
             next_cursor: None,
-        })
-    }
-
-    async fn list_automations(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        self.list_automations_calls
-            .lock()
-            .expect("lock")
-            .push(request);
-        if let Some(error) = self
-            .next_list_automations_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(error);
-        }
-        Ok(RebornListAutomationsResponse {
-            automations: vec![automation_info(
-                "automation-listed",
-                "Daily status",
-                "0 9 * * *",
-            )],
-            scheduler_enabled: true,
         })
     }
 
@@ -5376,13 +5377,6 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: WebUiListThreadsRequest,
         ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_automations(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: WebUiListAutomationsRequest,
-        ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
     }

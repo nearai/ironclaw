@@ -30,8 +30,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW, CodexLoginStart,
-    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW, AUTOMATIONS_VIEW,
+    CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
     LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
@@ -1317,7 +1317,20 @@ pub async fn list_automations(
         run_limit: query.run_limit,
         include_completed: query.include_completed,
     };
-    let response = state.services().list_automations(caller, request).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: AUTOMATIONS_VIEW.id.to_string(),
+                params: serde_json::to_value(request)
+                    .map_err(RebornServicesError::internal_from)?,
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 

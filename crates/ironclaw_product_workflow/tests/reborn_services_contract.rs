@@ -39,13 +39,13 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, ActiveModelReader, ApprovalInteractionActionView,
-    ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
-    AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
-    AutomationProductFacade, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
-    ChannelConnectionRequirement, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW, ActiveModelReader,
+    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
+    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
+    AutomationListRequest, AutomationName, AutomationProductFacade, ChannelAuthAccountState,
+    ChannelConfigFacade, ChannelConnectionFacade, ChannelConnectionRequirement, CodexLoginStart,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
+    EXTENSIONS_VIEW, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FilesystemBrowseReader, FsMount, InboundAttachmentLander,
     InboundAttachmentReader, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
     LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW,
@@ -74,26 +74,26 @@ use ironclaw_product_workflow::{
     RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
     RebornDeleteThreadRequest, RebornExtensionListResponse, RebornExtensionOnboardingState,
     RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
-    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
-    RebornServiceLifecycleState, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
+    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
+    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornRunArtifact,
+    RebornRunArtifactRequest, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
     RebornUpdateProjectRequest, RebornViewQuery, ResolveApprovalInteractionRequest,
@@ -5311,13 +5311,13 @@ async fn list_automation_dispatches_through_product_facade() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    let listed = services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest::default().set_limit(10),
-        )
-        .await
-        .expect("list automations");
+    let listed = query_automations(
+        &services,
+        caller(),
+        WebUiListAutomationsRequest::default().set_limit(10),
+    )
+    .await
+    .expect("list automations");
     assert_eq!(listed.automations.len(), 1);
     assert_eq!(listed.automations[0].automation_id, "trigger-listed");
     assert_eq!(
@@ -6538,13 +6538,13 @@ async fn list_automations_rejects_missing_agent_id() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    let err = services
-        .list_automations(
-            caller_without_agent(),
-            WebUiListAutomationsRequest::default().set_limit(10),
-        )
-        .await
-        .expect_err("missing agent id should fail closed");
+    let err = query_automations(
+        &services,
+        caller_without_agent(),
+        WebUiListAutomationsRequest::default().set_limit(10),
+    )
+    .await
+    .expect_err("missing agent id should fail closed");
 
     assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
@@ -6560,13 +6560,13 @@ async fn list_automations_clamps_oversize_limit_before_product_facade() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest::default().set_limit(u32::MAX),
-        )
-        .await
-        .expect("list automations");
+    query_automations(
+        &services,
+        caller(),
+        WebUiListAutomationsRequest::default().set_limit(u32::MAX),
+    )
+    .await
+    .expect("list automations");
 
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
@@ -6586,13 +6586,13 @@ async fn list_automations_clamps_zero_limit_before_product_facade() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest::default().set_limit(0),
-        )
-        .await
-        .expect("list automations");
+    query_automations(
+        &services,
+        caller(),
+        WebUiListAutomationsRequest::default().set_limit(0),
+    )
+    .await
+    .expect("list automations");
 
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
@@ -6611,8 +6611,7 @@ async fn list_automations_uses_default_limit_when_omitted() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    services
-        .list_automations(caller(), WebUiListAutomationsRequest::default())
+    query_automations(&services, caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -6634,13 +6633,13 @@ async fn list_automations_clamps_oversize_run_limit_before_product_facade() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest::default().set_run_limit(u32::MAX),
-        )
-        .await
-        .expect("list automations");
+    query_automations(
+        &services,
+        caller(),
+        WebUiListAutomationsRequest::default().set_run_limit(u32::MAX),
+    )
+    .await
+    .expect("list automations");
 
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
@@ -6660,13 +6659,13 @@ async fn list_automations_allows_zero_run_limit_before_product_facade() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest::default().set_run_limit(0),
-        )
-        .await
-        .expect("list automations");
+    query_automations(
+        &services,
+        caller(),
+        WebUiListAutomationsRequest::default().set_run_limit(0),
+    )
+    .await
+    .expect("list automations");
 
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
@@ -6685,13 +6684,13 @@ async fn list_automations_forwards_include_completed_true_to_product_facade() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    services
-        .list_automations(
-            caller(),
-            WebUiListAutomationsRequest::default().set_include_completed(true),
-        )
-        .await
-        .expect("list automations");
+    query_automations(
+        &services,
+        caller(),
+        WebUiListAutomationsRequest::default().set_include_completed(true),
+    )
+    .await
+    .expect("list automations");
 
     let list_calls = automation_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
@@ -6710,8 +6709,7 @@ async fn list_automations_forwards_include_completed_false_to_product_facade() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    services
-        .list_automations(caller(), WebUiListAutomationsRequest::default())
+    query_automations(&services, caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -8701,8 +8699,7 @@ async fn list_automations_returns_empty_list() {
     )
     .with_automation_product_facade(Arc::new(StaticAutomationFacade::new(Vec::new())));
 
-    let listed = services
-        .list_automations(caller(), WebUiListAutomationsRequest::default())
+    let listed = query_automations(&services, caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -8724,8 +8721,7 @@ async fn list_automations_surfaces_disabled_scheduler() {
         StaticAutomationFacade::new(Vec::new()).with_scheduler_enabled(false),
     ));
 
-    let listed = services
-        .list_automations(caller(), WebUiListAutomationsRequest::default())
+    let listed = query_automations(&services, caller(), WebUiListAutomationsRequest::default())
         .await
         .expect("list automations");
 
@@ -8739,8 +8735,7 @@ async fn automation_facade_unwired_fails_closed() {
         Arc::new(FakeTurnCoordinator::default()),
     );
 
-    let error = services
-        .list_automations(caller(), WebUiListAutomationsRequest::default())
+    let error = query_automations(&services, caller(), WebUiListAutomationsRequest::default())
         .await
         .expect_err("unwired automation facade");
 
@@ -9636,6 +9631,25 @@ async fn query_operator_setup<S: RebornServicesApi + ?Sized>(
             RebornViewQuery {
                 view_id: OPERATOR_SETUP_VIEW.id.to_string(),
                 params: json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
+async fn query_automations<S: RebornServicesApi + ?Sized>(
+    services: &S,
+    caller: WebUiAuthenticatedCaller,
+    request: WebUiListAutomationsRequest,
+) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: AUTOMATIONS_VIEW.id.to_string(),
+                params: serde_json::to_value(request)
+                    .map_err(RebornServicesError::internal_from)?,
                 cursor: None,
             },
         )

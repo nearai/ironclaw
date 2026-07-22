@@ -218,6 +218,10 @@ pub const EXTENSION_IMPORT_CAPABILITY_ID: &str = "builtin.extension_import";
 pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 pub const EXTENSION_SETUP_SUBMIT_CAPABILITY_ID: &str = "builtin.extension_setup_submit";
+pub const AUTOMATIONS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "automations",
+    paginated: false,
+};
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
 pub const SKILL_UPDATE_CAPABILITY_ID: &str = "builtin.skill_update";
 pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
@@ -2188,12 +2192,6 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError>;
 
-    async fn list_automations(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError>;
-
     async fn pause_automation(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2828,6 +2826,38 @@ where
             progress: ResultProgress::MadeProgress,
             terminate_hint: TerminateHint::Continue,
         }))
+    }
+
+    async fn build_automations_view(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiListAutomationsRequest,
+    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
+        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let limit = clamp_automation_list_limit(request.limit);
+        let run_limit = clamp_automation_run_limit(request.run_limit);
+        let scheduler_enabled = self.automation_facade.scheduler_enabled();
+        let automations = self
+            .automation_facade
+            .list_automations(
+                caller,
+                AutomationListRequest {
+                    limit,
+                    run_limit,
+                    include_completed: request.include_completed,
+                },
+            )
+            .await?;
+        Ok(RebornListAutomationsResponse {
+            automations,
+            scheduler_enabled,
+        })
     }
 
     /// Wire the generic channel-config configure port. Without it, the
@@ -3858,6 +3888,12 @@ where
                 let response = self.build_llm_config_view(caller).await?;
                 views::view_page(response)
             }
+            id if id == AUTOMATIONS_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.build_automations_view(caller, request).await?;
+                views::view_page(response)
+            }
             id if id == OUTBOUND_PREFERENCES_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_outbound_preferences_view(caller).await?;
@@ -4625,38 +4661,6 @@ where
         };
         self.list_visible_threads_for_scope(scope, request, caller)
             .await
-    }
-
-    async fn list_automations(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        let Some(caller) = product_agent_bound_caller_from_webui(caller) else {
-            return Err(RebornServicesError::from_status(
-                RebornServicesErrorCode::InvalidRequest,
-                400,
-                false,
-            ));
-        };
-        let limit = clamp_automation_list_limit(request.limit);
-        let run_limit = clamp_automation_run_limit(request.run_limit);
-        let scheduler_enabled = self.automation_facade.scheduler_enabled();
-        let automations = self
-            .automation_facade
-            .list_automations(
-                caller,
-                AutomationListRequest {
-                    limit,
-                    run_limit,
-                    include_completed: request.include_completed,
-                },
-            )
-            .await?;
-        Ok(RebornListAutomationsResponse {
-            automations,
-            scheduler_enabled,
-        })
     }
 
     async fn pause_automation(

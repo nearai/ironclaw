@@ -29,13 +29,13 @@ use ironclaw_product_workflow::{
     EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, RebornCancelRunResponse,
     RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionInfo, RebornExtensionListResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornViewPage, RebornViewQuery,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, rejecting_reborn_services_error,
+    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
+    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
@@ -378,14 +378,6 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiListThreadsRequest,
     ) -> Result<RebornListThreadsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_automations(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiListAutomationsRequest,
-    ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 }

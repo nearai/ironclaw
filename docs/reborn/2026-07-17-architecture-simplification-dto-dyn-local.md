@@ -78,8 +78,11 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   import now uses the API-only `builtin.extension_import` ProductSurface
   capability with upload bytes carried as a base64 JSON field. LLM provider
   upsert/delete and active-provider selection now use API-only ProductSurface
-  capabilities with `llm_config` view read-back; probe and login starts remain
-  explicit follow-ups because they need typed command result payloads.
+  capabilities with `llm_config` view read-back. Automation listing now uses
+  the descriptor-backed `automations` ProductSurface query while retaining the
+  existing product automation facade behind the view builder; probe and login
+  starts remain explicit follow-ups because they need typed command result
+  payloads.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
