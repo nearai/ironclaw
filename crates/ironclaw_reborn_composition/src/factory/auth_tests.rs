@@ -175,7 +175,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
     .expect("local-dev services build");
     let product_auth = &services.product_auth;
     let turn_coordinator = &services.turn_coordinator;
-    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let scope = turn_scope();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let submit = turn_coordinator
@@ -650,12 +650,12 @@ async fn oauth_callback_with_stale_gate_converges_without_resuming() {
     .expect("local-dev services build");
     let product_auth = &services.product_auth;
     let turn_coordinator = &services.turn_coordinator;
-    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let scope = turn_scope();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let run_id = submit_and_block_auth_run(
         turn_coordinator.as_ref(),
-        runtime_surfaces.as_ref(),
+        runtime_surfaces,
         scope.clone(),
         actor.clone(),
         "gate:current-auth",
@@ -932,7 +932,7 @@ fn provider_scope(value: &str) -> ProviderScope {
 #[cfg(test)]
 async fn submit_and_block_auth_run(
     turn_coordinator: &dyn ironclaw_turns::TurnCoordinator,
-    runtime_surfaces: &RebornRuntimeSurfaces,
+    runtime_surfaces: &RebornRuntimeSubstrate,
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,

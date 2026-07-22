@@ -8,13 +8,12 @@ use ironclaw_host_runtime::{
 use ironclaw_run_state::ApprovalRequestStore;
 use std::sync::Arc;
 
-use crate::RebornRuntime;
 use crate::builtin_capability_policy::{
     BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError, builtin_one_shot_lease_approval,
 };
 use crate::factory::{
-    ComposedApprovalRequestStore, ComposedCapabilityLeaseStore, RebornRuntimeSubstrate,
-    RebornRuntimeSurfaces,
+    ComposedApprovalRequestStore, ComposedAutoApproveSettingStore, ComposedCapabilityLeaseStore,
+    RebornRuntimeSubstrate,
 };
 
 pub(crate) trait LocalDevApprovalHarness {
@@ -28,9 +27,10 @@ pub(crate) trait LocalDevApprovalHarness {
     fn skill_mounts(&self) -> Option<&MountView>;
     fn memory_mounts(&self) -> Option<&MountView>;
     fn system_extensions_lifecycle_mounts(&self) -> Option<&MountView>;
+    fn auto_approve_settings(&self) -> Option<&Arc<ComposedAutoApproveSettingStore>>;
 }
 
-impl LocalDevApprovalHarness for RebornRuntime {
+impl LocalDevApprovalHarness for RebornRuntimeSubstrate {
     fn host_runtime(&self) -> Option<&Arc<dyn HostRuntime>> {
         Some(&self.host_runtime)
     }
@@ -64,46 +64,9 @@ impl LocalDevApprovalHarness for RebornRuntime {
     fn system_extensions_lifecycle_mounts(&self) -> Option<&MountView> {
         self.system_extensions_lifecycle_mounts.as_ref()
     }
-}
 
-impl LocalDevApprovalHarness for RebornRuntimeSubstrate {
-    fn host_runtime(&self) -> Option<&Arc<dyn HostRuntime>> {
-        Some(&self.host_runtime)
-    }
-
-    fn approval_requests(&self) -> Option<&Arc<ComposedApprovalRequestStore>> {
-        Some(&self.runtime_surfaces.as_ref()?.approval_requests)
-    }
-
-    fn capability_leases(&self) -> Option<&Arc<ComposedCapabilityLeaseStore>> {
-        Some(&self.runtime_surfaces.as_ref()?.capability_leases)
-    }
-
-    fn capability_policy(
-        &self,
-    ) -> Option<&Arc<crate::builtin_capability_policy::BuiltinCapabilityPolicy>> {
-        Some(&self.runtime_surfaces.as_ref()?.capability_policy)
-    }
-
-    fn workspace_mounts(&self) -> Option<&MountView> {
-        Some(&self.runtime_surfaces.as_ref()?.workspace_mounts)
-    }
-
-    fn skill_mounts(&self) -> Option<&MountView> {
-        Some(&self.runtime_surfaces.as_ref()?.skill_mounts)
-    }
-
-    fn memory_mounts(&self) -> Option<&MountView> {
-        Some(&self.runtime_surfaces.as_ref()?.memory_mounts)
-    }
-
-    fn system_extensions_lifecycle_mounts(&self) -> Option<&MountView> {
-        Some(
-            &self
-                .runtime_surfaces
-                .as_ref()?
-                .system_extensions_lifecycle_mounts,
-        )
+    fn auto_approve_settings(&self) -> Option<&Arc<ComposedAutoApproveSettingStore>> {
+        self.auto_approve_settings.as_ref()
     }
 }
 
@@ -113,11 +76,12 @@ impl LocalDevApprovalHarness for RebornRuntimeSubstrate {
 /// integration-test and root-crate binaries keep their own copies (they cannot
 /// see this crate-internal helper).
 pub(crate) async fn disable_global_auto_approve(
-    runtime_surfaces: &RebornRuntimeSurfaces,
+    runtime: &impl LocalDevApprovalHarness,
     context: &ExecutionContext,
 ) {
-    runtime_surfaces
-        .auto_approve_settings
+    runtime
+        .auto_approve_settings()
+        .expect("local-dev auto-approve store")
         .set(AutoApproveSettingInput {
             scope: context.resource_scope.clone(),
             enabled: false,

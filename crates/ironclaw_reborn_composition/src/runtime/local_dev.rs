@@ -107,37 +107,36 @@ pub(super) fn capability_wiring(
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> Option<CapabilityPortWiring> {
     let runtime = services.host_runtime.clone();
-    let runtime_surfaces = services.runtime_surfaces.as_ref()?;
-    let workspace_mounts = runtime_surfaces.workspace_mounts.clone();
-    let memory_mounts = runtime_surfaces.memory_mounts.clone();
-    let system_extensions_lifecycle_mounts =
-        runtime_surfaces.system_extensions_lifecycle_mounts.clone();
+    let workspace_mounts = services.workspace_mounts.clone()?;
+    let memory_mounts = services.memory_mounts.clone()?;
+    let system_extensions_lifecycle_mounts = services.system_extensions_lifecycle_mounts.clone()?;
     let approval_requests: Arc<dyn ApprovalRequestStore> =
-        runtime_surfaces.approval_requests.clone();
+        services.approval_requests.as_ref()?.clone();
     let capability_leases: Arc<dyn CapabilityLeaseStore> =
-        runtime_surfaces.capability_leases.clone();
+        services.capability_leases.as_ref()?.clone();
     let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-        runtime_surfaces.tool_permission_overrides.clone();
+        services.tool_permission_overrides.as_ref()?.clone();
     let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-        runtime_surfaces.auto_approve_settings.clone();
+        services.auto_approve_settings.as_ref()?.clone();
     let approval_settings: Arc<dyn ApprovalSettingsProvider> =
         Arc::new(StoreApprovalSettingsProvider::new(
             tool_permission_overrides,
             auto_approve_settings,
-            runtime_surfaces.persistent_approval_policies.clone(),
+            services.persistent_approval_policies.as_ref()?.clone(),
         ));
     let outbound_delivery_target_set_requires_approval = local_dev_effects_require_approval(
-        runtime_surfaces.runtime_policy.as_ref(),
+        services.runtime_policy.as_ref(),
         policy.as_ref(),
         &[EffectKind::ExternalWrite],
     );
-    let extension_surface_source =
-        ExtensionCapabilitySurfaceSource::new(runtime_surfaces.extension_management.clone());
+    let extension_surface_source = ExtensionCapabilitySurfaceSource::new(Some(
+        services.extension_management.as_ref()?.clone(),
+    ));
     // First-class project creation reuses the same access-controlled
     // `ProjectService` facade the WebUI v2 surface wires (composition owns the
     // service, never the raw repository), so an agent-created project is a real
     // entity that appears in the Projects list.
-    let project_service: Arc<dyn ProjectService> = Arc::clone(&runtime_surfaces.project_service);
+    let project_service: Arc<dyn ProjectService> = Arc::clone(&services.project_service);
     let display_previews = Arc::new(CapabilityDisplayPreviewStore::default());
     let capability_io = Arc::new(
         StagedCapabilityIo::new_with_durable_previews(
@@ -149,11 +148,11 @@ pub(super) fn capability_wiring(
     );
     let capability_input_resolver: Arc<dyn LoopCapabilityInputResolver> = capability_io.clone();
     let capability_result_writer: Arc<dyn LoopCapabilityResultWriter> = capability_io.clone();
-    // Shared per-runtime catalog (owned by runtime_surfaces services) so the
+    // Shared per-runtime catalog (owned by the composed runtime) so the
     // OpenAI-compatible Responses surface and this loop host see the same
     // run-scoped external-tool state.
     let external_tool_catalog: Arc<dyn ExternalToolCatalog> =
-        Arc::clone(&runtime_surfaces.external_tool_catalog);
+        services.external_tool_catalog.as_ref()?.clone();
     // Wire the durable gate-record and host-private replay-payload stores over
     // the composition-owned scoped filesystem (same backend + per-user mount view
     // as every other durable store; `extension_filesystem` is the shared composite
@@ -162,7 +161,7 @@ pub(super) fn capability_wiring(
     // and a gate/auth resume had no host-side replay payload to reconstitute
     // {input, estimate} from (arch-simplification §5.3 Stage 2a-i).
     let capability_store_filesystem =
-        crate::wrap_scoped(Arc::clone(&runtime_surfaces.extension_filesystem));
+        crate::wrap_scoped(Arc::clone(services.extension_filesystem.as_ref()?));
     let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
         Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
             Arc::clone(&capability_store_filesystem),

@@ -4,7 +4,7 @@
 //!
 //! Main entry point:
 //!
-//! - [`build_reborn_runtime`] — full runtime assembly: substrate + loop
+//! - [`build_runtime`] — full runtime assembly: deployment config + loop
 //!   driver registry + LLM model gateway + turn-runner worker, spawned
 //!   as one unit. This is the single entry
 //!   point used by the standalone `ironclaw-reborn` binary and any
@@ -46,6 +46,7 @@ mod root;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
+mod storage_catalog;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;
@@ -221,7 +222,7 @@ pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
+    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime, build_runtime,
 };
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,

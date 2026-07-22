@@ -37,8 +37,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
     .await
     .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services.host_runtime.as_ref(); // safety: test-only service fixture invariant.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: constant capability id.
@@ -62,7 +61,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
     };
     assert_eq!(gate.capability_id, capability_id);
     let approval = runtime_surfaces
-        .approval_requests
+        .approval_requests_for_test()
         .get(&context.resource_scope, gate.approval_request_id)
         .await
         .expect("approval store read")
@@ -86,7 +85,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
         "approved one-shot lease should allow resume, got {resumed:?}"
     );
     let leases = runtime_surfaces
-        .capability_leases
+        .capability_leases_for_test()
         .leases_for_scope(&context.resource_scope)
         .await;
     assert_eq!(leases.len(), 1);
@@ -110,8 +109,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
     .await
     .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
@@ -175,8 +173,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
     .await
     .expect("local-dev-yolo services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
     let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
@@ -219,8 +216,7 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
     .await
     .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
@@ -230,7 +226,7 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
     );
 
     runtime_surfaces
-        .auto_approve_settings
+        .auto_approve_settings_for_test()
         .set(AutoApproveSettingInput {
             scope: context.resource_scope.clone(),
             enabled: true,
@@ -273,8 +269,7 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
     .await
     .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services.host_runtime.as_ref(); // safety: test-only service fixture invariant.
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability"); // safety: constant capability id.
@@ -312,8 +307,7 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
     let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
@@ -353,8 +347,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
     let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
@@ -363,7 +356,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     let context = echo_spawn_execution_context("local-dev-echo-ask-resume", "thread-echo-resume");
 
     runtime_surfaces
-        .tool_permission_overrides
+        .tool_permission_overrides_for_test()
         .set(ToolPermissionOverrideInput {
             scope: operator_tool_permission_scope_for_test(&context.resource_scope),
             capability_id: capability_id.clone(),
@@ -409,7 +402,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     );
     assert!(
         runtime_surfaces
-            .capability_leases
+            .capability_leases_for_test()
             .leases_for_scope(&context.resource_scope)
             .await
             .is_empty(),
@@ -417,8 +410,8 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     );
 
     let lease = ApprovalResolver::new(
-        runtime_surfaces.approval_requests.as_ref(),
-        runtime_surfaces.capability_leases.as_ref(),
+        runtime_surfaces.approval_requests_for_test().as_ref(),
+        runtime_surfaces.capability_leases_for_test().as_ref(),
     )
     .approve_dispatch(
         &context.resource_scope,
@@ -428,7 +421,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     .await
     .expect("approval issues echo lease");
     let approved_record = runtime_surfaces
-        .approval_requests
+        .approval_requests_for_test()
         .get(&context.resource_scope, gate.approval_request_id)
         .await
         .expect("approval record lookup")
@@ -459,7 +452,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
         "approved ask_each_time one-shot lease should allow echo resume, got {resumed:?}"
     );
     let leases = runtime_surfaces
-        .capability_leases
+        .capability_leases_for_test()
         .leases_for_scope(&context.resource_scope)
         .await;
     assert_eq!(leases.len(), 1);
@@ -476,8 +469,7 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
     let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
@@ -486,7 +478,7 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
     disable_global_auto_approve(runtime_surfaces, &context).await;
 
     runtime_surfaces
-        .persistent_approval_policies
+        .persistent_approval_policies_for_test()
         .allow(PersistentApprovalPolicyInput {
             scope: context.resource_scope.clone(),
             action: PersistentApprovalAction::Dispatch,
@@ -541,8 +533,7 @@ async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
     let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
@@ -552,7 +543,7 @@ async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
     );
 
     runtime_surfaces
-        .persistent_approval_policies
+        .persistent_approval_policies_for_test()
         .allow(PersistentApprovalPolicyInput {
             scope: operator_tool_permission_scope_for_test(&context.resource_scope),
             action: PersistentApprovalAction::Dispatch,
@@ -609,8 +600,7 @@ async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
     let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
@@ -620,7 +610,7 @@ async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
     );
 
     runtime_surfaces
-        .persistent_approval_policies
+        .persistent_approval_policies_for_test()
         .allow(PersistentApprovalPolicyInput {
             scope: operator_tool_permission_scope_for_test(&context.resource_scope),
             action: PersistentApprovalAction::Dispatch,
@@ -681,15 +671,14 @@ async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
     .await
     .expect("local-dev-yolo services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
     let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
     let context = shell_execution_context("local-dev-yolo-ask-owner", "thread-local-yolo-ask");
 
     runtime_surfaces
-        .tool_permission_overrides
+        .tool_permission_overrides_for_test()
         .set(ToolPermissionOverrideInput {
             scope: operator_tool_permission_scope_for_test(&context.resource_scope),
             capability_id: capability_id.clone(),
@@ -758,8 +747,7 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
     let host_runtime = services.host_runtime.as_ref();
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
@@ -782,8 +770,8 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     };
 
     let resolver = ApprovalResolver::new(
-        runtime_surfaces.approval_requests.as_ref(),
-        runtime_surfaces.capability_leases.as_ref(),
+        runtime_surfaces.approval_requests_for_test().as_ref(),
+        runtime_surfaces.capability_leases_for_test().as_ref(),
     );
     resolver
         .deny(
@@ -812,7 +800,7 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert!(
         runtime_surfaces
-            .capability_leases
+            .capability_leases_for_test()
             .leases_for_scope(&context.resource_scope)
             .await
             .is_empty(),
@@ -881,13 +869,13 @@ fn shell_network_policy() -> NetworkPolicy {
 }
 
 async fn approve_shell_dispatch(
-    runtime_surfaces: &RebornRuntimeSurfaces,
+    runtime_surfaces: &RebornRuntimeSubstrate,
     context: &ExecutionContext,
     gate: &RuntimeApprovalGate,
 ) {
     ApprovalResolver::new(
-        runtime_surfaces.approval_requests.as_ref(),
-        runtime_surfaces.capability_leases.as_ref(),
+        runtime_surfaces.approval_requests_for_test().as_ref(),
+        runtime_surfaces.capability_leases_for_test().as_ref(),
     )
     .approve_dispatch(
         &context.resource_scope,
@@ -899,11 +887,11 @@ async fn approve_shell_dispatch(
 }
 
 async fn pending_approval_count(
-    runtime_surfaces: &RebornRuntimeSurfaces,
+    runtime_surfaces: &RebornRuntimeSubstrate,
     context: &ExecutionContext,
 ) -> usize {
     runtime_surfaces
-        .approval_requests
+        .approval_requests_for_test()
         .records_for_scope(&context.resource_scope)
         .await
         .expect("approval store records") // safety: test-only helper reads in-memory approval records from a constructed local runtime.
@@ -986,8 +974,7 @@ async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve
     .await
     .expect("local-dev minimal services build"); // safety: test-only helper in #[cfg(test)] module.
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
@@ -1025,8 +1012,7 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
     .await
     .expect("local-dev minimal enterprise services build"); // safety: test-only helper in #[cfg(test)] module.
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
@@ -1047,7 +1033,7 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
         panic!("enterprise profile must keep gating even under Minimal, got {outcome:?}");
     };
     let approval = runtime_surfaces
-        .approval_requests
+        .approval_requests_for_test()
         .get(&context.resource_scope, gate.approval_request_id)
         .await
         .expect("approval store read") // safety: test-only helper in #[cfg(test)] module.
@@ -1070,8 +1056,7 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
     .await
     .expect("local-dev services build"); // safety: test-only helper in #[cfg(test)] module.
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
@@ -1097,8 +1082,8 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
     assert_eq!(gate.capability_id, capability_id); // safety: test-only assertion in #[cfg(test)] module.
 
     ApprovalResolver::new(
-        runtime_surfaces.approval_requests.as_ref(),
-        runtime_surfaces.capability_leases.as_ref(),
+        runtime_surfaces.approval_requests_for_test().as_ref(),
+        runtime_surfaces.capability_leases_for_test().as_ref(),
     )
     .approve_spawn(
         &context.resource_scope,
@@ -1142,8 +1127,7 @@ async fn local_dev_ask_destructive_spawn_dispatch_only_capability_requires_appro
     .await
     .expect("local-dev services build"); // safety: test-only helper in #[cfg(test)] module.
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability"); // safety: test-only helper in #[cfg(test)] module.
@@ -1260,8 +1244,7 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
     .await
     .expect("local-dev services build"); // safety: test-only helper in #[cfg(test)] module.
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services.host_runtime.as_ref(); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.

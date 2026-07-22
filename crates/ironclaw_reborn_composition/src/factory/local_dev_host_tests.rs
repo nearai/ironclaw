@@ -23,12 +23,11 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
     .await
     .expect("local-dev-yolo services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
 
     let host_mount = runtime_surfaces
-        .workspace_mounts
+        .workspace_mounts_for_test()
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == "/host")
@@ -42,7 +41,7 @@ async fn local_yolo_policy_mounts_confirmed_host_home_as_host() {
         .to_string_lossy()
         .into_owned();
     let raw_host_home_mount = runtime_surfaces
-        .workspace_mounts
+        .workspace_mounts_for_test()
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == raw_host_home_alias)
@@ -75,12 +74,11 @@ async fn local_yolo_policy_allows_workspace_under_confirmed_host_home() {
     .await
     .expect("local-dev-yolo services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
 
     let workspace_mount = runtime_surfaces
-        .workspace_mounts
+        .workspace_mounts_for_test()
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == "/workspace")
@@ -89,7 +87,7 @@ async fn local_yolo_policy_allows_workspace_under_confirmed_host_home() {
     assert_eq!(workspace_mount.permissions, MountPermissions::read_write());
 
     let host_mount = runtime_surfaces
-        .workspace_mounts
+        .workspace_mounts_for_test()
         .mounts
         .iter()
         .find(|mount| mount.alias.as_str() == "/host")
@@ -120,12 +118,11 @@ async fn local_yolo_policy_keeps_symlinked_host_home_raw_alias() {
     .await
     .expect("local-dev-yolo services build"); // safety: test-only assertion in #[cfg(test)] module.
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
 
     let raw_aliases = runtime_surfaces
-        .workspace_mounts
+        .workspace_mounts_for_test()
         .mounts
         .iter()
         .map(|mount| mount.alias.as_str())

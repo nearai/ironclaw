@@ -48,6 +48,7 @@ use crate::product_auth::credentials::runtime_credentials::ProductAuthRuntimeCre
 use crate::product_auth::durable::{FilesystemAuthProductServices, UnavailableAuthProviderClient};
 use crate::root::default_system_prompt::seed_default_system_prompt;
 use crate::runtime_input::RebornRuntimeIdentity;
+use crate::storage_catalog::validate_reborn_runtime_storage;
 use crate::support::fs::RebornProjectService;
 use crate::web_access::register_bundled_web_access_first_party_handlers;
 use crate::{
@@ -62,10 +63,10 @@ use ironclaw_auth::AuthProviderClient;
 use ironclaw_auth::{AuthProductScope, AuthSurface};
 use ironclaw_authorization::FilesystemCapabilityLeaseStore;
 use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_conversations::RebornFilesystemConversationServices;
 use ironclaw_conversations::{
     AdapterInstallationId, AdapterKind, ConversationActorPairingService, ExternalActorRef,
 };
-use ironclaw_conversations::{InboundTurnError, RebornFilesystemConversationServices};
 use ironclaw_events::{DurableAuditLog, DurableEventLog};
 use ironclaw_extension_host::{AdminConfigurationService, FilesystemAdminConfigurationStore};
 use ironclaw_extensions::{
@@ -399,7 +400,49 @@ pub(crate) struct RebornRuntimeSubstrate {
     pub(crate) product_auth: Arc<RebornProductAuthServices>,
     pub(crate) readiness: RebornReadiness,
     pub(crate) skill_management: Arc<RebornLocalSkillManagementPort>,
-    pub(crate) runtime_surfaces: Option<Arc<RebornRuntimeSurfaces>>,
+    pub(crate) extension_lifecycle_surface_context: Option<LifecycleProductSurfaceContext>,
+    pub(crate) owner_user_id: Option<UserId>,
+    pub(crate) approval_requests: Option<Arc<ComposedApprovalRequestStore>>,
+    pub(crate) capability_leases: Option<Arc<ComposedCapabilityLeaseStore>>,
+    pub(crate) external_tool_catalog: Option<Arc<dyn ExternalToolCatalog>>,
+    pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
+    pub(crate) persistent_approval_policies: Option<Arc<ComposedPersistentApprovalPolicyStore>>,
+    pub(crate) tool_permission_overrides: Option<Arc<ComposedToolPermissionOverrideStore>>,
+    pub(crate) auto_approve_settings: Option<Arc<ComposedAutoApproveSettingStore>>,
+    pub(crate) capability_policy: Option<Arc<BuiltinCapabilityPolicy>>,
+    pub(crate) outbound_preferences: Option<Arc<dyn CommunicationPreferenceRepository>>,
+    pub(crate) outbound_delivery_targets:
+        Option<Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>>,
+    pub(crate) skill_auto_activate_learned: Option<Arc<AtomicBool>>,
+    pub(crate) outbound_state: Option<Arc<dyn OutboundStateStore>>,
+    pub(crate) delivered_gate_routes: Option<Arc<dyn DeliveredGateRouteStore>>,
+    pub(crate) triggered_run_delivery: Option<Arc<dyn TriggeredRunDeliveryStore>>,
+    pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    pub(crate) channel_config:
+        Option<Arc<crate::extension_host::channel_config::ChannelConfigService>>,
+    pub(crate) admin_configuration: Option<Arc<ComposedAdminConfigurationService>>,
+    pub(crate) admin_configuration_uses: Option<Arc<Vec<AdminConfigurationCatalogUse>>>,
+    pub(crate) channel_identity_store:
+        Option<Arc<crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore>>,
+    pub(crate) channel_dm_target_store:
+        Option<Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>>,
+    pub(crate) channel_disconnect_slot: Option<
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>,
+    >,
+    pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub(crate) skill_mounts: Option<MountView>,
+    pub(crate) memory_mounts: Option<MountView>,
+    pub(crate) system_extensions_lifecycle_mounts: Option<MountView>,
+    pub(crate) skill_filesystem: Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>>,
+    pub(crate) workspace_filesystem: Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>>,
+    pub(crate) extension_filesystem: Option<Arc<CompositeRootFilesystem>>,
+    pub(crate) workspace_mounts: Option<MountView>,
+    pub(crate) local_dev_storage_root: Option<PathBuf>,
+    pub(crate) default_system_prompt_path: Option<PathBuf>,
+    pub(crate) in_memory_budget_event_sink:
+        Option<Arc<ironclaw_resources::InMemoryBudgetEventSink>>,
+    pub(crate) extension_registry: Option<Arc<ExtensionRegistry>>,
+    pub(crate) shared_extension_registry: Option<Arc<SharedExtensionRegistry>>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) turn_state: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
@@ -543,6 +586,213 @@ pub struct ChannelHostAssemblyTestWiring {
 
 #[allow(dead_code)]
 impl RebornRuntimeSubstrate {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn local_runtime_for_test(&self) -> Option<&Self> {
+        self.extension_lifecycle_surface_context.as_ref()?;
+        Some(self)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn approval_requests_for_test(&self) -> &Arc<ComposedApprovalRequestStore> {
+        self.approval_requests
+            .as_ref()
+            .expect("local runtime approval request store")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn capability_leases_for_test(&self) -> &Arc<ComposedCapabilityLeaseStore> {
+        self.capability_leases
+            .as_ref()
+            .expect("local runtime capability lease store")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn capability_policy_for_test(&self) -> &Arc<BuiltinCapabilityPolicy> {
+        self.capability_policy
+            .as_ref()
+            .expect("local runtime capability policy")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn persistent_approval_policies_for_test(
+        &self,
+    ) -> &Arc<ComposedPersistentApprovalPolicyStore> {
+        self.persistent_approval_policies
+            .as_ref()
+            .expect("local runtime persistent approval policy store")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn tool_permission_overrides_for_test(
+        &self,
+    ) -> &Arc<ComposedToolPermissionOverrideStore> {
+        self.tool_permission_overrides
+            .as_ref()
+            .expect("local runtime tool permission override store")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn auto_approve_settings_for_test(&self) -> &Arc<ComposedAutoApproveSettingStore> {
+        self.auto_approve_settings
+            .as_ref()
+            .expect("local runtime auto-approve setting store")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn external_tool_catalog_for_test(&self) -> &Arc<dyn ExternalToolCatalog> {
+        self.external_tool_catalog
+            .as_ref()
+            .expect("local runtime external tool catalog")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn outbound_delivery_targets_for_test(
+        &self,
+    ) -> &Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry> {
+        self.outbound_delivery_targets
+            .as_ref()
+            .expect("local runtime outbound delivery target registry")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn outbound_preferences_for_test(
+        &self,
+    ) -> &Arc<dyn CommunicationPreferenceRepository> {
+        self.outbound_preferences
+            .as_ref()
+            .expect("local runtime outbound preferences")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn skill_auto_activate_learned_for_test(&self) -> &Arc<AtomicBool> {
+        self.skill_auto_activate_learned
+            .as_ref()
+            .expect("local runtime skill auto-activation switch")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn outbound_state_for_test(&self) -> &Arc<dyn OutboundStateStore> {
+        self.outbound_state
+            .as_ref()
+            .expect("local runtime outbound state store")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn delivered_gate_routes_for_test(&self) -> &Arc<dyn DeliveredGateRouteStore> {
+        self.delivered_gate_routes
+            .as_ref()
+            .expect("local runtime delivered gate route store")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn triggered_run_delivery_for_test(&self) -> &Arc<dyn TriggeredRunDeliveryStore> {
+        self.triggered_run_delivery
+            .as_ref()
+            .expect("local runtime triggered-run delivery store")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn in_memory_budget_event_sink_for_test(
+        &self,
+    ) -> &Arc<ironclaw_resources::InMemoryBudgetEventSink> {
+        self.in_memory_budget_event_sink
+            .as_ref()
+            .expect("local runtime in-memory budget event sink")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn admin_configuration_uses_for_test(
+        &self,
+    ) -> &Arc<Vec<AdminConfigurationCatalogUse>> {
+        self.admin_configuration_uses
+            .as_ref()
+            .expect("local runtime admin configuration catalog uses")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn channel_disconnect_slot_for_test(
+        &self,
+    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>
+    {
+        self.channel_disconnect_slot
+            .as_ref()
+            .expect("local runtime channel disconnect slot")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn skill_mounts_for_test(&self) -> &MountView {
+        self.skill_mounts
+            .as_ref()
+            .expect("local runtime skill mounts")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn memory_mounts_for_test(&self) -> &MountView {
+        self.memory_mounts
+            .as_ref()
+            .expect("local runtime memory mounts")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn system_extensions_lifecycle_mounts_for_test(&self) -> &MountView {
+        self.system_extensions_lifecycle_mounts
+            .as_ref()
+            .expect("local runtime system extension lifecycle mounts")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn skill_filesystem_for_test(
+        &self,
+    ) -> &Arc<ScopedFilesystem<CompositeRootFilesystem>> {
+        self.skill_filesystem
+            .as_ref()
+            .expect("local runtime skill filesystem")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn workspace_filesystem_for_test(
+        &self,
+    ) -> &Arc<ScopedFilesystem<CompositeRootFilesystem>> {
+        self.workspace_filesystem
+            .as_ref()
+            .expect("local runtime workspace filesystem")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn extension_filesystem_for_test(&self) -> &Arc<CompositeRootFilesystem> {
+        self.extension_filesystem
+            .as_ref()
+            .expect("local runtime extension filesystem")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn workspace_mounts_for_test(&self) -> &MountView {
+        self.workspace_mounts
+            .as_ref()
+            .expect("local runtime workspace mounts")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn local_dev_storage_root_for_direct_test(&self) -> &PathBuf {
+        self.local_dev_storage_root
+            .as_ref()
+            .expect("local runtime storage root")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn default_system_prompt_path_for_test(&self) -> &PathBuf {
+        self.default_system_prompt_path
+            .as_ref()
+            .expect("local runtime default system prompt path")
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn extension_registry_for_test(&self) -> &Arc<ExtensionRegistry> {
+        self.extension_registry
+            .as_ref()
+            .expect("local runtime extension registry")
+    }
+
     /// The shared scoped secret store backing this composition.
     pub(crate) fn secret_store(&self) -> Arc<dyn SecretStore> {
         Arc::clone(&self.secret_store)
@@ -693,7 +943,7 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn channel_config_facade(
         &self,
     ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelConfigFacade>> {
-        let service = self.runtime_surfaces.as_ref()?.channel_config.clone()?;
+        let service = self.channel_config.clone()?;
         Some(Arc::new(
             crate::extension_host::channel_config::RebornChannelConfigFacade::new(service),
         ))
@@ -726,22 +976,21 @@ impl RebornRuntimeSubstrate {
             auth_flow_cancel,
             run_delivery_settings,
         } = wiring;
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
-        let generic_host = runtime_surfaces
-            .extension_management
-            .as_ref()?
-            .generic_host()?;
+        let generic_host = self.extension_management.as_ref()?.generic_host()?;
         let ingress = self.extension_ingress.as_ref()?;
-        let channel_config = runtime_surfaces.channel_config.clone()?;
+        let channel_config = self.channel_config.clone()?;
         let workflow_state = Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::clone(
-            &runtime_surfaces.extension_filesystem,
+            self.extension_filesystem.as_ref()?,
         )));
+        let outbound_state = Arc::clone(self.outbound_state.as_ref()?);
+        let delivered_gate_routes = Arc::clone(self.delivered_gate_routes.as_ref()?);
+        let outbound_preferences = Arc::clone(self.outbound_preferences.as_ref()?);
         let delivery = self.delivery_coordinator.clone().map(|coordinator| {
             crate::extension_host::channel_host::ChannelHostDeliveryDeps {
                 coordinator,
-                outbound_store: Arc::clone(&runtime_surfaces.outbound_state),
-                route_store: Arc::clone(&runtime_surfaces.delivered_gate_routes),
-                communication_preferences: Arc::clone(&runtime_surfaces.outbound_preferences),
+                outbound_store: Arc::clone(&outbound_state),
+                route_store: Arc::clone(&delivered_gate_routes),
+                communication_preferences: Arc::clone(&outbound_preferences),
                 approval_context,
                 blocked_auth_prompts,
                 auth_flow_cancel,
@@ -749,7 +998,7 @@ impl RebornRuntimeSubstrate {
             }
         });
 
-        let identity_lookup = runtime_surfaces
+        let identity_lookup = self
             .channel_identity_store
             .clone()
             .map(|store| store as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>);
@@ -815,10 +1064,10 @@ impl RebornRuntimeSubstrate {
     }
 
     /// Read-write project-scoped workspace filesystem, built over
-    /// `runtime_surfaces.extension_filesystem` + `runtime_surfaces.workspace_mounts`.
+    /// `extension_filesystem` + `workspace_mounts`.
     /// `None` when no local runtime is composed.
     ///
-    /// This deliberately does NOT reuse `runtime_surfaces.workspace_filesystem`:
+    /// This deliberately does NOT reuse `workspace_filesystem`:
     /// that handle is intentionally read-only (it backs setup-marker reads —
     /// see `local_dev_setup_marker_workspace_filesystem_is_read_only`), so
     /// writing through it fails closed with `PermissionDenied`.
@@ -830,25 +1079,23 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn read_write_workspace_filesystem(
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
         Some(Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(&runtime_surfaces.extension_filesystem),
-            runtime_surfaces.workspace_mounts.clone(),
+            Arc::clone(self.extension_filesystem.as_ref()?),
+            self.workspace_mounts.clone()?,
         )))
     }
 
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_approval_test_parts(&self) -> Option<RebornApprovalTestParts> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
         let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
-            runtime_surfaces.approval_requests.clone();
+            self.approval_requests.as_ref()?.clone();
         let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
-            runtime_surfaces.capability_leases.clone();
+            self.capability_leases.as_ref()?.clone();
         // Build over the same shared composite root production `capability_wiring`
         // uses, so these test-support stores persist across the group's
         // threads/turns and round-trip identically to production.
         let capability_store_filesystem =
-            crate::wrap_scoped(Arc::clone(&runtime_surfaces.extension_filesystem));
+            crate::wrap_scoped(Arc::clone(self.extension_filesystem.as_ref()?));
         let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
             Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
                 Arc::clone(&capability_store_filesystem),
@@ -868,9 +1115,8 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn local_dev_auto_approve_settings_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-            runtime_surfaces.auto_approve_settings.clone();
+            self.auto_approve_settings.as_ref()?.clone();
         Some(auto_approve_settings)
     }
 
@@ -885,9 +1131,8 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn extension_installation_store_for_test(
         &self,
     ) -> Option<Arc<dyn ExtensionInstallationStore>> {
-        self.runtime_surfaces
+        self.extension_management
             .as_ref()
-            .and_then(|rt| rt.extension_management.as_ref())
             .map(|em| em.installation_store_for_test())
     }
 
@@ -901,8 +1146,7 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn local_dev_profile_filesystem_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_filesystem::RootFilesystem>> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
-        Some(Arc::clone(&runtime_surfaces.extension_filesystem)
+        Some(Arc::clone(self.extension_filesystem.as_ref()?)
             as Arc<dyn ironclaw_filesystem::RootFilesystem>)
     }
 
@@ -911,8 +1155,7 @@ impl RebornRuntimeSubstrate {
     /// production-profile compositions without a local-dev runtime.
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_project_service_for_test(&self) -> Option<Arc<dyn ProjectService>> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
-        Some(Arc::clone(&runtime_surfaces.project_service))
+        Some(Arc::clone(&self.project_service))
     }
 
     /// Test-support access to the local-dev session thread service (durable
@@ -927,8 +1170,7 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn local_dev_thread_service_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_threads::SessionThreadService>> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
-        Some(Arc::clone(&runtime_surfaces.thread_service))
+        Some(Arc::clone(&self.thread_service))
     }
 
     /// Test-support access to the local-dev communication-preference repository
@@ -940,24 +1182,22 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn local_dev_outbound_preferences_for_test(
         &self,
     ) -> Option<Arc<dyn CommunicationPreferenceRepository>> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
-        Some(Arc::clone(&runtime_surfaces.outbound_preferences))
+        self.outbound_preferences.as_ref().map(Arc::clone)
     }
 
     /// Test-support access to the on-disk local-dev storage root (W6-COLD-SPOTS
-    /// seam), for tests only — mirrors the same `runtime_surfaces.local_dev_storage_root`
+    /// seam), for tests only — mirrors the same `local_dev_storage_root`
     /// that `build_local_runtime_runtime_stores` establishes in production. Used to reopen
     /// a fresh outbound-preferences store at the same root (see
     /// `open_local_dev_outbound_preferences_store_for_test`). Returns `None` for
     /// production-profile compositions without a local-dev runtime.
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_storage_root_for_test(&self) -> Option<PathBuf> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
-        Some(runtime_surfaces.local_dev_storage_root.clone())
+        self.local_dev_storage_root.clone()
     }
 
     /// Single owner of the `ProjectScopedAttachmentReader` construction recipe
-    /// over `runtime_surfaces.workspace_filesystem` (mirrors the
+    /// over `workspace_filesystem` (mirrors the
     /// `read_write_workspace_filesystem` "single owner" pattern above). The
     /// concrete reader implements both `LoopAttachmentReadPort` and
     /// `InboundAttachmentReader`, so callers cast the same `Arc` into whichever
@@ -968,16 +1208,15 @@ impl RebornRuntimeSubstrate {
         &self,
     ) -> Option<Arc<crate::support::fs::ProjectScopedAttachmentReader<CompositeRootFilesystem>>>
     {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
         Some(Arc::new(
             crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
-                &runtime_surfaces.workspace_filesystem,
+                self.workspace_filesystem.as_ref()?,
             )),
         ))
     }
 
     /// Test-support access to the attachment read port + inbound lander backing
-    /// the C-ATTACH seam. The read port is built over `runtime_surfaces.workspace_filesystem`,
+    /// the C-ATTACH seam. The read port is built over `workspace_filesystem`,
     /// exactly like production's `attachment_read_port` (`runtime.rs` ~line 3328) —
     /// that handle is intentionally read-only (it backs setup-marker reads), which
     /// is fine for reading. The lander is built over the SAME read-write view
@@ -1013,9 +1252,8 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn local_dev_tool_permission_overrides_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
         let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-            runtime_surfaces.tool_permission_overrides.clone();
+            self.tool_permission_overrides.as_ref()?.clone();
         Some(overrides)
     }
 
@@ -1027,9 +1265,8 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn local_dev_persistent_approval_policies_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
         let policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
-            runtime_surfaces.persistent_approval_policies.clone();
+            self.persistent_approval_policies.as_ref()?.clone();
         Some(policies)
     }
 
@@ -1044,8 +1281,7 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn local_dev_shared_trigger_repository_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
-        Some(Arc::clone(&runtime_surfaces.trigger_repository))
+        Some(Arc::clone(&self.trigger_repository))
     }
 
     /// WebUI-facing `InboundAttachmentReader` view over the local-dev
@@ -1081,11 +1317,7 @@ impl RebornRuntimeSubstrate {
         package: &ironclaw_extensions::ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
     ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
-        let extension_management = self
-            .runtime_surfaces
-            .as_ref()?
-            .extension_management
-            .as_ref()?;
+        let extension_management = self.extension_management.as_ref()?;
         Some(
             extension_management
                 .publish_bundled_package_for_test(package, resolved)
@@ -1128,11 +1360,10 @@ impl RebornRuntimeSubstrate {
         Arc<dyn ironclaw_outbound::DeliveredGateRouteStore>,
         Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
     )> {
-        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
         Some((
-            Arc::clone(&runtime_surfaces.outbound_state),
-            Arc::clone(&runtime_surfaces.delivered_gate_routes),
-            Arc::clone(&runtime_surfaces.outbound_preferences),
+            Arc::clone(self.outbound_state.as_ref()?),
+            Arc::clone(self.delivered_gate_routes.as_ref()?),
+            Arc::clone(self.outbound_preferences.as_ref()?),
         ))
     }
 
@@ -1149,11 +1380,7 @@ impl RebornRuntimeSubstrate {
     ) -> Option<
         Result<ActiveExtensionAuthorityForTest, ironclaw_product_workflow::ProductWorkflowError>,
     > {
-        let extension_management = self
-            .runtime_surfaces
-            .as_ref()?
-            .extension_management
-            .as_ref()?;
+        let extension_management = self.extension_management.as_ref()?;
         Some(active_extension_authority_for_test(extension_management, grantee).await)
     }
 }
@@ -1301,7 +1528,9 @@ pub struct RebornApprovalTestParts {
     pub replay_payload_store: Arc<dyn ironclaw_capabilities::ReplayPayloadStore>,
 }
 
-pub(crate) struct RebornRuntimeSurfaces {
+struct RebornRuntimeStores {
+    run_state: Arc<ComposedRunStateStore>,
+    process_services: ComposedProcessServices,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) extension_lifecycle_surface_context: LifecycleProductSurfaceContext,
     pub(crate) owner_user_id: UserId,
@@ -1343,8 +1572,6 @@ pub(crate) struct RebornRuntimeSurfaces {
     pub(crate) outbound_state: Arc<dyn OutboundStateStore>,
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
-    pub(crate) trigger_conversation_services:
-        tokio::sync::OnceCell<RebornFilesystemConversationServices>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
@@ -1360,7 +1587,7 @@ pub(crate) struct RebornRuntimeSurfaces {
     /// composer can construct a `GovernorBackedAccountant` without losing
     /// the concrete governor type. Wired through #3841 follow-up "A1: wire
     /// GovernorBackedAccountant into production composition".
-    pub(crate) resource_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
+    pub(crate) resource_governor: Arc<ComposedResourceGovernor>,
     /// Sink that receives `BudgetEvent`s from the governor. Composition
     /// hands this to downstream consumers (audit log, SSE projection)
     /// without forcing the governor to know about them. Wired through
@@ -1469,32 +1696,6 @@ where
     )
 }
 
-impl RebornRuntimeSurfaces {
-    pub(crate) async fn durable_trigger_conversation_services(
-        &self,
-    ) -> Result<RebornFilesystemConversationServices, InboundTurnError> {
-        let filesystem = Arc::clone(&self.scoped_filesystem);
-        self.trigger_conversation_services
-            .get_or_try_init(|| async move {
-                RebornFilesystemConversationServices::new(filesystem).await
-            })
-            .await
-            .cloned()
-    }
-}
-
-struct RebornRuntimeStores {
-    run_state: Arc<ComposedRunStateStore>,
-    approval_requests: Arc<ComposedApprovalRequestStore>,
-    capability_leases: Arc<ComposedCapabilityLeaseStore>,
-    persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
-    turn_state: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
-    runtime_surfaces: Arc<RebornRuntimeSurfaces>,
-    resource_governor: Arc<ComposedResourceGovernor>,
-    process_services: ComposedProcessServices,
-    trigger_repository: Arc<dyn TriggerRepository>,
-}
-
 struct RebornRuntimeStoresInput {
     filesystem: Arc<CompositeRootFilesystem>,
     owner_user_id: UserId,
@@ -1525,7 +1726,7 @@ impl std::fmt::Debug for RebornRuntimeSubstrate {
             .field("turn_coordinator", &"Arc<dyn TurnCoordinator>")
             .field("product_auth", &"Arc<RebornProductAuthServices>")
             .field("readiness", &self.readiness)
-            .field("runtime_surfaces", &self.runtime_surfaces.is_some())
+            .field("extension_management", &self.extension_management.is_some())
             .field("scoped_filesystem", &"Arc<ScopedFilesystem>")
             .field("turn_state", &"Arc<FilesystemTurnStateRowStore>");
         debug.finish()
@@ -1910,26 +2111,17 @@ async fn build_local_runtime(
     // so a WebUI change applies without a restart (#4959). Reuse the local
     // runtime stores exactly so UI writes never fork away from the authorizer.
     let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-        runtime_stores
-            .runtime_surfaces
-            .tool_permission_overrides
-            .clone();
+        runtime_stores.tool_permission_overrides.clone();
     let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-        runtime_stores
-            .runtime_surfaces
-            .auto_approve_settings
-            .clone();
+        runtime_stores.auto_approve_settings.clone();
     let approval_settings_provider = Arc::new(StoreApprovalSettingsProvider::new(
         tool_permission_overrides,
         auto_approve_settings,
-        runtime_stores
-            .runtime_surfaces
-            .persistent_approval_policies
-            .clone(),
+        runtime_stores.persistent_approval_policies.clone(),
     ));
     let authorizer = local_dev_authorizer(
         runtime_policy.as_ref(),
-        Arc::clone(&runtime_stores.runtime_surfaces.capability_policy),
+        Arc::clone(&runtime_stores.capability_policy),
         approval_settings_provider,
     );
     let services = HostRuntimeServices::new(
@@ -2218,9 +2410,7 @@ async fn build_local_runtime(
         // Removal of a channel+auth extension disconnects the caller through
         // the facade this late-bound slot carries once composition (runtime
         // build or the channel-connection test bundle) fills it.
-        .with_channel_disconnect_slot(Arc::clone(
-            &runtime_stores.runtime_surfaces.channel_disconnect_slot,
-        )),
+        .with_channel_disconnect_slot(Arc::clone(&runtime_stores.channel_disconnect_slot)),
     );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
@@ -2231,76 +2421,69 @@ async fn build_local_runtime(
     .await?;
     nearai_mcp_bootstrap_outcome.log_completion();
     let fold_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
-    if let Some(runtime_surfaces) = Arc::get_mut(&mut runtime_stores.runtime_surfaces) {
-        runtime_surfaces.extension_management = Some(Arc::clone(&extension_management));
-        // The generic `[channel.config]` configure service (extension-runtime
-        // §6.4–§6.5): non-secret values persist on the durable installation
-        // store; secret values land in the shared scoped secret store at the
-        // channel-egress credential scope, where the egress credential fallback
-        // resolves them with no bridge. The management port runs the §6.5
-        // reactivate cycle for saves against an active extension.
-        let channel_config_service = Arc::new(
-            crate::extension_host::channel_config::ChannelConfigService::new(
-                extension_management.installation_store_handle(),
-                Arc::clone(&secret_store),
-                channel_egress_scope.clone(),
-                Arc::clone(&extension_management)
-                    as Arc<dyn crate::extension_host::channel_config::ChannelConfigReactivation>,
-            )
-            .with_admin_configuration(
-                Arc::clone(&admin_configuration),
-                channel_egress_scope.clone(),
-            )
-            .with_available_manifests(available_manifests.clone()),
-        );
-        extension_management.attach_channel_config(&channel_config_service);
-        channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
-        // The generic channel-identity and DM-target stores (extension-runtime
-        // §5.4–§5.5): the fold below seeds them from retired lane state, and the
-        // channel host assembly resolves verified inbound actors through them.
-        let channel_identity_store = Arc::new(
-            crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
-                Arc::clone(&fold_filesystem),
-                channel_egress_scope.tenant_id.clone(),
-                channel_egress_scope.user_id.clone(),
-            ),
-        );
-        let channel_dm_target_store = Arc::new(
-            crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore::new(
-                Arc::clone(&fold_filesystem),
-                channel_egress_scope.tenant_id.clone(),
-                channel_egress_scope.user_id.clone(),
-            ),
-        );
-        runtime_surfaces.channel_config = Some(Arc::clone(&channel_config_service));
-        runtime_surfaces.admin_configuration = Some(Arc::clone(&admin_configuration));
-        runtime_surfaces.admin_configuration_uses = Arc::new(admin_configuration_uses);
-        runtime_surfaces.channel_identity_store = Some(channel_identity_store);
-        runtime_surfaces.channel_dm_target_store = Some(channel_dm_target_store);
-        runtime_surfaces.runtime_http_egress =
-            Some(product_auth_runtime_ports.runtime_http_egress());
-        runtime_surfaces.extension_registry = Arc::clone(&extension_registry);
-        runtime_surfaces.shared_extension_registry = Some(services.shared_extension_registry());
-        runtime_surfaces.host_runtime_http_egress = services.host_runtime_http_egress_port();
-    } else {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: "local-dev extension lifecycle facade could not be attached".to_string(),
-        });
-    }
-    let channel_config_service = runtime_stores
-        .runtime_surfaces
-        .channel_config
-        .clone()
-        .ok_or_else(|| RebornBuildError::InvalidConfig {
-            reason: "generic extension host requires channel config".to_string(),
-        })?;
-    let trigger_create_hook = local_dev_trigger_create_hook(&runtime_stores.runtime_surfaces);
+    runtime_stores.extension_management = Some(Arc::clone(&extension_management));
+    // The generic `[channel.config]` configure service (extension-runtime
+    // §6.4–§6.5): non-secret values persist on the durable installation
+    // store; secret values land in the shared scoped secret store at the
+    // channel-egress credential scope, where the egress credential fallback
+    // resolves them with no bridge. The management port runs the §6.5
+    // reactivate cycle for saves against an active extension.
+    let channel_config_service = Arc::new(
+        crate::extension_host::channel_config::ChannelConfigService::new(
+            extension_management.installation_store_handle(),
+            Arc::clone(&secret_store),
+            channel_egress_scope.clone(),
+            Arc::clone(&extension_management)
+                as Arc<dyn crate::extension_host::channel_config::ChannelConfigReactivation>,
+        )
+        .with_admin_configuration(
+            Arc::clone(&admin_configuration),
+            channel_egress_scope.clone(),
+        )
+        .with_available_manifests(available_manifests.clone()),
+    );
+    extension_management.attach_channel_config(&channel_config_service);
+    channel_config_credential_slot.fill(Arc::clone(&channel_config_service));
+    // The generic channel-identity and DM-target stores (extension-runtime
+    // §5.4–§5.5): the fold below seeds them from retired lane state, and the
+    // channel host assembly resolves verified inbound actors through them.
+    let channel_identity_store = Arc::new(
+        crate::extension_host::channel_identity_store::FilesystemChannelIdentityStore::new(
+            Arc::clone(&fold_filesystem),
+            channel_egress_scope.tenant_id.clone(),
+            channel_egress_scope.user_id.clone(),
+        ),
+    );
+    let channel_dm_target_store = Arc::new(
+        crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore::new(
+            Arc::clone(&fold_filesystem),
+            channel_egress_scope.tenant_id.clone(),
+            channel_egress_scope.user_id.clone(),
+        ),
+    );
+    runtime_stores.channel_config = Some(Arc::clone(&channel_config_service));
+    runtime_stores.admin_configuration = Some(Arc::clone(&admin_configuration));
+    runtime_stores.admin_configuration_uses = Arc::new(admin_configuration_uses);
+    runtime_stores.channel_identity_store = Some(channel_identity_store);
+    runtime_stores.channel_dm_target_store = Some(channel_dm_target_store);
+    runtime_stores.runtime_http_egress = Some(product_auth_runtime_ports.runtime_http_egress());
+    runtime_stores.extension_registry = Arc::clone(&extension_registry);
+    runtime_stores.shared_extension_registry = Some(services.shared_extension_registry());
+    runtime_stores.host_runtime_http_egress = services.host_runtime_http_egress_port();
+    let channel_config_service =
+        runtime_stores
+            .channel_config
+            .clone()
+            .ok_or_else(|| RebornBuildError::InvalidConfig {
+                reason: "generic extension host requires channel config".to_string(),
+            })?;
+    let trigger_create_hook = local_dev_trigger_create_hook(&runtime_stores);
     // Built from the same turn-state store the WebUI automations panel reads
     // (`crate::webui::facade`), so both `trigger_list` and the panel agree on
     // which fires are blocked (#5886).
     let trigger_active_run_lookup: Arc<dyn TriggerActiveRunLookup> = Arc::new(
         crate::automation::trigger_poller::SnapshotActiveRunLookup::new(Arc::clone(
-            &runtime_stores.runtime_surfaces.turn_state,
+            &runtime_stores.turn_state,
         )
             as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>),
     );
@@ -2375,11 +2558,8 @@ async fn build_local_runtime(
         // Use the SAME effective port the rest of the runtime egresses
         // through (test overrides included) — a transport on a different
         // port would silently bypass recording/replay harnesses.
-        let channel_egress_transport = runtime_stores
-            .runtime_surfaces
-            .host_runtime_http_egress
-            .clone()
-            .map(|port| {
+        let channel_egress_transport =
+            runtime_stores.host_runtime_http_egress.clone().map(|port| {
                 Arc::new(
                     crate::extension_host::channel_egress::HostRuntimeChannelEgressTransport::new(
                         port,
@@ -2390,7 +2570,6 @@ async fn build_local_runtime(
                     as Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>
             });
         let generic_installation_store = runtime_stores
-            .runtime_surfaces
             .extension_management
             .as_ref()
             .map(|management| management.installation_store_handle())
@@ -2407,7 +2586,7 @@ async fn build_local_runtime(
                     .map(|binding| (binding.extension_id.clone(), Arc::clone(&binding.adapter)))
                     .collect(),
                 installation_store: generic_installation_store,
-                channel_config: runtime_stores.runtime_surfaces.channel_config.clone(),
+                channel_config: runtime_stores.channel_config.clone(),
                 governor: Arc::clone(&runtime_stores.resource_governor)
                     as Arc<dyn ironclaw_resources::ResourceGovernor>,
                 reserved_capability_ids,
@@ -2417,11 +2596,7 @@ async fn build_local_runtime(
             },
         )
         .await?;
-        if let Some(management) = runtime_stores
-            .runtime_surfaces
-            .extension_management
-            .as_ref()
-        {
+        if let Some(management) = runtime_stores.extension_management.as_ref() {
             management.attach_generic_host(Arc::clone(&generic.host));
             // A fresh ports handle: the one built earlier predates the
             // credential-account resolver wiring, and discovery staging
@@ -2468,15 +2643,9 @@ async fn build_local_runtime(
                     continue;
                 }
                 let (Some(channel_config), Some(identity_store), Some(dm_targets)) = (
-                    runtime_stores.runtime_surfaces.channel_config.clone(),
-                    runtime_stores
-                        .runtime_surfaces
-                        .channel_identity_store
-                        .clone(),
-                    runtime_stores
-                        .runtime_surfaces
-                        .channel_dm_target_store
-                        .clone(),
+                    runtime_stores.channel_config.clone(),
+                    runtime_stores.channel_identity_store.clone(),
+                    runtime_stores.channel_dm_target_store.clone(),
                 ) else {
                     return Err(RebornBuildError::InvalidConfig {
                         reason: format!(
@@ -2594,7 +2763,7 @@ async fn build_local_runtime(
                         .with_deployment_channels(Arc::clone(&deployment_channels)),
                     );
                 let coordinator = Arc::new(ironclaw_product_workflow::DeliveryCoordinator::new(
-                    Arc::clone(&runtime_stores.runtime_surfaces.outbound_state)
+                    Arc::clone(&runtime_stores.outbound_state)
                         as Arc<dyn ironclaw_outbound::OutboundStateStore>,
                     Arc::clone(&resolver),
                     Arc::new(
@@ -2622,8 +2791,6 @@ async fn build_local_runtime(
         services.wasm_runtime_credential_provider_captured_for_test();
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
-    let runtime_surfaces = runtime_stores.runtime_surfaces;
-
     Ok(RebornRuntimeSubstrate {
         host_runtime,
         turn_coordinator,
@@ -2631,22 +2798,72 @@ async fn build_local_runtime(
         // the caller does not inject one; readiness tracks the assembled facade.
         product_auth,
         readiness: readiness_for(profile, true, true, true),
-        skill_management: Arc::clone(&runtime_surfaces.skill_management),
-        scoped_filesystem: Arc::clone(&runtime_surfaces.scoped_filesystem),
-        turn_state: Arc::clone(&runtime_surfaces.turn_state),
-        checkpoint_state_store: Arc::clone(&runtime_surfaces.checkpoint_state_store),
-        loop_checkpoint_store: Arc::clone(&runtime_surfaces.loop_checkpoint_store),
-        thread_service: Arc::clone(&runtime_surfaces.thread_service),
-        trigger_repository: Arc::clone(&runtime_surfaces.trigger_repository),
-        resource_governor: Arc::clone(&runtime_surfaces.resource_governor),
-        budget_gate_store: Arc::clone(&runtime_surfaces.budget_gate_store),
-        broadcast_budget_event_sink: Arc::clone(&runtime_surfaces.broadcast_budget_event_sink),
-        event_log: Arc::clone(&runtime_surfaces.event_log),
-        audit_log: Arc::clone(&runtime_surfaces.audit_log),
-        admin_secret_provisioner: Arc::clone(&runtime_surfaces.admin_secret_provisioner),
-        project_service: Arc::clone(&runtime_surfaces.project_service),
+        skill_management: Arc::clone(&runtime_stores.skill_management),
+        extension_lifecycle_surface_context: Some(
+            runtime_stores.extension_lifecycle_surface_context.clone(),
+        ),
+        owner_user_id: Some(runtime_stores.owner_user_id.clone()),
+        approval_requests: Some(Arc::clone(&runtime_stores.approval_requests)),
+        capability_leases: Some(Arc::clone(&runtime_stores.capability_leases)),
+        external_tool_catalog: Some(Arc::clone(&runtime_stores.external_tool_catalog)),
+        runtime_policy: runtime_stores.runtime_policy.clone(),
+        persistent_approval_policies: Some(Arc::clone(
+            &runtime_stores.persistent_approval_policies,
+        )),
+        tool_permission_overrides: Some(Arc::clone(&runtime_stores.tool_permission_overrides)),
+        auto_approve_settings: Some(Arc::clone(&runtime_stores.auto_approve_settings)),
+        capability_policy: Some(Arc::clone(&runtime_stores.capability_policy)),
+        outbound_preferences: Some(Arc::clone(&runtime_stores.outbound_preferences)),
+        outbound_delivery_targets: Some(Arc::clone(&runtime_stores.outbound_delivery_targets)),
+        skill_auto_activate_learned: Some(Arc::clone(&runtime_stores.skill_auto_activate_learned)),
+        outbound_state: Some(Arc::clone(&runtime_stores.outbound_state)),
+        delivered_gate_routes: Some(Arc::clone(&runtime_stores.delivered_gate_routes)),
+        triggered_run_delivery: Some(Arc::clone(&runtime_stores.triggered_run_delivery)),
+        extension_management: runtime_stores.extension_management.as_ref().map(Arc::clone),
+        channel_config: runtime_stores.channel_config.as_ref().map(Arc::clone),
+        admin_configuration: runtime_stores.admin_configuration.as_ref().map(Arc::clone),
+        admin_configuration_uses: Some(Arc::clone(&runtime_stores.admin_configuration_uses)),
+        channel_identity_store: runtime_stores
+            .channel_identity_store
+            .as_ref()
+            .map(Arc::clone),
+        channel_dm_target_store: runtime_stores
+            .channel_dm_target_store
+            .as_ref()
+            .map(Arc::clone),
+        channel_disconnect_slot: Some(Arc::clone(&runtime_stores.channel_disconnect_slot)),
+        runtime_http_egress: runtime_stores.runtime_http_egress.as_ref().map(Arc::clone),
+        skill_mounts: Some(runtime_stores.skill_mounts.clone()),
+        memory_mounts: Some(runtime_stores.memory_mounts.clone()),
+        system_extensions_lifecycle_mounts: Some(
+            runtime_stores.system_extensions_lifecycle_mounts.clone(),
+        ),
+        skill_filesystem: Some(Arc::clone(&runtime_stores.skill_filesystem)),
+        workspace_filesystem: Some(Arc::clone(&runtime_stores.workspace_filesystem)),
+        extension_filesystem: Some(Arc::clone(&runtime_stores.extension_filesystem)),
+        workspace_mounts: Some(runtime_stores.workspace_mounts.clone()),
+        local_dev_storage_root: Some(runtime_stores.local_dev_storage_root.clone()),
+        default_system_prompt_path: Some(runtime_stores.default_system_prompt_path.clone()),
+        in_memory_budget_event_sink: Some(Arc::clone(&runtime_stores.in_memory_budget_event_sink)),
+        extension_registry: Some(Arc::clone(&runtime_stores.extension_registry)),
+        shared_extension_registry: runtime_stores
+            .shared_extension_registry
+            .as_ref()
+            .map(Arc::clone),
+        scoped_filesystem: Arc::clone(&runtime_stores.scoped_filesystem),
+        turn_state: Arc::clone(&runtime_stores.turn_state),
+        checkpoint_state_store: Arc::clone(&runtime_stores.checkpoint_state_store),
+        loop_checkpoint_store: Arc::clone(&runtime_stores.loop_checkpoint_store),
+        thread_service: Arc::clone(&runtime_stores.thread_service),
+        trigger_repository: Arc::clone(&runtime_stores.trigger_repository),
+        resource_governor: runtime_stores.resource_governor.clone() as Arc<dyn ResourceGovernor>,
+        budget_gate_store: Arc::clone(&runtime_stores.budget_gate_store),
+        broadcast_budget_event_sink: Arc::clone(&runtime_stores.broadcast_budget_event_sink),
+        event_log: Arc::clone(&runtime_stores.event_log),
+        audit_log: Arc::clone(&runtime_stores.audit_log),
+        admin_secret_provisioner: Arc::clone(&runtime_stores.admin_secret_provisioner),
+        project_service: Arc::clone(&runtime_stores.project_service),
         trigger_conversation_services: None,
-        runtime_surfaces: Some(runtime_surfaces),
         production_scheduler_wake: None,
         secret_store,
         #[cfg(any(test, feature = "test-support"))]
@@ -2826,6 +3043,7 @@ async fn build_runtime_stores(
         postgres_resource_governor_singleton,
         identity_substrate_db,
     } = input;
+    validate_reborn_runtime_storage(&filesystem).await?;
     let scoped_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
     // The turn-state filesystem is needed by both backends: the durable
     // filesystem store persists every transition to it, and the in-memory
@@ -2926,7 +3144,11 @@ async fn build_runtime_stores(
     let skill_management =
         build_local_skill_management_port(owner_user_id.clone(), Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
-    let runtime_surfaces = Arc::new(RebornRuntimeSurfaces {
+    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
+
+    Ok(RebornRuntimeStores {
+        run_state,
+        process_services,
         scoped_filesystem: Arc::clone(&scoped_filesystem),
         extension_lifecycle_surface_context,
         owner_user_id: owner_user_id.clone(),
@@ -2949,12 +3171,10 @@ async fn build_runtime_stores(
         outbound_state: outbound_stores.outbound_state,
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
         triggered_run_delivery: outbound_stores.triggered_run_delivery,
-        trigger_conversation_services: tokio::sync::OnceCell::new(),
         checkpoint_state_store,
         loop_checkpoint_store,
         thread_service,
-        resource_governor: Arc::clone(&resource_governor)
-            as Arc<dyn ironclaw_resources::ResourceGovernor>,
+        resource_governor,
         budget_event_sink,
         in_memory_budget_event_sink,
         broadcast_budget_event_sink,
@@ -2984,19 +3204,6 @@ async fn build_runtime_stores(
         audit_log,
         extension_registry: Arc::new(ExtensionRegistry::new()),
         shared_extension_registry: None,
-    });
-    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
-
-    Ok(RebornRuntimeStores {
-        run_state,
-        approval_requests,
-        capability_leases,
-        persistent_approval_policies,
-        turn_state,
-        runtime_surfaces,
-        resource_governor,
-        process_services,
-        trigger_repository,
     })
 }
 
@@ -3027,11 +3234,11 @@ async fn local_dev_trigger_repository(
     }
 }
 
-fn local_dev_trigger_create_hook(
-    runtime_surfaces: &Arc<RebornRuntimeSurfaces>,
-) -> Arc<dyn TriggerCreateHook> {
+fn local_dev_trigger_create_hook(stores: &RebornRuntimeStores) -> Arc<dyn TriggerCreateHook> {
     Arc::new(LocalRuntimeTriggerCreatorPairingHook {
-        runtime: Arc::clone(runtime_surfaces),
+        outbound_delivery_targets: Arc::clone(&stores.outbound_delivery_targets),
+        scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
+        conversations: tokio::sync::OnceCell::new(),
     })
 }
 
@@ -3086,7 +3293,9 @@ async fn validate_trigger_delivery_target_against_registry(
 }
 
 struct LocalRuntimeTriggerCreatorPairingHook {
-    runtime: Arc<RebornRuntimeSurfaces>,
+    outbound_delivery_targets: Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
+    scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    conversations: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
 }
 
 #[async_trait::async_trait]
@@ -3097,7 +3306,7 @@ impl TriggerCreateHook for LocalRuntimeTriggerCreatorPairingHook {
         target: &ironclaw_triggers::TriggerDeliveryTargetId,
     ) -> Result<(), TriggerError> {
         validate_trigger_delivery_target_against_registry(
-            &self.runtime.outbound_delivery_targets,
+            &self.outbound_delivery_targets,
             scope,
             target,
         )
@@ -3105,14 +3314,17 @@ impl TriggerCreateHook for LocalRuntimeTriggerCreatorPairingHook {
     }
 
     async fn after_trigger_persisted(&self, record: &TriggerRecord) -> Result<(), TriggerError> {
+        let filesystem = Arc::clone(&self.scoped_filesystem);
         let conversations = self
-            .runtime
-            .durable_trigger_conversation_services()
+            .conversations
+            .get_or_try_init(|| async move {
+                RebornFilesystemConversationServices::new(filesystem).await
+            })
             .await
             .map_err(|error| {
                 trigger_pairing_error(TriggerPairingFailureSource::ConversationInit, error)
             })?;
-        pair_trigger_creator(&conversations, record).await
+        pair_trigger_creator(conversations, record).await
     }
 }
 
@@ -3354,6 +3566,10 @@ fn local_dev_project_filesystem(
         VirtualPath::new("/system/extensions")?,
         HostPath::from_path_buf(root.join("system/extensions")),
     )?;
+    filesystem.mount_local(
+        VirtualPath::new("/system/skills")?,
+        HostPath::from_path_buf(root.join("system/skills")),
+    )?;
     if let Some(host_home_root) = host_home_root {
         filesystem.mount_local(
             VirtualPath::new("/projects/host")?,
@@ -3588,6 +3804,18 @@ where
         )?,
         Arc::clone(&database),
     )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/system/settings",
+            "local-dev-system-settings",
+            BackendKind::DatabaseFilesystem,
+            StorageClass::StructuredRecords,
+            ContentKind::SystemState,
+            IndexPolicy::BackendDefined,
+            database.capabilities(),
+        )?,
+        Arc::clone(&database),
+    )?;
     mount_local_dev_memory_root(root, Arc::clone(&database))?;
     root.mount(
         local_dev_mount_descriptor(
@@ -3666,6 +3894,18 @@ fn mount_local_dev_project_roots(
             BackendKind::DiskFilesystem,
             StorageClass::FileContent,
             ContentKind::ExtensionPackage,
+            IndexPolicy::NotIndexed,
+            BackendCapabilities::bytes_only(),
+        )?,
+        Arc::clone(&local),
+    )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/system/skills",
+            "local-dev-system-skills",
+            BackendKind::DiskFilesystem,
+            StorageClass::FileContent,
+            ContentKind::GenericFile,
             IndexPolicy::NotIndexed,
             BackendCapabilities::bytes_only(),
         )?,
@@ -5165,6 +5405,7 @@ impl ProductionStoreBundle {
         secret_master_key: ironclaw_secrets::SecretMaterial,
         event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
     ) -> Result<Self, RebornBuildError> {
+        validate_reborn_runtime_storage(&filesystem).await?;
         let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
         let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
             &scoped_filesystem,
@@ -5314,7 +5555,7 @@ async fn build_backend_production(
         ));
     // Projects persist over the production scoped filesystem (tenant supplied
     // per call; the scope carries only the control-plane owner/agent identity),
-    // exactly as the local substrate builds them — see the `runtime_surfaces`
+    // exactly as the local substrate builds them — see the local runtime stores'
     // project repository. Production is always durable, so there is no
     // in-memory fallback arm here.
     let project_agent_id = ironclaw_host_api::AgentId::new("reborn-projects").map_err(|error| {
@@ -5366,8 +5607,8 @@ async fn build_backend_production(
     )
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
-    .with_capability_leases(stores.leases)
-    .with_persistent_approval_policies(stores.persistent_approval_policies)
+    .with_capability_leases(Arc::clone(&stores.leases))
+    .with_persistent_approval_policies(Arc::clone(&stores.persistent_approval_policies))
     .with_secret_store(Arc::clone(&stores.secret_credentials.secret_store))
     .with_credential_broker(stores.secret_credentials.credential_broker)
     .with_security_audit_sink(Arc::new(ironclaw_events::TracingSecurityAuditSink))
@@ -5503,6 +5744,7 @@ async fn build_backend_production(
         reason: format!("GSuite first-party handlers are invalid: {error}"),
     })?;
     let services = services.with_first_party_capabilities(Arc::new(first_party_registry));
+    let shared_extension_registry = services.shared_extension_registry();
 
     #[cfg(any(test, feature = "test-support"))]
     let local_dev_wasm_runtime_credential_provider_captured =
@@ -5516,7 +5758,42 @@ async fn build_backend_production(
         readiness: readiness_for(profile, true, true, product_auth_ready),
         product_auth: product_auth_services,
         skill_management,
-        runtime_surfaces: None,
+        extension_lifecycle_surface_context: None,
+        owner_user_id: Some(owner_user_id),
+        approval_requests: None,
+        capability_leases: Some(Arc::clone(&stores.leases)),
+        external_tool_catalog: None,
+        runtime_policy: None,
+        persistent_approval_policies: Some(Arc::clone(&stores.persistent_approval_policies)),
+        tool_permission_overrides: None,
+        auto_approve_settings: None,
+        capability_policy: None,
+        outbound_preferences: None,
+        outbound_delivery_targets: None,
+        skill_auto_activate_learned: None,
+        outbound_state: None,
+        delivered_gate_routes: None,
+        triggered_run_delivery: None,
+        extension_management: None,
+        channel_config: None,
+        admin_configuration: None,
+        admin_configuration_uses: None,
+        channel_identity_store: None,
+        channel_dm_target_store: None,
+        channel_disconnect_slot: None,
+        runtime_http_egress: None,
+        skill_mounts: None,
+        memory_mounts: None,
+        system_extensions_lifecycle_mounts: None,
+        skill_filesystem: None,
+        workspace_filesystem: None,
+        extension_filesystem: Some(Arc::clone(&stores.filesystem)),
+        workspace_mounts: None,
+        local_dev_storage_root: None,
+        default_system_prompt_path: None,
+        in_memory_budget_event_sink: None,
+        extension_registry: Some(Arc::clone(&extension_registry)),
+        shared_extension_registry: Some(shared_extension_registry),
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store,

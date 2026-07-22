@@ -28,8 +28,7 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
     .await
     .expect("local-dev services build");
     let extension_management = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local runtime substrate")
         .extension_management
         .as_ref()

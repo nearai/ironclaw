@@ -88,7 +88,7 @@ fn build_runtime_substrate_uses_filesystem_resource_governor() {
             dir.path().join("local-dev"),
         )))
         .expect("local-dev services build");
-    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let scope = ResourceScope {
         tenant_id: TenantId::new("resource-governor-tenant").expect("tenant"),
         user_id: UserId::new("resource-governor-user").expect("user"),
@@ -363,17 +363,7 @@ async fn pair_trigger_creator_maps_pairing_failure_to_sanitized_backend_error() 
     assert_eq!(reason, "trigger creator actor pairing failed");
 }
 
-async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntimeSurfaces> {
-    let local_dev_root = tempfile::tempdir().expect("tempdir");
-    let owner_user_id = "pairing-owner";
-    let services = build_runtime_substrate(RebornBuildInput::local_dev(
-        owner_user_id,
-        local_dev_root.path().join("local-dev"),
-    ))
-    .await
-    .expect("local-dev services build");
-
-    let base_runtime = services.runtime_surfaces.expect("local runtime");
+fn failing_trigger_conversation_filesystem() -> Arc<ScopedFilesystem<CompositeRootFilesystem>> {
     let mut failing_root = CompositeRootFilesystem::new();
     failing_root
         .mount(
@@ -400,79 +390,22 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
             ),
         )
         .expect("mount failing backend");
-    Arc::new(RebornRuntimeSurfaces {
-        scoped_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::new(failing_root),
-            MountView::new(vec![MountGrant::new(
-                MountAlias::new("/conversations").expect("mount alias"),
-                VirtualPath::new("/conversations").expect("virtual path"),
-                MountPermissions::read_write_list_delete(),
-            )])
-            .expect("mount view"),
-        )),
-        extension_lifecycle_surface_context: base_runtime
-            .extension_lifecycle_surface_context
-            .clone(),
-        owner_user_id: base_runtime.owner_user_id.clone(),
-        approval_requests: Arc::clone(&base_runtime.approval_requests),
-        capability_leases: Arc::clone(&base_runtime.capability_leases),
-        external_tool_catalog: Arc::clone(&base_runtime.external_tool_catalog),
-        runtime_policy: base_runtime.runtime_policy.clone(),
-        capability_policy: Arc::clone(&base_runtime.capability_policy),
-        persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
-        tool_permission_overrides: Arc::clone(&base_runtime.tool_permission_overrides),
-        outbound_delivery_targets: Arc::clone(&base_runtime.outbound_delivery_targets),
-        auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
-        turn_state: Arc::clone(&base_runtime.turn_state),
-        trigger_repository: Arc::clone(&base_runtime.trigger_repository),
-        project_service: Arc::clone(&base_runtime.project_service),
-        outbound_preferences: Arc::clone(&base_runtime.outbound_preferences),
-        skill_auto_activate_learned: Arc::clone(&base_runtime.skill_auto_activate_learned),
-        outbound_state: Arc::clone(&base_runtime.outbound_state),
-        delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
-        triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
-        trigger_conversation_services: tokio::sync::OnceCell::new(),
-        checkpoint_state_store: Arc::clone(&base_runtime.checkpoint_state_store),
-        loop_checkpoint_store: Arc::clone(&base_runtime.loop_checkpoint_store),
-        thread_service: Arc::clone(&base_runtime.thread_service),
-        resource_governor: Arc::clone(&base_runtime.resource_governor),
-        budget_event_sink: Arc::clone(&base_runtime.budget_event_sink),
-        in_memory_budget_event_sink: Arc::clone(&base_runtime.in_memory_budget_event_sink),
-        broadcast_budget_event_sink: Arc::clone(&base_runtime.broadcast_budget_event_sink),
-        budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
-        skill_management: Arc::clone(&base_runtime.skill_management),
-        extension_management: base_runtime.extension_management.clone(),
-        channel_config: base_runtime.channel_config.clone(),
-        admin_configuration: base_runtime.admin_configuration.clone(),
-        admin_configuration_uses: Arc::clone(&base_runtime.admin_configuration_uses),
-        channel_identity_store: base_runtime.channel_identity_store.clone(),
-        channel_dm_target_store: base_runtime.channel_dm_target_store.clone(),
-        channel_disconnect_slot: Arc::clone(&base_runtime.channel_disconnect_slot),
-        runtime_http_egress: base_runtime.runtime_http_egress.clone(),
-        host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
-        skill_mounts: base_runtime.skill_mounts.clone(),
-        memory_mounts: base_runtime.memory_mounts.clone(),
-        system_extensions_lifecycle_mounts: base_runtime.system_extensions_lifecycle_mounts.clone(),
-        skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
-        workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
-        admin_secret_provisioner: base_runtime.admin_secret_provisioner.clone(),
-        identity_substrate_db: base_runtime.identity_substrate_db.clone(),
-        extension_filesystem: Arc::clone(&base_runtime.extension_filesystem),
-        workspace_mounts: base_runtime.workspace_mounts.clone(),
-        local_dev_storage_root: base_runtime.local_dev_storage_root.clone(),
-        default_system_prompt_path: base_runtime.default_system_prompt_path.clone(),
-        event_log: Arc::clone(&base_runtime.event_log),
-        audit_log: Arc::clone(&base_runtime.audit_log),
-        extension_registry: Arc::clone(&base_runtime.extension_registry),
-        shared_extension_registry: base_runtime.shared_extension_registry.clone(),
-    })
+    Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(failing_root),
+        MountView::new(vec![MountGrant::new(
+            MountAlias::new("/conversations").expect("mount alias"),
+            VirtualPath::new("/conversations").expect("virtual path"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view"),
+    ))
 }
 
 #[tokio::test]
 async fn durable_trigger_conversation_services_propagates_init_error() {
-    let runtime = local_runtime_with_failing_trigger_conversations().await;
+    let filesystem = failing_trigger_conversation_filesystem();
 
-    let error = match runtime.durable_trigger_conversation_services().await {
+    let error = match RebornFilesystemConversationServices::new(filesystem).await {
         Ok(_) => panic!("conversation service init should fail"),
         Err(error) => error,
     };
@@ -485,8 +418,18 @@ async fn durable_trigger_conversation_services_propagates_init_error() {
 
 #[tokio::test]
 async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
+    let local_dev_root = tempfile::tempdir().expect("tempdir");
+    let services = build_runtime_substrate(RebornBuildInput::local_dev(
+        "pairing-owner",
+        local_dev_root.path().join("local-dev"),
+    ))
+    .await
+    .expect("local-dev services build");
+    let runtime = services.local_runtime_for_test().expect("local runtime");
     let hook = LocalRuntimeTriggerCreatorPairingHook {
-        runtime: local_runtime_with_failing_trigger_conversations().await,
+        outbound_delivery_targets: Arc::clone(runtime.outbound_delivery_targets_for_test()),
+        scoped_filesystem: failing_trigger_conversation_filesystem(),
+        conversations: tokio::sync::OnceCell::new(),
     };
     let record = trigger_record_for_pairing_test();
 
@@ -514,13 +457,12 @@ async fn local_dev_services_include_repl_runtime_substrate() {
     let _ = &services.host_runtime;
     let _ = &services.turn_coordinator;
     let _ = &services.product_auth;
-    assert!(services.runtime_surfaces.is_some());
+    assert!(services.local_runtime_for_test().is_some());
     let _ = &services.scoped_filesystem;
     let _ = &services.turn_state;
     assert!(
         services
-            .runtime_surfaces
-            .as_ref()
+            .local_runtime_for_test()
             .expect("local runtime")
             .extension_management
             .is_some()
@@ -1089,7 +1031,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     ))
     .await
     .expect("local-dev services build");
-    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
@@ -1130,15 +1072,17 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     let gmail_capability =
         CapabilityId::new("gmail.send_message").expect("valid Gmail capability id");
     assert!(matches!(
-        runtime_surfaces.capability_policy.lease_approval_for(
-            BuiltinApprovalPolicyAction::Dispatch {
-                capability: &gmail_capability,
-            },
-            &runtime_surfaces.workspace_mounts,
-            &runtime_surfaces.skill_mounts,
-            &runtime_surfaces.memory_mounts,
-            &runtime_surfaces.system_extensions_lifecycle_mounts,
-        ),
+        runtime_surfaces
+            .capability_policy_for_test()
+            .lease_approval_for(
+                BuiltinApprovalPolicyAction::Dispatch {
+                    capability: &gmail_capability,
+                },
+                &runtime_surfaces.workspace_mounts_for_test(),
+                &runtime_surfaces.skill_mounts_for_test(),
+                &runtime_surfaces.memory_mounts_for_test(),
+                &runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
+            ),
         Err(BuiltinCapabilityPolicyError::MissingGrant { .. })
     ));
     let auth_scope = AuthProductScope::new(gmail_context.resource_scope.clone(), AuthSurface::Api);
@@ -1177,7 +1121,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     assert_ne!(failure, RuntimeFailureKind::Authorization);
     assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
     let gmail_leases = runtime_surfaces
-        .capability_leases
+        .capability_leases_for_test()
         .leases_for_scope(&gmail_scope)
         .await;
     assert_eq!(gmail_leases.len(), 1);
@@ -1215,7 +1159,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
     )
     .await
     .expect("local-dev services build");
-    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
@@ -1300,7 +1244,7 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
     )
     .await
     .expect("local-dev services build");
-    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
@@ -1495,7 +1439,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     .expect("production libsql services build");
 
     let turn_state = &services.turn_state;
-    assert!(services.runtime_surfaces.is_none());
+    assert!(services.local_runtime_for_test().is_none());
     let scope = ironclaw_turns::TurnScope::new_with_owner(
         tenant,
         Some(agent),
@@ -1731,7 +1675,7 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     ))
     .await
     .expect("local-dev services build");
-    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
     let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
@@ -1908,8 +1852,7 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
         .find(|account| account.provider.as_str() == "nearai")
         .expect("NEAR AI product-auth account");
     let extension_management = first
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local runtime")
         .extension_management
         .as_ref()
@@ -1971,8 +1914,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
     .await
     .expect("local-dev services build");
     let extension_management = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local runtime")
         .extension_management
         .as_ref()
@@ -2106,8 +2048,7 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
             .await
             .expect("first local-dev services build");
     services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local runtime")
         .thread_service
         .ensure_thread(ironclaw_threads::EnsureThreadRequest {
@@ -2126,8 +2067,7 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
             .await
             .expect("rebuilt local-dev services");
     let history = rebuilt
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("rebuilt local runtime")
         .thread_service
         .list_thread_history(ironclaw_threads::ThreadHistoryRequest {
@@ -2159,8 +2099,7 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services
-        .runtime_surfaces
-        .as_ref()
+        .local_runtime_for_test()
         .expect("local-dev runtime substrate");
     let scope = ResourceScope::local_default(
         UserId::new("local-dev-marker-user").expect("valid user"),
@@ -2169,7 +2108,7 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
     .expect("valid resource scope");
 
     let stat = runtime_surfaces
-        .workspace_filesystem
+        .workspace_filesystem_for_test()
         .stat(
             &scope,
             &ScopedPath::new("/workspace/markers/setup.done").expect("valid marker path"),
@@ -2179,7 +2118,7 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
     assert_eq!(stat.len, 4);
 
     let error = runtime_surfaces
-        .workspace_filesystem
+        .workspace_filesystem_for_test()
         .write_file(
             &scope,
             &ScopedPath::new("/workspace/markers/new.done").expect("valid marker path"),
@@ -2548,11 +2487,11 @@ fn gsuite_context(capability_id: &str) -> ExecutionContext {
 /// first-party tool dispatch; enabling it here mirrors the operator
 /// having flipped it on before letting the agent run tools.
 async fn enable_global_auto_approve_for_context(
-    runtime_surfaces: &RebornRuntimeSurfaces,
+    runtime_surfaces: &RebornRuntimeSubstrate,
     context: &ExecutionContext,
 ) {
     runtime_surfaces
-        .auto_approve_settings
+        .auto_approve_settings_for_test()
         .set(AutoApproveSettingInput {
             updated_by: Principal::User(context.resource_scope.user_id.clone()),
             scope: context.resource_scope.clone(),
@@ -2753,7 +2692,7 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 /// trait-object roles.
 ///
 /// The assertion reads the four trait-object pointers from the built
-/// `RebornRuntimeSurfaces` and compares their data halves via
+/// `RebornRuntimeSubstrate` and compares their data halves via
 /// `std::ptr::addr_eq` (trait objects of different traits cannot be compared
 /// with `Arc::ptr_eq` directly).
 #[tokio::test]
@@ -2766,13 +2705,14 @@ async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles
     .await
     .expect("local-dev services build");
 
-    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
 
     // Cast each fat-pointer's data half to *const () for cross-trait comparison.
-    let pref_ptr = Arc::as_ptr(&runtime_surfaces.outbound_preferences) as *const ();
-    let state_ptr = Arc::as_ptr(&runtime_surfaces.outbound_state) as *const ();
-    let gate_ptr = Arc::as_ptr(&runtime_surfaces.delivered_gate_routes) as *const ();
-    let delivery_ptr = Arc::as_ptr(&runtime_surfaces.triggered_run_delivery) as *const ();
+    let pref_ptr = Arc::as_ptr(&runtime_surfaces.outbound_preferences_for_test()) as *const ();
+    let state_ptr = Arc::as_ptr(&runtime_surfaces.outbound_state_for_test()) as *const ();
+    let gate_ptr = Arc::as_ptr(&runtime_surfaces.delivered_gate_routes_for_test()) as *const ();
+    let delivery_ptr =
+        Arc::as_ptr(&runtime_surfaces.triggered_run_delivery_for_test()) as *const ();
 
     assert!(
         std::ptr::addr_eq(pref_ptr, state_ptr),
