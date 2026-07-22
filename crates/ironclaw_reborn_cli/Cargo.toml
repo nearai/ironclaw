@@ -37,6 +37,9 @@ postgres = [
 libsql = [
     "ironclaw_reborn_composition/libsql",
 ]
+# Build the hermetic E2E binary with composition-owned test seams. This is
+# intentionally absent from default and distribution feature sets.
+test-support = ["ironclaw_reborn_composition/test-support"]
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1" }

@@ -122,6 +122,7 @@ def _new_llm_trace_state() -> dict:
         "responses": [],
         "next_response": 0,
         "expected_user_inputs": {},
+        "request_hints": [],
         "error": None,
     }
 
@@ -145,7 +146,8 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
 
     responses = []
     expected_user_inputs = {0: first_response["content"]}
-    pending_user_input = False
+    request_hints = []
+    pending_user_input = True
     for index, step in enumerate(steps[1:], start=1):
         if not isinstance(step, dict) or not isinstance(step.get("response"), dict):
             raise ValueError(f"trace.steps[{index}].response must be an object")
@@ -185,7 +187,29 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
             raise ValueError(
                 f"trace.steps[{index}] has unsupported response type {response_type!r}"
             )
+        request_hint = step.get("request_hint", {})
+        if not isinstance(request_hint, dict):
+            raise ValueError(f"trace.steps[{index}].request_hint must be an object")
+        last_user_message_contains = request_hint.get("last_user_message_contains")
+        if last_user_message_contains is not None and not isinstance(
+            last_user_message_contains, str
+        ):
+            raise ValueError(
+                f"trace.steps[{index}].request_hint.last_user_message_contains "
+                "must be a string"
+            )
+        min_message_count = request_hint.get("min_message_count")
+        if min_message_count is not None and (
+            isinstance(min_message_count, bool)
+            or not isinstance(min_message_count, int)
+            or min_message_count < 0
+        ):
+            raise ValueError(
+                f"trace.steps[{index}].request_hint.min_message_count "
+                "must be a non-negative integer"
+            )
         responses.append(response)
+        request_hints.append(request_hint)
         pending_user_input = False
 
     if not responses:
@@ -197,6 +221,7 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
         "responses": responses,
         "next_response": 0,
         "expected_user_inputs": expected_user_inputs,
+        "request_hints": request_hints,
         "error": None,
     }
 
@@ -214,6 +239,25 @@ def _next_llm_trace_response(
     if next_index >= len(responses):
         state["error"] = (
             "recorded LLM trace is exhausted but the agent requested another response"
+        )
+        raise web.HTTPConflict(text=state["error"])
+
+    request_hint = state["request_hints"][next_index]
+    min_message_count = request_hint.get("min_message_count")
+    if min_message_count is not None and len(messages) < min_message_count:
+        state["error"] = (
+            "recorded LLM trace request has too few messages before response "
+            f"{next_index}: expected at least {min_message_count}, got {len(messages)}"
+        )
+        raise web.HTTPConflict(text=state["error"])
+
+    hinted_user_input = request_hint.get("last_user_message_contains")
+    if hinted_user_input is not None and hinted_user_input not in _last_user_content(
+        messages
+    ):
+        state["error"] = (
+            "recorded LLM trace request hint does not match the last user message "
+            f"before response {next_index}"
         )
         raise web.HTTPConflict(text=state["error"])
 

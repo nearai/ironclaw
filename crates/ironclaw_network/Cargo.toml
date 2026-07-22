@@ -7,12 +7,17 @@ publish = false
 [package.metadata.ironclaw]
 layer = "substrates"
 
+[features]
+# Compile the explicit loopback HTTP rewrite seam used by hermetic E2E
+# binaries. Default and release builds do not read rewrite configuration.
+test-support = ["dep:serde_json"]
+
 [dependencies]
 async-trait = "0.1"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
-serde_json = "1"
+serde_json = { version = "1", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
 tracing = "0.1"

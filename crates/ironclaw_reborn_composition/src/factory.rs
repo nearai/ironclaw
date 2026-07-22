@@ -1780,10 +1780,27 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             http_body_filesystem,
         )?
     } else {
+        let transport = match std::env::var("IRONCLAW_TEST_HTTP_REWRITE_MAP") {
+            Ok(raw_rewrites) => {
+                ironclaw_network::ReqwestNetworkTransport::new_with_test_host_rewrites(
+                    std::time::Duration::from_secs(30),
+                    &raw_rewrites,
+                )
+                .map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!("invalid test HTTP rewrite map: {error}"),
+                })?
+            }
+            Err(std::env::VarError::NotPresent) => {
+                ironclaw_network::ReqwestNetworkTransport::default()
+            }
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(RebornBuildError::InvalidConfig {
+                    reason: "test HTTP rewrite map must be valid UTF-8".to_string(),
+                });
+            }
+        };
         services.try_with_host_http_egress_with_body_store(
-            ironclaw_network::PolicyNetworkHttpEgress::new(
-                ironclaw_network::ReqwestNetworkTransport::default(),
-            ),
+            ironclaw_network::PolicyNetworkHttpEgress::new(transport),
             http_body_filesystem,
         )?
     };

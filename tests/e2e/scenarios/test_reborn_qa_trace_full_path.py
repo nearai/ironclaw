@@ -1,4 +1,4 @@
-"""Replay harvested Reborn QA model traces against real Emulate providers.
+"""Run harvested Reborn QA traces through the full Emulate-backed path.
 
 The trace controls model decisions only. Capability execution still crosses the
 served Reborn runtime, first-party extension, credential boundary, HTTP rewrite,
@@ -175,7 +175,16 @@ async def _load_trace(
                 for call in step["response"].get("tool_calls", [])
             )
         )
-        trace["steps"] = [trace["steps"][0], *trace["steps"][start_index:]]
+        retained_steps = trace["steps"][start_index:]
+        first_minimum = retained_steps[0].get("request_hint", {}).get(
+            "min_message_count", 2
+        )
+        message_count_offset = first_minimum - 2
+        for step in retained_steps:
+            request_hint = step.get("request_hint")
+            if request_hint is not None and "min_message_count" in request_hint:
+                request_hint["min_message_count"] -= message_count_offset
+        trace["steps"] = [trace["steps"][0], *retained_steps]
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{mock_llm_server}/__mock/llm_trace",

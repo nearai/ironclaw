@@ -135,7 +135,7 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | Fixture | What it does |
 |---------|-------------|
 | `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw`; if absent, runs `cargo build --no-default-features --features libsql` (timeout 600s). |
-| `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw` with default features (`libsql`) when stale/missing. Used by the v2 SPA scenarios. |
+| `ironclaw_reborn_binary` | Reborn v2 E2E binary. Builds `target/debug/ironclaw` with `test-support` (plus default `libsql`) when stale/missing. Used by the v2 SPA and full-path fixture scenarios. |
 | `reborn_v2_server` | Starts `ironclaw serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
 | `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
 | `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. Serves canned responses including delayed ones (e.g. `"editable composer slow response"` → ~5s) so tests can act while a run is in flight. |
@@ -174,18 +174,19 @@ blob/tree/commit read/write, fork create/list, and empty Actions route readback.
 
 Direct provider-contract tests prove the Emulate fixture layer itself. Full-path
 recorded-trace tests load harvested `LlmTrace` JSON through `mock_llm.py`'s
-`/__mock/llm_trace` endpoint. `test_reborn_qa_trace_catalog.py` replays every
-model response from every case in the live-canary manifest and probes each
-supported provider operation against Emulate. Its closed-set assertions require
-new fixtures and provider operations to be classified instead of silently
-losing coverage. `test_reborn_qa_trace_emulate_replay.py` additionally proves
-the whole runtime seam for `qa_2c_drive_connect`: it executes the recorded Drive
-decision through standalone `ironclaw serve`, routes Google HTTP through
+`/__mock/llm_trace` endpoint. `test_reborn_qa_trace_replay.py` replays every
+model response from every case in the live-canary manifest. Its closed-set
+assertions require new fixtures and provider operations to be classified
+instead of silently losing coverage. `test_reborn_qa_trace_full_path.py`
+additionally proves the whole runtime seam for the harvested Drive connection
+case: it executes the recorded decision through standalone `ironclaw serve`,
+routes Google HTTP through
 `emulate_google_server`, and asserts Emulate-seeded Drive data rather than the
 model's final prose.
-Debug builds honor `IRONCLAW_TEST_HTTP_REWRITE_MAP` only after the original
-destination has passed the normal network policy and DNS checks; release builds
-do not compile this local rewrite seam.
+Only binaries built with `test-support` honor `IRONCLAW_TEST_HTTP_REWRITE_MAP`,
+and only for loopback IP targets after the original destination has passed the
+normal network policy and DNS checks. Default and distribution builds do not
+compile this local rewrite seam.
 
 Legacy hosted full-path Reborn + Emulate tests use
 `hosted_google_emulate_server` or a matching

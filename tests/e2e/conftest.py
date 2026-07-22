@@ -425,18 +425,25 @@ def ironclaw_reborn_binary():
     """
     target_dir = _cargo_target_dir()
     binary = target_dir / "debug" / "ironclaw"
-    if _binary_needs_rebuild(binary):
-        print("Building Reborn ironclaw (this may take a while)...")
+    stamp = target_dir / "debug" / ".ironclaw-reborn-test-support.stamp"
+    if (
+        _binary_needs_rebuild(binary)
+        or not stamp.exists()
+        or binary.stat().st_mtime > stamp.stat().st_mtime
+    ):
+        print("Building Reborn ironclaw with E2E test support (this may take a while)...")
         subprocess.run(
             [
                 "cargo", "build",
                 "-p", "ironclaw",
                 "--bin", "ironclaw",
+                "--features", "test-support",
             ],
             cwd=ROOT,
             check=True,
             timeout=600,
         )
+        stamp.touch()
     assert binary.exists(), (
         f"Binary not found at {binary}. "
         f"Cargo target dir resolved to: {target_dir}"

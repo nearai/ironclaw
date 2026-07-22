@@ -179,9 +179,13 @@ jobs:
           cargo build
           -p ironclaw
           --bin ironclaw
+          --features test-support
 
-      - name: Mark OpenAI-compatible binary build
-        run: touch target/debug/.ironclaw-reborn-openai-compat.stamp
+      - name: Mark E2E binary build
+        run: >-
+          touch
+          target/debug/.ironclaw-reborn-openai-compat.stamp
+          target/debug/.ironclaw-reborn-test-support.stamp
 
       - name: Install Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -210,8 +214,8 @@ jobs:
           IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
         run: >-
           pytest
-          tests/e2e/scenarios/test_reborn_qa_trace_catalog.py
-          tests/e2e/scenarios/test_reborn_qa_trace_emulate_replay.py
+          tests/e2e/scenarios/test_reborn_qa_trace_replay.py
+          tests/e2e/scenarios/test_reborn_qa_trace_full_path.py
           -v
           --timeout=120
 
