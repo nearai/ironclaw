@@ -61,13 +61,14 @@ use ironclaw_product_workflow::{
     OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
     PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
     ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAddMemberRequest,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
+    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornExtensionSurface,
+    RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
     RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
@@ -86,10 +87,11 @@ use ironclaw_product_workflow::{
     RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornViewQuery, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
-    StaticOperatorStatusService, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewQuery, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticOperatorStatusService,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
@@ -6259,6 +6261,61 @@ async fn outbound_preferences_reads_are_available_as_product_views() {
     assert_eq!(targets.targets.len(), 1);
     assert_eq!(outbound_facade.get_calls(), vec![preferences_caller]);
     assert_eq!(outbound_facade.list_calls(), vec![targets_caller]);
+}
+
+#[tokio::test]
+async fn trace_reads_are_available_as_product_views() {
+    let user_id = format!(
+        "trace-query-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    );
+    let caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new(user_id.as_str()).expect("user"),
+        None,
+        None,
+    );
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let credits_page = services
+        .query(
+            caller.clone(),
+            RebornViewQuery {
+                view_id: TRACE_CREDITS_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("trace credits view");
+    let credits: RebornTraceCreditsResponse =
+        serde_json::from_value(credits_page.payload).expect("trace credits payload");
+    assert!(!credits.enrolled);
+    assert_eq!(credits.submissions_total, 0);
+    assert!(credits.note.contains("authoritative ledger is server-side"));
+
+    let traces_page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: TRACE_ACCOUNT_TRACES_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("trace account traces view");
+    let traces: RebornAccountTracesResponse =
+        serde_json::from_value(traces_page.payload).expect("trace account traces payload");
+    assert!(!traces.enrolled);
+    assert!(traces.traces.is_empty());
 }
 
 #[tokio::test]

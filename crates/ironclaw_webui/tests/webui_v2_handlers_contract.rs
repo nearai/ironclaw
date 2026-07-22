@@ -64,8 +64,9 @@ use ironclaw_product_workflow::{
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    RunArtifactLogs, RunArtifactRedaction, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    RebornViewPage, RebornViewQuery, RunArtifactLogs, RunArtifactRedaction, SetActiveLlmRequest,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
@@ -632,7 +633,7 @@ impl RebornServicesApi for StubServices {
 
     async fn query(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        caller: WebUiAuthenticatedCaller,
         query: RebornViewQuery,
     ) -> Result<RebornViewPage, RebornServicesError> {
         self.view_queries.lock().expect("lock").push(query.clone());
@@ -747,6 +748,26 @@ impl RebornServicesApi for StubServices {
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(outbound_delivery_targets_response())
                         .expect("outbound delivery targets payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == TRACE_CREDITS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(trace_credits_response())
+                    .expect("trace credits payload"),
+                next_cursor: None,
+            }),
+            id if id == TRACE_ACCOUNT_TRACES_VIEW.id => {
+                let user_id = caller.actor().user_id.as_str().to_string();
+                self.trace_account_traces_callers
+                    .lock()
+                    .expect("lock")
+                    .push(user_id);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornAccountTracesResponse {
+                        enrolled: false,
+                        traces: vec![],
+                    })
+                    .expect("trace account payload"),
                     next_cursor: None,
                 })
             }
@@ -1565,25 +1586,6 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn trace_account_traces(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
-        // Capture the forwarded caller so the contract test can verify the
-        // caller-scoped route actually threads the authenticated identity.
-        self.trace_account_traces_callers
-            .lock()
-            .expect("lock")
-            .push(caller.actor().user_id.as_str().to_string());
-        // Hermetic zero-state stub — no filesystem or network access.
-        // Mirrors the unenrolled branch of the real `account_traces_for_user`
-        // so the contract test for `GET /traces/account` is fully self-contained.
-        Ok(RebornAccountTracesResponse {
-            enrolled: false,
-            traces: vec![],
-        })
-    }
-
     async fn trace_account_login_link(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1692,6 +1694,27 @@ fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListRespo
             },
         ],
         next_cursor: None,
+    }
+}
+
+fn trace_credits_response() -> RebornTraceCreditsResponse {
+    RebornTraceCreditsResponse {
+        enrolled: false,
+        pending_credit: 0.0,
+        final_credit: 0.0,
+        delayed_credit_delta: 0.0,
+        submissions_total: 0,
+        submissions_submitted: 0,
+        submissions_accepted: 0,
+        submissions_revoked: 0,
+        submissions_expired: 0,
+        credit_events_total: 0,
+        last_submission_at: None,
+        last_credit_sync_at: None,
+        recent_explanations: Vec::new(),
+        manual_review_hold_count: 0,
+        holds: Vec::new(),
+        note: "Local view as of last sync; authoritative ledger is server-side.".to_string(),
     }
 }
 
@@ -2696,10 +2719,8 @@ async fn rename_automation_error_maps_to_http_status() {
 
 #[tokio::test]
 async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
-    // The facade's default `trace_credits` body reads contributor-local
-    // Trace Commons state scoped by the authenticated caller's user id.
-    // A unique per-test user id guarantees a fresh scope so the
-    // unenrolled zero-state is deterministic on any machine.
+    // The handler reads through the descriptor-backed ProductSurface query.
+    // A unique caller keeps the route shape pinned to authenticated identity.
     let user_id = format!(
         "webui-v2-trace-credits-{}-{}",
         std::process::id(),
@@ -2714,8 +2735,9 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
         None,
         None,
     );
+    let services = Arc::new(StubServices::default());
     let router = webui_v2_router(WebUiV2State::new(
-        Arc::new(StubServices::default()),
+        services.clone(),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
     .layer(axum::Extension(unique_caller))
@@ -2745,14 +2767,20 @@ async fn trace_credits_returns_caller_scoped_unenrolled_zero_state() {
             .expect("note")
             .contains("authoritative ledger is server-side")
     );
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert!(view_ids.contains(&TRACE_CREDITS_VIEW.id.to_string()));
 }
 
 #[tokio::test]
 async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
-    // The facade's default `trace_account_traces` body reads contributor-local
-    // Trace Commons state scoped by the authenticated caller's user id.
-    // A unique per-test user id guarantees a fresh scope so the
-    // unenrolled zero-state is deterministic on any machine.
+    // The handler reads through the descriptor-backed ProductSurface query.
+    // A unique caller keeps the route shape pinned to authenticated identity.
     let user_id = format!(
         "webui-v2-account-traces-{}-{}",
         std::process::id(),
@@ -2801,6 +2829,14 @@ async fn trace_account_traces_returns_caller_scoped_unenrolled_zero_state() {
             .clone(),
         vec![user_id],
     );
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert!(view_ids.contains(&TRACE_ACCOUNT_TRACES_VIEW.id.to_string()));
 }
 
 #[tokio::test]

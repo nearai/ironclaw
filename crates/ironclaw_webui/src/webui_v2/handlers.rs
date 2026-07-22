@@ -62,12 +62,13 @@ use ironclaw_product_workflow::{
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewQuery,
-    SetActiveLlmRequest, SettingsToolPermissionState, UpsertLlmProviderRequest,
-    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    SetActiveLlmRequest, SettingsToolPermissionState, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1398,7 +1399,19 @@ pub async fn trace_credits(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
-    let response = state.services().trace_credits(caller).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: TRACE_CREDITS_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1411,7 +1424,19 @@ pub async fn trace_account_traces(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornAccountTracesResponse>, WebUiV2HttpError> {
-    let response = state.services().trace_account_traces(caller).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: TRACE_ACCOUNT_TRACES_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 

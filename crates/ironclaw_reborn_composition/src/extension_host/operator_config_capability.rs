@@ -17,7 +17,6 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 use ironclaw_product_workflow::OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID;
-use serde::Deserialize;
 
 pub(crate) fn extend_builtin_first_party_package(
     mut package: ExtensionPackage,
@@ -69,12 +68,6 @@ struct SetAutoApproveHandler {
     auto_approve: Arc<dyn AutoApproveSettingStore>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SetAutoApproveInput {
-    enabled: bool,
-}
-
 #[async_trait]
 impl FirstPartyCapabilityHandler for SetAutoApproveHandler {
     async fn dispatch(
@@ -82,56 +75,88 @@ impl FirstPartyCapabilityHandler for SetAutoApproveHandler {
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         let started = Instant::now();
-        if request.capability_id.as_str() != OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID {
-            return Err(FirstPartyCapabilityError::new(
-                RuntimeDispatchErrorKind::UndeclaredCapability,
-            )
-            .with_usage(resource_usage(started)));
-        }
-        let Some(actor) = authenticated_operator(&request) else {
-            return Err(
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::PolicyDenied)
-                    .with_usage(resource_usage(started)),
-            );
-        };
-        let actor = actor.clone();
-        let input: SetAutoApproveInput = serde_json::from_value(request.input).map_err(|_| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
-                .with_usage(resource_usage(started))
-        })?;
+        ensure_declared(&request, started)?;
+        let actor = authenticated_operator(&request, started)?;
+        let enabled = parse_enabled(request.input, started)?;
         let scope = request.scope.tenant_user_settings_scope();
         let record = self
             .auto_approve
             .set(AutoApproveSettingInput {
                 scope,
-                enabled: input.enabled,
+                enabled,
                 updated_by: Principal::User(actor),
             })
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "operator auto-approve setting mutation failed");
-                FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
-                    .with_usage(resource_usage(started))
+                dispatch_error(RuntimeDispatchErrorKind::Backend, started)
             })?;
-        Ok(FirstPartyCapabilityResult::new(
+        Ok(dispatch_result(
             serde_json::json!({
                 "key": "agent.auto_approve_tools",
                 "enabled": record.enabled,
                 "tenant_id": record.key.tenant_id.as_str(),
                 "user_id": record.key.user_id.as_str(),
             }),
-            resource_usage(started),
+            started,
         ))
     }
 }
 
-fn authenticated_operator(request: &FirstPartyCapabilityRequest) -> Option<&UserId> {
-    let actor = request.authenticated_actor_user_id.as_ref()?;
-    if actor == &request.scope.user_id {
-        Some(actor)
+fn ensure_declared(
+    request: &FirstPartyCapabilityRequest,
+    started: Instant,
+) -> Result<(), FirstPartyCapabilityError> {
+    if request.capability_id.as_str() == OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID {
+        Ok(())
     } else {
-        None
+        Err(dispatch_error(
+            RuntimeDispatchErrorKind::UndeclaredCapability,
+            started,
+        ))
     }
+}
+
+fn authenticated_operator(
+    request: &FirstPartyCapabilityRequest,
+    started: Instant,
+) -> Result<UserId, FirstPartyCapabilityError> {
+    match request.authenticated_actor_user_id.as_ref() {
+        Some(actor) if actor == &request.scope.user_id => Ok(actor.clone()),
+        _ => Err(dispatch_error(
+            RuntimeDispatchErrorKind::PolicyDenied,
+            started,
+        )),
+    }
+}
+
+fn parse_enabled(
+    input: serde_json::Value,
+    started: Instant,
+) -> Result<bool, FirstPartyCapabilityError> {
+    let object = input
+        .as_object()
+        .ok_or_else(|| dispatch_error(RuntimeDispatchErrorKind::InputEncode, started))?;
+    let enabled = object
+        .get("enabled")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| dispatch_error(RuntimeDispatchErrorKind::InputEncode, started))?;
+    if object.len() == 1 {
+        Ok(enabled)
+    } else {
+        Err(dispatch_error(
+            RuntimeDispatchErrorKind::InputEncode,
+            started,
+        ))
+    }
+}
+
+fn dispatch_error(kind: RuntimeDispatchErrorKind, started: Instant) -> FirstPartyCapabilityError {
+    FirstPartyCapabilityError::new(kind).with_usage(resource_usage(started))
+}
+
+fn dispatch_result(output: serde_json::Value, started: Instant) -> FirstPartyCapabilityResult {
+    FirstPartyCapabilityResult::new(output, resource_usage(started))
 }
 
 fn resource_usage(started: Instant) -> ResourceUsage {
@@ -174,8 +199,11 @@ mod tests {
             None,
         );
         request.authenticated_actor_user_id = Some(member);
-        assert!(authenticated_operator(&request).is_none());
+        assert!(authenticated_operator(&request, Instant::now()).is_err());
         request.authenticated_actor_user_id = Some(operator.clone());
-        assert_eq!(authenticated_operator(&request), Some(&operator));
+        assert_eq!(
+            authenticated_operator(&request, Instant::now()).expect("operator"),
+            operator
+        );
     }
 }

@@ -103,8 +103,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "rename_automation",
     "delete_automation",
     // --- trace / credits ---
-    "trace_credits",
-    "trace_account_traces",
     "trace_account_login_link",
     "authorize_trace_hold",
     // --- outbound channels ---

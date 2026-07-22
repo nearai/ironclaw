@@ -109,7 +109,8 @@ pub use admin_users::{
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use trace_credits::{
     RebornAccountLoginLinkResponse, RebornAccountTrace, RebornAccountTracesResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW,
 };
 
 pub use fs_browse::{
@@ -2211,59 +2212,6 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// Read-only Trace Commons credit summary for the authenticated
-    /// caller.
-    ///
-    /// The trace scope derives from the caller's user id only — never
-    /// from request input. Missing or unreadable contributor-local
-    /// state is the normal "not enrolled / nothing submitted yet"
-    /// zero response, never an error. The aggregates are a local view
-    /// as of the last credit sync; the authoritative ledger is
-    /// server-side.
-    ///
-    /// The default body is the production implementation: every facade
-    /// reads the same caller-scoped contributor-local state through
-    /// `ironclaw_reborn_traces`, so impls (including test fakes) only
-    /// override this when they need a non-local credits source.
-    async fn trace_credits(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornTraceCreditsResponse, RebornServicesError> {
-        let actor = caller.actor();
-        // Tenant-scope the local state key so the same user id in two tenants
-        // does not share Trace Commons credit/hold state.
-        let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
-            caller.tenant_id.as_str(),
-            actor.user_id.as_str(),
-        );
-        // A genuine local-state read failure must surface as a sanitized 500,
-        // not a misleading zero/not-enrolled view (carry the cause for the
-        // server-side trail per error-handling.md).
-        trace_credits::local_trace_credits_for_user(&scope)
-            .map_err(RebornServicesError::internal_from)
-    }
-
-    /// Read-only list of the authenticated caller's submitted Trace Commons
-    /// traces, fetched directly from the server (not a local view).
-    ///
-    /// The scope is always derived from the authenticated caller's tenant +
-    /// user id — never from request input. A user who is not enrolled gets the
-    /// unenrolled zero-state (`{ enrolled: false, traces: [] }`), never an
-    /// error. Transport failures surface as an internal error.
-    ///
-    /// The default body is the production implementation using the crate-local
-    /// hardened reqwest path (no host-egress sink), so impls (including test
-    /// fakes) only override this when they need a non-standard fetch path.
-    async fn trace_account_traces(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornAccountTracesResponse, RebornServicesError> {
-        let actor = caller.actor();
-        trace_credits::account_traces_for_user(&caller.tenant_id, &actor.user_id)
-            .await
-            .map_err(RebornServicesError::internal_from)
-    }
-
     /// Mint a one-time Trace Commons browser login link for the
     /// authenticated caller, so hosted users (no host-file access) can open
     /// their contributor account from the WebUI.
@@ -4165,6 +4113,16 @@ where
             id if id == OUTBOUND_DELIVERY_TARGETS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_outbound_delivery_targets_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == TRACE_CREDITS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_trace_credits_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == TRACE_ACCOUNT_TRACES_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_trace_account_traces_view(caller).await?;
                 views::view_page(response)
             }
             id if id == RUN_ARTIFACT_VIEW.id => {
