@@ -66,8 +66,8 @@ def test_every_shipped_provider_capability_has_an_owned_classification():
         assert waiver["capabilities"], f"waiver has no capabilities: {waiver}"
 
 
-def test_tested_capabilities_have_recorded_full_path_evidence():
-    """A tested label must point to an exercised hermetic journey."""
+def test_tested_capabilities_have_full_path_evidence():
+    """A tested label must point to a harvested journey or typed operation case."""
     evidence = _recorded_tool_evidence()
     operation_case_tools = {
         capability_id_to_wire_name(case.capability_id)
@@ -76,5 +76,7 @@ def test_tested_capabilities_have_recorded_full_path_evidence():
     missing_tested = sorted(
         EMULATE_SUPPORTED_TOOLS - evidence.keys() - operation_case_tools
     )
-    assert not missing_tested, f"tested capabilities lack journey evidence: {missing_tested}"
+    assert not missing_tested, (
+        f"tested capabilities lack full-path evidence: {missing_tested}"
+    )
     assert operation_case_tools <= EMULATE_SUPPORTED_TOOLS

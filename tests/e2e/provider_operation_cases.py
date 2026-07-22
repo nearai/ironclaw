@@ -3,6 +3,7 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import json
+from typing import Literal
 
 import httpx
 
@@ -10,6 +11,7 @@ from emulate_provider import gmail_header, google_headers, raw_mime
 
 BaselineAssertion = Callable[[str], Awaitable[None]]
 OutcomeAssertion = Callable[[str, dict], Awaitable[None]]
+ProviderService = Literal["google", "github", "slack"]
 
 
 @dataclass(frozen=True)
@@ -17,6 +19,7 @@ class ProviderOperationCase:
     """One capability invocation with provider-observable proof."""
 
     case_id: str
+    provider_service: ProviderService
     capability_id: str
     arguments: dict
     assert_baseline: BaselineAssertion
@@ -102,6 +105,7 @@ async def _assert_gmail_trash_outcome(emulate_url: str, preview: dict) -> None:
 PROVIDER_OPERATION_CASES = (
     ProviderOperationCase(
         case_id="google_drive_get_file",
+        provider_service="google",
         capability_id="google-drive.get_file",
         arguments={"file_id": "drv_reborn_qa_brief"},
         assert_baseline=_assert_drive_get_baseline,
@@ -109,6 +113,7 @@ PROVIDER_OPERATION_CASES = (
     ),
     ProviderOperationCase(
         case_id="gmail_create_draft",
+        provider_service="google",
         capability_id="gmail.create_draft",
         arguments={
             "draft": {
@@ -126,6 +131,7 @@ PROVIDER_OPERATION_CASES = (
     ),
     ProviderOperationCase(
         case_id="google_drive_update_file",
+        provider_service="google",
         capability_id="google-drive.update_file",
         arguments={
             "file_id": "drv_reborn_qa_brief",
@@ -136,6 +142,7 @@ PROVIDER_OPERATION_CASES = (
     ),
     ProviderOperationCase(
         case_id="gmail_trash_message",
+        provider_service="google",
         capability_id="gmail.trash_message",
         arguments={"message_id": "msg_emulate_unread"},
         assert_baseline=_assert_gmail_trash_baseline,

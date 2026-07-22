@@ -19,7 +19,10 @@ import pytest
 
 from emulate_provider import google_headers, slack_post
 from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
-from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
+from provider_capability_inventory import (
+    EMULATE_SUPPORTED_TOOLS,
+    capability_id_to_wire_name,
+)
 from provider_operation_cases import PROVIDER_OPERATION_CASES, ProviderOperationCase
 from reborn_webui_harness import (
     YOLO_PROFILE,
@@ -243,12 +246,15 @@ async def reborn_qa_emulate_provider_server(
 async def reborn_provider_operation_server(
     reborn_qa_emulate_runtime,
     resettable_emulate_provider_world,
+    operation_case,
 ):
-    """Reuse Reborn but restore Google after each operation case."""
+    """Reuse Reborn but restore the case's provider after execution."""
     try:
         yield reborn_qa_emulate_runtime
     finally:
-        await resettable_emulate_provider_world.reset({"google"})
+        await resettable_emulate_provider_world.reset(
+            {operation_case.provider_service}
+        )
 
 
 async def _seed_google_account(
@@ -763,7 +769,7 @@ async def _install_inline_trace(
 
 
 def _provider_operation_trace(case: ProviderOperationCase) -> dict:
-    wire_name = case.capability_id.replace(".", "__")
+    wire_name = capability_id_to_wire_name(case.capability_id)
     return {
         "steps": [
             {
@@ -1189,7 +1195,9 @@ async def test_provider_operation_case_executes_with_provider_readback(
 ):
     """Typed operation cases cross Reborn and prove provider-observable results."""
     server = reborn_provider_operation_server["base_url"]
-    emulate_url = reborn_provider_operation_server["emulate_google_url"]
+    emulate_url = reborn_provider_operation_server[
+        f"emulate_{operation_case.provider_service}_url"
+    ]
     source = f"provider-operation-{operation_case.case_id}.json"
     trace = _provider_operation_trace(operation_case)
     await operation_case.assert_baseline(emulate_url)
