@@ -42,7 +42,7 @@ trap 'rm -f "${tmp_matches}" "${tmp_files}"' EXIT
 
 redact_matches() {
   sed -E \
-    -e 's/(bearer[[:space:]]+)[^[:space:]]+/\1<REDACTED>/Ig' \
+    -e 's/(bearer[[:space:]]+)[^[:space:]\",}]+/\1<REDACTED>/Ig' \
     -e 's/gh[pousr]_[A-Za-z0-9_]{20,}/<REDACTED_GITHUB_TOKEN>/g' \
     -e 's/github_pat_[A-Za-z0-9_]{20,}/<REDACTED_GITHUB_PAT>/g' \
     -e 's/ya29\.[A-Za-z0-9._-]{20,}/<REDACTED_GOOGLE_TOKEN>/g' \
@@ -50,25 +50,52 @@ redact_matches() {
     -e 's/sk-ant-[A-Za-z0-9_-]{10,}/<REDACTED_ANTHROPIC_KEY>/g' \
     -e 's/sk-[A-Za-z0-9_-]{20,}/<REDACTED_OPENAI_KEY>/g' \
     -e 's/A[KS]IA[0-9A-Z]{16}/<REDACTED_AWS_ACCESS_KEY>/g' \
-    -e 's/(api[_-]?key[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
-    -e 's/(access[_-]?token[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
-    -e 's/(refresh[_-]?token[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
-    -e 's/(secret[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
-    -e 's/(password[[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1<REDACTED>/Ig' \
+    -e 's/(api[_-]?key[[:space:]]*[:=][[:space:]]*)[^[:space:]\",}]+/\1<REDACTED>/Ig' \
+    -e 's/(access[_-]?token[[:space:]]*[:=][[:space:]]*)[^[:space:]\",}]+/\1<REDACTED>/Ig' \
+    -e 's/(refresh[_-]?token[[:space:]]*[:=][[:space:]]*)[^[:space:]\",}]+/\1<REDACTED>/Ig' \
+    -e 's/(secret[[:space:]]*[:=][[:space:]]*)[^[:space:]\",}]+/\1<REDACTED>/Ig' \
+    -e 's/(password[[:space:]]*[:=][[:space:]]*)[^[:space:]\",}]+/\1<REDACTED>/Ig' \
     -e 's/("(access|refresh|id|bearer)_token"[[:space:]]*:[[:space:]]*)"[^"]+"/\1"<REDACTED>"/Ig' \
     -e 's/("(api[_-]?key|client[_-]?secret|password)"[[:space:]]*:[[:space:]]*)"[^"]+"/\1"<REDACTED>"/Ig'
+}
+
+is_llm_trace_artifact() {
+  local file="$1"
+  case "${file}" in
+    llm-traces/*.json|*/llm-traces/*.json)
+      return 0
+      ;;
+  esac
+  return 1
 }
 
 is_redactable_artifact() {
   local file="$1"
   local base
   base="$(basename "${file}")"
+  # Per-case LLM trace recordings (reborn-webui-v2-live-qa `llm-traces/*.json`)
+  # are captured LLM I/O harvested for fixture curation. Matched by their
+  # `llm-traces/` directory (the basename is an arbitrary case name) so that
+  # under strict scrub any token-shaped material is redacted in place rather
+  # than the whole trace being deleted. Token-shape regexes only — no content
+  # normalization or identifier scrubbing beyond the shared patterns above.
+  if is_llm_trace_artifact "${file}"; then
+    return 0
+  fi
   case "${base}" in
     *.log|*.jsonl|summary.md|env-summary.txt|trace-fixture-status.txt|auth-canary-junit.xml|results.json|case-manifest.json|preflight.json|preflight.*.json|browser-summary.json|browser-events.jsonl)
       return 0
       ;;
   esac
   return 1
+}
+
+validate_redacted_artifact() {
+  local original_file="$1"
+  local redacted_file="$2"
+  if is_llm_trace_artifact "${original_file}"; then
+    python3 -m json.tool "${redacted_file}" >/dev/null
+  fi
 }
 
 contains_unredacted_secret_patterns() {
@@ -115,7 +142,8 @@ if [[ -s "${tmp_matches}" ]]; then
           redacted_tmp="$(mktemp "${RUNNER_TEMP:-/tmp}/live-canary-redacted.XXXXXX")" || redacted_tmp=""
           if [[ -n "${redacted_tmp}" ]] \
             && redact_matches < "${matched_file}" > "${redacted_tmp}" \
-            && ! contains_unredacted_secret_patterns "${redacted_tmp}"; then
+            && ! contains_unredacted_secret_patterns "${redacted_tmp}" \
+            && validate_redacted_artifact "${matched_file}" "${redacted_tmp}"; then
             mv "${redacted_tmp}" "${matched_file}"
             redacted_found=1
           else

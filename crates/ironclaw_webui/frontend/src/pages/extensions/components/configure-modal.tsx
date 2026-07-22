@@ -14,19 +14,13 @@ import {
   extensionLifecycleState,
   setupReadyForActivation,
 } from "../lib/extension-actions";
-import { isChannelExtensionKind } from "../lib/extensions-schema";
+import { connectsViaOauth, hasChannelSurface } from "../lib/extensions-schema";
 import { redeemPairingCode } from "../lib/pairing-api";
+import { useQuery } from "@tanstack/react-query";
+import { getExtensionPairingStatus } from "../../../lib/extension-pairing-api";
+import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 import { activateExtension } from "../lib/extensions-api";
 import { notifyChannelConnected } from "../../../lib/channel-connection-events";
-import { TelegramPairingPanel } from "../../../components/telegram-pairing-panel";
-
-// Model B: the visible Slack extension is the user-tools package (id `slack`),
-// not the bot channel (which is hidden operator infrastructure).
-const SLACK_TOOLS_EXTENSION_ID = "slack";
-// Telegram pairs via WebGeneratedCode: IronClaw mints the code (deep link +
-// QR + typed fallback), so Configure hosts the pairing panel — never the
-// proof-code paste box and never the "no configuration required" fallback.
-const TELEGRAM_EXTENSION_ID = "telegram";
 
 export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const t = useT();
@@ -42,14 +36,18 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       : extension?.packageRef?.id || "";
   const channelId = extension?.channel || packageId;
   const lifecycleState = extensionLifecycleState(extension);
-  // Slack tools use OAuth rather than the proof-code pairing flow below.
-  const isSlackToolsExtension =
-    channelId.toLowerCase() === SLACK_TOOLS_EXTENSION_ID;
   const handleOauthConfigured = React.useCallback(async () => {
-    // Extension-scoped OAuth completion is atomic on the backend: the callback
-    // is not marked complete until lifecycle activation has published tools.
-    // A second client-side activation races that committed state and used to
-    // surface a misleading Conflict after an otherwise successful popup.
+    onClose();
+    // OAuth connect expresses the user's intent to make the extension live:
+    // best-effort activate any extension whose wire lifecycle state says it
+    // is not active yet, exactly like pairing redemption below.
+    if (packageId && !extensionIsActive(extension)) {
+      try {
+        await activateExtension({ id: packageId });
+      } catch {
+        console.error("extension activation after OAuth failed.");
+      }
+    }
     // invalidateQueries refetches active queries and resolves when they
     // settle (TanStack v5), so no follow-up refetchQueries pass is needed.
     await Promise.all(
@@ -60,7 +58,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     // Broadcast channel-connected (same event pairing redemption sends) so an
     // open chat card for this channel clears and its parked request resumes —
     // connecting from the Extensions page must not strand the chat surface.
-    if ((isChannelExtensionKind(extension?.kind) || isSlackToolsExtension) && channelId) {
+    if (hasChannelSurface(extension) && channelId) {
       try {
         await notifyChannelConnected({ channel: channelId, source: "extensions-oauth" });
       } catch {
@@ -68,8 +66,7 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       }
     }
     if (onSaved) onSaved();
-    onClose();
-  }, [channelId, extension?.kind, isSlackToolsExtension, onClose, onSaved, packageId, queryClient]);
+  }, [channelId, extension, onClose, onSaved, packageId, queryClient]);
   const oauthMutation = useOauthSetup(extension?.packageRef, {
     onConfigured: handleOauthConfigured,
   });
@@ -116,10 +113,28 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const manualSecrets = secrets.filter(
     (secret) => (secret.setup?.kind || "manual_token") === "manual_token"
   );
+  // OAuth-connecting channels (surface connection strategy or an oauth-kind
+  // setup secret) never route to the paste-a-code pairing panel: their
+  // connect affordance is the OAuth secret rendered below.
   const isPairingChannel =
-    !isSlackToolsExtension &&
-    isChannelExtensionKind(extension?.kind) &&
+    !connectsViaOauth(extension, secrets) &&
+    hasChannelSurface(extension) &&
     (lifecycleState === "pairing" || lifecycleState === "pairing_required");
+  // WebGeneratedCode probe: the backend registers generic pairing routes only
+  // for extensions whose account-setup descriptor declares the web-minted
+  // strategy — a 404 means the channel pairs by pasted proof code instead.
+  // Probed for every non-OAuth channel surface (not just pairing lifecycle
+  // states) so an installed-but-unpaired channel still gets its panel.
+  const probeWebCodePairing =
+    !connectsViaOauth(extension, secrets) && hasChannelSurface(extension);
+  const webCodePairing = useQuery({
+    queryKey: ["extension-pairing-probe", channelId],
+    enabled: Boolean(probeWebCodePairing && channelId),
+    retry: false,
+    staleTime: 60_000,
+    queryFn: () => getExtensionPairingStatus(channelId),
+  });
+  const isWebCodeChannel = Boolean(probeWebCodePairing && webCodePairing.isSuccess);
   const channelPairingInstructions = t("pairing.instructions");
   const channelPairingPlaceholder = t("pairing.placeholder");
   const channelPairingError = t("pairing.error");
@@ -137,7 +152,6 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
     onSuccess: () => {
       for (const queryKey of [
         ["extensions"],
-        ["connectable-channels"],
         ["pairing", channelId],
       ]) {
         queryClient.invalidateQueries({ queryKey });
@@ -155,24 +169,19 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
   const canSave = manualSecrets.length > 0 || fields.length > 0;
   const isActive = extensionIsActive(extension);
   const canActivate =
-    !isChannelExtensionKind(extension?.kind) &&
+    !hasChannelSurface(extension) &&
     setupReadyForActivation({ extension, secrets, fields });
   const oauthBusy = oauthMutation.isPending || oauthMutation.isAuthorizing;
   const setupUrl = httpsUrl(onboarding?.setup_url);
-  const isTelegramChannelExtension =
-    isChannelExtensionKind(extension?.kind) &&
-    channelId.toLowerCase() === TELEGRAM_EXTENSION_ID;
-
-  if (isTelegramChannelExtension) {
+  if (isWebCodeChannel) {
     // The panel is self-contained (mints/rotates codes, polls status,
-    // broadcasts channel-connected on pairing), so the modal only hosts it —
-    // dual-surface parity with the Channels tab (design spec §4.2/§5).
+    // broadcasts channel-connected on pairing), so the modal only hosts it.
     return (
       <ModalShell
         onClose={onClose}
         title={t("extensions.configureName").replace("{name}", extensionName)}
       >
-        <TelegramPairingPanel compact />
+        <PairingWebCodePanel extensionId={channelId} displayName={extensionName} compact />
       </ModalShell>
     );
   }

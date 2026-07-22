@@ -109,6 +109,20 @@ Prefer generic/extensible architectures over hardcoding specific integrations. A
 
 ### Extension/Auth Invariants
 
+**Reborn (`crates/`): the unified extension model.** The top-level product
+object is always an *extension*; a channel is one capability surface an
+extension's manifest declares (`tool` / `channel` / `auth` —
+`ironclaw_host_api::CapabilitySurfaceKind`), and runtime (`wasm` / `mcp` /
+`first_party`) is implementation only, never taxonomy. `ExtensionId` is the
+product identity (`slack`, `github`, `gmail`); `ProviderId` is the credential
+authority namespace and may be shared across extensions (`google` backs
+gmail + drive + calendar + …). There is no separate channel registry, no
+`slack_bot`/`slack_personal` split, and no extension `kind` wire string —
+`crates/ironclaw_architecture/tests/reborn_retired_taxonomy.rs` pins the
+retired vocabulary at zero. Start from the `reborn-extension-surfaces` skill
+when adding an integration. The identity rules below predate the unified model
+and remain binding wherever credential/extension identities appear:
+
 Extension and channel onboarding has two distinct identities that must not be conflated:
 
 - `credential_name`: backend secret identity used for storage, injection, and gate resume
@@ -169,7 +183,6 @@ crates/                     # all production code (see crates/AGENTS.md for the 
 ├── ironclaw_webui/         # WebChat v2 SPA (frontend/) + serve wiring
 ├── ironclaw_filesystem/    # RootFilesystem mount catalog (persistence plane)
 ├── ironclaw_llm/ ironclaw_safety/ ironclaw_skills/  # extracted subsystems
-├── ironclaw_reborn_migration/    # v1 → Reborn state migration tool
 └── ...                     # domain crates (threads, secrets, oauth, triggers, …)
 
 tests/
@@ -202,7 +215,6 @@ When modifying a module with a spec, read the spec first. Code follows spec; spe
 | `crates/ironclaw_webui/` | `crates/ironclaw_webui/CLAUDE.md` |
 | `crates/ironclaw_reborn_composition/` | `crates/ironclaw_reborn_composition/CLAUDE.md` |
 | `crates/ironclaw_reborn_identity/` | `crates/ironclaw_reborn_identity/CONTRACT.md` |
-| `crates/ironclaw_reborn_migration/` | `crates/ironclaw_reborn_migration/CLAUDE.md` |
 | `tests/integration/` | `tests/integration/CLAUDE.md` |
 | `tests/support/reborn_parity_qa/` | `tests/support/reborn_parity_qa/CLAUDE.md` |
 | `tests/e2e/` | `tests/e2e/CLAUDE.md` |
@@ -230,12 +242,18 @@ See `.env.example` for all environment variables. LLM backends (`nearai`, `opena
 
 ## Adding a New Channel
 
-Reborn channels are WASM modules (source under `channels-src/`, built via
-`scripts/build-wasm-extensions.sh`) plus the host-side channel crates
-(`ironclaw_channel_host`, `ironclaw_channel_delivery`, and per-channel
-extensions such as `ironclaw_telegram_extension`). Wire the channel through
-composition (`ironclaw_reborn_composition`) rather than reconstructing runtime
-state at the route layer. See `crates/AGENTS.md` for the channel crate map.
+A Reborn channel is one capability surface of an **extension** (unified model):
+the manifest (`reborn.extension_manifest.v3`) declares `[channel]` (ingress
+verification recipe, `[channel.config]`, egress allowlist, presentation) beside
+the extension's tools and auth recipes, and the extension's `ChannelAdapter`
+(`crates/ironclaw_product_adapters`) implements inbound normalize / deliver /
+activate / cleanup. Binaries supply adapters through
+`RebornBuildInput::with_channel_extension_bindings`
+(`crates/ironclaw_reborn_composition/src/input.rs`); composition wires the
+generic ingress router, pairing seam, identity bindings, and the host-owned
+delivery coordinator — never per-channel host code. Start from the
+`reborn-extension-surfaces` skill; the worked example is the Slack package
+(`crates/ironclaw_first_party_extensions/assets/slack/`).
 
 ## Everything Goes Through Capability Dispatch
 

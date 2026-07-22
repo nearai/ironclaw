@@ -121,9 +121,9 @@ for test_name in "${selected_names[@]}"; do
   test_args+=(--test "${test_name}")
 done
 
-echo "::group::cargo llvm-cov --workspace --features ironclaw/libsql test ${test_args[*]}"
+echo "::group::cargo llvm-cov --workspace test ${test_args[*]}"
 timeout --signal=INT --kill-after=30s "${test_timeout}" \
-  cargo llvm-cov --workspace --features ironclaw/libsql test "${test_args[@]}" \
+  cargo llvm-cov --workspace test "${test_args[@]}" \
     --lcov --output-path "${output_lcov}" \
     -- --nocapture
 echo "::endgroup::"

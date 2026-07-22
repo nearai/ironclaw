@@ -282,10 +282,10 @@ pub fn trace_channel_from_host_channel(channel: &str) -> trace::TraceChannel {
     match channel {
         "gateway" | "web" => trace::TraceChannel::Web,
         "cli" | "repl" | "tui" => trace::TraceChannel::Cli,
-        "telegram" => trace::TraceChannel::Telegram,
-        "slack" => trace::TraceChannel::Slack,
         "routine" | "heartbeat" => trace::TraceChannel::Routine,
-        _ => trace::TraceChannel::Other,
+        // Everything else is an extension-served channel; the concrete
+        // identity rides `channel_origin` as data.
+        _ => trace::TraceChannel::Extension,
     }
 }
 

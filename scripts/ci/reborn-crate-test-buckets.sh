@@ -26,10 +26,6 @@ jq -c -n --argjson packages "${packages_json}" '
     "events-conversations",
     "auth-security",
     "memory-skills",
-    "channel-delivery",
-    "channel-host",
-    "reborn-migration",
-    "telegram-extension",
     "adapters-misc"
   ];
 
@@ -67,7 +63,6 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_first_party_extensions: "wasm-sandbox",
       ironclaw_wasm: "wasm-sandbox",
       ironclaw_wasm_limiter: "wasm-sandbox",
-      ironclaw_wasm_product_adapters: "wasm-sandbox",
       ironclaw_wasm_sandbox_core: "wasm-sandbox",
 
       ironclaw_filesystem: "llm-mcp",
@@ -103,20 +98,12 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_skill_learning: "memory-skills",
       ironclaw_skills: "memory-skills",
 
-      # These packages dominate cold/partial-cache wall time. Keep each in its
-      # own matrix lane so compilation overlaps instead of serializing behind
-      # the miscellaneous adapters bucket.
-      ironclaw_channel_delivery: "channel-delivery",
-      ironclaw_channel_host: "channel-host",
-      ironclaw_reborn_migration: "reborn-migration",
-      ironclaw_telegram_extension: "telegram-extension",
-
       ironclaw_architecture: "adapters-misc",
       ironclaw_common: "adapters-misc",
       ironclaw_extensions: "adapters-misc",
       ironclaw_reborn_traces: "adapters-misc",
-      ironclaw_slack_v2_adapter: "adapters-misc",
-      ironclaw_telegram_v2_adapter: "adapters-misc"
+      ironclaw_slack_extension: "adapters-misc",
+      ironclaw_telegram_extension: "adapters-misc"
     };
 
   bucket_map as $bucket_map

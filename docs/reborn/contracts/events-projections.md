@@ -202,6 +202,11 @@ subscription visibility.
 Rules:
 
 - event ids are scoped; a user cannot replay another user's stream
+- an origin subscription receives the durable snapshot plus the latest
+  retained value for each stable live projection identity; it does not replay
+  cumulative live UI hint history such as every partial-text growth step
+- a cursor-based reconnect remains incremental and replays available events
+  after that cursor before resuming the live tail
 - replay gaps produce an explicit snapshot/rebase, not silent data loss
 - truncated snapshot/replay pages produce an explicit lag signal before live tailing, not a cursor treated as complete
 - access policy runs before snapshot, replay, or live subscription

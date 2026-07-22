@@ -2,7 +2,6 @@
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { gatewayStatus } from "../../../lib/api";
-import { listConnectableChannels } from "../../../lib/channel-connect";
 import {
   completionMatchesFlow,
   failureMatchesFlow,
@@ -12,7 +11,7 @@ import {
   subscribeProductAuthOAuthCompletion,
 } from "../../../lib/product-auth-oauth-events";
 import { useT } from "../../../lib/i18n";
-import { isChannelExtensionKind } from "../lib/extensions-schema";
+import { hasChannelSurface } from "../lib/extensions-schema";
 import {
   fetchExtensions,
   fetchExtensionRegistry,
@@ -71,8 +70,8 @@ function extensionListItemIsConfigured(extension) {
   const state =
     extension.onboarding_state ||
     extension.onboardingState ||
-    extension.activation_status ||
-    extension.activationStatus ||
+    extension.installation_state ||
+    extension.installationState ||
     (extension.active ? "active" : null);
   return (state === "active" || state === "ready") && extension.needs_setup !== true;
 }
@@ -123,12 +122,6 @@ export function useExtensions() {
     refetchOnMount: "always",
   });
 
-  const connectableChannelsQuery = useQuery({
-    queryKey: ["connectable-channels"],
-    queryFn: listConnectableChannels,
-    refetchOnMount: "always",
-  });
-
   const refetch = React.useCallback(
     () => Promise.all([extensionsQuery.refetch(), registryQuery.refetch()]),
     [extensionsQuery.refetch, registryQuery.refetch]
@@ -138,7 +131,6 @@ export function useExtensions() {
     queryClient.invalidateQueries({ queryKey: ["extensions"] });
     queryClient.invalidateQueries({ queryKey: ["extension-registry"] });
     queryClient.invalidateQueries({ queryKey: ["gateway-status-extensions"] });
-    queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
   }, [queryClient]);
 
   const [actionResult, setActionResult] = React.useState(null);
@@ -147,11 +139,11 @@ export function useExtensions() {
 
   const installMutation = useMutation({
     mutationFn: ({ packageRef }) => installExtension(packageRef),
-    onSuccess: (res, { displayName, kind, configureAfterInstall, onNeedsSetup, packageRef }) => {
+    onSuccess: (res, { displayName, surfaces, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
-        const message = isChannelExtensionKind(kind)
+        const message = hasChannelSurface({ surfaces })
           ? t("extensions.channelInstalledSetup", {
-              name: displayName || t("extensions.kind.channel"),
+              name: displayName || t("extensions.defaultName"),
             })
           : res.message ||
             res.instructions ||
@@ -179,14 +171,15 @@ export function useExtensions() {
           onNeedsSetup({
             packageRef,
             displayName,
-            // Carry `kind` so the modal can route a connectable channel to the
-            // Connect (pairing) panel — without it the modal can't tell this is
-            // a channel and falls through to "No configuration required".
-            kind,
+            // Carry `surfaces` so the modal can route a channel-surface
+            // extension to the Connect panel — without it the modal can't
+            // tell this is a channel and falls through to "No configuration
+            // required".
+            surfaces,
             // Freshly installed: the caller has not connected/paired yet.
             authenticated: false,
             active: false,
-            activationStatus: "setup_required",
+            installationState: "installed",
             onboardingState: "setup_required",
           });
         }
@@ -268,7 +261,6 @@ export function useExtensions() {
   const status = statusQuery.data || {};
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
-  const connectableChannels = connectableChannelsQuery.data?.channels || [];
   const extensionById = new Map(
     extensions
       .map((extension) => [packageId(extension), extension])
@@ -299,19 +291,14 @@ export function useExtensions() {
       })),
   ].sort(catalogSort);
 
-  const isChannel = (entry) => isChannelExtensionKind(entry.kind);
-  const channels = extensions.filter(isChannel);
-  const mcpServers = extensions.filter((e) => e.kind === "mcp_server");
-  const tools = extensions.filter((e) => !isChannel(e) && e.kind !== "mcp_server");
+  // Views over surfaces (product taxonomy). Runtime never groups: an
+  // MCP-backed tool extension sits beside a wasm one, with its runtime shown
+  // as a badge on the card.
+  const channels = extensions.filter(hasChannelSurface);
+  const tools = extensions.filter((e) => !hasChannelSurface(e));
 
-  const channelRegistry = registry.filter((e) => isChannel(e) && !e.installed);
-  const mcpRegistry = registry.filter((e) => e.kind === "mcp_server" && !e.installed);
-  const toolRegistry = registry.filter(
-    (e) =>
-      e.kind !== "mcp_server" &&
-      !isChannel(e) &&
-      !e.installed
-  );
+  const channelRegistry = registry.filter((e) => hasChannelSurface(e) && !e.installed);
+  const toolRegistry = registry.filter((e) => !hasChannelSurface(e) && !e.installed);
 
   const importMutation = useMutation({
     mutationFn: ({ file }) => importExtension(file),
@@ -338,14 +325,11 @@ export function useExtensions() {
     status,
     extensions,
     channels,
-    mcpServers,
     tools,
     channelRegistry,
-    mcpRegistry,
     toolRegistry,
     registry,
     catalogEntries,
-    connectableChannels,
     isExtensionsLoading: extensionsQuery.isLoading,
     isRegistryLoading: registryQuery.isLoading,
     isLoading,

@@ -800,6 +800,10 @@ pub trait ResourceGovernor: Send + Sync {
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError>;
 
+    /// Validates that a prepared reservation is still active and matches the
+    /// reservation facts being handed to a runtime before side effects start.
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError>;
+
     /// Releases an active reservation without usage when work is cancelled or fails before reconciliation.
     fn release(
         &self,
@@ -1522,6 +1526,11 @@ where
         result
     }
 
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        let reservation = reservation.clone();
+        self.update_active_state(move |state| validate_reservation_in_state(state, &reservation))
+    }
+
     fn release(
         &self,
         reservation_id: ResourceReservationId,
@@ -1935,6 +1944,10 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         result
     }
 
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        validate_reservation_in_state(&mut self.lock_state(), reservation)
+    }
+
     fn release(
         &self,
         reservation_id: ResourceReservationId,
@@ -2209,6 +2222,26 @@ pub(crate) fn reconcile_in_state(
     };
     state.reservations.insert(reservation_id, record);
     Ok(receipt)
+}
+
+fn validate_reservation_in_state(
+    state: &mut ResourceState,
+    reservation: &ResourceReservation,
+) -> Result<(), ResourceError> {
+    let record = state
+        .reservations
+        .get(&reservation.id)
+        .ok_or(ResourceError::UnknownReservation { id: reservation.id })?;
+    if record.status != ReservationStatus::Active {
+        return Err(ResourceError::ReservationClosed {
+            id: reservation.id,
+            status: record.status,
+        });
+    }
+    if record.reservation != *reservation {
+        return Err(ResourceError::ReservationMismatch { id: reservation.id });
+    }
+    Ok(())
 }
 
 pub(crate) fn release_in_state(

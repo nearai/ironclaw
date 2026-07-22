@@ -129,7 +129,7 @@ The script expands to the dedicated `reborn_e2e_gate.rs` tests plus the current 
 Run the gateway smoke test:
 
 ```bash
-cargo build --no-default-features --features libsql
+cargo build -p ironclaw
 cd tests/e2e
 pip install -e .
 playwright install --with-deps chromium  # on Linux CI; local macOS can omit --with-deps

@@ -127,7 +127,8 @@ pub use sandbox_process::{
     RebornScopedSandboxCommandTransport,
 };
 pub use services::{
-    HostRuntimeServices, ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
+    ExtensionLaneToolBinder, ExtensionToolBindError, HostRuntimeServices,
+    ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
     ProductionEventStoreWiringError, ProductionWiringComponent, ProductionWiringConfig,
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
     RegisteredRuntimeHealth,
@@ -310,151 +311,6 @@ impl From<SurfaceKind> for String {
 impl fmt::Display for SurfaceKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
-    }
-}
-
-/// Request to invoke one capability through the composed host runtime.
-///
-/// Caller/workflow origin is intentionally not part of this lower contract.
-/// Host runtime authorization must be derived from [`ExecutionContext`],
-/// principals, grants, leases, and policy; upper workflow services can attach
-/// audit labels outside this facade when they need product-specific origin
-/// vocabulary.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub struct RuntimeCapabilityRequest {
-    pub context: ExecutionContext,
-    pub capability_id: CapabilityId,
-    /// Advisory pre-flight estimate supplied by the caller.
-    ///
-    /// Production host-runtime implementations must treat this as a hint only:
-    /// resource authorization, reservation, and reconciliation remain host-owned
-    /// and must not trust caller estimates as binding limits or actual usage.
-    pub estimate: ResourceEstimate,
-    pub input: Value,
-    /// Caller-supplied dedup hint.
-    ///
-    /// **This field is currently advisory at this layer.** The composed
-    /// capability host does not yet implement caller-driven idempotent
-    /// retries, so two `invoke_capability` calls carrying the same key will
-    /// both execute. Upper turn/loop services that need at-most-once
-    /// semantics must dedupe themselves until idempotency lands in the
-    /// capability host. The field is kept on the contract surface so that
-    /// shape doesn't break when dedup is wired through downstream.
-    ///
-    /// The host runtime still validates and forwards the key into
-    /// observability spans for audit/tracing.
-    pub idempotency_key: Option<IdempotencyKey>,
-}
-
-impl RuntimeCapabilityRequest {
-    // Deliberately NO `trust_decision` parameter — do not re-add one. Trust is
-    // host-owned: `DefaultHostRuntime` evaluates it itself, and a caller-supplied
-    // decision would be unvalidated authority input the runtime must ignore
-    // (arch-simplification §1.1).
-    // Removed so it is no longer carried across the capability hops.
-    pub fn new(
-        context: ExecutionContext,
-        capability_id: CapabilityId,
-        estimate: ResourceEstimate,
-        input: Value,
-    ) -> Self {
-        Self {
-            context,
-            capability_id,
-            estimate,
-            input,
-            idempotency_key: None,
-        }
-    }
-
-    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
-        self.idempotency_key = Some(key);
-        self
-    }
-}
-
-/// Request to resume one approval-blocked capability through the composed host runtime.
-///
-/// The shape mirrors [`RuntimeCapabilityRequest`] but additionally carries the
-/// approval request selected by an upper approval workflow. The default host
-/// runtime evaluates provider trust itself before delegating to `CapabilityHost`.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub struct RuntimeCapabilityResumeRequest {
-    pub context: ExecutionContext,
-    pub approval_request_id: ApprovalRequestId,
-    pub capability_id: CapabilityId,
-    pub estimate: ResourceEstimate,
-    pub input: Value,
-    pub idempotency_key: Option<IdempotencyKey>,
-}
-
-impl RuntimeCapabilityResumeRequest {
-    pub fn new(
-        context: ExecutionContext,
-        approval_request_id: ApprovalRequestId,
-        capability_id: CapabilityId,
-        estimate: ResourceEstimate,
-        input: Value,
-    ) -> Self {
-        Self {
-            context,
-            approval_request_id,
-            capability_id,
-            estimate,
-            input,
-            idempotency_key: None,
-        }
-    }
-
-    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
-        self.idempotency_key = Some(key);
-        self
-    }
-}
-
-/// Auth-gate resume request.
-///
-/// Re-dispatches a capability that was previously blocked by an auth gate,
-/// reusing the original `invocation_id` encoded in the `context`. When the
-/// invocation also passed a prior approval gate, `approval_request_id` is set
-/// so the host can locate and claim the matching fingerprinted lease.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub struct RuntimeCapabilityAuthResumeRequest {
-    pub context: ExecutionContext,
-    pub capability_id: CapabilityId,
-    pub estimate: ResourceEstimate,
-    pub input: Value,
-    pub idempotency_key: Option<IdempotencyKey>,
-    /// Present when the invocation previously passed an approval gate.
-    /// Used to locate and claim the matching fingerprinted approval lease
-    /// so the re-dispatch does not require a second approval.
-    pub approval_request_id: Option<ApprovalRequestId>,
-}
-
-impl RuntimeCapabilityAuthResumeRequest {
-    pub fn new(
-        context: ExecutionContext,
-        capability_id: CapabilityId,
-        estimate: ResourceEstimate,
-        input: Value,
-        approval_request_id: Option<ApprovalRequestId>,
-    ) -> Self {
-        Self {
-            context,
-            capability_id,
-            estimate,
-            input,
-            idempotency_key: None,
-            approval_request_id,
-        }
-    }
-
-    pub fn with_idempotency_key(mut self, key: IdempotencyKey) -> Self {
-        self.idempotency_key = Some(key);
-        self
     }
 }
 
@@ -988,20 +844,37 @@ pub trait RuntimeBackendHealth: Send + Sync {
 }
 
 /// Contract for the Reborn host runtime facade.
+pub type RuntimeInvocation = (ExecutionContext, CapabilityId, ResourceEstimate, Value);
+pub type RuntimeApprovalResume = (
+    ExecutionContext,
+    ApprovalRequestId,
+    CapabilityId,
+    ResourceEstimate,
+    Value,
+);
+pub type RuntimeAuthResume = (
+    ExecutionContext,
+    CapabilityId,
+    ResourceEstimate,
+    Value,
+    Option<ApprovalRequestId>,
+);
+
 #[async_trait]
 pub trait HostRuntime: Send + Sync {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
 
     async fn spawn_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let (_, capability_id, _, _) = request;
         Ok(RuntimeCapabilityOutcome::Failed(
             RuntimeCapabilityFailure::new(
-                request.capability_id,
+                capability_id,
                 RuntimeFailureKind::Unavailable,
                 Some("capability spawn is unsupported by this host runtime".to_string()),
             ),
@@ -1010,7 +883,7 @@ pub trait HostRuntime: Send + Sync {
 
     async fn resume_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError>;
 
     /// Re-dispatch after an auth gate has been resolved.
@@ -1027,11 +900,12 @@ pub trait HostRuntime: Send + Sync {
     /// provide an explicit override.
     async fn auth_resume_capability(
         &self,
-        request: RuntimeCapabilityAuthResumeRequest,
+        request: RuntimeAuthResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let (_, capability_id, _, _, _) = request;
         Ok(RuntimeCapabilityOutcome::Failed(
             RuntimeCapabilityFailure::new(
-                request.capability_id,
+                capability_id,
                 RuntimeFailureKind::Unavailable,
                 Some("capability auth-resume is unsupported by this host runtime".to_string()),
             ),
@@ -1040,11 +914,12 @@ pub trait HostRuntime: Send + Sync {
 
     async fn resume_spawn_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let (_, _, capability_id, _, _) = request;
         Ok(RuntimeCapabilityOutcome::Failed(
             RuntimeCapabilityFailure::new(
-                request.capability_id,
+                capability_id,
                 RuntimeFailureKind::Unavailable,
                 Some("capability spawn resume is unsupported by this host runtime".to_string()),
             ),

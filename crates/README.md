@@ -54,8 +54,8 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_mcp` | `ironclaw_mcp` | Adapts manifest-declared MCP tools into IronClaw capabilities without granting ambient filesystem, secret, or network authority. |
 | `ironclaw_wasm` | `ironclaw_wasm` | Reborn WASM component runtime lane. Owns component-model/WIT runtime surface plus the folded domain-free `wasm_sandbox_core` primitives. |
 | `ironclaw_wasm_limiter` | `ironclaw_wasm_limiter` | Shared `wasmtime::ResourceLimiter` used by WASM tool and hook runtimes so memory/table/instance limits do not drift. |
-| `ironclaw_wasm_product_adapters` | `ironclaw_wasm_product_adapters` | WASM-side adapters that bridge guest components into product-facing shapes. Keeps host-only authority out of the guest. |
 | `ironclaw_extensions` | `ironclaw_extensions` | Extension manifest, lifecycle, and registration contracts. Owns install/activate/remove semantics; runtime crates consume validated descriptors from here. |
+| `ironclaw_extension_host` | `ironclaw_extension_host` | Generic channel-host assembly: binds installed extensions to inbound/outbound channel surfaces (ingress registration, delivery, per-extension idempotency ledgers) for the Reborn product surface. |
 | `ironclaw_host_runtime` | `ironclaw_host_runtime` | Narrow facade upper Reborn services depend on. Provides `HostRuntime` plus production composition around capability hosting. |
 
 ### Durable state, eventing, and read models
@@ -98,7 +98,8 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_gateway` | `ironclaw_gateway` | Browser gateway frontend assets, layout configuration, and widget extension system. |
 | `ironclaw_webui` | `ironclaw_webui` | Reborn WebChat v2 HTTP route surface and route descriptors. |
 | `ironclaw_tui` | `ironclaw_tui` | Modular Ratatui-based terminal UI. |
-| `ironclaw_telegram_v2_adapter` | `ironclaw_telegram_v2_adapter` | Telegram v2 channel adapter for the Reborn product surface. Maps Telegram traffic into Reborn capability and turn contracts. |
+| `ironclaw_slack_extension` | `ironclaw_slack_extension` | Slack v2 channel extension for the Reborn product surface: protocol parsing and rendering (payloads, mrkdwn, delivery DTOs). |
+| `ironclaw_telegram_extension` | `ironclaw_telegram_extension` | Telegram v2 channel adapter for the Reborn product surface. Maps Telegram traffic into Reborn capability and turn contracts. |
 | `ironclaw_silk_decoder` | `ironclaw_silk_decoder` | Standalone WeChat `audio/silk` decoder helper. Excluded from the default workspace build; needs `libclang` and a C toolchain. |
 
 ## Where to make common changes
@@ -112,7 +113,7 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **Extension lifecycle (install/activate/remove)**: use `ironclaw_extensions`; do not parse manifests or reimplement registration in runtime or UI crates.
 - **Reborn composition or boot config**: use `ironclaw_reborn_composition` and `ironclaw_reborn_config`; keep `main.rs`/CLI entry points thin.
 - **LLM provider routing**: use `ironclaw_llm`; do not wire provider clients directly into engine or gateway crates.
-- **Channel adapters (e.g., Telegram)**: use the channel adapter crate (`ironclaw_telegram_v2_adapter`); keep authority in lower host crates.
+- **Channel adapters (e.g., Telegram)**: use the channel adapter crate (`ironclaw_telegram_extension`); keep authority in lower host crates.
 - **Durable event history**: use `ironclaw_events` for contracts and `ironclaw_reborn_event_store` for backend adapters.
 - **Current invocation state**: use `ironclaw_run_state`, not event logs.
 - **User-visible read models and live projection streams**: prefer `ironclaw_event_projections`, `ironclaw_event_streams`, or `ironclaw_product_adapters` over parsing storage rows in UI code.

@@ -954,6 +954,7 @@ fn sample_request(input: Value) -> ProcessExecutionRequest {
         estimate: ResourceEstimate::default(),
         mounts: MountView::default(),
         resource_reservation: None,
+        authorized_continuation: None,
         input,
         cancellation: ProcessCancellationToken::new(),
     }

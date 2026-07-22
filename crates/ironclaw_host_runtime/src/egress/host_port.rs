@@ -201,6 +201,7 @@ fn execution_context_for_host_http_egress(
 ) -> Result<ExecutionContext, RuntimeHttpEgressError> {
     let context = ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id: scope.invocation_id,
         correlation_id: ironclaw_host_api::CorrelationId::new(),
         process_id: None,

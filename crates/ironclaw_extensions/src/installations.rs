@@ -1,14 +1,20 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
+use ironclaw_filesystem::{
+    CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName, IndexSpec,
+    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, VersionedEntry,
+};
+use ironclaw_host_api::{
+    ExtensionId, HostPortCatalog, SecretHandle, UserId, VirtualPath, sha256_digest_token,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
-use tokio::sync::RwLock;
 
+use crate::resolved::ResolvedExtensionManifest;
 use crate::{ExtensionManifestV2, HostApiContractRegistry, ManifestSource, ManifestV2Error};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -140,34 +146,33 @@ impl ExtensionRemovalCleanupRequirement {
 
 /// Product-agnostic extension manifest record.
 ///
-/// Domain crates can project their own host-api sections from `raw_toml` and
-/// `manifest`; installation state itself stays in `ironclaw_extensions`.
+/// Compiled once per install/upgrade: the raw source is kept for diagnostics
+/// and recompilation only; production projection reads the
+/// [`ResolvedExtensionManifest`] (checklist REC-1). v2 records may still be
+/// reprojected from `raw_toml` by domain crates until their cutover phases
+/// land.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionManifestRecord {
     raw_toml: String,
     manifest: ExtensionManifestV2,
+    resolved: ResolvedExtensionManifest,
     manifest_hash: Option<ManifestHash>,
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
 
-impl ExtensionManifestRecord {
-    pub fn from_toml(
-        raw_toml: impl Into<String>,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
-        manifest_hash: Option<ManifestHash>,
-    ) -> Result<Self, ExtensionInstallationError> {
-        let contracts = HostApiContractRegistry::new();
-        Self::from_toml_with_contracts(
-            raw_toml,
-            source,
-            host_port_catalog,
-            manifest_hash,
-            &contracts,
-        )
-    }
+/// Minimal probe used to dispatch the single parse entry point on the
+/// declared schema version (checklist MAN-2).
+#[derive(Deserialize)]
+struct SchemaVersionProbe {
+    #[serde(default)]
+    schema_version: String,
+}
 
-    pub fn from_toml_with_contracts(
+impl ExtensionManifestRecord {
+    /// The single manifest parse entry point: dispatches on the declared
+    /// `schema_version` (v2 or v3) and normalizes both into the same
+    /// resolved model.
+    pub fn from_toml(
         raw_toml: impl Into<String>,
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
@@ -175,15 +180,47 @@ impl ExtensionManifestRecord {
         contracts: &HostApiContractRegistry,
     ) -> Result<Self, ExtensionInstallationError> {
         let raw_toml = raw_toml.into();
-        let manifest = ExtensionManifestV2::parse_with_optional_host_api_contracts(
-            &raw_toml,
-            source,
-            host_port_catalog,
-            contracts,
-        )?;
+        let probe: SchemaVersionProbe = toml::from_str(&raw_toml).map_err(|error| {
+            ExtensionInstallationError::InvalidManifest {
+                reason: format!("failed to parse extension manifest: {error}"),
+            }
+        })?;
+        let (manifest, resolved) = if probe.schema_version == crate::v3::MANIFEST_SCHEMA_VERSION_V3
+        {
+            crate::v3::parse_v3(&raw_toml, source, host_port_catalog).map_err(|error| {
+                ExtensionInstallationError::InvalidManifest {
+                    reason: error.to_string(),
+                }
+            })?
+        } else {
+            let manifest =
+                ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
+            let resolved = ResolvedExtensionManifest::from_v2(&manifest);
+            (manifest, resolved)
+        };
         Ok(Self {
             raw_toml,
             manifest,
+            resolved,
+            manifest_hash,
+            removal_cleanup_requirements: Vec::new(),
+        })
+    }
+
+    /// Rebuild a record from its persisted resolved contract — no TOML
+    /// reparse; the raw source is carried for diagnostics only (checklist
+    /// REC-2).
+    pub fn from_resolved(
+        raw_toml: impl Into<String>,
+        source: ManifestSource,
+        resolved: ResolvedExtensionManifest,
+        manifest_hash: Option<ManifestHash>,
+    ) -> Result<Self, ExtensionInstallationError> {
+        let manifest = resolved.to_internal(source)?;
+        Ok(Self {
+            raw_toml: raw_toml.into(),
+            manifest,
+            resolved,
             manifest_hash,
             removal_cleanup_requirements: Vec::new(),
         })
@@ -202,6 +239,11 @@ impl ExtensionManifestRecord {
 
     pub fn manifest(&self) -> &ExtensionManifestV2 {
         &self.manifest
+    }
+
+    /// The persisted resolved contract this record was compiled into.
+    pub fn resolved(&self) -> &ResolvedExtensionManifest {
+        &self.resolved
     }
 
     pub fn raw_toml(&self) -> &str {
@@ -794,6 +836,29 @@ pub trait ExtensionInstallationStore: Send + Sync {
         installation_id: &ExtensionInstallationId,
         health: ExtensionHealthSnapshot,
     ) -> Result<(), ExtensionInstallationError>;
+
+    /// Non-secret `[channel.config]` values for the extension's installation,
+    /// keyed by field handle. Stores without durable channel-config support
+    /// report empty (config completeness then derives as "nothing provided").
+    async fn channel_config(
+        &self,
+        _extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        Ok(Vec::new())
+    }
+
+    /// Replace the stored non-secret `[channel.config]` values for the
+    /// extension's installation. Fails closed on stores without durable
+    /// channel-config support so a save can never silently vanish.
+    async fn set_channel_config(
+        &self,
+        _extension_id: &ExtensionId,
+        _values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        Err(ExtensionInstallationError::InvalidInstallation {
+            reason: "channel config persistence is not supported by this store".to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -886,26 +951,471 @@ where
     ) -> Result<(), ExtensionInstallationError> {
         (**self).update_health(installation_id, health).await
     }
+
+    async fn channel_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        (**self).channel_config(extension_id).await
+    }
+
+    async fn set_channel_config(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self).set_channel_config(extension_id, values).await
+    }
 }
 
-#[derive(Debug, Default, Clone)]
-pub struct InMemoryExtensionInstallationStore {
-    inner: Arc<RwLock<InMemoryState>>,
+const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations";
+const MANIFEST_RECORD_KIND: &str = "extension_manifest_record";
+const INSTALLATION_RECORD_KIND: &str = "extension_installation_record";
+const CHANNEL_CONFIG_RECORD_KIND: &str = "extension_channel_config_record";
+const FILESYSTEM_CAS_RETRIES: usize = 5;
+
+/// Filesystem-backed extension installation state store.
+///
+/// Manifests and installations are persisted as separate record rows under the
+/// configured root path. Secondary indexes are declared on the row prefixes so
+/// scans that gate lifecycle behavior can use the filesystem query API instead
+/// of loading a monolithic state snapshot.
+pub struct FilesystemExtensionInstallationStore {
+    filesystem: Arc<dyn RootFilesystem>,
+    root: VirtualPath,
+    host_ports: HostPortCatalog,
+    contracts: HostApiContractRegistry,
+    cas_retries: usize,
 }
 
-#[derive(Debug, Default)]
-struct InMemoryState {
-    manifests: HashMap<ExtensionId, ExtensionManifestRecord>,
-    installations: HashMap<ExtensionInstallationId, ExtensionInstallation>,
+impl fmt::Debug for FilesystemExtensionInstallationStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FilesystemExtensionInstallationStore")
+            .field("root", &self.root)
+            .field("cas_retries", &self.cas_retries)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FilesystemExtensionInstallationStore {
+    pub async fn load_at(
+        filesystem: Arc<dyn RootFilesystem>,
+        root: VirtualPath,
+        host_ports: HostPortCatalog,
+        contracts: HostApiContractRegistry,
+    ) -> Result<Self, ExtensionInstallationError> {
+        let store = Self {
+            filesystem,
+            root,
+            host_ports,
+            contracts,
+            cas_retries: FILESYSTEM_CAS_RETRIES,
+        };
+        store.ensure_indexes().await?;
+        store.migrate_legacy_manifest_rows().await?;
+        Ok(store)
+    }
+
+    pub fn default_state_path() -> Result<VirtualPath, ExtensionInstallationError> {
+        VirtualPath::new(DEFAULT_INSTALLATION_STATE_PATH).map_err(invalid_installation_error)
+    }
+
+    pub fn with_cas_retries(mut self, cas_retries: usize) -> Self {
+        self.cas_retries = cas_retries;
+        self
+    }
+
+    async fn ensure_indexes(&self) -> Result<(), ExtensionInstallationError> {
+        self.ensure_exact_index(
+            &self.manifests_root()?,
+            "extension_manifests_by_extension_id",
+            "extension_id",
+        )
+        .await?;
+        self.ensure_exact_index(
+            &self.installations_root()?,
+            "extension_installations_by_installation_id",
+            "installation_id",
+        )
+        .await?;
+        self.ensure_exact_index(
+            &self.installations_root()?,
+            "extension_installations_by_extension_id",
+            "extension_id",
+        )
+        .await?;
+        self.ensure_exact_index(
+            &self.installations_root()?,
+            "extension_installations_by_activation_state",
+            "activation_state",
+        )
+        .await
+    }
+
+    async fn ensure_exact_index(
+        &self,
+        prefix: &VirtualPath,
+        name: &'static str,
+        key: &'static str,
+    ) -> Result<(), ExtensionInstallationError> {
+        let name = index_name(name)?;
+        let key = index_key(key)?;
+        let spec = IndexSpec::new(name, vec![key], IndexKind::Exact);
+        self.filesystem
+            .ensure_index(prefix, &spec)
+            .await
+            .map_err(store_unavailable(
+                "ensure extension installation store index",
+            ))
+    }
+
+    /// One-time compatibility compiler for rows written by the filesystem
+    /// store before resolved manifests became authoritative. The migrated row
+    /// is rewritten under CAS before `load_at` returns, so normal projection
+    /// paths never reparse raw TOML.
+    async fn migrate_legacy_manifest_rows(&self) -> Result<(), ExtensionInstallationError> {
+        let rows = query_all(&self.filesystem, &self.manifests_root()?, &Filter::All).await?;
+        for row in rows {
+            let mut complete = false;
+            for _ in 0..=self.cas_retries {
+                let Some(current) = self
+                    .filesystem
+                    .get(&row.path)
+                    .await
+                    .map_err(store_unavailable("load legacy extension manifest row"))?
+                else {
+                    complete = true;
+                    break;
+                };
+                ensure_entry_kind(&current.entry, MANIFEST_RECORD_KIND, &row.path)?;
+                let wire: WireManifestRecord = current.entry.parse_json().map_err(|error| {
+                    corrupt_row(
+                        "deserialize legacy extension manifest row",
+                        &row.path,
+                        error,
+                    )
+                })?;
+                if wire.resolved.is_some() {
+                    complete = true;
+                    break;
+                }
+                let record = ExtensionManifestRecord::from_toml(
+                    wire.raw_toml,
+                    wire.source.into_manifest_source(),
+                    &self.host_ports,
+                    wire.manifest_hash,
+                    &self.contracts,
+                )?
+                .with_removal_cleanup_requirements(wire.removal_cleanup_requirements);
+                match self
+                    .filesystem
+                    .put(
+                        &row.path,
+                        entry_for_manifest(&record)?,
+                        CasExpectation::Version(current.version),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        complete = true;
+                        break;
+                    }
+                    Err(FilesystemError::VersionMismatch { .. }) => continue,
+                    Err(error) => {
+                        return Err(store_unavailable("migrate extension manifest row")(error));
+                    }
+                }
+            }
+            if !complete {
+                return Err(store_unavailable_error(
+                    "legacy extension manifest row changed repeatedly while migrating",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn manifests_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
+        child_path(&self.root, "manifests")
+    }
+
+    fn installations_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
+        child_path(&self.root, "installations")
+    }
+
+    fn channel_configs_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
+        child_path(&self.root, "channel-configs")
+    }
+
+    fn manifest_path(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<VirtualPath, ExtensionInstallationError> {
+        child_path(
+            &self.manifests_root()?,
+            &format!("{}.json", row_token(extension_id.as_str())),
+        )
+    }
+
+    fn installation_path(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<VirtualPath, ExtensionInstallationError> {
+        child_path(
+            &self.installations_root()?,
+            &format!("{}.json", row_token(installation_id.as_str())),
+        )
+    }
+
+    fn channel_config_path(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<VirtualPath, ExtensionInstallationError> {
+        child_path(
+            &self.channel_configs_root()?,
+            &format!("{}.json", row_token(extension_id.as_str())),
+        )
+    }
+
+    async fn load_channel_config_entry(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Option<(WireChannelConfig, RecordVersion)>, ExtensionInstallationError> {
+        let path = self.channel_config_path(extension_id)?;
+        let Some(entry) = self
+            .filesystem
+            .get(&path)
+            .await
+            .map_err(store_unavailable("load extension channel config row"))?
+        else {
+            return Ok(None);
+        };
+        ensure_entry_kind(&entry.entry, CHANNEL_CONFIG_RECORD_KIND, &path)?;
+        let config: WireChannelConfig = entry.entry.parse_json().map_err(|error| {
+            corrupt_row("deserialize extension channel config row", &path, error)
+        })?;
+        if &config.extension_id != extension_id {
+            return Err(invalid_installation_error(format!(
+                "extension channel config row key {extension_id} contained config for {}",
+                config.extension_id
+            )));
+        }
+        Ok(Some((config, entry.version)))
+    }
+
+    async fn put_channel_config(
+        &self,
+        config: &WireChannelConfig,
+    ) -> Result<(), ExtensionInstallationError> {
+        let path = self.channel_config_path(&config.extension_id)?;
+        let payload = serde_json::to_value(config).map_err(invalid_installation_error)?;
+        let entry = Entry::record(record_kind(CHANNEL_CONFIG_RECORD_KIND)?, &payload)
+            .map_err(invalid_installation_error)?;
+        self.filesystem
+            .put(&path, entry, CasExpectation::Any)
+            .await
+            .map(|_| ())
+            .map_err(store_unavailable("save extension channel config row"))
+    }
+
+    async fn delete_channel_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ExtensionInstallationError> {
+        for _ in 0..=self.cas_retries {
+            let Some((_, version)) = self.load_channel_config_entry(extension_id).await? else {
+                return Ok(());
+            };
+            let path = self.channel_config_path(extension_id)?;
+            match self.filesystem.delete_if_version(&path, version).await {
+                Ok(()) | Err(FilesystemError::NotFound { .. }) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => {
+                    return Err(store_unavailable("delete extension channel config row")(
+                        error,
+                    ));
+                }
+            }
+        }
+        Err(store_unavailable_error(
+            "extension channel config row changed repeatedly while deleting",
+        ))
+    }
+
+    async fn load_manifest_entry(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Option<(ExtensionManifestRecord, RecordVersion)>, ExtensionInstallationError> {
+        let path = self.manifest_path(extension_id)?;
+        let Some(entry) = self
+            .filesystem
+            .get(&path)
+            .await
+            .map_err(store_unavailable("load extension manifest row"))?
+        else {
+            return Ok(None);
+        };
+        let manifest = self.parse_manifest_entry(entry.entry, &path)?;
+        if manifest.extension_id() != extension_id {
+            return Err(invalid_installation_error(format!(
+                "extension manifest row key {extension_id} contained manifest {}",
+                manifest.extension_id()
+            )));
+        }
+        Ok(Some((manifest, entry.version)))
+    }
+
+    async fn load_installation_entry(
+        &self,
+        installation_id: &ExtensionInstallationId,
+    ) -> Result<Option<(ExtensionInstallation, RecordVersion)>, ExtensionInstallationError> {
+        let path = self.installation_path(installation_id)?;
+        let Some(entry) = self
+            .filesystem
+            .get(&path)
+            .await
+            .map_err(store_unavailable("load extension installation row"))?
+        else {
+            return Ok(None);
+        };
+        let installation = parse_installation_entry(entry.entry, &path)?;
+        if installation.installation_id() != installation_id {
+            return Err(invalid_installation_error(format!(
+                "extension installation row key {installation_id} contained installation {}",
+                installation.installation_id()
+            )));
+        }
+        Ok(Some((installation, entry.version)))
+    }
+
+    async fn query_installations_by_extension(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+        let filter = Filter::Eq {
+            key: index_key("extension_id")?,
+            value: IndexValue::Text(extension_id.as_str().to_string()),
+        };
+        self.query_installations(&filter).await
+    }
+
+    async fn query_installations(
+        &self,
+        filter: &Filter,
+    ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
+        let rows = query_all(&self.filesystem, &self.installations_root()?, filter).await?;
+        rows.into_iter()
+            .map(|entry| parse_installation_entry(entry.entry, &entry.path))
+            .collect()
+    }
+
+    async fn query_manifests(
+        &self,
+        filter: &Filter,
+    ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
+        let rows = query_all(&self.filesystem, &self.manifests_root()?, filter).await?;
+        rows.into_iter()
+            .map(|entry| self.parse_manifest_entry(entry.entry, &entry.path))
+            .collect()
+    }
+
+    fn parse_manifest_entry(
+        &self,
+        entry: Entry,
+        path: &VirtualPath,
+    ) -> Result<ExtensionManifestRecord, ExtensionInstallationError> {
+        ensure_entry_kind(&entry, MANIFEST_RECORD_KIND, path)?;
+        let wire: WireManifestRecord = entry
+            .parse_json()
+            .map_err(|error| corrupt_row("deserialize extension manifest row", path, error))?;
+        wire.into_manifest_record()
+    }
+
+    async fn put_manifest(
+        &self,
+        manifest: &ExtensionManifestRecord,
+        cas: CasExpectation,
+    ) -> Result<(), SaveRowError> {
+        let path = self.manifest_path(manifest.extension_id())?;
+        match self
+            .filesystem
+            .put(&path, entry_for_manifest(manifest)?, cas)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::VersionMismatch { .. }) => Err(SaveRowError::CasConflict),
+            Err(error) => Err(SaveRowError::Store(store_unavailable(
+                "save extension manifest row",
+            )(error))),
+        }
+    }
+
+    async fn put_installation(
+        &self,
+        installation: &ExtensionInstallation,
+        cas: CasExpectation,
+    ) -> Result<(), SaveRowError> {
+        let path = self.installation_path(installation.installation_id())?;
+        match self
+            .filesystem
+            .put(&path, entry_for_installation(installation)?, cas)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::VersionMismatch { .. }) => Err(SaveRowError::CasConflict),
+            Err(error) => Err(SaveRowError::Store(store_unavailable(
+                "save extension installation row",
+            )(error))),
+        }
+    }
+
+    async fn delete_installation_row(
+        &self,
+        installation_id: &ExtensionInstallationId,
+        version: RecordVersion,
+    ) -> Result<(), SaveRowError> {
+        let path = self.installation_path(installation_id)?;
+        match self.filesystem.delete_if_version(&path, version).await {
+            Ok(()) => Ok(()),
+            Err(FilesystemError::VersionMismatch { .. }) => Err(SaveRowError::CasConflict),
+            Err(FilesystemError::NotFound { .. }) => Err(SaveRowError::NotFound),
+            Err(error) => Err(SaveRowError::Store(store_unavailable(
+                "delete extension installation row",
+            )(error))),
+        }
+    }
+
+    async fn delete_manifest_row(
+        &self,
+        extension_id: &ExtensionId,
+        version: RecordVersion,
+    ) -> Result<(), SaveRowError> {
+        let path = self.manifest_path(extension_id)?;
+        match self.filesystem.delete_if_version(&path, version).await {
+            Ok(()) => Ok(()),
+            Err(FilesystemError::VersionMismatch { .. }) => Err(SaveRowError::CasConflict),
+            Err(FilesystemError::NotFound { .. }) => Err(SaveRowError::NotFound),
+            Err(error) => Err(SaveRowError::Store(store_unavailable(
+                "delete extension manifest row",
+            )(error))),
+        }
+    }
+
+    async fn restore_manifest_best_effort(&self, prior: Option<ExtensionManifestRecord>) {
+        if let Some(prior) = prior
+            && let Err(error) = self.put_manifest(&prior, CasExpectation::Any).await
+        {
+            let _ = error;
+        }
+    }
 }
 
 #[async_trait]
-impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
+impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
     async fn list_manifests(
         &self,
     ) -> Result<Vec<ExtensionManifestRecord>, ExtensionInstallationError> {
-        let inner = self.inner.read().await;
-        let mut manifests: Vec<_> = inner.manifests.values().cloned().collect();
+        let mut manifests = self.query_manifests(&Filter::All).await?;
         manifests.sort_by(|a, b| a.extension_id().cmp(b.extension_id()));
         Ok(manifests)
     }
@@ -914,26 +1424,24 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         &self,
         extension_id: &ExtensionId,
     ) -> Result<Option<ExtensionManifestRecord>, ExtensionInstallationError> {
-        Ok(self.inner.read().await.manifests.get(extension_id).cloned())
+        self.load_manifest_entry(extension_id)
+            .await
+            .map(|entry| entry.map(|(manifest, _)| manifest))
     }
 
     async fn upsert_manifest(
         &self,
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
-        let mut inner = self.inner.write().await;
-        // The in-memory store intentionally scans existing installations to
-        // preserve the manifest hash invariant. Durable stores should use a
-        // targeted read path or secondary index before handling large catalogs.
-        for installation in inner.installations.values() {
-            if installation.extension_id() == manifest.extension_id() {
-                validate_installation_against_one_manifest(&manifest, installation)?;
-            }
+        for installation in self
+            .query_installations_by_extension(manifest.extension_id())
+            .await?
+        {
+            validate_installation_against_one_manifest(&manifest, &installation)?;
         }
-        inner
-            .manifests
-            .insert(manifest.extension_id().clone(), manifest);
-        Ok(())
+        self.put_manifest(&manifest, CasExpectation::Any)
+            .await
+            .map_err(SaveRowError::into_installation_error)
     }
 
     async fn upsert_manifest_and_installation(
@@ -942,21 +1450,25 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
         validate_installation_against_one_manifest(&manifest, &installation)?;
-        let mut inner = self.inner.write().await;
-        inner
-            .manifests
-            .insert(manifest.extension_id().clone(), manifest);
-        inner
-            .installations
-            .insert(installation.installation_id().clone(), installation);
+        let extension_id = manifest.extension_id().clone();
+        let prior_manifest = self.get_manifest(&extension_id).await?;
+        self.put_manifest(&manifest, CasExpectation::Any)
+            .await
+            .map_err(SaveRowError::into_installation_error)?;
+        if let Err(error) = self
+            .put_installation(&installation, CasExpectation::Any)
+            .await
+        {
+            self.restore_manifest_best_effort(prior_manifest).await;
+            return Err(error.into_installation_error());
+        }
         Ok(())
     }
 
     async fn list_installations(
         &self,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-        let inner = self.inner.read().await;
-        let mut installations: Vec<_> = inner.installations.values().cloned().collect();
+        let mut installations = self.query_installations(&Filter::All).await?;
         installations.sort_by(|a, b| a.installation_id().cmp(b.installation_id()));
         Ok(installations)
     }
@@ -964,13 +1476,11 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
     async fn list_enabled_installations(
         &self,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-        let inner = self.inner.read().await;
-        let mut installations: Vec<_> = inner
-            .installations
-            .values()
-            .filter(|i| i.activation_state() == ExtensionActivationState::Enabled)
-            .cloned()
-            .collect();
+        let filter = Filter::Eq {
+            key: index_key("activation_state")?,
+            value: IndexValue::Text(activation_state_key(ExtensionActivationState::Enabled).into()),
+        };
+        let mut installations = self.query_installations(&filter).await?;
         installations.sort_by(|a, b| {
             b.updated_at()
                 .cmp(&a.updated_at())
@@ -983,25 +1493,25 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         &self,
         installation_id: &ExtensionInstallationId,
     ) -> Result<Option<ExtensionInstallation>, ExtensionInstallationError> {
-        Ok(self
-            .inner
-            .read()
+        self.load_installation_entry(installation_id)
             .await
-            .installations
-            .get(installation_id)
-            .cloned())
+            .map(|entry| entry.map(|(installation, _)| installation))
     }
 
     async fn upsert_installation(
         &self,
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
-        let mut inner = self.inner.write().await;
-        validate_installation_against_manifest(&inner.manifests, &installation)?;
-        inner
-            .installations
-            .insert(installation.installation_id().clone(), installation);
-        Ok(())
+        let manifest = self
+            .get_manifest(installation.extension_id())
+            .await?
+            .ok_or_else(|| ExtensionInstallationError::UnknownManifest {
+                extension_id: installation.extension_id().clone(),
+            })?;
+        validate_installation_against_one_manifest(&manifest, &installation)?;
+        self.put_installation(&installation, CasExpectation::Any)
+            .await
+            .map_err(SaveRowError::into_installation_error)
     }
 
     async fn set_activation_state(
@@ -1009,62 +1519,106 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         installation_id: &ExtensionInstallationId,
         state: ExtensionActivationState,
     ) -> Result<(), ExtensionInstallationError> {
-        let mut inner = self.inner.write().await;
-        let InMemoryState {
-            manifests,
-            installations,
-        } = &mut *inner;
-        let installation = installations.get_mut(installation_id).ok_or_else(|| {
-            ExtensionInstallationError::InstallationNotFound {
-                installation_id: installation_id.clone(),
+        for _ in 0..=self.cas_retries {
+            let Some((mut installation, version)) =
+                self.load_installation_entry(installation_id).await?
+            else {
+                return Err(ExtensionInstallationError::InstallationNotFound {
+                    installation_id: installation_id.clone(),
+                });
+            };
+            if installation.activation_state() == state {
+                return Ok(());
             }
-        })?;
-        if installation.activation_state() == state {
-            return Ok(());
+            if state == ExtensionActivationState::Enabled {
+                let manifest = self
+                    .get_manifest(installation.extension_id())
+                    .await?
+                    .ok_or_else(|| ExtensionInstallationError::UnknownManifest {
+                        extension_id: installation.extension_id().clone(),
+                    })?;
+                validate_installation_against_one_manifest(&manifest, &installation)?;
+            }
+            installation.set_activation_state(state);
+            match self
+                .put_installation(&installation, CasExpectation::Version(version))
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(SaveRowError::CasConflict) => continue,
+                Err(error) => return Err(error.into_installation_error()),
+            }
         }
-        if state == ExtensionActivationState::Enabled {
-            validate_installation_against_manifest(manifests, installation)?;
-        }
-        installation.set_activation_state(state);
-        Ok(())
+        Err(store_unavailable_error(
+            "extension installation row changed repeatedly while updating activation state",
+        ))
     }
 
     async fn delete_installation(
         &self,
         installation_id: &ExtensionInstallationId,
     ) -> Result<(), ExtensionInstallationError> {
-        self.inner
-            .write()
-            .await
-            .installations
-            .remove(installation_id)
-            .map(|_| ())
-            .ok_or_else(|| ExtensionInstallationError::InstallationNotFound {
-                installation_id: installation_id.clone(),
-            })
+        for _ in 0..=self.cas_retries {
+            let Some((installation, version)) =
+                self.load_installation_entry(installation_id).await?
+            else {
+                return Err(ExtensionInstallationError::InstallationNotFound {
+                    installation_id: installation_id.clone(),
+                });
+            };
+            match self.delete_installation_row(installation_id, version).await {
+                Ok(()) => {
+                    self.delete_channel_config(installation.extension_id())
+                        .await?;
+                    return Ok(());
+                }
+                Err(SaveRowError::CasConflict) => continue,
+                Err(SaveRowError::NotFound) => {
+                    return Err(ExtensionInstallationError::InstallationNotFound {
+                        installation_id: installation_id.clone(),
+                    });
+                }
+                Err(error) => return Err(error.into_installation_error()),
+            }
+        }
+        Err(store_unavailable_error(
+            "extension installation row changed repeatedly while deleting installation",
+        ))
     }
 
     async fn delete_manifest(
         &self,
         extension_id: &ExtensionId,
     ) -> Result<(), ExtensionInstallationError> {
-        let mut inner = self.inner.write().await;
-        if inner
-            .installations
-            .values()
-            .any(|installation| installation.extension_id() == extension_id)
+        if !self
+            .query_installations_by_extension(extension_id)
+            .await?
+            .is_empty()
         {
             return Err(ExtensionInstallationError::InvalidInstallation {
                 reason: format!("extension {extension_id} still has installations"),
             });
         }
-        inner
-            .manifests
-            .remove(extension_id)
-            .map(|_| ())
-            .ok_or_else(|| ExtensionInstallationError::ManifestNotFound {
-                extension_id: extension_id.clone(),
-            })
+        for _ in 0..=self.cas_retries {
+            let Some((_, version)) = self.load_manifest_entry(extension_id).await? else {
+                return Err(ExtensionInstallationError::ManifestNotFound {
+                    extension_id: extension_id.clone(),
+                });
+            };
+            match self.delete_manifest_row(extension_id, version).await {
+                Ok(()) => return Ok(()),
+                Err(SaveRowError::CasConflict) => continue,
+                Err(SaveRowError::NotFound) => {
+                    return Err(ExtensionInstallationError::ManifestNotFound {
+                        extension_id: extension_id.clone(),
+                    });
+                }
+                Err(error) => return Err(error.into_installation_error()),
+            }
+        }
+        Err(store_unavailable_error(
+            "extension manifest row changed repeatedly while deleting manifest",
+        ))
     }
 
     async fn update_health(
@@ -1072,22 +1626,323 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         installation_id: &ExtensionInstallationId,
         health: ExtensionHealthSnapshot,
     ) -> Result<(), ExtensionInstallationError> {
-        self.inner
-            .write()
+        for _ in 0..=self.cas_retries {
+            let Some((mut installation, version)) =
+                self.load_installation_entry(installation_id).await?
+            else {
+                return Err(ExtensionInstallationError::InstallationNotFound {
+                    installation_id: installation_id.clone(),
+                });
+            };
+            installation.set_health(health.clone());
+            match self
+                .put_installation(&installation, CasExpectation::Version(version))
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(SaveRowError::CasConflict) => continue,
+                Err(error) => return Err(error.into_installation_error()),
+            }
+        }
+        Err(store_unavailable_error(
+            "extension installation row changed repeatedly while updating health",
+        ))
+    }
+
+    async fn channel_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        if self
+            .query_installations_by_extension(extension_id)
+            .await?
+            .is_empty()
+        {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .load_channel_config_entry(extension_id)
+            .await?
+            .map(|(config, _)| config.values)
+            .unwrap_or_default())
+    }
+
+    async fn set_channel_config(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        if self
+            .query_installations_by_extension(extension_id)
+            .await?
+            .is_empty()
+        {
+            return Err(ExtensionInstallationError::InvalidInstallation {
+                reason: format!("extension {extension_id} has no installation for channel config"),
+            });
+        }
+        if values.is_empty() {
+            return self.delete_channel_config(extension_id).await;
+        }
+        self.put_channel_config(&WireChannelConfig {
+            extension_id: extension_id.clone(),
+            values,
+        })
+        .await
+    }
+}
+
+#[derive(Debug)]
+enum SaveRowError {
+    CasConflict,
+    NotFound,
+    Store(ExtensionInstallationError),
+}
+
+impl From<ExtensionInstallationError> for SaveRowError {
+    fn from(error: ExtensionInstallationError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl SaveRowError {
+    fn into_installation_error(self) -> ExtensionInstallationError {
+        match self {
+            Self::CasConflict => store_unavailable_error("extension installation row CAS conflict"),
+            Self::NotFound => store_unavailable_error("extension installation row disappeared"),
+            Self::Store(error) => error,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WireManifestRecord {
+    raw_toml: String,
+    source: WireManifestSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved: Option<ResolvedExtensionManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest_hash: Option<ManifestHash>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WireChannelConfig {
+    extension_id: ExtensionId,
+    values: Vec<(String, String)>,
+}
+
+impl WireManifestRecord {
+    fn into_manifest_record(self) -> Result<ExtensionManifestRecord, ExtensionInstallationError> {
+        let resolved = self.resolved.ok_or_else(|| {
+            invalid_installation_error("extension manifest row was not resolved during store load")
+        })?;
+        ExtensionManifestRecord::from_resolved(
+            self.raw_toml,
+            self.source.into_manifest_source(),
+            resolved,
+            self.manifest_hash,
+        )
+        .map(|record| record.with_removal_cleanup_requirements(self.removal_cleanup_requirements))
+    }
+}
+
+impl From<&ExtensionManifestRecord> for WireManifestRecord {
+    fn from(record: &ExtensionManifestRecord) -> Self {
+        Self {
+            raw_toml: record.raw_toml().to_string(),
+            source: WireManifestSource::from_manifest_source(record.manifest().source),
+            resolved: Some(record.resolved().clone()),
+            manifest_hash: record.manifest_hash().cloned(),
+            removal_cleanup_requirements: record.removal_cleanup_requirements().to_vec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireManifestSource {
+    HostBundled,
+    InstalledLocal,
+    RegistryInstalled,
+}
+
+impl WireManifestSource {
+    fn from_manifest_source(source: ManifestSource) -> Self {
+        match source {
+            ManifestSource::HostBundled => Self::HostBundled,
+            ManifestSource::InstalledLocal => Self::InstalledLocal,
+            ManifestSource::RegistryInstalled => Self::RegistryInstalled,
+        }
+    }
+
+    fn into_manifest_source(self) -> ManifestSource {
+        match self {
+            Self::HostBundled => ManifestSource::HostBundled,
+            Self::InstalledLocal => ManifestSource::InstalledLocal,
+            Self::RegistryInstalled => ManifestSource::RegistryInstalled,
+        }
+    }
+}
+
+async fn query_all(
+    filesystem: &Arc<dyn RootFilesystem>,
+    prefix: &VirtualPath,
+    filter: &Filter,
+) -> Result<Vec<VersionedEntry>, ExtensionInstallationError> {
+    let mut out = Vec::new();
+    let mut offset: u64 = 0;
+    loop {
+        let page = Page::new(offset, Page::MAX_LIMIT);
+        let rows = filesystem
+            .query(prefix, filter, page)
             .await
-            .installations
-            .get_mut(installation_id)
-            .ok_or_else(|| ExtensionInstallationError::InstallationNotFound {
-                installation_id: installation_id.clone(),
-            })?
-            .set_health(health);
-        Ok(())
+            .map_err(store_unavailable("query extension installation rows"))?;
+        let received = rows.len();
+        out.extend(rows);
+        if received < Page::MAX_LIMIT as usize {
+            break;
+        }
+        offset = offset.saturating_add(received as u64);
+    }
+    Ok(out)
+}
+
+fn entry_for_manifest(
+    manifest: &ExtensionManifestRecord,
+) -> Result<Entry, ExtensionInstallationError> {
+    let payload = serde_json::to_value(WireManifestRecord::from(manifest))
+        .map_err(invalid_installation_error)?;
+    Ok(Entry::record(record_kind(MANIFEST_RECORD_KIND)?, &payload)
+        .map_err(invalid_installation_error)?
+        .with_indexed(
+            index_key("extension_id")?,
+            IndexValue::Text(manifest.extension_id().as_str().to_string()),
+        )
+        .with_indexed(
+            index_key("manifest_source")?,
+            IndexValue::Text(manifest_source_key(manifest.manifest().source).into()),
+        ))
+}
+
+fn entry_for_installation(
+    installation: &ExtensionInstallation,
+) -> Result<Entry, ExtensionInstallationError> {
+    let payload = serde_json::to_value(installation).map_err(invalid_installation_error)?;
+    Ok(
+        Entry::record(record_kind(INSTALLATION_RECORD_KIND)?, &payload)
+            .map_err(invalid_installation_error)?
+            .with_indexed(
+                index_key("installation_id")?,
+                IndexValue::Text(installation.installation_id().as_str().to_string()),
+            )
+            .with_indexed(
+                index_key("extension_id")?,
+                IndexValue::Text(installation.extension_id().as_str().to_string()),
+            )
+            .with_indexed(
+                index_key("activation_state")?,
+                IndexValue::Text(activation_state_key(installation.activation_state()).into()),
+            ),
+    )
+}
+
+fn parse_installation_entry(
+    entry: Entry,
+    path: &VirtualPath,
+) -> Result<ExtensionInstallation, ExtensionInstallationError> {
+    ensure_entry_kind(&entry, INSTALLATION_RECORD_KIND, path)?;
+    entry
+        .parse_json()
+        .map_err(|error| corrupt_row("deserialize extension installation row", path, error))
+}
+
+fn ensure_entry_kind(
+    entry: &Entry,
+    expected: &'static str,
+    path: &VirtualPath,
+) -> Result<(), ExtensionInstallationError> {
+    match entry.kind.as_ref().map(RecordKind::as_str) {
+        Some(actual) if actual == expected => Ok(()),
+        _ => Err(invalid_installation_error(format!(
+            "extension installation store row at {} had unexpected record kind",
+            path.as_str()
+        ))),
+    }
+}
+
+fn child_path(root: &VirtualPath, child: &str) -> Result<VirtualPath, ExtensionInstallationError> {
+    VirtualPath::new(format!("{}/{}", root.as_str().trim_end_matches('/'), child))
+        .map_err(invalid_installation_error)
+}
+
+fn row_token(value: &str) -> String {
+    sha256_digest_token(value.as_bytes()).replace(':', "_")
+}
+
+fn activation_state_key(state: ExtensionActivationState) -> &'static str {
+    match state {
+        ExtensionActivationState::Installed => "installed",
+        ExtensionActivationState::Disabled => "disabled",
+        ExtensionActivationState::Enabled => "enabled",
+    }
+}
+
+fn manifest_source_key(source: ManifestSource) -> &'static str {
+    match source {
+        ManifestSource::HostBundled => "host_bundled",
+        ManifestSource::InstalledLocal => "installed_local",
+        ManifestSource::RegistryInstalled => "registry_installed",
+    }
+}
+
+fn record_kind(value: &'static str) -> Result<RecordKind, ExtensionInstallationError> {
+    RecordKind::new(value).map_err(invalid_installation_error)
+}
+
+fn index_name(value: &'static str) -> Result<IndexName, ExtensionInstallationError> {
+    IndexName::new(value).map_err(invalid_installation_error)
+}
+
+fn index_key(value: &'static str) -> Result<IndexKey, ExtensionInstallationError> {
+    IndexKey::new(value).map_err(invalid_installation_error)
+}
+
+fn corrupt_row(
+    operation: &'static str,
+    path: &VirtualPath,
+    error: impl fmt::Display,
+) -> ExtensionInstallationError {
+    let _ = path;
+    invalid_installation_error(format!("{operation}: {error}"))
+}
+
+fn store_unavailable(
+    operation: &'static str,
+) -> impl FnOnce(FilesystemError) -> ExtensionInstallationError {
+    move |error| {
+        let _ = error;
+        store_unavailable_error(operation)
+    }
+}
+
+fn invalid_installation_error(error: impl fmt::Display) -> ExtensionInstallationError {
+    ExtensionInstallationError::InvalidInstallation {
+        reason: error.to_string(),
+    }
+}
+
+fn store_unavailable_error(error: impl fmt::Display) -> ExtensionInstallationError {
+    ExtensionInstallationError::StoreUnavailable {
+        reason: error.to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::{ExtensionId, HostPortCatalog};
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{ExtensionId, HostPortCatalog, VirtualPath};
 
     use super::*;
     use crate::ManifestSource;
@@ -1135,8 +1990,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn channel_config_round_trips_and_is_deleted_with_the_installation() {
+        let store = filesystem_store().await;
+        let manifest = manifest_record("fixture", Some("hash-1"));
+        let extension_id = manifest.extension_id().clone();
+        store
+            .upsert_manifest(manifest)
+            .await
+            .expect("upsert manifest");
+        let installed = installation("fixture", Some("hash-1"));
+        let installation_id = installed.installation_id().clone();
+        store
+            .upsert_installation(installed)
+            .await
+            .expect("upsert installation");
+
+        assert!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read empty config")
+                .is_empty(),
+            "no config is provided until a save"
+        );
+        store
+            .set_channel_config(
+                &extension_id,
+                vec![(
+                    "public_endpoint_url".to_string(),
+                    "https://x.example".to_string(),
+                )],
+            )
+            .await
+            .expect("save config");
+        assert_eq!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read config"),
+            vec![(
+                "public_endpoint_url".to_string(),
+                "https://x.example".to_string()
+            )]
+        );
+        // Channel config is installation-owned state: deleting the
+        // installation deletes it (removal order §6.2 step 5).
+        store
+            .delete_installation(&installation_id)
+            .await
+            .expect("delete installation");
+        assert!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read after delete")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn load_migrates_pre_resolved_manifest_rows_before_projection() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let root = VirtualPath::new("/system/extensions/.installations/migration-test")
+            .expect("valid root");
+        let store = FilesystemExtensionInstallationStore::load_at(
+            backend.clone(),
+            root.clone(),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("initial store");
+        let record = manifest_record("legacy-fixture", Some("hash-legacy"));
+        let path = store
+            .manifest_path(record.extension_id())
+            .expect("manifest path");
+        let wire = WireManifestRecord {
+            raw_toml: record.raw_toml().to_string(),
+            source: WireManifestSource::from_manifest_source(record.manifest().source),
+            resolved: None,
+            manifest_hash: record.manifest_hash().cloned(),
+            removal_cleanup_requirements: Vec::new(),
+        };
+        let payload = serde_json::to_value(wire).expect("legacy wire payload");
+        let entry = Entry::record(
+            record_kind(MANIFEST_RECORD_KIND).expect("record kind"),
+            &payload,
+        )
+        .expect("legacy manifest entry")
+        .with_indexed(
+            index_key("extension_id").expect("index key"),
+            IndexValue::Text(record.extension_id().as_str().to_string()),
+        )
+        .with_indexed(
+            index_key("manifest_source").expect("index key"),
+            IndexValue::Text("host_bundled".to_string()),
+        );
+        backend
+            .put(&path, entry, CasExpectation::Any)
+            .await
+            .expect("seed legacy row");
+        drop(store);
+
+        let reopened = FilesystemExtensionInstallationStore::load_at(
+            backend,
+            root,
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("migration succeeds");
+        let loaded = reopened
+            .get_manifest(record.extension_id())
+            .await
+            .expect("load migrated row")
+            .expect("migrated row exists");
+        assert_eq!(loaded.resolved(), record.resolved());
+    }
+
+    #[tokio::test]
     async fn delete_manifest_rejects_active_installations() {
-        let store = InMemoryExtensionInstallationStore::default();
+        let store = filesystem_store().await;
         let manifest = manifest_record("fixture", Some("hash-1"));
         let extension_id = manifest.extension_id().clone();
         store
@@ -1160,12 +2134,34 @@ mod tests {
         assert!(store.get_manifest(&extension_id).await.unwrap().is_some());
     }
 
+    async fn filesystem_store() -> FilesystemExtensionInstallationStore {
+        FilesystemExtensionInstallationStore::load_at(
+            Arc::new(InMemoryBackend::new()),
+            VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("filesystem store")
+    }
+
+    fn capability_provider_contracts() -> crate::HostApiContractRegistry {
+        let mut contracts = crate::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                crate::CapabilityProviderHostApiContract::new().expect("contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
+
     fn manifest_record(extension_id: &str, hash: Option<&str>) -> ExtensionManifestRecord {
         ExtensionManifestRecord::from_toml(
             manifest_toml(extension_id),
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
             hash.map(|value| ManifestHash::new(value).expect("hash")),
+            &capability_provider_contracts(),
         )
         .expect("manifest record")
     }
@@ -1271,7 +2267,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/{extension_id}.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.read"
 description = "read"
 effects = ["network"]
@@ -1288,6 +2290,8 @@ output_schema_ref = "schemas/read.output.json"
 pub enum ExtensionInstallationError {
     #[error(transparent)]
     Manifest(#[from] ManifestV2Error),
+    #[error("invalid extension manifest: {reason}")]
+    InvalidManifest { reason: String },
     #[error("invalid {field}: {reason}")]
     InvalidValue { field: &'static str, reason: String },
     #[error("installation owner member set must not be empty")]
@@ -1327,18 +2331,6 @@ pub enum ExtensionInstallationError {
         extension_id: ExtensionId,
         handle: ExtensionCredentialHandle,
     },
-}
-
-fn validate_installation_against_manifest(
-    manifests: &HashMap<ExtensionId, ExtensionManifestRecord>,
-    installation: &ExtensionInstallation,
-) -> Result<(), ExtensionInstallationError> {
-    let manifest = manifests.get(installation.extension_id()).ok_or_else(|| {
-        ExtensionInstallationError::UnknownManifest {
-            extension_id: installation.extension_id().clone(),
-        }
-    })?;
-    validate_installation_against_one_manifest(manifest, installation)
 }
 
 fn validate_installation_against_one_manifest(

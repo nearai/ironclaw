@@ -9,6 +9,8 @@
 import { apiFetch } from "../../../lib/api";
 
 const ADMIN_BASE = "/api/webchat/v2/admin";
+const EXTENSION_CONFIGURATION_BASE =
+  "/api/webchat/v2/operator/extension-configuration";
 
 function normalizeUser(record) {
   if (!record) return record;
@@ -124,6 +126,32 @@ export async function deleteUserSecret(userId, handle) {
   return apiFetch(
     `${ADMIN_BASE}/users/${encodeURIComponent(userId)}/secrets/${encodeURIComponent(handle)}`,
     { method: "DELETE" },
+  );
+}
+
+// --- Manifest-driven deployment configuration -----------------------------
+
+export async function fetchExtensionAdminConfiguration() {
+  const response = await apiFetch(EXTENSION_CONFIGURATION_BASE);
+  return Array.isArray(response?.groups) ? response.groups : [];
+}
+
+export async function replaceExtensionAdminConfiguration(
+  groupId,
+  values,
+  expectedRevision,
+  idempotencyKey,
+) {
+  return apiFetch(
+    `${EXTENSION_CONFIGURATION_BASE}/${encodeURIComponent(groupId)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        values,
+        expected_revision: expectedRevision,
+        idempotency_key: idempotencyKey,
+      }),
+    },
   );
 }
 

@@ -9,9 +9,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentId, CapabilitySet, CorrelationId, ExtensionId, HostApiError, InvocationId, MissionId,
-    MountView, ProcessId, ProjectId, ResourceScope, RunId, RuntimeKind, SystemServiceId, TenantId,
-    ThreadId, TrustClass, UserId,
+    AgentId, CapabilitySet, CorrelationId, ExtensionId, HostApiError, InvocationId,
+    InvocationOrigin, MissionId, MountView, ProcessId, ProjectId, ResourceScope, RunId,
+    RuntimeKind, SystemServiceId, TenantId, ThreadId, TrustClass, UserId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -63,6 +63,21 @@ pub struct ExecutionContext {
     /// treat `None` as its own bucket, never as a wildcard.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
+    /// Authoritative origin of this invocation — where the call came from
+    /// (§5.2.1), stamped host-side by the ingress that builds the context:
+    /// loop orchestration stamps [`InvocationOrigin::LoopRun`], product
+    /// surfaces stamp [`InvocationOrigin::Product`], and the routine/heartbeat
+    /// scheduler stamps [`InvocationOrigin::Automation`]. Consumed by the
+    /// capability kernel's `authorize()` fold to seal the [`crate::Invocation`]
+    /// origin.
+    ///
+    /// `None` for a context whose ingress has not (yet) stamped an origin; the
+    /// kernel falls back to reconstructing [`InvocationOrigin::LoopRun`] from
+    /// `run_id` when it is set, so the loop path is covered even before it
+    /// stamps `origin` explicitly. It must never be a stand-in placeholder —
+    /// an ingress either knows its true origin or leaves this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<InvocationOrigin>,
 
     pub extension_id: ExtensionId,
     pub runtime: RuntimeKind,
@@ -102,6 +117,7 @@ impl ExecutionContext {
             mission_id: None,
             thread_id: None,
             run_id: None,
+            origin: None,
             extension_id,
             runtime,
             trust,
@@ -111,6 +127,20 @@ impl ExecutionContext {
         };
         context.validate()?;
         Ok(context)
+    }
+
+    /// The authoritative invocation origin (§5.2.1): the ingress-stamped
+    /// [`Self::origin`], falling back to reconstructing
+    /// [`InvocationOrigin::LoopRun`] from [`Self::run_id`] when a loop ingress
+    /// stamped only the run id. `None` for a context carrying neither (a
+    /// host-internal or test context). This is the single definition of the
+    /// "`run_id` implies a `LoopRun` origin" rule — the capability seal and the
+    /// authorization gate both resolve origin through here rather than
+    /// re-deriving it.
+    pub fn resolved_origin(&self) -> Option<InvocationOrigin> {
+        self.origin
+            .clone()
+            .or_else(|| self.run_id.map(InvocationOrigin::LoopRun))
     }
 
     pub fn validate(&self) -> Result<(), HostApiError> {

@@ -1828,6 +1828,7 @@ async fn webui_event_stream_accepts_legacy_partial_origin_cursor() {
     let legacy_cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
         runtime: None,
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 1,

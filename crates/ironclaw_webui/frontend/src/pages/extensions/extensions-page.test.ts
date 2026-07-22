@@ -61,7 +61,7 @@ function renderExtensionsPage(tab, extensionState = {}) {
     ChannelsTab() {},
     ConfirmDialog,
     ConfigureModal() {},
-    McpTab() {},
+    ToolsTab() {},
     Navigate() {},
     React: {
       useCallback: (fn) => fn,
@@ -84,11 +84,10 @@ function renderExtensionsPage(tab, extensionState = {}) {
     useExtensions: () => ({
       status: {},
       channels: [],
-      mcpServers: [],
+      tools: [],
       channelRegistry: [],
-      mcpRegistry: [],
+      toolRegistry: [],
       catalogEntries: [],
-      connectableChannels: [],
       isExtensionsLoading: false,
       isRegistryLoading: false,
       isLoading: false,
@@ -184,6 +183,26 @@ for (const tab of ["installed", "unknown"]) {
     assert.match(rendered.strings.join(""), /to="\/extensions\/registry"/);
   });
 }
+
+test("ExtensionsPage redirects the legacy mcp tab to the tools view", () => {
+  const { Navigate, rendered } = renderExtensionsPage("mcp", {
+    isExtensionsLoading: true,
+    isRegistryLoading: true,
+  });
+
+  assert.equal(rendered.values[0], Navigate);
+  assert.match(rendered.strings.join(""), /to="\/extensions\/tools"/);
+});
+
+test("ExtensionsPage renders the tools view for the tools tab", () => {
+  const { ToolsTab, rendered } = renderExtensionsPage("tools", {
+    isExtensionsLoading: false,
+    isRegistryLoading: false,
+  });
+
+  const toolsTab = findComponent(rendered, ToolsTab) || componentProps(rendered, ToolsTab)[0];
+  assert.ok(toolsTab, "the tools tab content must be rendered");
+});
 
 test("ExtensionsPage removes an extension only after confirming the shared dialog", () => {
   const harness = renderExtensionsPage("registry", { isBusy: true, isRemoving: false });

@@ -74,26 +74,9 @@ pub fn validate_callback_claim(
     if crate::is_terminal_status(record.status) {
         return match record.status {
             AuthFlowStatus::Completed => Ok(()),
-            AuthFlowStatus::Failed
-                if record.credential_secret_fingerprint.is_some()
-                    && matches!(
-                        record.continuation,
-                        crate::AuthContinuationRef::LifecycleActivation { .. }
-                    ) =>
-            {
-                Ok(())
-            }
             AuthFlowStatus::Canceled => Err(AuthProductError::Canceled),
             _ => Err(AuthProductError::FlowAlreadyTerminal),
         };
-    }
-    if record.status == AuthFlowStatus::Completing
-        && matches!(
-            record.continuation,
-            crate::AuthContinuationRef::LifecycleActivation { .. }
-        )
-    {
-        return Ok(());
     }
     expire_if_needed(record, now)?;
     if record.status != AuthFlowStatus::AwaitingUser {

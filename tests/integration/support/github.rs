@@ -55,12 +55,16 @@ pub fn extension_registry() -> GithubSupportResult<ExtensionRegistry> {
 /// feeds it into `publish_bundled_extension_for_test` for github.* dispatch
 /// without a scripted install/activate handshake.
 pub fn extension_package() -> GithubSupportResult<ExtensionPackage> {
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
-        &std::fs::read_to_string(asset_root().join("manifest.toml"))?,
+    // Parse through the single record entry point (the bundled assets are
+    // manifest v3 documents since the first-party rewrite).
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+        std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,
+        None,
         &default_host_api_contract_registry()?,
     )?;
+    let manifest = ExtensionManifest::try_from(record.manifest().clone())?;
     Ok(ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/github")?,

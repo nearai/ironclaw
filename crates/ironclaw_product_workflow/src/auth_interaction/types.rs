@@ -298,7 +298,7 @@ impl AuthGateRecord {
     }
 
     pub(super) fn to_view(&self, now: Timestamp) -> Option<PendingAuthInteractionView> {
-        // Honor `expires_at` in the projection (RFC 6819 §5.1.5.3). A
+        // A2a · Honor `expires_at` in the projection (RFC 6819 §5.1.5.3). A
         // non-terminal flow whose TTL has passed is not a live interaction, even
         // when a background sweep has not yet transitioned it to `Expired`.
         // Without this, an abandoned "Connect" flow keeps reading as

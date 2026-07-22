@@ -1,6 +1,6 @@
 import React from "react";
 import { Button } from "../../../design-system/button";
-import { TelegramPairingPanel } from "../../../components/telegram-pairing-panel";
+import { PairingWebCodePanel } from "../../../components/pairing-web-code-panel";
 import { useT } from "../../../lib/i18n";
 import { channelConnectionDisplayName } from "../../../lib/channel-connection-events";
 
@@ -75,11 +75,10 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
 
   // Web-minted code strategy: this side generates the code, so render the
   // pairing panel (code + deep link + QR + live connect detection) instead of
-  // an input asking the user to paste a code that doesn't exist yet. Gated by
-  // channel as well as strategy (mirroring channels-tab): the strategy string
-  // is generic, and a future non-Telegram web_generated_code channel must not
-  // inherit the Telegram-specific panel.
-  if (onboarding?.strategy === "web_generated_code" && onboarding?.extensionName === "telegram") {
+  // an input asking the user to paste a code that doesn't exist yet. The
+  // panel is vendor-blind: it drives the generic per-extension pairing
+  // endpoints and takes its copy from the backend connection requirement.
+  if (onboarding?.strategy === "web_generated_code" && onboarding?.extensionName) {
     const instructions = onboarding?.instructions || onboarding?.message || "";
     return (
       <div
@@ -89,7 +88,11 @@ export function OnboardingPairingCard({ onboarding, onSubmit, onConfigure, onCan
         <h3 className="text-sm font-semibold text-iron-100">{copy.title}</h3>
         {instructions &&
         (<p className="mt-1 text-sm leading-6 text-iron-300">{instructions}</p>)}
-        <TelegramPairingPanel compact />
+        <PairingWebCodePanel
+          compact
+          extensionId={onboarding.extensionName}
+          displayName={copy.displayName || onboarding.extensionName}
+        />
         {onCancel &&
         (
           <div className="mt-3">

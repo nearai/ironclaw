@@ -5,7 +5,13 @@ import { test } from "vitest";
 import vm from "node:vm";
 
 import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events";
+import { connectsViaOauth, hasChannelSurface } from "../lib/extensions-schema";
 import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api";
+
+// Wire-shaped surface fixtures: a channel extension declares a channel
+// surface; a plain tool extension declares only a tool surface.
+const channelSurfaces = [{ kind: "channel", inbound: true, outbound: true }];
+const toolSurfaces = [{ kind: "tool" }];
 
 function configureModalSourceForTest() {
   const source = readFileSync(new URL("./configure-modal.tsx", import.meta.url), "utf8");
@@ -26,7 +32,7 @@ function configureModalSourceForTest() {
 }
 
 function renderModal({
-  kind = "channel",
+  surfaces = channelSurfaces,
   packageRef = { kind: "extension", id: "slack" },
   channel = undefined,
   displayName = "Slack",
@@ -34,6 +40,7 @@ function renderModal({
   onClose = () => {},
   onSaved,
   activate = async () => {},
+  extensionActive = false,
   translate,
   redeemPairingCode,
   setupResult,
@@ -41,6 +48,7 @@ function renderModal({
   oauthMutationState = {},
   runEffects = false,
   blockPopup = false,
+  webCodePairingProbe = { isSuccess: false },
 } = {}) {
   const calls = [];
   const invalidations = [];
@@ -64,9 +72,11 @@ function renderModal({
     useQueryClient: () => ({
       invalidateQueries: ({ queryKey }) => invalidations.push(queryKey),
     }),
+    useQuery: () => webCodePairingProbe,
+    getExtensionPairingStatus: async () => ({ connected: false, pending: null }),
+    PairingWebCodePanel() {},
     Button() {},
     Icon() {},
-    TelegramPairingPanel() {},
     console: { error() {} },
     React: {
       useState: (initial) => [
@@ -105,15 +115,18 @@ function renderModal({
       };
     },
     useSetupSubmit: () => ({ mutate() {}, isPending: false, error: null }),
-    extensionIsActive: () => false,
+    extensionIsActive: () => extensionActive,
     extensionLifecycleState: (extension) =>
       extension?.onboarding_state ||
       extension?.onboardingState ||
-      extension?.activation_status ||
-      extension?.activationStatus ||
+      extension?.installation_state ||
+      extension?.installationState ||
       (extension?.active ? "active" : "installed"),
     setupReadyForActivation: () => setupReady,
-    isChannelExtensionKind: (k) => k === "channel" || k === "wasm_channel",
+    // The real surface-taxonomy helpers: modal routing must key off declared
+    // channel surfaces and connect strategies, exactly as production does.
+    connectsViaOauth,
+    hasChannelSurface,
     redeemPairingCode: redeem,
     notifyChannelConnected: async (payload) => {
       notifications.push(payload);
@@ -143,7 +156,7 @@ function renderModal({
     extension: {
       packageRef,
       displayName,
-      kind,
+      surfaces,
       channel,
       onboarding_state: onboardingState,
     },
@@ -153,7 +166,7 @@ function renderModal({
   return {
     calls,
     context,
-    TelegramPairingPanel: context.TelegramPairingPanel,
+    PairingWebCodePanel: context.PairingWebCodePanel,
     invalidations,
     mutationConfig,
     notifications,
@@ -214,13 +227,13 @@ function renderedContainsComponent(rendered, component) {
 }
 
 test("ConfigureModal renders the code-entry panel for a channel extension that uses manual setup", () => {
-  // A generic proof-code channel — NOT telegram, whose WebGeneratedCode flow
-  // renders the minted-code pairing panel instead of a paste box.
+  // A generic proof-code channel: the paste-box flow is the
+  // inbound_proof_code connect strategy's UI.
   const { rendered, mutationConfig } = renderModal({
-    kind: "channel",
-    packageRef: { kind: "extension", id: "whatsapp" },
-    channel: "whatsapp",
-    displayName: "WhatsApp",
+    surfaces: channelSurfaces,
+    packageRef: { kind: "extension", id: "acme-messenger" },
+    channel: "acme-messenger",
+    displayName: "Acme Messenger",
     onboardingState: "pairing_required",
   });
   assert.ok(mutationConfig, "a pairing mutation must be configured");
@@ -229,59 +242,63 @@ test("ConfigureModal renders the code-entry panel for a channel extension that u
   assert.match(body, /pairing\.instructions/);
 });
 
-test("ConfigureModal hosts the Telegram pairing panel instead of a paste box or no-config fallback", () => {
+test("ConfigureModal hosts the web-code pairing panel instead of a paste box or no-config fallback", () => {
   const view = renderModal({
-    kind: "channel",
-    packageRef: { kind: "extension", id: "telegram" },
-    displayName: "Telegram",
+    surfaces: channelSurfaces,
+    packageRef: { kind: "extension", id: "acme-messenger" },
+    channel: "acme-messenger",
+    displayName: "Acme Messenger",
     // Even a pairing_required lifecycle state must not fall into the
     // proof-code paste box: WebGeneratedCode mints the code on this side.
     onboardingState: "pairing_required",
+    webCodePairingProbe: { isSuccess: true },
   });
 
   assert.equal(
-    renderedContainsComponent(view.rendered, view.TelegramPairingPanel),
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
     true,
-    "telegram Configure must render the WebGeneratedCode pairing panel",
+    "a probe-discovered WebGeneratedCode channel must render the minted-code pairing panel",
   );
   const body = JSON.stringify(view.rendered);
-  assert.ok(!body.includes("pairing.placeholder"), "no proof-code paste box for telegram");
+  assert.ok(!body.includes("pairing.placeholder"), "no proof-code paste box");
   assert.ok(
     !body.includes("extensions.noConfigRequired"),
-    "telegram Configure must never claim no configuration is required",
+    "web-code Configure must never claim no configuration is required",
   );
 });
 
-test("ConfigureModal keeps the Telegram panel for an installed (non-pairing) lifecycle state", () => {
+test("ConfigureModal keeps the web-code panel for an installed (non-pairing) lifecycle state", () => {
   const view = renderModal({
-    kind: "channel",
-    packageRef: { kind: "extension", id: "telegram" },
-    displayName: "Telegram",
+    surfaces: channelSurfaces,
+    packageRef: { kind: "extension", id: "acme-messenger" },
+    channel: "acme-messenger",
+    displayName: "Acme Messenger",
     onboardingState: "installed",
+    webCodePairingProbe: { isSuccess: true },
   });
 
   assert.equal(
-    renderedContainsComponent(view.rendered, view.TelegramPairingPanel),
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
     true,
-    "the empty-secrets fallback must not swallow the telegram panel",
+    "the empty-secrets fallback must not swallow the web-code panel",
   );
 });
 
 test("ConfigureModal renders Slack OAuth without opening the popup automatically", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   const { rendered, oauthCalls, openedPopups } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -309,19 +326,19 @@ test("ConfigureModal renders Slack OAuth without opening the popup automatically
 
 test("ConfigureModal does not show a generic activate action beside Slack OAuth", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: true,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   const { rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -344,22 +361,22 @@ test("ConfigureModal does not show a generic activate action beside Slack OAuth"
   assert.doesNotMatch(body, /extensions\.activate/);
 });
 
-test("ConfigureModal broadcasts public wasm-tool Slack OAuth completion without duplicate activation", async () => {
+test("ConfigureModal activates any not-yet-active extension after OAuth setup completes", async () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   let closed = false;
   const { calls, invalidations, notifications, oauthSetupArgs } = renderModal({
-    kind: "wasm_tool",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -385,7 +402,16 @@ test("ConfigureModal broadcasts public wasm-tool Slack OAuth completion without 
 
   await oauthSetupArgs[0][1].onConfigured();
 
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), []);
+  // The WebUI's OAuth-configured handler best-effort activates any not-yet-
+  // active extension (generic, no per-extension branch — see the tool-surface
+  // half below). This is intentionally belt-and-suspenders with the server-
+  // side OAuth continuation (`dispatch_auth_continuation`, which also
+  // activates on the callback); activation is idempotent, so the redundant
+  // client call is harmless and keeps the OAuth path consistent with pairing
+  // redemption, which activates the same way.
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    ["activate", { id: "slack" }],
+  ]);
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
     ["extension-registry"],
@@ -398,11 +424,77 @@ test("ConfigureModal broadcasts public wasm-tool Slack OAuth completion without 
   assert.deepEqual(JSON.parse(JSON.stringify(notifications)), [
     { channel: "slack", source: "extensions-oauth" },
   ]);
+
+  // The auto-activate is generic: a non-channel tool extension gets the same
+  // best-effort activation after its OAuth connect (no per-extension branch).
+  const toolView = renderModal({
+    surfaces: toolSurfaces,
+    packageRef: { kind: "extension", id: "acme" },
+    channel: "acme",
+    displayName: "Acme",
+    onboardingState: "auth_required",
+    setupResult: {
+      secrets: [
+        {
+          name: "acme_oauth",
+          provider: "acme",
+          provided: false,
+          setup: { kind: "oauth", invocation_id: "invocation-beta" },
+        },
+      ],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+  await toolView.oauthSetupArgs[0][1].onConfigured();
+  assert.deepEqual(JSON.parse(JSON.stringify(toolView.calls)), [
+    ["activate", { id: "acme" }],
+  ]);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(toolView.notifications)),
+    [],
+    "a tool-only extension broadcasts no channel-connected event",
+  );
+});
+
+test("ConfigureModal skips the post-OAuth activation for an already-active extension", async () => {
+  const { calls, oauthSetupArgs } = renderModal({
+    surfaces: channelSurfaces,
+    packageRef: { kind: "extension", id: "slack" },
+    channel: "slack",
+    displayName: "Slack",
+    onboardingState: "active",
+    extensionActive: true,
+    setupResult: {
+      secrets: [
+        {
+          name: "slack_oauth",
+          provider: "slack",
+          provided: true,
+          setup: { kind: "oauth", invocation_id: "invocation-alpha" },
+        },
+      ],
+      fields: [],
+      onboarding: null,
+      isLoading: false,
+      error: null,
+    },
+  });
+
+  await oauthSetupArgs[0][1].onConfigured();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(calls)),
+    [],
+    "a reconnect on an active extension must not re-run activation",
+  );
 });
 
 test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
   const { rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -410,8 +502,8 @@ test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
     setupResult: {
       secrets: [
         {
-          name: "slack_personal_oauth",
-          provider: "slack_personal",
+          name: "slack_oauth",
+          provider: "slack",
           provided: false,
           setup: { kind: "oauth", invocation_id: "invocation-alpha" },
         },
@@ -432,13 +524,13 @@ test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
 
 test("ConfigureModal closes as soon as Slack OAuth setup completes", async () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
@@ -449,7 +541,7 @@ test("ConfigureModal closes as soon as Slack OAuth setup completes", async () =>
     releaseActivation = resolve;
   });
   const { oauthSetupArgs } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -481,19 +573,19 @@ test("ConfigureModal closes as soon as Slack OAuth setup completes", async () =>
 
 test("ConfigureModal keeps Slack OAuth visibly loading while waiting for authorization", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   const { rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -520,14 +612,14 @@ test("ConfigureModal keeps Slack OAuth visibly loading while waiting for authori
 });
 
 test("ConfigureModal does not render the pairing panel for a non-channel extension", () => {
-  const { rendered } = renderModal({ kind: "mcp_server" });
+  const { rendered } = renderModal({ surfaces: toolSurfaces });
   const body = JSON.stringify(rendered);
   assert.doesNotMatch(body, /pairing\.placeholder/);
 });
 
 test("ConfigureModal does not route setup-required channels to the pairing panel", () => {
   const { rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     onboardingState: "setup_required",
   });
 
@@ -536,10 +628,10 @@ test("ConfigureModal does not route setup-required channels to the pairing panel
 
 test("ConfigureModal localizes channel pairing copy", () => {
   const { rendered } = renderModal({
-    kind: "channel",
-    packageRef: { kind: "extension", id: "whatsapp" },
-    channel: "whatsapp",
-    displayName: "WhatsApp",
+    surfaces: channelSurfaces,
+    packageRef: { kind: "extension", id: "telegram" },
+    channel: "telegram",
+    displayName: "Telegram",
     onboardingState: "pairing_required",
     translate: (key) =>
       ({
@@ -562,7 +654,7 @@ test("ConfigureModal localizes channel pairing copy", () => {
 
 test("ConfigureModal renders a localized close label through ModalShell", () => {
   const { context, rendered } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     onboardingState: "pairing_required",
     translate: (key) =>
       ({
@@ -583,7 +675,7 @@ test("ConfigureModal renders a localized close label through ModalShell", () => 
 test("ConfigureModal pairing redeems then activates, invalidates queries, and closes", async () => {
   let closed = false;
   const { calls, invalidations, mutationConfig } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     channel: "telegram",
     displayName: "Telegram",
@@ -603,7 +695,6 @@ test("ConfigureModal pairing redeems then activates, invalidates queries, and cl
   assert.deepEqual(result, { success: true });
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
-    ["connectable-channels"],
     ["pairing", "telegram"],
   ]);
   assert.equal(closed, true);
@@ -611,7 +702,7 @@ test("ConfigureModal pairing redeems then activates, invalidates queries, and cl
 
 test("ConfigureModal pairing redeems by channel slug and activates package id", async () => {
   const { calls, invalidations, mutationConfig } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     onboardingState: "pairing_required",
     packageRef: { kind: "extension", id: "telegram-host-package" },
     channel: "telegram",
@@ -627,7 +718,6 @@ test("ConfigureModal pairing redeems by channel slug and activates package id", 
   ]);
   assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
     ["extensions"],
-    ["connectable-channels"],
     ["pairing", "telegram"],
   ]);
 });
@@ -686,7 +776,7 @@ test("ConfigureModal pairing through the real API waits for blocked chats to res
     };
 
     const { mutationConfig } = renderModal({
-      kind: "channel",
+      surfaces: channelSurfaces,
       packageRef: { kind: "extension", id: "telegram" },
       channel: "telegram",
       displayName: "Telegram",
@@ -730,7 +820,7 @@ test("ConfigureModal pairing through the real API waits for blocked chats to res
 
 test("ConfigureModal treats post-redeem activation failure as best-effort", async () => {
   const { calls, mutationConfig } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "telegram" },
     channel: "telegram",
     displayName: "Telegram",
@@ -753,19 +843,19 @@ test("ConfigureModal treats post-redeem activation failure as best-effort", asyn
 
 test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   const { rendered, oauthCalls, openedPopups, stateSets } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
@@ -806,19 +896,19 @@ test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow"
 
 test("ConfigureModal starts the OAuth flow when the popup pre-open succeeds", () => {
   const slackOauthSecret = {
-    name: "slack_personal_oauth",
-    provider: "slack_personal",
+    name: "slack_oauth",
+    provider: "slack",
     prompt: "Slack credential",
     provided: false,
     setup: {
       kind: "oauth",
-      account_label: "slack slack_personal",
+      account_label: "slack slack",
       scopes: ["users:read"],
       invocation_id: "invocation-alpha",
     },
   };
   const { rendered, oauthCalls, openedPopups } = renderModal({
-    kind: "channel",
+    surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",

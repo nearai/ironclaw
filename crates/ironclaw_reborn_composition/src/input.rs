@@ -1,19 +1,14 @@
 use std::path::PathBuf;
-#[cfg(feature = "postgres")]
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ironclaw_auth::{AuthProductError, CredentialAccountLabel, OAuthClientId, OAuthRedirectUri};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_auth::{AuthProductError, OAuthClientId, OAuthRedirectUri};
 use ironclaw_host_api::runtime_policy::ProcessBackendKind;
-#[cfg(feature = "postgres")]
 use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
 use ironclaw_host_api::{AgentId, TenantId};
-#[cfg(test)]
-use ironclaw_host_runtime::HostRuntimeHttpEgressPort;
 use ironclaw_host_runtime::TenantSandboxProcessPort;
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
@@ -21,33 +16,19 @@ use ironclaw_trust::HostTrustPolicy;
 use ironclaw_turns::{TurnRunWakeNotifier, TurnStateStoreLimits};
 use secrecy::SecretString;
 
-#[cfg(feature = "postgres")]
 use ironclaw_reborn_config::StorageBackend;
-#[cfg(feature = "postgres")]
 use ironclaw_reborn_event_store::{PostgresPoolTlsOptions, RebornPostgresSslMode};
 
-#[cfg(feature = "postgres")]
 use crate::RebornBuildError;
 use crate::deployment::DeploymentConfig;
-use crate::product_auth::oauth::google_oauth::google_provider_spec;
-use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
-use crate::product_auth::oauth::oauth_dcr::OAuthDcrProviderConfig;
-use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec;
-use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
-#[cfg(feature = "postgres")]
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
-#[cfg(feature = "postgres")]
 const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
-#[cfg(feature = "postgres")]
 const REBORN_POSTGRES_POOL_MAX_SIZE_ENV: &str = "IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE";
-#[cfg(feature = "postgres")]
 const REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV: &str =
     "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON";
-#[cfg(feature = "postgres")]
 const DATABASE_SSLMODE_ENV: &str = "DATABASE_SSLMODE";
-#[cfg(feature = "postgres")]
 const ALLOW_REMOTE_POSTGRES_CLEAR_TEXT_ENV: &str =
     "IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT";
 
@@ -101,15 +82,21 @@ impl std::fmt::Debug for OAuthClientConfig {
     }
 }
 
+/// Deployment OAuth client material for one vendor id. The vendor's recipe
+/// (from its manifest) names the client-credential handles; this config
+/// supplies their values.
 #[derive(Debug, Clone)]
 pub(crate) struct OAuthProviderBackendConfig {
-    pub(crate) spec: HostOAuthProviderSpec,
+    pub(crate) vendor: String,
     pub(crate) client: OAuthClientConfig,
 }
 
+/// The public origin serving the static vendor OAuth callback routes —
+/// enables dynamic client registration (and the engine callback base) for
+/// vendors whose recipes carry no deployment client credentials.
 #[derive(Debug, Clone)]
-pub(crate) struct OAuthDcrProviderBackendConfig {
-    pub(crate) config: OAuthDcrProviderConfig,
+pub(crate) struct OAuthDcrCallbackConfig {
+    pub(crate) callback_origin: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -121,14 +108,12 @@ pub enum RebornRuntimeProcessBinding {
     },
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RebornRuntimeProcessBindingError {
     MissingTenantSandboxProcessPort,
     UnexpectedTenantSandboxProcessPort { process_backend: ProcessBackendKind },
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 impl std::fmt::Display for RebornRuntimeProcessBindingError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -152,7 +137,6 @@ impl RebornRuntimeProcessBinding {
         Self::TenantSandbox { process_port }
     }
 
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn validate_for_production_policy(
         &self,
         runtime_policy: &EffectiveRuntimePolicy,
@@ -197,46 +181,63 @@ pub struct RebornBuildInput {
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
-    #[cfg(test)]
-    pub(crate) host_runtime_http_egress_for_test: Option<Option<HostRuntimeHttpEgressPort>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
+    /// Test-support only: stamp filesystem-discovered extension packages as
+    /// `HostBundled` so integration fixtures that model host-bundled
+    /// extensions (the §8 invented-vendor fixture) may assert
+    /// first-party trust. Production discovery always stamps
+    /// `InstalledLocal` (#5459).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) trust_fixture_extensions_for_test: bool,
     pub(crate) product_auth_ports: Option<RebornProductAuthServicePorts>,
     pub(crate) oauth_provider_configs: Vec<OAuthProviderBackendConfig>,
-    pub(crate) oauth_dcr_provider_configs: Vec<OAuthDcrProviderBackendConfig>,
-    pub(crate) slack_personal_oauth_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
-    /// Build-time Slack host-beta wiring signal: whether the CLI `serve`
-    /// path resolved a Slack
-    /// host-beta config for this instance BEFORE the composition build ran.
-    /// Mirrors how `google_oauth_configured` arrives via
-    /// `oauth_provider_configs` — one signal, read by
-    /// `provider_instance_readiness_map` to decide whether the
-    /// `slack_personal` provider needs a readiness-map entry. Defaults
-    /// `false`; unrelated to whether the Slack host-beta mounts are composed
-    /// post-build (a separate, later step — see `serve.rs`).
-    pub(crate) slack_host_beta_enabled: bool,
-    /// Build-time signal that this instance resolved
-    /// `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`. Slack personal
-    /// OAuth needs this IN ADDITION to `slack_host_beta_enabled`: with the
-    /// route mounted but no redirect URI, the WebUI Connect button reaches
-    /// `product_auth::serve::slack_personal_oauth_credentials` and gets a
-    /// message-less 503.
-    ///
-    /// Deliberately NOT derived from `slack_personal_oauth_lazy_slot`, even
-    /// though the CLI resolves both from that one env var: the slot is a
-    /// composition input that switches the Slack provider client to
-    /// lazy setup-service credential resolution, so deriving readiness from it
-    /// would force every fixture that merely wants "this instance is
-    /// configured" to also opt into lazy credentials it never fills (proved by
-    /// `factory::auth_tests::slack_oauth_callback_activates_and_publishes_all_personal_tools`,
-    /// which fails `BackendUnavailable` that way). This field records the
-    /// operator FACT; the slot performs the WIRING. Defaults `false`.
-    pub(crate) slack_personal_oauth_redirect_uri_configured: bool,
+    pub(crate) oauth_dcr_callback: Option<OAuthDcrCallbackConfig>,
     pub(crate) nearai_mcp_bootstrap_config:
         Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
+    /// `first_party`-runtime extension factories the binary assembles
+    /// (extension-runtime P2). Empty until concrete extension crates extract
+    /// in P6; integration tests register the invented-vendor fixture factory
+    /// here.
+    pub(crate) native_extension_factories:
+        Vec<std::sync::Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
+    /// Channel-adapter bindings + extras the binary assembles for channel
+    /// extensions whose runtime is not `first_party` (extension-runtime
+    /// DEL-7): the generic loader binds the adapter at activation and the
+    /// channel host assembly consumes the extras. Composition never names a
+    /// concrete extension crate.
+    pub(crate) channel_extension_bindings: Vec<ChannelExtensionBinding>,
     /// Concurrency limits applied to the in-memory turn-state store.
     /// Defaults to no limits (all caps `None` / unlimited).
     pub(crate) turn_state_store_limits: TurnStateStoreLimits,
+    /// Binary-assembled account-setup declarations (extension-runtime §5.5):
+    /// per-extension activation gates and connect-strategy presentation.
+    /// `WebGeneratedCode` declarations additionally get a generic pairing
+    /// service composed over the durable identity/pairing stores.
+    pub(crate) account_setup_descriptors:
+        Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+}
+
+/// One channel extension's binary-assembled vendor binding
+/// (extension-runtime DEL-7): the adapter linked into this deployment plus
+/// the composition extras the generic channel host consumes.
+/// Supplied through [`RebornBuildInput::with_channel_extension_bindings`] by
+/// the assembling binary — composition itself never names a concrete
+/// extension crate.
+#[derive(Clone)]
+pub struct ChannelExtensionBinding {
+    /// The extension id the manifest declares (also the adapter id).
+    pub extension_id: String,
+    /// The channel adapter implementation linked into the deployment.
+    pub adapter: std::sync::Arc<dyn ironclaw_product_adapters::ChannelAdapter>,
+    /// Protocol-specific inbound payload reclassification (gate-resolution
+    /// replies), registered on the channel host assembly.
+    pub inbound_payload_classifier:
+        Option<std::sync::Arc<crate::extension_host::extension_ingress::InboundPayloadClassifier>>,
+    /// The vendor half of the preference-target codec, consumed by the
+    /// generic outbound-target provider and triggered-delivery hook.
+    pub preference_target_codec:
+        Option<std::sync::Arc<dyn ironclaw_product_workflow::PreferenceTargetCodec>>,
 }
 
 #[derive(Clone, Debug)]
@@ -252,7 +253,6 @@ pub(crate) enum RebornStorageInput {
         workspace_root: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
     },
-    #[cfg(feature = "postgres")]
     HostedSingleTenantPostgres {
         root: PathBuf,
         workspace_root: Option<PathBuf>,
@@ -261,7 +261,6 @@ pub(crate) enum RebornStorageInput {
         secret_master_key: ironclaw_secrets::SecretMaterial,
         process_local_resource_governor_singleton: bool,
     },
-    #[cfg(feature = "libsql")]
     Libsql {
         db: Arc<libsql::Database>,
         path_or_url: String,
@@ -269,7 +268,6 @@ pub(crate) enum RebornStorageInput {
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
         process_local_resource_governor_singleton: bool,
     },
-    #[cfg(feature = "postgres")]
     Postgres {
         pool: deadpool_postgres::Pool,
         url: ironclaw_secrets::SecretMaterial,
@@ -382,7 +380,6 @@ impl RebornBuildInput {
         )
     }
 
-    #[cfg(feature = "postgres")]
     pub fn hosted_single_tenant_postgres(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -417,7 +414,6 @@ impl RebornBuildInput {
         ))
     }
 
-    #[cfg(feature = "postgres")]
     pub fn hosted_single_tenant_postgres_from_config_and_env(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -465,7 +461,6 @@ impl RebornBuildInput {
             } => {
                 *root = Some(workspace_root);
             }
-            #[cfg(feature = "postgres")]
             RebornStorageInput::HostedSingleTenantPostgres {
                 workspace_root: root,
                 ..
@@ -489,7 +484,6 @@ impl RebornBuildInput {
             } => {
                 *root = Some(host_home_root);
             }
-            #[cfg(feature = "postgres")]
             RebornStorageInput::HostedSingleTenantPostgres {
                 host_home_root: root,
                 ..
@@ -523,7 +517,6 @@ impl RebornBuildInput {
         })
     }
 
-    #[cfg(feature = "libsql")]
     pub fn libsql(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -545,7 +538,6 @@ impl RebornBuildInput {
         )
     }
 
-    #[cfg(feature = "libsql")]
     pub fn libsql_with_resolved_secret_master_key(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -566,7 +558,6 @@ impl RebornBuildInput {
         )
     }
 
-    #[cfg(feature = "postgres")]
     pub fn postgres(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -587,7 +578,6 @@ impl RebornBuildInput {
         )
     }
 
-    #[cfg(feature = "postgres")]
     pub fn postgres_with_resolved_secret_master_key(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -607,7 +597,6 @@ impl RebornBuildInput {
         )
     }
 
-    #[cfg(feature = "postgres")]
     pub fn postgres_from_config_and_env(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -692,6 +681,36 @@ impl RebornBuildInput {
         self
     }
 
+    pub fn with_native_extension_factories(
+        mut self,
+        factories: Vec<std::sync::Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
+    ) -> Self {
+        self.native_extension_factories = factories;
+        self
+    }
+
+    /// Supply the binary-assembled channel-adapter bindings for channel
+    /// extensions whose runtime is not `first_party` (extension-runtime
+    /// DEL-7): the generic loader binds each adapter at activation, and the
+    /// channel host assembly registers the accompanying extras (gate-reply
+    /// classifier, preference-target codec).
+    pub fn with_channel_extension_bindings(
+        mut self,
+        bindings: Vec<ChannelExtensionBinding>,
+    ) -> Self {
+        self.channel_extension_bindings = bindings;
+        self
+    }
+
+    /// Binary-assembled account-setup descriptors (see the field doc).
+    pub fn with_account_setup_descriptors(
+        mut self,
+        descriptors: Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+    ) -> Self {
+        self.account_setup_descriptors = descriptors;
+        self
+    }
+
     pub fn with_nearai_mcp_bootstrap_config(
         mut self,
         config: crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig,
@@ -708,15 +727,6 @@ impl RebornBuildInput {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_host_runtime_http_egress_for_test(
-        mut self,
-        egress: Option<HostRuntimeHttpEgressPort>,
-    ) -> Self {
-        self.host_runtime_http_egress_for_test = Some(egress);
-        self
-    }
-
     /// Override local-dev host HTTP egress for fixture recording and replay.
     ///
     /// This is compiled only for tests/test-support so Reborn QA harnesses can
@@ -725,6 +735,14 @@ impl RebornBuildInput {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_network_http_egress_for_test(mut self, egress: Arc<dyn NetworkHttpEgress>) -> Self {
         self.network_http_egress_for_test = Some(egress);
+        self
+    }
+
+    /// Trust filesystem-discovered fixture extensions as host-bundled
+    /// (first-party-eligible). Test-support only; see the field doc.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_trusted_fixture_extensions_for_test(mut self) -> Self {
+        self.trust_fixture_extensions_for_test = true;
         self
     }
 
@@ -739,70 +757,32 @@ impl RebornBuildInput {
         self
     }
 
-    /// Record product/bootstrap-provided Google OAuth metadata on the build input.
+    /// Record deployment OAuth client material for one vendor id. The vendor's
+    /// manifest recipe names the client-credential handles these values fill.
     ///
     /// `RebornBuildInput` owns this composition seam until a settings-backed
     /// source exists.
-    pub fn with_google_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
-        self.push_oauth_provider_config(google_provider_spec(), config);
+    pub fn with_vendor_oauth_client(
+        mut self,
+        vendor: impl Into<String>,
+        config: OAuthClientConfig,
+    ) -> Self {
+        self.push_oauth_provider_config(vendor.into(), config);
         self
     }
 
-    /// Record product/bootstrap-provided Notion MCP OAuth metadata on the build input.
-    ///
-    /// This keeps Notion OAuth in the Reborn product-auth provider path; callers
-    /// that use dynamic client registration can pass the client metadata they
-    /// registered for this host callback URL.
-    pub fn with_notion_oauth_backend(mut self, config: OAuthClientConfig) -> Self {
-        self.push_oauth_provider_config(notion_provider_spec(), config);
-        self
-    }
-
-    /// Register the lazy Slack personal OAuth slot so the provider client
-    /// fetches credentials from the setup service at request time rather than
-    /// from env vars at startup.
-    pub fn with_slack_personal_oauth_lazy(mut self, slot: SlackPersonalSetupServiceSlot) -> Self {
-        self.slack_personal_oauth_lazy_slot = Some(slot);
-        self
-    }
-
-    /// Record the build-time Slack host-beta wiring signal. The CLI `serve`
-    /// path calls this before the composition build with whether it
-    /// resolved a Slack host-beta
-    /// config for this instance, so `provider_instance_readiness_map` can
-    /// decide whether `slack_personal` needs a readiness-map entry.
-    pub fn with_slack_host_beta_enabled(mut self, enabled: bool) -> Self {
-        self.slack_host_beta_enabled = enabled;
-        self
-    }
-
-    /// Record whether this instance resolved
-    /// `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`. The CLI `serve`
-    /// path passes the already-resolved slot's presence; it does not re-read
-    /// the environment. See the field doc for why this is a separate signal
-    /// from `with_slack_personal_oauth_lazy`.
-    pub fn with_slack_personal_oauth_redirect_uri_configured(mut self, configured: bool) -> Self {
-        self.slack_personal_oauth_redirect_uri_configured = configured;
-        self
-    }
-
-    /// Enable Dynamic Client Registration for the bundled Notion MCP OAuth provider.
-    ///
-    /// Callers provide the public origin that serves the Reborn product-auth
-    /// callback route. Local loopback HTTP origins are accepted; non-loopback
-    /// deployments must use HTTPS.
-    pub fn with_notion_dcr_oauth_backend(
+    /// Record the public origin serving the vendor OAuth callback routes.
+    /// Enables the engine's dynamic client registration (RFC 7591) for
+    /// recipes without deployment client credentials, and anchors the static
+    /// vendor callback base. Local loopback HTTP origins are accepted;
+    /// non-loopback deployments must use HTTPS.
+    pub fn with_dcr_oauth_callback(
         mut self,
         callback_origin: impl Into<String>,
-        client_name: impl Into<String>,
     ) -> Result<Self, ironclaw_auth::AuthProductError> {
-        self.push_oauth_dcr_provider_config(OAuthDcrProviderConfig {
-            spec: notion_provider_spec(),
-            callback_origin: callback_origin.into(),
-            client_name: client_name.into(),
-            account_label: CredentialAccountLabel::new("notion")?,
-            scopes: Vec::new(),
-        });
+        let callback_origin = callback_origin.into();
+        validate_dcr_callback_origin(&callback_origin)?;
+        self.oauth_dcr_callback = Some(OAuthDcrCallbackConfig { callback_origin });
         Ok(self)
     }
 
@@ -816,35 +796,17 @@ impl RebornBuildInput {
         self
     }
 
-    fn push_oauth_provider_config(
-        &mut self,
-        spec: HostOAuthProviderSpec,
-        client: OAuthClientConfig,
-    ) {
+    fn push_oauth_provider_config(&mut self, vendor: String, client: OAuthClientConfig) {
         if let Some(existing) = self
             .oauth_provider_configs
             .iter_mut()
-            .find(|existing| existing.spec.provider_id == spec.provider_id)
+            .find(|existing| existing.vendor == vendor)
         {
-            existing.spec = spec;
             existing.client = client;
             return;
         }
         self.oauth_provider_configs
-            .push(OAuthProviderBackendConfig { spec, client });
-    }
-
-    fn push_oauth_dcr_provider_config(&mut self, config: OAuthDcrProviderConfig) {
-        if let Some(existing) = self
-            .oauth_dcr_provider_configs
-            .iter_mut()
-            .find(|existing| existing.config.spec.provider_id == config.spec.provider_id)
-        {
-            existing.config = config;
-            return;
-        }
-        self.oauth_dcr_provider_configs
-            .push(OAuthDcrProviderBackendConfig { config });
+            .push(OAuthProviderBackendConfig { vendor, client });
     }
 
     fn new(
@@ -864,23 +826,22 @@ impl RebornBuildInput {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
-            #[cfg(test)]
-            host_runtime_http_egress_for_test: None,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
+            #[cfg(any(test, feature = "test-support"))]
+            trust_fixture_extensions_for_test: false,
             product_auth_ports: None,
             oauth_provider_configs: Vec::new(),
-            oauth_dcr_provider_configs: Vec::new(),
-            slack_personal_oauth_lazy_slot: None,
-            slack_host_beta_enabled: false,
-            slack_personal_oauth_redirect_uri_configured: false,
+            oauth_dcr_callback: None,
             nearai_mcp_bootstrap_config: None,
+            native_extension_factories: Vec::new(),
+            channel_extension_bindings: Vec::new(),
             turn_state_store_limits: TurnStateStoreLimits::default(),
+            account_setup_descriptors: Vec::new(),
         }
     }
 }
 
-#[cfg(feature = "postgres")]
 struct ResolvedPostgresStorage {
     pool: deadpool_postgres::Pool,
     url: ironclaw_secrets::SecretMaterial,
@@ -889,7 +850,6 @@ struct ResolvedPostgresStorage {
     process_local_resource_governor_singleton: bool,
 }
 
-#[cfg(feature = "postgres")]
 fn resolve_postgres_storage_from_config_and_env(
     profile: RebornCompositionProfile,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -958,7 +918,6 @@ fn resolve_postgres_storage_from_config_and_env(
     })
 }
 
-#[cfg(feature = "postgres")]
 fn resolve_production_runtime_policy(
     profile: RebornCompositionProfile,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -1006,7 +965,6 @@ fn resolve_production_runtime_policy(
     })
 }
 
-#[cfg(feature = "postgres")]
 fn resolve_postgres_pool_max_size(
     configured: Option<usize>,
 ) -> Result<(usize, &'static str), RebornBuildError> {
@@ -1040,7 +998,6 @@ fn resolve_postgres_pool_max_size(
     }
 }
 
-#[cfg(feature = "postgres")]
 fn required_production_url_env(
     env_name: &str,
     description: &str,
@@ -1060,7 +1017,6 @@ fn required_production_url_env(
     Ok(SecretString::from(trimmed.to_string()))
 }
 
-#[cfg(feature = "postgres")]
 fn required_production_key_env(
     env_name: &str,
     description: &str,
@@ -1079,7 +1035,6 @@ fn required_production_key_env(
     Ok(SecretString::from(value))
 }
 
-#[cfg(feature = "postgres")]
 fn require_postgres_resource_governor_singleton_env() -> Result<bool, RebornBuildError> {
     match std::env::var(REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV) {
         Ok(value) => match parse_bool_opt_in(&value) {
@@ -1108,7 +1063,6 @@ fn require_postgres_resource_governor_singleton_env() -> Result<bool, RebornBuil
     }
 }
 
-#[cfg(feature = "postgres")]
 fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, RebornBuildError> {
     let ssl_mode_override = match std::env::var(DATABASE_SSLMODE_ENV) {
         Ok(value) if value.trim().is_empty() => None,
@@ -1149,13 +1103,28 @@ fn postgres_pool_tls_options_from_env() -> Result<PostgresPoolTlsOptions, Reborn
     })
 }
 
-#[cfg(feature = "postgres")]
 fn parse_bool_opt_in(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "" | "0" | "false" | "no" | "off" => Some(false),
         "1" | "true" | "yes" | "on" => Some(true),
         _ => None,
     }
+}
+
+/// The DCR callback origin must be a bare https (or loopback http) origin.
+fn validate_dcr_callback_origin(origin: &str) -> Result<(), AuthProductError> {
+    let parsed = url::Url::parse(origin).map_err(|_| AuthProductError::BackendUnavailable)?;
+    let is_loopback_http = parsed.scheme() == "http"
+        && parsed
+            .host_str()
+            .is_some_and(|host| matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]"));
+    if parsed.scheme() != "https" && !is_loopback_http {
+        return Err(AuthProductError::BackendUnavailable);
+    }
+    if parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(AuthProductError::BackendUnavailable);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

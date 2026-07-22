@@ -75,7 +75,6 @@ where
 /// `FilesystemSecretStore` over the same scoped filesystem can consume a
 /// secret written by the first. For tests only — zero bytes shipped in
 /// production builds.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn build_secret_store_for_test<F>(
     root: &std::path::Path,
     scoped: std::sync::Arc<ironclaw_filesystem::ScopedFilesystem<F>>,

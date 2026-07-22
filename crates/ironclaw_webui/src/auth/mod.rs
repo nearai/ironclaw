@@ -9,7 +9,7 @@
 //!   a CSRF state + PKCE verifier and redirects to the provider.
 //! - `GET  /auth/callback/{provider}` — exchange the code, resolve
 //!   the user through [`UserDirectory`], create a session via
-//!   [`SessionStore`](crate::SessionStore), and land the browser on
+//!   [`SignedTokenSessionStore`](crate::SignedTokenSessionStore), and land the browser on
 //!   the SPA with a one-time exchange ticket.
 //! - `POST /auth/session/exchange` — consume the one-time ticket and
 //!   return the bearer over same-origin JSON.

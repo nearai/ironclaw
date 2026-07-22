@@ -43,7 +43,7 @@ fn dispatch_lease_approval() -> LeaseApproval {
 async fn auth_resume_json_accepts_blocked_auth_run_and_dispatches() {
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
 
     // Simulate a run that was previously blocked at an auth gate.
@@ -73,18 +73,12 @@ async fn auth_resume_json_accepts_blocked_auth_run_and_dispatches() {
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
     let result = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id(),
-            estimate,
-            input,
-            approval_request_id: None,
-        })
+        .auth_resume_json(context, capability_id(), estimate, input, None)
         .await
         .unwrap();
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Completed);
 }
@@ -93,7 +87,7 @@ async fn auth_resume_json_accepts_blocked_auth_run_and_dispatches() {
 async fn auth_resume_preserves_original_actor_and_rejects_forged_actor() {
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
 
     let mut alice_context = execution_context(CapabilitySet {
@@ -122,13 +116,13 @@ async fn auth_resume_preserves_original_actor_and_rejects_forged_actor() {
     forged_context.authenticated_actor_user_id =
         Some(UserId::new("slack-bob").expect("valid forged authenticated actor user id"));
     let forged_error = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: forged_context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "resume"}),
-            approval_request_id: None,
-        })
+        .auth_resume_json(
+            forged_context,
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "resume"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -142,19 +136,19 @@ async fn auth_resume_preserves_original_actor_and_rejects_forged_actor() {
         ),
         "changed authenticated actor must fail closed, got {forged_error:?}"
     );
-    assert_eq!(dispatcher.dispatch_count(), 0);
+    assert_eq!(dispatcher.call_count(), 0);
 
-    host.auth_resume_json(CapabilityAuthResumeRequest {
-        context: alice_context,
-        capability_id: capability_id(),
-        estimate: ResourceEstimate::default(),
-        input: json!({"message": "resume"}),
-        approval_request_id: None,
-    })
+    host.auth_resume_json(
+        alice_context,
+        capability_id(),
+        ResourceEstimate::default(),
+        json!({"message": "resume"}),
+        None,
+    )
     .await
     .expect("the original authenticated actor can resume");
 
-    let dispatched = dispatcher.take_request();
+    let dispatched = dispatcher.last_request().unwrap();
     assert_eq!(
         dispatched
             .authenticated_actor_user_id
@@ -171,7 +165,7 @@ async fn auth_resume_preserves_original_actor_and_rejects_forged_actor() {
 #[tokio::test]
 async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
 
@@ -184,12 +178,12 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
     let invocation_id = context.invocation_id;
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs approval"}),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs approval"}),
+        )
         .await
         .unwrap_err();
 
@@ -201,13 +195,13 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
     let auth_host =
         capability_host(&registry, &dispatcher, &auth_authorizer).with_run_state(&run_state);
     let err = auth_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs approval"}),
-            approval_request_id: None,
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs approval"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -222,7 +216,7 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
         "expected ResumeNotBlocked(BlockedApproval), got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "auth_resume must not dispatch when run is not in BlockedAuth"
     );
@@ -232,7 +226,7 @@ async fn auth_resume_json_rejects_run_in_blocked_approval_status() {
 async fn auth_resume_json_rejects_run_in_running_status() {
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
 
     let context = execution_context(CapabilitySet {
@@ -254,13 +248,13 @@ async fn auth_resume_json_rejects_run_in_running_status() {
 
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "try to resume running"}),
-            approval_request_id: None,
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "try to resume running"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -274,7 +268,7 @@ async fn auth_resume_json_rejects_run_in_running_status() {
         ),
         "expected ResumeNotBlocked(Running), got {err:?}"
     );
-    assert!(!dispatcher.has_request());
+    assert!(dispatcher.call_count() == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +280,7 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
     // Build an invocation, approve it (fingerprinted to original input), then
     // attempt auth_resume with different input — should reject before lease claim.
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -302,12 +296,12 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
     let original_input = json!({"message": "original approved input"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: original_input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            original_input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -338,13 +332,13 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: original_context,
-            capability_id: capability_id(),
+        .auth_resume_json(
+            original_context,
+            capability_id(),
             estimate,
-            input: json!({"message": "MUTATED input"}),
-            approval_request_id: Some(approval_id),
-        })
+            json!({"message": "MUTATED input"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -356,7 +350,7 @@ async fn auth_resume_json_rejects_fingerprint_mismatch_on_approval_request() {
         "mutated input must be rejected as fingerprint mismatch, got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire when fingerprint mismatches"
     );
@@ -380,7 +374,7 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
     // Clean-ordering path: approve → manual block_auth (skipping resume_json) →
     // auth_resume_json → finds Active lease, claims it, dispatches.
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -396,12 +390,12 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
     let input = json!({"message": "needs both approval and auth"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -439,13 +433,13 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
         .with_capability_leases(&leases);
 
     let result = resume_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
             estimate,
             input,
-            approval_request_id: Some(approval_id),
-        })
+            Some(approval_id),
+        )
         .await
         .unwrap();
 
@@ -454,7 +448,7 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
         json!({"ok": true}),
         "auth_resume with original invocation_id must complete dispatch"
     );
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
     // Run must be completed.
     let run = run_state
         .get(&scope, original_invocation_id)
@@ -483,7 +477,7 @@ async fn auth_resume_json_with_approval_request_id_claims_active_lease_and_dispa
 async fn auth_resume_json_rejects_capability_id_mismatch_against_run_record() {
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
 
     // Start the run with the canonical capability_id.
@@ -516,13 +510,13 @@ async fn auth_resume_json_rejects_capability_id_mismatch_against_run_record() {
     // pre-authorization; the unknown-capability precedence is covered separately.)
     let different_id = other_capability_id();
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: different_id,
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "mismatch"}),
-            approval_request_id: None,
-        })
+            different_id,
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "mismatch"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -531,7 +525,7 @@ async fn auth_resume_json_rejects_capability_id_mismatch_against_run_record() {
         "capability_id mismatch against run record must be rejected, got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire on capability_id mismatch"
     );
@@ -556,7 +550,7 @@ async fn auth_resume_json_rejects_approval_not_yet_approved() {
     // and leave the run in its original BlockedAuth status.
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -609,13 +603,13 @@ async fn auth_resume_json_rejects_approval_not_yet_approved() {
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "pending approval"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "pending approval"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -630,7 +624,7 @@ async fn auth_resume_json_rejects_approval_not_yet_approved() {
         "expected ApprovalNotApproved(Pending), got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire when approval is still Pending"
     );
@@ -655,7 +649,7 @@ async fn auth_resume_json_returns_store_missing_when_approval_requests_absent() 
     // Err(ResumeStoreMissing { store: "approval_requests" }) immediately.
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
 
     let context = execution_context(CapabilitySet {
@@ -683,13 +677,13 @@ async fn auth_resume_json_returns_store_missing_when_approval_requests_absent() 
 
     let approval_id = ApprovalRequestId::new();
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "needs approval store"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "needs approval store"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -702,7 +696,7 @@ async fn auth_resume_json_returns_store_missing_when_approval_requests_absent() 
         "expected ResumeStoreMissing {{ store: \"approval_requests\" }}, got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire when approval_requests store is absent"
     );
@@ -719,7 +713,7 @@ async fn auth_resume_json_without_approval_request_id_skips_lease_path_and_dispa
     // validation entirely and proceed directly to dispatch.
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
 
     let context = execution_context(CapabilitySet {
@@ -748,18 +742,12 @@ async fn auth_resume_json_without_approval_request_id_skips_lease_path_and_dispa
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
     let result = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id(),
-            estimate,
-            input,
-            approval_request_id: None, // no prior approval
-        })
+        .auth_resume_json(context, capability_id(), estimate, input, None)
         .await
         .unwrap();
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
-    assert!(dispatcher.has_request());
+    assert!(dispatcher.call_count() > 0);
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Completed);
 }
@@ -785,49 +773,22 @@ async fn auth_resume_json_without_approval_request_id_skips_lease_path_and_dispa
 
 #[tokio::test]
 async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
-    use async_trait::async_trait;
-
     // A dispatcher that returns AuthRequired on the first call and succeeds on
     // the second, so we can drive the real resume_json → auth bounce → auth_resume_json flow.
-    struct FirstCallAuthRequiredDispatcher {
-        inner: RecordingDispatcher,
-        call_count: std::sync::atomic::AtomicUsize,
-    }
-
-    impl Default for FirstCallAuthRequiredDispatcher {
-        fn default() -> Self {
-            Self {
-                inner: RecordingDispatcher::default(),
-                call_count: std::sync::atomic::AtomicUsize::new(0),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl CapabilityDispatcher for FirstCallAuthRequiredDispatcher {
-        async fn dispatch_json(
-            &self,
-            request: CapabilityDispatchRequest,
-        ) -> Result<CapabilityDispatchResult, DispatchError> {
-            let count = self
-                .call_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if count == 0 {
-                // First dispatch: return AuthRequired to trigger the auth bounce.
-                Err(DispatchError::AuthRequired {
-                    capability: request.capability_id,
-                    required_secrets: vec![],
-                    credential_requirements: vec![],
-                })
-            } else {
-                // Second dispatch (from auth_resume_json): succeed.
-                self.inner.dispatch_json(request).await
-            }
-        }
-    }
-
     let registry = registry_with_echo_capability();
-    let dispatcher = FirstCallAuthRequiredDispatcher::default();
+    let dispatcher = TestDispatcher::responding(|request, call_index| {
+        if call_index == 0 {
+            // First dispatch: return AuthRequired to trigger the auth bounce.
+            Err(DispatchError::AuthRequired {
+                capability: request.invocation.capability.clone(),
+                required_secrets: vec![],
+                credential_requirements: vec![],
+            })
+        } else {
+            // Second dispatch (from auth_resume_json): succeed.
+            Ok(ok_dispatch_result(request))
+        }
+    });
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -843,12 +804,12 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
     let input = json!({"message": "needs approval then auth"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -904,13 +865,13 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
         .with_capability_leases(&leases);
 
     let resume_err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: resume_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            resume_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -951,13 +912,13 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
 
     // ── Assertion (b): auth_resume_json succeeds ─────────────────────────────
     let auth_result = auth_resume_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_or_else(|e| {
             panic!(
@@ -993,11 +954,10 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
     );
 
     // ── Assertion (e): dispatch was called with the SAME invocation_id ────────
-    // The dispatcher is FirstCallAuthRequiredDispatcher; the second call
-    // went through inner.dispatch_json which recorded the request.
-    let dispatched_request = dispatcher.inner.take_request();
+    // The second (successful) dispatch is the most recently recorded request.
+    let dispatched_request = dispatcher.last_request().unwrap();
     assert_eq!(
-        dispatched_request.scope.invocation_id, original_invocation_id,
+        dispatched_request.invocation.scope.invocation_id, original_invocation_id,
         "(e) capability must be dispatched with the original invocation_id"
     );
 }
@@ -1017,51 +977,23 @@ async fn auth_resume_after_real_approval_bounce_reuses_claimed_lease() {
 
 #[tokio::test]
 async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
-    use async_trait::async_trait;
-
     // Phase 1+2 use an auth-bounce dispatcher (AuthRequired on first call
     // so resume_json bounces and leaves the lease Claimed).
     // Phase 3 (auth_resume_json) uses a terminal-fail dispatcher
     // (UnknownCapability on first call so auth_resume_json errors terminally).
-    struct TerminalFailDispatcher {
-        call_count: std::sync::atomic::AtomicUsize,
-    }
-
-    impl Default for TerminalFailDispatcher {
-        fn default() -> Self {
-            Self {
-                call_count: std::sync::atomic::AtomicUsize::new(0),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl CapabilityDispatcher for TerminalFailDispatcher {
-        async fn dispatch_json(
-            &self,
-            request: CapabilityDispatchRequest,
-        ) -> Result<CapabilityDispatchResult, DispatchError> {
-            let count = self
-                .call_count
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if count == 0 {
-                // First call (from resume_json): auth bounce → lease stays Claimed.
-                Err(DispatchError::AuthRequired {
-                    capability: request.capability_id,
-                    required_secrets: vec![],
-                    credential_requirements: vec![],
-                })
-            } else {
-                // Second call (from auth_resume_json): terminal failure.
-                Err(DispatchError::UnknownCapability {
-                    capability: request.capability_id,
-                })
-            }
-        }
-    }
-
     let registry = registry_with_echo_capability();
-    let dispatcher = TerminalFailDispatcher::default();
+    let dispatcher = TestDispatcher::scripted(vec![
+        // First call (from resume_json): auth bounce → lease stays Claimed.
+        Err(DispatchError::AuthRequired {
+            capability: capability_id(),
+            required_secrets: vec![],
+            credential_requirements: vec![],
+        }),
+        // Second call (from auth_resume_json): terminal failure.
+        Err(DispatchError::UnknownCapability {
+            capability: capability_id(),
+        }),
+    ]);
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -1077,12 +1009,12 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
     let input = json!({"message": "terminal fail test"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1114,13 +1046,13 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
         .with_capability_leases(&leases);
 
     let _ = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: resume_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            resume_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1140,13 +1072,13 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
         .with_capability_leases(&leases);
 
     let err = auth_resume_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -1179,27 +1111,9 @@ async fn auth_resume_json_terminal_dispatch_failure_revokes_claimed_lease() {
 
 #[tokio::test]
 async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
-    use async_trait::async_trait;
-
     // A dispatcher that always returns AuthRequired (non-terminal BlockAuth path).
-    struct AlwaysAuthRequiredDispatcher;
-
-    #[async_trait]
-    impl CapabilityDispatcher for AlwaysAuthRequiredDispatcher {
-        async fn dispatch_json(
-            &self,
-            request: CapabilityDispatchRequest,
-        ) -> Result<CapabilityDispatchResult, DispatchError> {
-            Err(DispatchError::AuthRequired {
-                capability: request.capability_id,
-                required_secrets: vec![],
-                credential_requirements: vec![],
-            })
-        }
-    }
-
     let registry = registry_with_echo_capability();
-    let dispatcher = AlwaysAuthRequiredDispatcher;
+    let dispatcher = TestDispatcher::auth_required();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -1215,12 +1129,12 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
     let input = json!({"message": "non-terminal auth bounce"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1251,13 +1165,13 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
         .with_capability_leases(&leases);
 
     let _ = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: resume_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            resume_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1279,13 +1193,13 @@ async fn auth_resume_json_non_terminal_auth_bounce_leaves_lease_claimed() {
         .with_capability_leases(&leases);
 
     let err = auth_resume_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -1327,6 +1241,10 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     // A lease store that delegates everything to an inner FilesystemCapabilityLeaseStore<InMemoryBackend>
     // except `claim()`, which returns InactiveLease { status: Claimed } once the
     // `fail_next_claim` flag is set — simulating the loser of a concurrent claim race.
+    // domain-state fake, not an I/O fault — cannot move to
+    // ironclaw_filesystem::FaultInjecting: it returns a domain
+    // `CapabilityLeaseError::InactiveLease{Claimed}` (the concurrent winner already
+    // claimed) that no backend fault (which only yields `Persistence`) can produce.
     struct ClaimFailingLeaseStore {
         inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
         fail_next_claim: AtomicBool,
@@ -1429,7 +1347,7 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     }
 
     let registry = registry_with_echo_capability();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = ClaimFailingLeaseStore::new();
@@ -1445,12 +1363,12 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
     let input = json!({"message": "concurrent claim race"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1489,13 +1407,13 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -1515,7 +1433,7 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
 
     // Dispatch must not have been called (claim failed before dispatch).
     assert!(
-        !dispatcher.has_request(),
+        dispatcher.call_count() == 0,
         "concurrent claim loser must not dispatch"
     );
 }
@@ -1538,7 +1456,7 @@ async fn concurrent_auth_resume_claim_loser_returns_lease_error_without_failing_
 async fn auth_resume_json_returns_store_missing_when_capability_leases_absent() {
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
 
@@ -1571,13 +1489,13 @@ async fn auth_resume_json_returns_store_missing_when_capability_leases_absent() 
 
     let approval_id = ApprovalRequestId::new();
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "needs lease store"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "needs lease store"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -1590,7 +1508,7 @@ async fn auth_resume_json_returns_store_missing_when_capability_leases_absent() 
         "expected ResumeStoreMissing {{ store: \"capability_leases\" }}, got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire when capability_leases store is absent"
     );
@@ -1622,7 +1540,7 @@ async fn auth_resume_json_returns_store_missing_when_capability_leases_absent() 
 async fn auth_resume_json_rejected_prior_approval_fails_blocked_auth_run() {
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -1689,13 +1607,13 @@ async fn auth_resume_json_rejected_prior_approval_fails_blocked_auth_run() {
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "denied approval"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "denied approval"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -1711,7 +1629,7 @@ async fn auth_resume_json_rejected_prior_approval_fails_blocked_auth_run() {
         "expected ApprovalNotApproved(Denied), got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire when prior approval is Denied"
     );
@@ -1769,6 +1687,10 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     // `begin_dispatch_claimed`, creating the real data race on the state
     // machine transition: one wins (Claimed→Dispatching), the other loses
     // (sees Dispatching → InactiveLease{Dispatching}).
+    // Synchronization primitive, not an I/O fault — cannot move to
+    // ironclaw_filesystem::FaultInjecting: FaultInjecting injects errors + records
+    // ops but is explicitly NOT a read/write-interleaving barrier (see
+    // ironclaw_filesystem/CLAUDE.md). The Barrier(2) interleave is the whole test.
     struct BarrierLeaseStore {
         inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
         /// Both concurrent auth_resume_json callers rendezvous here after
@@ -1883,7 +1805,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     // Call 1: winner auth_resume_json → signals `in_dispatch`, blocks on
     //         `release`, then succeeds.  Holds Dispatching while loser runs.
     struct GatingDispatcher {
-        inner: RecordingDispatcher,
+        inner: TestDispatcher,
         call_count: std::sync::atomic::AtomicUsize,
         in_dispatch: StdArc<Notify>,
         release: StdArc<Notify>,
@@ -1893,14 +1815,16 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     impl CapabilityDispatcher for GatingDispatcher {
         async fn dispatch_json(
             &self,
-            request: CapabilityDispatchRequest,
+            request: Authorized,
         ) -> Result<CapabilityDispatchResult, DispatchError> {
             let count = self
                 .call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count == 0 {
+                let capability = request.invocation().capability.clone();
+                let _ = request.abort();
                 return Err(DispatchError::AuthRequired {
-                    capability: request.capability_id,
+                    capability,
                     required_secrets: vec![],
                     credential_requirements: vec![],
                 });
@@ -1918,7 +1842,7 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
 
     let registry = StdArc::new(registry_with_echo_capability());
     let gating_dispatcher = StdArc::new(GatingDispatcher {
-        inner: RecordingDispatcher::default(),
+        inner: recording_dispatcher(),
         call_count: std::sync::atomic::AtomicUsize::new(0),
         in_dispatch: StdArc::clone(&in_dispatch),
         release: StdArc::clone(&release),
@@ -1939,12 +1863,12 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
     let input = json!({"message": "real concurrent dispatch reuse race"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -1974,13 +1898,13 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             .with_approval_requests(&*approval_requests)
             .with_capability_leases(&*leases);
         resume_host
-            .resume_json(CapabilityResumeRequest {
-                context: resume_context.clone(),
-                approval_request_id: approval_id,
-                capability_id: capability_id(),
-                estimate: estimate.clone(),
-                input: input.clone(),
-            })
+            .resume_json(
+                resume_context.clone(),
+                approval_id,
+                capability_id(),
+                estimate.clone(),
+                input.clone(),
+            )
             .await
             .unwrap_err();
     }
@@ -2031,13 +1955,13 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             .with_run_state(&*task_a_run_state)
             .with_approval_requests(&*task_a_approval_requests)
             .with_capability_leases(&*task_a_leases);
-        host.auth_resume_json(CapabilityAuthResumeRequest {
-            context: task_a_context,
-            capability_id: capability_id(),
-            estimate: task_a_estimate,
-            input: task_a_input,
-            approval_request_id: Some(approval_id),
-        })
+        host.auth_resume_json(
+            task_a_context,
+            capability_id(),
+            task_a_estimate,
+            task_a_input,
+            Some(approval_id),
+        )
         .await
     });
 
@@ -2059,13 +1983,13 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
             .with_run_state(&*task_b_run_state)
             .with_approval_requests(&*task_b_approval_requests)
             .with_capability_leases(&*task_b_leases);
-        host.auth_resume_json(CapabilityAuthResumeRequest {
-            context: task_b_context,
-            capability_id: capability_id(),
-            estimate: task_b_estimate,
-            input: task_b_input,
-            approval_request_id: Some(approval_id),
-        })
+        host.auth_resume_json(
+            task_b_context,
+            capability_id(),
+            task_b_estimate,
+            task_b_input,
+            Some(approval_id),
+        )
         .await
     });
 
@@ -2119,11 +2043,11 @@ async fn concurrent_auth_resume_reuse_loser_does_not_double_dispatch() {
 
     // The inner RecordingDispatcher sees exactly one successful dispatch.
     assert!(
-        gating_dispatcher.inner.has_request(),
+        gating_dispatcher.inner.call_count() > 0,
         "exactly one successful dispatch must have been recorded by the winner"
     );
     assert_eq!(
-        gating_dispatcher.inner.dispatch_count(),
+        gating_dispatcher.inner.call_count(),
         1,
         "exactly one successful dispatch (loser never reached the dispatcher)"
     );
@@ -2170,29 +2094,14 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
 
     // Dispatcher: first call (resume_json) → AuthRequired bounce; second call
     // (auth_resume_json) is never reached because the authorizer denies first.
-    struct AuthRequiredOnFirstCall;
-
-    #[async_trait]
-    impl CapabilityDispatcher for AuthRequiredOnFirstCall {
-        async fn dispatch_json(
-            &self,
-            request: CapabilityDispatchRequest,
-        ) -> Result<CapabilityDispatchResult, DispatchError> {
-            Err(DispatchError::AuthRequired {
-                capability: request.capability_id,
-                required_secrets: vec![],
-                credential_requirements: vec![],
-            })
-        }
-    }
-
+    // `auth_required()` returns AuthRequired on every call, which covers this.
     let registry = registry_with_echo_capability();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
 
     // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
-    let block_dispatcher = AuthRequiredOnFirstCall;
+    let block_dispatcher = TestDispatcher::auth_required();
     let block_host = capability_host(&registry, &block_dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
@@ -2204,12 +2113,12 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
     let input = json!({"message": "deny-after-claimed test"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -2234,20 +2143,20 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
         grants: vec![dispatch_grant()],
     };
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_dispatcher = AuthRequiredOnFirstCall;
+    let resume_dispatcher = TestDispatcher::auth_required();
     let resume_host = capability_host(&registry, &resume_dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
 
     resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: resume_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            resume_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -2265,20 +2174,20 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
     // Pre-fix: lease stuck in Dispatching.
     // Post-fix: lease revoked → Revoked.
     let deny_authorizer = DenyingAuthorizer;
-    let deny_dispatcher = RecordingDispatcher::default();
+    let deny_dispatcher = recording_dispatcher();
     let deny_host = capability_host(&registry, &deny_dispatcher, &deny_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
 
     let err = deny_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -2287,7 +2196,7 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
         "expected AuthorizationDenied, got {err:?}"
     );
     assert_eq!(
-        deny_dispatcher.dispatch_count(),
+        deny_dispatcher.call_count(),
         0,
         "dispatch must not fire when authorization is denied"
     );
@@ -2318,24 +2227,8 @@ async fn auth_resume_json_authorization_deny_revokes_dispatching_lease() {
 
 #[tokio::test]
 async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lease() {
-    use async_trait::async_trait;
-
     // Dispatcher: always returns AuthRequired (used for the resume_json bounce).
-    struct AlwaysAuthRequired;
-
-    #[async_trait]
-    impl CapabilityDispatcher for AlwaysAuthRequired {
-        async fn dispatch_json(
-            &self,
-            request: CapabilityDispatchRequest,
-        ) -> Result<CapabilityDispatchResult, DispatchError> {
-            Err(DispatchError::AuthRequired {
-                capability: request.capability_id,
-                required_secrets: vec![],
-                credential_requirements: vec![],
-            })
-        }
-    }
+    let always_auth_required = TestDispatcher::auth_required();
 
     let registry = registry_with_echo_capability();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
@@ -2343,7 +2236,7 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
     let leases = in_memory_backed_capability_lease_store();
 
     // ── Phase 1: invoke → BlockedApproval ──────────────────────────────────
-    let block_host = capability_host(&registry, &AlwaysAuthRequired, &ApprovalAuthorizer)
+    let block_host = capability_host(&registry, &always_auth_required, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
 
@@ -2354,12 +2247,12 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
     let input = json!({"message": "require-approval-after-claimed test"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -2384,19 +2277,19 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
         grants: vec![dispatch_grant()],
     };
     let resume_grant_authorizer = GrantAuthorizer::new();
-    let resume_host = capability_host(&registry, &AlwaysAuthRequired, &resume_grant_authorizer)
+    let resume_host = capability_host(&registry, &always_auth_required, &resume_grant_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
 
     resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: resume_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            resume_context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -2413,7 +2306,7 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
     // Pre-fix: lease stuck Dispatching.
     // Post-fix: lease → Revoked.
     let approval_authorizer_for_resume = ApprovalAuthorizer;
-    let recording_dispatcher = RecordingDispatcher::default();
+    let recording_dispatcher = recording_dispatcher();
     let req_approval_host = capability_host(
         &registry,
         &recording_dispatcher,
@@ -2424,13 +2317,13 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
     .with_capability_leases(&leases);
 
     let err = req_approval_host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: resume_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            resume_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -2442,7 +2335,7 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
         "expected AuthorizationRequiresApproval, got {err:?}"
     );
     assert_eq!(
-        recording_dispatcher.dispatch_count(),
+        recording_dispatcher.call_count(),
         0,
         "dispatch must not fire when authorization requires approval"
     );
@@ -2473,22 +2366,22 @@ async fn auth_resume_json_authorization_require_approval_revokes_dispatching_lea
 async fn auth_resume_json_returns_store_missing_when_run_state_absent() {
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
 
     // Host has NO run_state store — only the bare minimum.
     let host = capability_host(&registry, &dispatcher, &authorizer);
     // Do NOT call .with_run_state(...).
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: execution_context(CapabilitySet {
+        .auth_resume_json(
+            execution_context(CapabilitySet {
                 grants: vec![dispatch_grant()],
             }),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "no run_state store"}),
-            approval_request_id: None,
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "no run_state store"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -2501,7 +2394,7 @@ async fn auth_resume_json_returns_store_missing_when_run_state_absent() {
         "expected ResumeStoreMissing {{ store: \"run_state\" }}, got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire when run_state store is absent"
     );
@@ -2522,7 +2415,7 @@ async fn auth_resume_json_returns_store_missing_when_run_state_absent() {
 async fn auth_resume_json_unknown_invocation_when_run_record_missing() {
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     // No run record seeded — the store is empty.
 
@@ -2533,13 +2426,13 @@ async fn auth_resume_json_unknown_invocation_when_run_record_missing() {
     let host = capability_host(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "no run record seeded"}),
-            approval_request_id: None,
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "no run record seeded"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -2552,7 +2445,7 @@ async fn auth_resume_json_unknown_invocation_when_run_record_missing() {
         "expected RunState(UnknownInvocation), got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire when no run record exists"
     );
@@ -2608,7 +2501,7 @@ async fn auth_resume_json_approval_request_mismatch_action() {
     // Approval references a DIFFERENT capability than the one being invoked.
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -2652,13 +2545,13 @@ async fn auth_resume_json_approval_request_mismatch_action() {
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "action mismatch"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "action mismatch"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -2673,7 +2566,7 @@ async fn auth_resume_json_approval_request_mismatch_action() {
         "expected ApprovalRequestMismatch {{ field: \"action\" }}, got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire on action mismatch"
     );
@@ -2691,7 +2584,7 @@ async fn auth_resume_json_approval_request_mismatch_correlation_id() {
     // Approval has a DIFFERENT correlation_id than the current invocation context.
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -2740,13 +2633,13 @@ async fn auth_resume_json_approval_request_mismatch_correlation_id() {
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "correlation_id mismatch"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "correlation_id mismatch"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -2761,7 +2654,7 @@ async fn auth_resume_json_approval_request_mismatch_correlation_id() {
         "expected ApprovalRequestMismatch {{ field: \"correlation_id\" }}, got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire on correlation_id mismatch"
     );
@@ -2780,7 +2673,7 @@ async fn auth_resume_json_approval_request_mismatch_requested_by() {
     // must mismatch.
     let registry = registry_with_echo_capability();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -2823,13 +2716,13 @@ async fn auth_resume_json_approval_request_mismatch_requested_by() {
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"message": "requested_by mismatch"}),
-            approval_request_id: Some(approval_id),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"message": "requested_by mismatch"}),
+            Some(approval_id),
+        )
         .await
         .unwrap_err();
 
@@ -2844,7 +2737,7 @@ async fn auth_resume_json_approval_request_mismatch_requested_by() {
         "expected ApprovalRequestMismatch {{ field: \"requested_by\" }}, got {err:?}"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire on requested_by mismatch"
     );
@@ -2910,6 +2803,10 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     // store, suspends the caller until `claim_release` is notified.  Any other
     // caller that runs `matching_approval_lease` during this window finds None
     // (lease is Claimed, not Active) and falls into the REUSE branch.
+    // Synchronization primitive, not an I/O fault — cannot move to
+    // ironclaw_filesystem::FaultInjecting: the Notify gate suspends a caller
+    // mid-`claim` to force an interleaving; FaultInjecting only injects errors +
+    // records ops and is explicitly not a synchronization barrier.
     struct GatedLeaseStore {
         inner: FilesystemCapabilityLeaseStore<InMemoryBackend>,
         claim_entered: StdArc<Notify>,
@@ -3020,7 +2917,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     let claim_release = StdArc::new(Notify::new());
 
     let registry = StdArc::new(registry_with_echo_capability());
-    let dispatcher = StdArc::new(RecordingDispatcher::default());
+    let dispatcher = StdArc::new(recording_dispatcher());
     let run_state = StdArc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let approval_requests =
         StdArc::new(ironclaw_run_state::in_memory_backed_approval_request_store());
@@ -3040,12 +2937,12 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
     let input = json!({"message": "fresh active lease concurrent race"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: original_context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            original_context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -3098,13 +2995,13 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
             .with_run_state(&*task_a_run_state)
             .with_approval_requests(&*task_a_approval_requests)
             .with_capability_leases(&*task_a_leases);
-        host.auth_resume_json(CapabilityAuthResumeRequest {
-            context: task_a_context,
-            capability_id: capability_id(),
-            estimate: task_a_estimate,
-            input: task_a_input,
-            approval_request_id: Some(approval_id),
-        })
+        host.auth_resume_json(
+            task_a_context,
+            capability_id(),
+            task_a_estimate,
+            task_a_input,
+            Some(approval_id),
+        )
         .await
     });
 
@@ -3124,13 +3021,13 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
         .with_run_state(&*run_state)
         .with_approval_requests(&*approval_requests)
         .with_capability_leases(&*leases)
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context: winner_context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(
+            winner_context,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+            Some(approval_id),
+        )
         .await;
 
     winner_result.unwrap_or_else(|e| panic!("concurrent winner (B) must succeed, got {e:?}"));
@@ -3142,7 +3039,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
         "lease must be Consumed after winner B dispatched"
     );
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         1,
         "exactly one dispatch after winner B — before releasing A"
     );
@@ -3170,7 +3067,7 @@ async fn concurrent_auth_resume_fresh_active_lease_loser_does_not_double_dispatc
 
     // A must NOT have dispatched.
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         1,
         "exactly one dispatch must be recorded — A must not have dispatched \
          (pre-fix: dispatch_count would be 2)"
@@ -3225,7 +3122,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
     // the auth resume.
     let empty_registry = ironclaw_extensions::ExtensionRegistry::new();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -3315,13 +3212,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id(),
-            estimate,
-            input,
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(context, capability_id(), estimate, input, Some(approval_id))
         .await
         .unwrap_err();
 
@@ -3345,7 +3236,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_active_approval_lea
 
     // 3. No dispatch must have been attempted.
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire when capability is unknown"
     );
@@ -3358,7 +3249,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_le
     // (as it would be after a prior resume_json auth bounce left it Claimed).
     let empty_registry = ironclaw_extensions::ExtensionRegistry::new();
     let authorizer = GrantAuthorizer::new();
-    let dispatcher = RecordingDispatcher::default();
+    let dispatcher = recording_dispatcher();
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
@@ -3456,13 +3347,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_le
         .with_capability_leases(&leases);
 
     let err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id(),
-            estimate,
-            input,
-            approval_request_id: Some(approval_id),
-        })
+        .auth_resume_json(context, capability_id(), estimate, input, Some(approval_id))
         .await
         .unwrap_err();
 
@@ -3486,7 +3371,7 @@ async fn auth_resume_json_unknown_capability_does_not_strand_claimed_approval_le
 
     // 3. No dispatch.
     assert_eq!(
-        dispatcher.dispatch_count(),
+        dispatcher.call_count(),
         0,
         "dispatch must not fire when capability is unknown"
     );

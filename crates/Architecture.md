@@ -410,7 +410,7 @@ refs that cross crate boundaries:
 | `LoopCheckpointStateRef` / `TurnCheckpointId` | Opaque checkpoint payload ref and public checkpoint metadata id. | checkpoint stores + turns |
 | `LoopExit` | Driver claim containing durable refs only; never trusted by itself. | loop driver / turns |
 | `LoopMessageRef` / `LoopResultRef` / `LoopGateRef` | Host-minted evidence refs used to validate exits and blocked gates. | host ports / turns |
-| `CapabilityInvocation` / `CapabilityOutcome` | Scoped tool/capability request and sanitized result refs/summaries. | loop host ports + host runtime |
+| `LoopRequest` / `CapabilityOutcome` | Scoped tool/capability request and sanitized result refs/summaries. | loop host ports + host runtime |
 | `EventCursor` | Replay/projection cursor for redacted lifecycle and progress events. | events / turns |
 
 Persistence placement follows this split:

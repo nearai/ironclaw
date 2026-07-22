@@ -49,9 +49,9 @@ mod tests {
         TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
             CapabilityApprovalResume, CapabilityCallCandidate, CapabilityInputIssue,
-            CapabilityInputRef, CapabilityInvocation, CapabilityResumeToken,
-            InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
-            RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+            CapabilityInputRef, CapabilityResumeToken, InMemoryLoopHostMilestoneSink,
+            InMemoryRunProfileResolver, LoopRequest, RegisterProviderToolCallRequest,
+            VisibleCapabilityRequest,
         },
     };
 
@@ -299,8 +299,8 @@ mod tests {
         provider_tool_call_with_name("builtin_echo", arguments)
     }
 
-    fn invocation_for_candidate(candidate: &CapabilityCallCandidate) -> CapabilityInvocation {
-        CapabilityInvocation {
+    fn invocation_for_candidate(candidate: &CapabilityCallCandidate) -> LoopRequest {
+        LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version.clone(),
             capability_id: candidate.capability_id.clone(),
@@ -645,7 +645,7 @@ mod tests {
                 dir.path().join("local-dev"),
             )
             .with_runtime_policy(local_dev_minimal_approval_policy())
-            .with_google_oauth_backend(google_oauth_backend),
+            .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend),
         )
         .await
         .expect("local-dev services build");
@@ -2000,6 +2000,7 @@ mod tests {
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
+                EffectKind::UseSecret,
                 EffectKind::ExternalWrite
             ]
         );
@@ -3989,7 +3990,7 @@ mod tests {
             .id;
 
         let missing_set_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: missing_set_activity_id,
                 surface_version: missing_set_surface_version,
                 capability_id: missing_set_capability_id_from_candidate,
@@ -4189,7 +4190,7 @@ mod tests {
         .expect("approval issues dispatch lease");
 
         let set_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: set_activity_id,
                 surface_version: set_surface_version,
                 capability_id: set_capability_id_from_candidate,
@@ -4831,7 +4832,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
@@ -4865,7 +4866,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
@@ -4977,7 +4978,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)
@@ -5148,7 +5149,7 @@ mod tests {
             .await
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
@@ -5364,7 +5365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_capability_port_extension_search_reads_system_catalog() {
+    async fn local_dev_extension_search_makes_every_bundled_result_model_visible() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
             "local-dev-extension-search-owner",
@@ -5412,29 +5413,46 @@ mod tests {
             .find(|definition| definition.capability_id.as_str() == EXTENSION_SEARCH_CAPABILITY_ID)
             .expect("extension_search tool definition");
 
-        let candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                provider_tool_call_with_name(
-                    tool_definition.name.as_str(),
-                    serde_json::json!({"query": "gmail"}),
-                ),
-            ))
-            .await
-            .expect("extension_search provider tool call stages");
-        assert_eq!(
-            candidate.capability_id.as_str(),
-            EXTENSION_SEARCH_CAPABILITY_ID
-        );
+        let extension_ids = ironclaw_first_party_extensions::packages::bundled_packages()
+            .iter()
+            .map(|package| package.id)
+            .collect::<Vec<_>>();
+        for (index, extension_id) in extension_ids.into_iter().enumerate() {
+            let mut tool_call = provider_tool_call_with_name(
+                tool_definition.name.as_str(),
+                serde_json::json!({"query": extension_id}),
+            );
+            tool_call.turn_id = Some(format!("extension-search-turn-{index}"));
+            tool_call.id = format!("extension-search-call-{index}");
+            let candidate = port
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(tool_call))
+                .await
+                .expect("extension_search provider tool call stages");
+            assert_eq!(
+                candidate.capability_id.as_str(),
+                EXTENSION_SEARCH_CAPABILITY_ID
+            );
 
-        let outcome = port
-            .invoke_capability(invocation_for_candidate(&candidate))
-            .await
-            .expect("extension_search invocation");
+            let outcome = port
+                .invoke_capability(invocation_for_candidate(&candidate))
+                .await
+                .expect("extension_search invocation");
 
-        assert!(
-            matches!(outcome, Resolution::Done(_)),
-            "extension_search should be authorized to read the system extension catalog, got {outcome:?}"
-        );
+            let Resolution::Done(outcome) = outcome else {
+                panic!(
+                    "extension_search should be authorized to read the system extension catalog"
+                );
+            };
+            let preview = outcome.refs.preview.as_ref().unwrap_or_else(|| {
+                panic!("the model must receive the {extension_id} search result inline")
+            });
+            assert!(
+                preview
+                    .as_str()
+                    .contains(&format!("\"id\":\"{extension_id}\"")),
+                "the model-visible result must contain the {extension_id} catalog entry: {preview}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -5539,7 +5557,7 @@ mod tests {
         );
 
         let batch_result = port
-            .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
+            .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
                 invocations: vec![
                     invocation_for_candidate(&candidate1),
                     invocation_for_candidate(&candidate2),

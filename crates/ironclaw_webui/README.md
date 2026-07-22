@@ -64,7 +64,8 @@ Each middleware is its own module: `webui_ws_origin`, `webui_body_limit`,
 `webui_operator_auth`, `webui_rate_limit`, `webui_route_match`. This is where
 the descriptor-driven policy (from `webui_v2_routes()`) is turned into real
 tower layers, where product-auth and OAuth `PublicRouteMount`s are merged
-outside bearer auth, and where the Slack / OpenAI-compat route mounts attach.
+outside bearer auth, and where the OpenAI-compat host-beta route mounts
+attach under their feature flag.
 
 ### 3. Serve loop + host authentication (`src/lib.rs`, `src/auth/`, `src/session.rs`, `src/oidc.rs`)
 
@@ -72,11 +73,10 @@ outside bearer auth, and where the Slack / OpenAI-compat route mounts attach.
   and run `axum::serve` with graceful shutdown.
 - **Authenticators** (`WebuiAuthenticator` impls): `EnvBearerAuthenticator`
   (single operator token for the standalone binary / local dev),
-  `SessionAuthenticator` (bearer → `SessionStore` lookup, non-operator),
+  `SessionAuthenticator` (bearer → `SignedTokenSessionStore` lookup),
   `OidcAuthenticator` (JWKS + standard-claim verifier, non-operator).
-- **Sessions:** the `SessionStore` trait (durable impl is the host's;
-  `InMemorySessionStore` behind `test-support` for dev/tests) plus the
-  signed-token login surface (`build_signed_session_login`).
+- **Sessions:** `SignedTokenSessionStore` plus the signed-token login surface
+  (`build_signed_session_login`).
 - **OAuth login surface:** `webui_v2_auth_router` mounts `/auth/*` and mints
   sessions from Google / GitHub logins. Providers plug in through the
   `OAuthProvider` trait. Full security model (PKCE, CSRF state, canonical host,
@@ -99,11 +99,11 @@ outside bearer auth, and where the Slack / OpenAI-compat route mounts attach.
 | Feature | Effect |
 |---|---|
 | `default` | Route surface + SPA + serve loop + auth. |
-| `test-support` | Compile in `InMemorySessionStore` + `EmailUserDirectory` for local dev / tests. |
+| `test-support` | Compile in `EmailUserDirectory` for local dev / tests. |
 
-The Slack personal-OAuth setup + channel-route admin surface and the
-`OpenAiCompatActorScope` stamping for protected OpenAI-compatible mounts are
-unconditional parts of `webui_v2_app`; both forward to composition.
+The generic extension administration surface and the `OpenAiCompatActorScope`
+stamping for protected OpenAI-compatible mounts are unconditional parts of
+`webui_v2_app`; both forward to composition.
 
 ## Build & test
 
@@ -112,7 +112,7 @@ unconditional parts of `webui_v2_app`; both forward to composition.
 cargo test  -p ironclaw_webui
 cargo clippy -p ironclaw_webui --all-targets -- -D warnings
 
-# Everything, incl. the dev-only session store
+# Everything, incl. the OpenAI-compat host-beta surface
 cargo test  -p ironclaw_webui --all-features
 cargo clippy -p ironclaw_webui --all-features --all-targets -- -D warnings
 

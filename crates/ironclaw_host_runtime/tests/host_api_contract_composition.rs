@@ -80,11 +80,14 @@ async fn default_host_port_catalog_rejects_unknown_required_port() {
     .await
     .unwrap_err();
 
+    // The capability-provider contract preserves typed manifest errors, so
+    // the unknown port surfaces as `UnknownHostPort`, still fail-closed
+    // before install.
     assert!(
         matches!(
             err,
-            ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
-                if reason.contains("unknown host port 'host.runtime.not_supported'")
+            ExtensionError::ManifestV2(ManifestV2Error::UnknownHostPort { ref port, .. })
+                if port.as_str() == "host.runtime.not_supported"
         ),
         "unexpected error: {err:?}"
     );

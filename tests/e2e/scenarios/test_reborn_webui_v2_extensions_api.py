@@ -80,10 +80,14 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
                 if extension["package_ref"]["id"] == "web-access"
             )
             assert installed["display_name"] == "Web Access"
-            assert installed["kind"] == "first_party"
+            # Runtime is an implementation badge (`runtime`), never taxonomy;
+            # the retired `kind` wire string is gone (NEA-25).
+            assert installed["runtime"] == "first_party"
             assert installed["has_auth"] is False
             assert installed["needs_setup"] in {False, True}
-            assert installed["activation_status"] in {"installed", "configured", "active"}
+            # §6.1 installation-state enum replaces the `activation_status`
+            # string stopgap on the extensions wire.
+            assert installed["installation_state"] in {"installed", "configured", "active"}
 
             setup = await client.get(
                 f"{reborn_v2_server}/api/webchat/v2/extensions/web-access/setup",
@@ -115,7 +119,7 @@ async def test_reborn_v2_extension_lifecycle_served(reborn_v2_server):
                 if extension["package_ref"]["id"] == "web-access"
             )
             assert active["active"] is True
-            assert active["activation_status"] == "active"
+            assert active["installation_state"] == "active"
             assert "web-access.search" in active.get("tools", [])
         finally:
             await _remove_web_access_if_present(client, reborn_v2_server)

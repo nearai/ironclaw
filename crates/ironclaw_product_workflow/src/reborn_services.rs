@@ -18,13 +18,15 @@ use chrono::Utc;
 use futures::future::try_join_all;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
-    AuthProductScope, AuthProviderId, CredentialAccountId, CredentialAccountProjection,
-    CredentialAccountUpdateBinding, ProviderScope,
+    AuthFlowStatus, AuthProductScope, AuthProviderId, CredentialAccountId,
+    CredentialAccountProjection, CredentialAccountStatus, CredentialAccountUpdateBinding,
+    ProviderScope,
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
-    AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId, PermissionMode,
-    Principal, ProjectId, ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
+    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, GrantConstraints, InvocationId,
+    PermissionMode, Principal, ProjectId, Resolution, ResourceScope, SecretHandle, TenantId,
+    ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -66,6 +68,7 @@ use crate::{
     is_approval_gate_ref, is_auth_gate_ref, thread_metadata_is_automation_trigger,
 };
 
+mod admin_configuration;
 mod admin_users;
 mod error;
 mod extension_credentials;
@@ -75,11 +78,19 @@ mod extensions;
 mod fs_browse;
 mod lifecycle_setup;
 mod llm_config;
+mod log_views;
 mod project_fs;
 mod projects;
+mod run_artifact;
 mod trace_credits;
 mod types;
+mod views;
 
+pub use admin_configuration::{
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW,
+    RebornAdminConfigurationField, RebornAdminConfigurationGroup,
+    RebornAdminConfigurationListResponse, RebornAdminConfigurationUse,
+};
 use admin_users::{
     ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminUserService,
 };
@@ -115,6 +126,7 @@ pub use llm_config::{
     NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
     UpsertLlmProviderRequest,
 };
+pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
@@ -128,22 +140,26 @@ pub use projects::{
     RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
     RebornRemoveMemberRequest, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
 };
+pub use run_artifact::{
+    RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornRunArtifact, RebornRunArtifactRequest,
+    RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+};
 pub use types::{
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationActiveHold,
-    RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest, RebornAuthAccount,
+    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -163,7 +179,11 @@ pub use types::{
     RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornTimelineResponse, RebornVendorAuthAccounts,
+};
+pub use views::{
+    RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
+    UnavailableRebornViewProvider,
 };
 
 type SkillActivationRecorder =
@@ -225,37 +245,26 @@ fn rejected_busy_notice(status: TurnStatus) -> String {
     }
 }
 
-#[async_trait]
-pub trait ConnectableChannelsProductFacade: Send + Sync {
-    async fn list_connectable_channels(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError>;
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct StaticConnectableChannelsProductFacade {
-    channels: Arc<[RebornConnectableChannelInfo]>,
-}
-
-impl StaticConnectableChannelsProductFacade {
-    pub fn new(channels: impl Into<Vec<RebornConnectableChannelInfo>>) -> Self {
-        Self {
-            channels: Arc::from(channels.into()),
-        }
-    }
-}
-
-#[async_trait]
-impl ConnectableChannelsProductFacade for StaticConnectableChannelsProductFacade {
-    async fn list_connectable_channels(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        Ok(RebornConnectableChannelListResponse {
-            channels: self.channels.iter().cloned().collect(),
-        })
-    }
+/// The caller's durable auth-account signal for one channel extension's vendor
+/// — the raw inputs the extensions-list facade feeds to
+/// [`ironclaw_auth::project_auth_account_state`] so an account renders its real
+/// §6.3 state (`expired` / `refresh-failed` / `authenticating`) plus a typed
+/// last error, instead of the connected/disconnected collapse the
+/// [`ChannelConnectionFacade::caller_channel_connections`] bool alone permits.
+///
+/// Both inputs are optional. A facade that only knows the caller holds a live
+/// grant leaves both `None` and the projection falls back to the connection
+/// bool (a live grant backfills to `connected`, MIG-1); a facade that reads the
+/// durable credential-account status supplies `account_status` (and, mid-flow,
+/// `active_flow_status`) so the wire surfaces the real state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChannelAuthAccountState {
+    /// The caller's durable credential-account status for the extension's
+    /// vendor, when the facade can read it.
+    pub account_status: Option<CredentialAccountStatus>,
+    /// A live (non-terminal) auth flow for the extension's vendor, when one is
+    /// in progress — projects to `authenticating`.
+    pub active_flow_status: Option<AuthFlowStatus>,
 }
 
 /// Per-user channel connection state. Returns, for the calling user, which
@@ -269,6 +278,24 @@ pub trait ChannelConnectionFacade: Send + Sync {
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError>;
+
+    /// The caller's durable auth-account signal per channel extension, keyed by
+    /// channel package id — richer than the connected/disconnected bool
+    /// [`Self::caller_channel_connections`] returns. Lets the extensions wire
+    /// project the shared §6.3 auth-account state (`expired` / `refresh-failed`)
+    /// and its typed last error for each vendor account.
+    ///
+    /// Default: empty. A facade that does not yet read durable credential-account
+    /// status reports none and the wire falls back to the connection bool; the
+    /// production channel-connection facade overrides this to project each
+    /// caller's account status.
+    async fn caller_channel_account_states(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<std::collections::HashMap<String, ChannelAuthAccountState>, RebornServicesError>
+    {
+        Ok(std::collections::HashMap::new())
+    }
 
     async fn disconnect_channel_for_caller(
         &self,
@@ -290,6 +317,44 @@ impl ChannelConnectionFacade for StaticChannelConnectionFacade {
     ) -> Result<std::collections::HashMap<String, bool>, RebornServicesError> {
         Ok(std::collections::HashMap::new())
     }
+}
+
+/// Presence-only projection of one manifest-declared channel-config field.
+/// Secret fields report `provided` only; stored values are never echoed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornChannelConfigField {
+    /// The manifest-declared field handle (the submit key).
+    pub name: String,
+    /// Operator-facing label from the manifest.
+    pub label: String,
+    pub secret: bool,
+    pub provided: bool,
+}
+
+/// The generic channel-config configure port: per-extension operator config
+/// declared by the extension manifest's channel-config fields. Host
+/// composition implements it over the durable installation store and the
+/// scoped secret store; the setup facade routes submitted values through it
+/// and derives config completeness from the field status.
+#[async_trait]
+pub trait ChannelConfigFacade: Send + Sync {
+    /// Per-field presence for the extension's declared channel config.
+    /// Empty when the extension declares none (or is not installed yet).
+    async fn field_status(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<RebornChannelConfigField>, RebornServicesError>;
+
+    /// Validate submitted `(handle, value)` pairs against the installed
+    /// manifest's declared fields and persist them (non-secret values
+    /// durably per installation, secret values into the scoped secret
+    /// store). Saving while the extension is active re-runs its activation
+    /// with the new values.
+    async fn save_values(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), RebornServicesError>;
 }
 
 #[async_trait]
@@ -1785,6 +1850,37 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(false)
     }
 
+    /// Invoke one descriptor-declared product capability through the generic
+    /// mutation conduit targeted by architecture simplification §5.2.
+    ///
+    /// `caller` is trusted ingress input. `capability` and `input` are
+    /// designators only; a wired implementation must resolve and authorize
+    /// them rather than treating either as authority. `activity_id` is the
+    /// client-minted idempotency identity and must be preserved across retries.
+    /// The unwired default fails closed without performing any side effect.
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        let _ = (caller, capability, input, activity_id);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
+    /// Query one descriptor-declared, read-only product view. This is the
+    /// generic read conduit; new views register an id rather than growing this
+    /// facade with per-feature methods.
+    async fn query(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        let _ = (caller, query);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+
     /// Read the raw bytes of one landed attachment so the browser can render an
     /// image thumbnail (or download a file) for a persisted message. The default
     /// reports the bytes are unavailable; compositions that wire a reader over
@@ -2185,15 +2281,6 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    async fn list_connectable_channels(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        Ok(RebornConnectableChannelListResponse {
-            channels: Vec::new(),
-        })
-    }
-
     /// Return the authenticated caller's scoped outbound preferences.
     ///
     /// Implementations must scope stored preferences by the caller's
@@ -2526,24 +2613,6 @@ pub trait RebornServicesApi: Send + Sync {
         ))
     }
 
-    async fn query_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        let _ = (caller, query);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn query_operator_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornOperatorLogsQuery,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let _ = (caller, query);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     async fn run_operator_service_lifecycle(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2689,9 +2758,50 @@ pub trait InboundAttachmentReader: Send + Sync {
     ) -> Result<Vec<u8>, RebornServicesError>;
 }
 
+/// Product-side command membrane for the generic [`RebornServicesApi::invoke`]
+/// conduit.
+///
+/// The concrete execution adapter lives in composition: this crate owns the
+/// product contract and remains independent of runtime implementation crates.
+/// The facade is generic over this boundary so the production capability hot
+/// path does not add another `Arc<dyn ...>` seam solely for test substitution.
+#[async_trait]
+pub trait ProductCapabilityInvoker: Send + Sync {
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError>;
+}
+
+/// Fail-closed default for compositions that have not attached the product
+/// capability membrane.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnavailableProductCapabilityInvoker;
+
+#[async_trait]
+impl ProductCapabilityInvoker for UnavailableProductCapabilityInvoker {
+    async fn invoke(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _capability: CapabilityId,
+        _input: serde_json::Value,
+        _activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
+
 /// Default facade implementation composed at the WebUI boundary.
 #[derive(Clone)]
-pub struct RebornServices {
+pub struct RebornServices<
+    I = UnavailableProductCapabilityInvoker,
+    V = UnavailableRebornViewProvider,
+> {
+    product_capability_invoker: I,
+    view_provider: V,
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     inbound_attachments: Option<Arc<dyn InboundAttachmentLander>>,
@@ -2703,8 +2813,8 @@ pub struct RebornServices {
     lifecycle_facade: Arc<dyn LifecycleProductFacade>,
     automation_facade: Arc<dyn AutomationProductFacade>,
     skills_facade: Arc<dyn SkillsProductFacade>,
-    connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
     channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
+    channel_config_facade: Option<Arc<dyn ChannelConfigFacade>>,
     outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     operator_status: Arc<dyn OperatorStatusService>,
     operator_logs: Arc<dyn OperatorLogsService>,
@@ -2722,12 +2832,52 @@ pub struct RebornServices {
     thread_operation_locks: Arc<ThreadOperationLocks>,
 }
 
-impl RebornServices {
+impl RebornServices<UnavailableProductCapabilityInvoker, UnavailableRebornViewProvider> {
     pub fn new(
         thread_service: Arc<dyn SessionThreadService>,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Self {
+        Self::new_with_product_ports(
+            thread_service,
+            turn_coordinator,
+            UnavailableProductCapabilityInvoker,
+            UnavailableRebornViewProvider,
+        )
+    }
+}
+
+impl<I> RebornServices<I, UnavailableRebornViewProvider>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+{
+    pub fn new_with_product_capability_invoker(
+        thread_service: Arc<dyn SessionThreadService>,
+        turn_coordinator: Arc<dyn TurnCoordinator>,
+        product_capability_invoker: I,
+    ) -> Self {
+        Self::new_with_product_ports(
+            thread_service,
+            turn_coordinator,
+            product_capability_invoker,
+            UnavailableRebornViewProvider,
+        )
+    }
+}
+
+impl<I, V> RebornServices<I, V>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
+    pub fn new_with_product_ports(
+        thread_service: Arc<dyn SessionThreadService>,
+        turn_coordinator: Arc<dyn TurnCoordinator>,
+        product_capability_invoker: I,
+        view_provider: V,
+    ) -> Self {
         Self {
+            product_capability_invoker,
+            view_provider,
             thread_service,
             turn_coordinator,
             inbound_attachments: None,
@@ -2741,8 +2891,8 @@ impl RebornServices {
             )),
             automation_facade: Arc::new(UnsupportedAutomationProductFacade::new_static()),
             skills_facade: Arc::new(UnsupportedSkillsProductFacade::new_static()),
-            connectable_channels_facade: Arc::new(StaticConnectableChannelsProductFacade::default()),
             channel_connection_facade: Arc::new(StaticChannelConnectionFacade),
+            channel_config_facade: None,
             outbound_preferences_facade: Arc::new(
                 UnsupportedOutboundPreferencesProductFacade::new_static(),
             ),
@@ -2877,14 +3027,6 @@ impl RebornServices {
         self
     }
 
-    pub fn with_connectable_channels_facade(
-        mut self,
-        connectable_channels_facade: Arc<dyn ConnectableChannelsProductFacade>,
-    ) -> Self {
-        self.connectable_channels_facade = connectable_channels_facade;
-        self
-    }
-
     pub fn with_channel_connection_facade(
         mut self,
         channel_connection_facade: Arc<dyn ChannelConnectionFacade>,
@@ -2898,6 +3040,17 @@ impl RebornServices {
         outbound_preferences_facade: Arc<dyn OutboundPreferencesProductFacade>,
     ) -> Self {
         self.outbound_preferences_facade = outbound_preferences_facade;
+        self
+    }
+
+    /// Wire the generic channel-config configure port. Without it, the
+    /// setup facade renders no channel-config fields and rejects
+    /// channel-config submissions as unavailable.
+    pub fn with_channel_config_facade(
+        mut self,
+        channel_config_facade: Arc<dyn ChannelConfigFacade>,
+    ) -> Self {
+        self.channel_config_facade = Some(channel_config_facade);
         self
     }
 
@@ -3117,7 +3270,23 @@ fn last_admin_error() -> RebornServicesError {
 }
 
 #[async_trait]
-impl RebornServicesApi for RebornServices {
+impl<I, V> RebornServicesApi for RebornServices<I, V>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        self.product_capability_invoker
+            .invoke(caller, capability, input, activity_id)
+            .await
+    }
+
     async fn list_admin_users(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3908,6 +4077,62 @@ impl RebornServicesApi for RebornServices {
         })
     }
 
+    async fn query(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        if self.view_provider.descriptor().id == query.view_id {
+            return self
+                .view_provider
+                .query(caller, query.params, query.cursor)
+                .await;
+        }
+        match query.view_id.as_str() {
+            id if id == LOGS_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.build_logs_view(caller, request, query.cursor).await?;
+                let next_cursor = response.next_cursor.clone();
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor,
+                })
+            }
+            id if id == OPERATOR_LOGS_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self
+                    .build_operator_logs_view(caller, request, query.cursor)
+                    .await?;
+                let next_cursor = response
+                    .logs
+                    .as_ref()
+                    .and_then(|logs| logs.next_cursor.clone());
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor,
+                })
+            }
+            id if id == RUN_ARTIFACT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let artifact = self.build_run_artifact(caller, request).await?;
+                let payload =
+                    serde_json::to_value(artifact).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor: None,
+                })
+            }
+            _ => Err(RebornServicesError::not_found()),
+        }
+    }
+
     async fn list_project_dir(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4672,15 +4897,6 @@ impl RebornServicesApi for RebornServices {
             .await
     }
 
-    async fn list_connectable_channels(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        self.connectable_channels_facade
-            .list_connectable_channels(caller)
-            .await
-    }
-
     async fn get_outbound_preferences(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4842,6 +5058,7 @@ impl RebornServicesApi for RebornServices {
         lifecycle_setup::setup_extension(
             self.lifecycle_facade.as_ref(),
             self.extension_credentials.as_deref(),
+            self.channel_config_facade.as_deref(),
             caller,
             package_ref,
             request,
@@ -4929,49 +5146,6 @@ impl RebornServicesApi for RebornServices {
             message: "operator status is available".to_string(),
             operator_status: Some(status),
             logs: None,
-            service_lifecycle: None,
-            diagnostics: Vec::new(),
-        })
-    }
-
-    async fn query_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        validate_log_query_modes(query.tail, query.follow)?;
-
-        let request = bounded_log_query(query);
-        let thread_id = request.thread_id.clone().ok_or_else(|| {
-            RebornServicesError::validation(WebUiInboundValidationError::new(
-                "thread_id",
-                WebUiInboundValidationCode::MissingField,
-            ))
-        })?;
-        let thread_id = parse_thread_id_field("thread_id", thread_id)?;
-        let actor = caller.actor();
-        let scope = caller.turn_scope(thread_id);
-        self.resolve_thread_access_for_caller(caller.clone(), scope, &actor)
-            .await?;
-
-        self.operator_logs.query_logs(caller, request).await
-    }
-
-    async fn query_operator_logs(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornOperatorLogsQuery,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        validate_log_query_modes(query.tail, query.follow)?;
-
-        let request = bounded_operator_logs_query(query);
-        let logs = self.operator_logs.query_logs(caller, request).await?;
-        Ok(RebornOperatorCommandPlaneResponse {
-            area: RebornOperatorArea::Logs,
-            status: RebornOperatorSurfaceStatus::Available,
-            message: "operator logs query completed".to_string(),
-            operator_status: None,
-            logs: Some(logs),
             service_lifecycle: None,
             diagnostics: Vec::new(),
         })
@@ -5155,7 +5329,11 @@ impl RebornServicesApi for RebornServices {
     }
 }
 
-impl RebornServices {
+impl<I, V> RebornServices<I, V>
+where
+    I: ProductCapabilityInvoker,
+    V: RebornViewProvider,
+{
     async fn list_visible_threads_for_scope(
         &self,
         scope: ThreadScope,
@@ -5776,7 +5954,11 @@ struct ResolvedThreadAccess {
 //                == Some(fire.creator_user_id) [post-#4754: new first-fire bindings
 //                   persist creator; legacy (pre-#4754) bindings remain owner-None
 //                   and will not match — accepted breakage; recreate trigger to fix].
-impl RebornServices {
+impl<I, V> RebornServices<I, V>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
     /// Shared authorization check for automation-trigger threads.
     ///
     /// Checks whether `scope.thread_id` belongs to one of the authenticated

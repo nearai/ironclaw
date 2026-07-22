@@ -105,7 +105,7 @@ async fn webui_event_stream_uses_credential_requirement_for_manual_token_auth_pr
         thread_id.clone(),
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: VendorId::new("github").unwrap(),
         setup: Default::default(),
         requester_extension: ExtensionId::new("github").unwrap(),
         provider_scopes: Vec::new(),
@@ -203,7 +203,7 @@ async fn webui_event_stream_keeps_retired_channel_pairing_requirement_generic() 
         thread_id.clone(),
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("slack").unwrap(),
+        provider: VendorId::new("slack").unwrap(),
         setup: RuntimeCredentialAccountSetup::Retired,
         requester_extension: ExtensionId::new("slack").unwrap(),
         provider_scopes: Vec::new(),
@@ -290,7 +290,7 @@ async fn webui_event_stream_keeps_oauth_requirement_as_oauth_prompt_without_url(
         thread_id.clone(),
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        provider: VendorId::new("google").unwrap(),
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/calendar.readonly".to_string()],
         },
@@ -419,15 +419,13 @@ async fn webui_event_stream_surfaces_auth_challenge_lookup_failure() {
 }
 
 #[tokio::test]
-async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_gate() {
-    use crate::OAuthClientConfig;
-    use crate::product_auth::api::auth::RebornProductAuthServices;
-    use crate::product_auth::oauth::oauth_gate::{
-        GoogleOAuthGateProvider, OAuthGateFlowDriver, OAuthGateProviderRegistry,
+async fn webui_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_gate() {
+    use crate::product_auth::api::auth::{
+        RebornAuthContinuationDispatcher, RebornProductAuthServices,
     };
+    use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
     use async_trait::async_trait;
     use ironclaw_auth::{AuthContinuationEvent, InMemoryAuthProductServices};
-    use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
     use ironclaw_secrets::FilesystemSecretStore;
 
     #[derive(Debug)]
@@ -441,12 +439,49 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
         ) -> Result<(), ironclaw_auth::AuthProductError> {
             Ok(())
         }
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticTestCredentials;
+
+    #[async_trait]
+    impl ironclaw_auth::EngineClientCredentialsSource for StaticTestCredentials {
+        async fn resolve(
+            &self,
+            _vendor: &str,
+            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+        ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, ironclaw_auth::AuthProductError>
+        {
+            Ok(ironclaw_auth::EngineOAuthClientMaterial {
+                client_id: ironclaw_auth::OAuthClientId::new("vendorco-client-id")?,
+                client_secret: None,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct PanicEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for PanicEgress {
+        async fn execute(
+            &self,
+            _request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+            panic!("gate challenge preparation must not reach the vendor");
+        }
     }
 
     let tenant_id = TenantId::new("webui-events-tenant").unwrap();
     let user_id = UserId::new("webui-events-user").unwrap();
     let agent_id = AgentId::new("webui-events-agent").unwrap();
-    let thread_id = ThreadId::new("webui-events-google-auth-thread").unwrap();
+    let thread_id = ThreadId::new("webui-events-vendor-auth-thread").unwrap();
     let turn_run = TurnRunId::new();
     let gate_ref = "gate:auth-required";
     let scope = TurnScope::new(
@@ -456,30 +491,52 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
         thread_id.clone(),
     );
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        provider: VendorId::new("vendorco").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
-            scopes: vec!["https://www.googleapis.com/auth/calendar.readonly".to_string()],
+            scopes: vec!["items:read".to_string()],
         },
-        requester_extension: ExtensionId::new("google-calendar").unwrap(),
-        provider_scopes: vec!["https://www.googleapis.com/auth/calendar.readonly".to_string()],
+        requester_extension: ExtensionId::new("vendorco-tools").unwrap(),
+        provider_scopes: vec!["items:read".to_string()],
     }];
 
     let shared = Arc::new(InMemoryAuthProductServices::new());
-    let google_gate = Arc::new(OAuthGateFlowDriver::new(
-        Arc::new(GoogleOAuthGateProvider::new(
-            OAuthClientConfig::new(
-                "google-client.apps.googleusercontent.com",
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
-                None,
+    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
+        "method": "oauth2_code",
+        "display_name": "Vendor account",
+        "authorization_endpoint": "https://auth.vendorco.example/authorize",
+        "token_endpoint": "https://auth.vendorco.example/token",
+        "scopes": ["items:read"],
+        "client_credentials": { "client_id_handle": "vendorco_oauth_client_id" },
+        "token_response": { "access_token": "/access_token" },
+    }))
+    .unwrap();
+    let engine = Arc::new(ironclaw_auth::AuthEngine::new(
+        ironclaw_auth::AuthEngineDeps {
+            recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
+                ironclaw_auth::ResolvedVendorAuthRecipe {
+                    vendor: "vendorco".to_string(),
+                    recipe,
+                    token_exchange_resource: None,
+                },
+            ])),
+            client_credentials: Arc::new(StaticTestCredentials),
+            egress: Arc::new(PanicEgress),
+            secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
+            callback_base: ironclaw_auth::EngineCallbackBase::new(
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
             )
             .unwrap(),
-        )),
+            dcr_client_name: "Ironclaw".to_string(),
+        },
+    ));
+    let gate_driver = Arc::new(OAuthGateFlowDriver::new(
+        engine,
         Arc::new(FilesystemSecretStore::ephemeral()),
     ));
     let product_auth = Arc::new(
         RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
             .with_flow_record_source(shared)
-            .with_oauth_gate_registry(Arc::new(OAuthGateProviderRegistry::new(vec![google_gate]))),
+            .with_oauth_gate_driver(gate_driver),
     );
 
     let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
@@ -503,184 +560,7 @@ async fn webui_event_stream_creates_google_oauth_prompt_for_runtime_credential_g
                     activity_id: None,
                     credential_requirements: credential_requirements.clone(),
                 }),
-                sanitized_reason: Some("Google authentication required".to_string()),
-                detail: None,
-                retryable: None,
-            }],
-        }),
-        Arc::new(FakeTurnCoordinator {
-            state: TurnRunState {
-                credential_requirements,
-                ..turn_run_state(&scope, &user_id, turn_run, TurnEventCursor(1))
-            },
-        }),
-    )
-    .with_auth_challenges(product_auth);
-
-    let events = services
-        .webui_event_stream()
-        .drain(ProjectionSubscriptionRequest {
-            actor: TurnActor::new(user_id),
-            scope,
-            after_cursor: None,
-        })
-        .await
-        .unwrap();
-
-    assert!(events.iter().any(|event| matches!(
-        event.payload(),
-        ProductOutboundPayload::AuthPrompt(prompt)
-            if prompt.turn_run_id == turn_run
-                && prompt.auth_request_ref == gate_ref
-                && prompt.challenge_kind == Some(AuthPromptChallengeKind::OAuthUrl)
-                && prompt.provider.as_deref() == Some("google")
-                && prompt.authorization_url.as_deref().is_some_and(|url|
-                    url.starts_with("https://accounts.google.com/")
-                        && url.contains("https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar.readonly")
-                )
-                && prompt.account_label.is_none()
-    )), "events: {events:#?}");
-}
-
-#[tokio::test]
-async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credential_gate() {
-    use crate::product_auth::api::auth::RebornProductAuthServices;
-    use crate::product_auth::oauth::oauth_dcr::{
-        OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
-    };
-    use async_trait::async_trait;
-    use ironclaw_auth::{
-        AuthContinuationEvent, CredentialAccountLabel, InMemoryAuthProductServices,
-    };
-    use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
-    use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
-    use ironclaw_secrets::FilesystemSecretStore;
-
-    #[derive(Debug)]
-    struct NoopDispatcher;
-
-    #[async_trait]
-    impl RebornAuthContinuationDispatcher for NoopDispatcher {
-        async fn dispatch_auth_continuation(
-            &self,
-            _event: AuthContinuationEvent,
-        ) -> Result<(), ironclaw_auth::AuthProductError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Debug)]
-    struct NoopObligationHandler;
-
-    #[async_trait]
-    impl CapabilityObligationHandler for NoopObligationHandler {
-        async fn satisfy(
-            &self,
-            _request: CapabilityObligationRequest<'_>,
-        ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
-            Ok(())
-        }
-    }
-
-    #[derive(Debug)]
-    struct RouteDcrEgress;
-
-    #[async_trait]
-    impl RuntimeHttpEgress for RouteDcrEgress {
-        async fn execute(
-            &self,
-            request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
-            let body = match request.url.as_str() {
-                "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource" => {
-                    br#"{"authorization_servers":["https://oauth.notion.com"]}"#.to_vec()
-                }
-                "https://oauth.notion.com/.well-known/oauth-authorization-server" => {
-                    br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token","registration_endpoint":"https://oauth.notion.com/register"}"#.to_vec()
-                }
-                "https://oauth.notion.com/register" => br#"{"client_id":"dcr-client","registration_client_uri":"https://oauth.notion.com/register/dcr-client","registration_access_token":"registration-token"}"#.to_vec(),
-                "https://oauth.notion.com/register/dcr-client"
-                    if request.method == NetworkMethod::Delete =>
-                {
-                    br#"{}"#.to_vec()
-                }
-                other => panic!("unexpected DCR route egress URL: {other}"),
-            };
-            Ok(RuntimeHttpEgressResponse {
-                status: 200,
-                headers: Vec::new(),
-                request_bytes: request.body.len() as u64,
-                response_bytes: body.len() as u64,
-                body,
-                saved_body: None,
-                redaction_applied: false,
-            })
-        }
-    }
-
-    let tenant_id = TenantId::new("webui-events-tenant").unwrap();
-    let user_id = UserId::new("webui-events-user").unwrap();
-    let agent_id = AgentId::new("webui-events-agent").unwrap();
-    let thread_id = ThreadId::new("webui-events-notion-auth-thread").unwrap();
-    let turn_run = TurnRunId::new();
-    let gate_ref = "gate:auth-required";
-    let scope = TurnScope::new(
-        tenant_id.clone(),
-        Some(agent_id.clone()),
-        None,
-        thread_id.clone(),
-    );
-    let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("notion").unwrap(),
-        setup: Default::default(),
-        requester_extension: ExtensionId::new("notion").unwrap(),
-        provider_scopes: Vec::new(),
-    }];
-
-    let shared = Arc::new(InMemoryAuthProductServices::new());
-    let dcr_provider = Arc::new(
-        OAuthDcrProvider::new(
-            OAuthDcrProviderConfig {
-                spec: crate::product_auth::oauth::notion_oauth::notion_provider_spec(),
-                callback_origin: "http://127.0.0.1:3000".to_string(),
-                client_name: "Ironclaw".to_string(),
-                account_label: CredentialAccountLabel::new("notion").unwrap(),
-                scopes: Vec::new(),
-            },
-            Arc::new(RouteDcrEgress),
-            Arc::new(FilesystemSecretStore::ephemeral()),
-            Arc::new(NoopObligationHandler),
-        )
-        .unwrap(),
-    );
-    let product_auth = Arc::new(
-        RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
-            .with_flow_record_source(shared)
-            .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![dcr_provider]))),
-    );
-
-    let event_log_dyn: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
-    let services = build_reborn_projection_services(
-        event_log_dyn,
-        ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
-    )
-    .with_turn_events(
-        Arc::new(FakeTurnEventSource {
-            events: vec![TurnLifecycleEvent {
-                cursor: TurnEventCursor(1),
-                scope: scope.clone(),
-                occurred_at: Some(chrono::Utc::now()),
-                owner_user_id: Some(user_id.clone()),
-                run_id: turn_run,
-                status: TurnStatus::BlockedAuth,
-                kind: TurnEventKind::Blocked,
-                blocked_gate: Some(TurnBlockedGateMetadata {
-                    gate_ref: GateRef::new(gate_ref).unwrap(),
-                    gate_kind: TurnBlockedGateKind::Auth,
-                    activity_id: None,
-                    credential_requirements: credential_requirements.clone(),
-                }),
-                sanitized_reason: Some("Notion authentication required".to_string()),
+                sanitized_reason: Some("Vendor authentication required".to_string()),
                 detail: None,
                 retryable: None,
             }],
@@ -711,10 +591,10 @@ async fn webui_event_stream_creates_notion_dcr_oauth_prompt_for_runtime_credenti
                 if prompt.turn_run_id == turn_run
                     && prompt.auth_request_ref == gate_ref
                     && prompt.challenge_kind == Some(AuthPromptChallengeKind::OAuthUrl)
-                    && prompt.provider.as_deref() == Some("notion")
+                    && prompt.provider.as_deref() == Some("vendorco")
                     && prompt.authorization_url.as_deref().is_some_and(|url|
-                        url.starts_with("https://oauth.notion.com/authorize")
-                            && url.contains("client_id=dcr-client")
+                        url.starts_with("https://auth.vendorco.example/authorize")
+                            && url.contains("items%3Aread")
                     )
                     && prompt.account_label.is_none()
         )),

@@ -12,7 +12,11 @@ fn extension_search_json_reads_reborn_home_local_dev_packages() {
 
     let json = run_extension_json(&reborn_home, &["search", "zztest", "--json"]);
 
-    assert_eq!(json["phase"], "discovered");
+    // Option A honest projection: search/list responses carry the neutral
+    // multi-item `installed` phase; per-item states ride the payload
+    // (`LifecycleProductResponse.phase` contract). Main's `discovered`
+    // variant is retired.
+    assert_eq!(json["phase"], "installed");
     assert_eq!(json["payload"]["kind"], "extension_search");
     assert_eq!(json["payload"]["count"], 1);
     assert_eq!(
@@ -37,7 +41,11 @@ fn extension_search_json_without_query_lists_local_dev_packages() {
         .filter_map(|extension| extension["package_ref"]["id"].as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(json["phase"], "discovered");
+    // Option A honest projection: search/list responses carry the neutral
+    // multi-item `installed` phase; per-item states ride the payload
+    // (`LifecycleProductResponse.phase` contract). Main's `discovered`
+    // variant is retired.
+    assert_eq!(json["phase"], "installed");
     assert_eq!(json["payload"]["kind"], "extension_search");
     assert!(ids.contains(&"zztest-alpha"), "ids: {ids:?}");
     assert!(ids.contains(&"zztest-beta"), "ids: {ids:?}");

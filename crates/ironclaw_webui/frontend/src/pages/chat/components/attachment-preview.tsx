@@ -10,14 +10,14 @@
 //   download          → metadata panel for binaries we won't render inline
 // A Download action is always offered. The bytes are fetched once (the
 // authenticated byte endpoint can't be hit by a bare element src, which carries
-// no bearer); object URLs created for the PDF frame / download are revoked when
-// the modal closes.
+// no bearer); object URLs created for previews are revoked when the modal closes.
 
 import React from "react";
 import { Modal, ModalBody, ModalFooter, ModalHeader } from "../../../design-system/modal";
 import { Icon } from "../../../design-system/icons";
 import { useT } from "../../../lib/i18n";
 import { fetchAttachmentBlob, blobToDataUrl } from "../../../lib/api";
+import { saveBlob } from "../../../lib/download";
 import { attachmentPreviewMode } from "../lib/attachments";
 
 // Cap inline text rendering so a large (but within the byte limit) text file
@@ -55,9 +55,10 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
     let objectUrl = null;
     fetchAttachmentBlob(attachment.fetch_url)
       .then(async (blob) => {
-        // The object URL doubles as the download href and the PDF frame src.
+        // Keep the Blob for downloads so `saveBlob` can force the logical
+        // filename even when Chromium's PDF viewer owns the preview object URL.
         objectUrl = URL.createObjectURL(blob);
-        const next = { downloadUrl: objectUrl };
+        const next = { downloadUrl: objectUrl, downloadBlob: blob };
         if (mode === "image" || mode === "audio" || mode === "video") {
           next.dataUrl = await blobToDataUrl(blob);
         } else if (mode === "pdf") {
@@ -106,6 +107,10 @@ export function AttachmentPreviewModal({ attachment, onClose }) {
         (<a
           href={view.downloadUrl}
           download={filename}
+          onClick={view.downloadBlob ? (event) => {
+            event.preventDefault();
+            saveBlob(view.downloadBlob, filename);
+          } : undefined}
           data-testid="attachment-download"
           className="v2-button inline-flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-iron-200 hover:border-signal/35 hover:text-white"
         >

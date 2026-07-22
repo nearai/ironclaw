@@ -425,10 +425,6 @@ impl DeploymentConfig {
 pub enum RebornRuntimeProfileError {
     #[error("profile={profile} is not a local Reborn runtime profile")]
     UnsupportedProfile { profile: RebornCompositionProfile },
-    #[error(
-        "profile=hosted-single-tenant-volume requires a binary built with the `libsql` feature"
-    )]
-    MissingLibsqlFeature,
     #[error("failed to resolve local runtime policy: {0}")]
     Policy(#[from] ResolveError),
     #[error("profile={profile} carries no runtime-policy request to resolve")]
@@ -504,17 +500,8 @@ pub(crate) fn hosted_single_tenant_volume_build_input(
     owner_id: impl Into<String>,
     root: PathBuf,
 ) -> Result<RebornBuildInput, RebornRuntimeProfileError> {
-    #[cfg(not(feature = "libsql"))]
-    {
-        let _ = owner_id;
-        let _ = root;
-        Err(RebornRuntimeProfileError::MissingLibsqlFeature)
-    }
-
-    #[cfg(feature = "libsql")]
     let policy =
         hosted_single_tenant_volume_runtime_policy().map_err(RebornRuntimeProfileError::Policy)?;
-    #[cfg(feature = "libsql")]
     Ok(RebornBuildInput::local_dev_with_profile(
         RebornCompositionProfile::HostedSingleTenantVolume,
         owner_id,
@@ -565,9 +552,6 @@ pub fn local_dev_yolo_runtime_policy(
     )
     .map_err(|error| match error {
         RebornRuntimeProfileError::Policy(error) => error,
-        RebornRuntimeProfileError::MissingLibsqlFeature => {
-            unreachable!("local-dev-yolo is not the hosted volume profile")
-        }
         RebornRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("local-dev-yolo is a local runtime profile")
         }
@@ -595,9 +579,6 @@ fn local_runtime_policy_for_local_dev_shape(
     )
     .map_err(|error| match error {
         RebornRuntimeProfileError::Policy(error) => error,
-        RebornRuntimeProfileError::MissingLibsqlFeature => {
-            unreachable!("{profile_name} is not the hosted volume profile")
-        }
         RebornRuntimeProfileError::UnsupportedProfile { .. } => {
             unreachable!("{profile_name} uses the local-dev runtime policy shape")
         }

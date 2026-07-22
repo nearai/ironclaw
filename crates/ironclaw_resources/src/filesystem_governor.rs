@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
-use ironclaw_host_api::{ResourceReservationId, ResourceScope};
+use ironclaw_host_api::{ResourceReservation, ResourceReservationId, ResourceScope};
 use tracing::warn;
 
 use crate::cas_snapshot::{AsyncStorageWorkerPoolCell, new_worker_pool_cell, run_on_worker_pool};
@@ -32,7 +32,7 @@ use crate::{
     ResourceGovernorStore, ResourceLimits, ResourceReceipt, ResourceTally, SystemClock,
     account_snapshot_in_state, advance_period_if_rolled_over, emit_reserve_events,
     most_specific_account, reconcile_in_state, release_in_state, reserve_with_outcome_in_state,
-    set_limit_in_state,
+    set_limit_in_state, validate_reservation_in_state,
 };
 use crate::{ResourceEstimate, ResourceUsage};
 
@@ -572,6 +572,28 @@ where
             at: now,
         });
         Ok(receipt)
+    }
+
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        let authority = self.authority()?;
+        authority.check_available()?;
+        let accounts = {
+            let reservations = authority.lock_reservations()?;
+            let Some(record) = reservations.get(&reservation.id) else {
+                return Err(ResourceError::UnknownReservation { id: reservation.id });
+            };
+            record.accounts.clone()
+        };
+        let _commit = authority.lock_commit_for_accounts(&accounts)?;
+        let reservations = authority.lock_reservations()?;
+        let Some(record) = reservations.get(&reservation.id).cloned() else {
+            return Err(ResourceError::UnknownReservation { id: reservation.id });
+        };
+        let mut locked = authority.lock_accounts(&accounts)?;
+        let mut reservation_subset = HashMap::new();
+        reservation_subset.insert(reservation.id, record);
+        let mut state = locked.state_for_accounts(&accounts, reservation_subset);
+        validate_reservation_in_state(&mut state, reservation)
     }
 
     fn release(

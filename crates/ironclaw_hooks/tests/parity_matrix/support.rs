@@ -205,7 +205,6 @@ pub(crate) async fn libsql_backend() -> LibSqlFixture {
 /// after env discovery fails loudly so a misconfigured-but-reachable CI DB
 /// cannot silently drop the Postgres parity leg. Each call uses a unique schema
 /// so concurrent matrix runs cannot collide.
-#[cfg(feature = "postgres")]
 pub(crate) async fn postgres_backend() -> Result<Option<Arc<dyn PredicateStateBackend>>, String> {
     use ironclaw_hooks::postgres_backend::PostgresPredicateStateBackend;
 
@@ -285,8 +284,8 @@ pub(crate) fn libsql_serial_guard() -> &'static tokio::sync::Mutex<()> {
 
 /// When `IRONCLAW_REQUIRE_POSTGRES=1`, a missing/unreachable Postgres backend is
 /// a HARD failure rather than a silent skip. CI sets this so a misconfigured DB
-/// (or a forgotten `--features postgres`) cannot turn the Postgres parity leg
-/// into a green skip-pass; local runs without the env var still skip cleanly.
+/// cannot turn the Postgres parity leg into a green skip-pass; local runs
+/// without the env var still skip cleanly.
 pub(crate) fn require_postgres_or_skip(script_name: &str) {
     let required = std::env::var("IRONCLAW_REQUIRE_POSTGRES")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -294,14 +293,13 @@ pub(crate) fn require_postgres_or_skip(script_name: &str) {
     if required {
         panic!(
             "[{script_name}] IRONCLAW_REQUIRE_POSTGRES=1 but the Postgres parity leg \
-             did not run (backend not compiled with --features postgres, or \
-             IRONCLAW_HOOKS_POSTGRES_URL / DATABASE_URL unset/unreachable). \
+             did not run (IRONCLAW_HOOKS_POSTGRES_URL / DATABASE_URL unset/unreachable). \
              Refusing to skip-pass under the CI hard-gate."
         );
     }
     eprintln!(
-        "[{script_name}] Postgres leg SKIPPED (no --features postgres or no reachable \
-         DB URL). Parity proven for in-memory + libSQL only; set \
+        "[{script_name}] Postgres leg SKIPPED (no reachable DB URL). Parity proven \
+         for in-memory + libSQL only; set \
          IRONCLAW_REQUIRE_POSTGRES=1 to make this a hard failure in CI."
     );
 }
@@ -395,7 +393,6 @@ where
     ran.push("libsql");
 
     // Postgres leg (compiled under `postgres`, runs only with a DB URL).
-    #[cfg(feature = "postgres")]
     {
         // `Err` = DB URL was set but setup (connect/schema/pool/migrate/
         // truncate) failed: ALWAYS fatal, never a skip — a misconfigured but
@@ -419,11 +416,6 @@ where
             ),
         }
     }
-    #[cfg(not(feature = "postgres"))]
-    {
-        require_postgres_or_skip(script_name);
-    }
-
     eprintln!("[{script_name}] parity legs executed: {ran:?}");
     ran
 }

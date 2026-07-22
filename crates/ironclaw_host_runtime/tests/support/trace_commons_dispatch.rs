@@ -35,8 +35,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, builtin_first_party_handlers,
-    builtin_first_party_package,
+    RuntimeFailureKind, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -254,7 +253,7 @@ pub fn execution_context_with_network(
             network,
         )],
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new(user_id).unwrap(),
         ExtensionId::new(caller_extension_id).unwrap(),
         RuntimeKind::FirstParty,
@@ -262,7 +261,9 @@ pub fn execution_context_with_network(
         capability_set,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 /// Execution context granting a read-only capability (no network needed).
@@ -348,7 +349,7 @@ pub async fn invoke_with_context(
     context: ExecutionContext,
 ) -> Result<Value, RuntimeFailureKind> {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(capability),
             ResourceEstimate::default(),

@@ -113,5 +113,8 @@ fn credential_target_summary(target: &RuntimeCredentialTarget) -> String {
         RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
             format!("path:{placeholder}=<secret>")
         }
+        RuntimeCredentialTarget::BodyJsonPointer { pointer } => {
+            format!("body:{pointer}=<secret>")
+        }
     }
 }

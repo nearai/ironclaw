@@ -241,6 +241,11 @@ impl ResolvedRebornLlm {
         &self.model
     }
 
+    /// Whether a caller-installed provider decorator will run at cold boot.
+    pub fn has_provider_factory(&self) -> bool {
+        self.provider_factory.is_some()
+    }
+
     /// Base URL of the backend `serve` actually boots with, when the
     /// backend has one. See [`ironclaw_llm::LlmConfig::active_base_url`].
     pub fn base_url(&self) -> Option<String> {
@@ -272,6 +277,47 @@ impl ResolvedRebornLlm {
     pub fn with_provider_factory(mut self, factory: RebornProviderFactory) -> Self {
         self.provider_factory = Some(factory);
         self
+    }
+
+    /// Attach the LLM-trace-recording decorator when `IRONCLAW_RECORD_TRACE` is
+    /// set in the environment; otherwise return the resolved LLM unchanged.
+    ///
+    /// This is the *only* place the serve/run turn path wires
+    /// [`ironclaw_llm::RecordingLlm`]. The runtime builds its turn provider
+    /// through `wrap_swappable_gateway` and hot-reloads it through
+    /// `build_provider_chain_components`, and neither calls
+    /// `RecordingLlm::from_env` — that wiring lives only in
+    /// `build_provider_chain`/`build_static_provider_chain`, which serve uses
+    /// solely for onboarding/probe (`list_models`), never for turns. Without
+    /// this seam `IRONCLAW_RECORD_TRACE=1` on `ironclaw serve` produces no trace
+    /// files at all (the reason the committed reborn_qa fixtures were only ever
+    /// recorded through the in-process integration harness).
+    ///
+    /// The factory wraps the gateway's *swappable* provider (via
+    /// [`with_provider_factory`](Self::with_provider_factory)), so recording
+    /// follows the active inner provider across live config reloads. Recording
+    /// is off by default: an unset or empty env var leaves the resolved LLM
+    /// untouched, so production `serve`/`run` are unaffected unless the operator
+    /// opts in.
+    pub fn with_env_trace_recording(self) -> Self {
+        // Keep the enabling semantics with the recorder rather than duplicating
+        // its environment parsing at the composition seam.
+        if !ironclaw_llm::RecordingLlm::env_recording_enabled() {
+            return self;
+        }
+        // `RecordingLlm::from_env` re-reads `IRONCLAW_RECORD_TRACE` /
+        // `IRONCLAW_TRACE_OUTPUT` / `IRONCLAW_TRACE_MODEL_NAME` at cold boot when
+        // the gateway applies the factory, keeping the canonical env parsing in
+        // one place. If it declines (env cleared between resolve and boot), the
+        // provider passes through unwrapped.
+        let factory: RebornProviderFactory =
+            Arc::new(
+                |inner| match ironclaw_llm::RecordingLlm::from_env(Arc::clone(&inner)) {
+                    Some(recorder) => recorder as Arc<dyn ironclaw_llm::LlmProvider>,
+                    None => inner,
+                },
+            );
+        self.with_provider_factory(factory)
     }
 }
 
@@ -351,73 +397,16 @@ impl Default for PollSettings {
     }
 }
 
-/// Configuration for the background Google OAuth credential keepalive worker.
-///
-/// The worker handles background keepalive refreshes (B2/B3): it periodically
-/// refreshes Google OAuth accounts that are idle (by `updated_at`) to prevent
-/// the 7-day refresh-token death window from expiring during periods of
-/// inactivity.
+/// Scheduling knobs for the engine-owned credential keepalive sweep
+/// ([`ironclaw_auth::keepalive`]). The idle threshold is deliberately NOT a
+/// deployment setting: vendors declare their idle lifetime in their auth
+/// recipe (`refresh.keepalive_idle_seconds`) and the engine sweeps every
+/// declaring vendor's accounts.
 ///
 /// The inline access-token expiry gate is controlled by the fixed
 /// `DEFAULT_ACCESS_REFRESH_MARGIN` constant in
 /// `product_auth_runtime_credentials.rs`; it is not configurable here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CredentialRefreshSettings {
-    /// Whether the worker is enabled. Defaults to `false`; use
-    /// `CredentialRefreshSettings::enabled()` to turn on.
-    pub enabled: bool,
-    /// How often the worker wakes and sweeps for idle accounts.
-    ///
-    /// Default: 6 hours.
-    pub interval: Duration,
-    /// How old (by `updated_at`) an account must be before it is considered
-    /// idle and eligible for a proactive refresh.
-    ///
-    /// Default: 2 days — well under the 7-day refresh-token idle-death window,
-    /// with headroom for downtime or deployment gaps.
-    pub idle_threshold: Duration,
-    /// Maximum random jitter applied once at worker startup before the first
-    /// tick. Spreading startup jitter across the multi-process deployment
-    /// prevents a thundering herd at first boot. The advisory-lock wrapper
-    /// (A4) serializes concurrent refreshes, but jitter reduces unnecessary
-    /// contention. Default: `Duration::ZERO`.
-    pub startup_jitter_max: Duration,
-    /// Maximum random jitter appended to each inter-tick sleep.
-    /// Default: `Duration::ZERO`.
-    pub tick_jitter_max: Duration,
-    /// Maximum number of candidate accounts processed per tick. Bounds the
-    /// work done in a single sweep to avoid a large initial backfill
-    /// overloading the token endpoint.
-    ///
-    /// Default: 5.
-    pub max_per_tick: usize,
-}
-
-impl Default for CredentialRefreshSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            interval: Duration::from_secs(6 * 3600),
-            idle_threshold: Duration::from_secs(2 * 24 * 3600),
-            startup_jitter_max: Duration::ZERO,
-            tick_jitter_max: Duration::ZERO,
-            max_per_tick: 5,
-        }
-    }
-}
-
-impl CredentialRefreshSettings {
-    /// Return a settings value with the worker enabled and all other fields at
-    /// their defaults.
-    pub fn enabled() -> Self {
-        Self {
-            enabled: true,
-            // 5-minute spread prevents fleet-wide sweep storms on simultaneous startup.
-            startup_jitter_max: Duration::from_secs(300),
-            ..Self::default()
-        }
-    }
-}
+pub use ironclaw_auth::KeepaliveSweepSettings;
 
 /// Configuration for the composition-owned scheduled-trigger poller.
 ///
@@ -490,7 +479,7 @@ pub struct RebornRuntimeInput {
     pub runner: TurnRunnerSettings,
     pub tool_disclosure: Option<ToolDisclosureMode>,
     pub trigger_poller: TriggerPollerSettings,
-    pub credential_refresh: CredentialRefreshSettings,
+    pub credential_refresh: KeepaliveSweepSettings,
     /// Explicit fire-time access checker override. Primarily a test/advanced
     /// seam; production callers set [`trigger_fire_access`](Self::trigger_fire_access)
     /// and let the build construct the checker. When set, it takes precedence
@@ -566,7 +555,7 @@ impl RebornRuntimeInput {
             runner: TurnRunnerSettings::default(),
             tool_disclosure: None,
             trigger_poller: TriggerPollerSettings::default(),
-            credential_refresh: CredentialRefreshSettings::default(),
+            credential_refresh: KeepaliveSweepSettings::default(),
             trigger_fire_access_checker: None,
             trigger_fire_access: TriggerFireAccessPolicy::default(),
             poll: PollSettings::default(),
@@ -700,7 +689,7 @@ impl RebornRuntimeInput {
 
     pub fn with_credential_refresh_settings(
         mut self,
-        credential_refresh: CredentialRefreshSettings,
+        credential_refresh: KeepaliveSweepSettings,
     ) -> Self {
         self.credential_refresh = credential_refresh;
         self
@@ -747,26 +736,6 @@ impl RebornRuntimeInput {
         self.services = self
             .services
             .map(|services| services.with_owner_id(owner_id));
-        self
-    }
-
-    /// Forward the build-time Slack host-beta wiring signal onto the
-    /// substrate build input. No-op when the services input is absent,
-    /// mirroring `with_owner_id` above.
-    pub fn with_slack_host_beta_enabled(mut self, enabled: bool) -> Self {
-        self.services = self
-            .services
-            .map(|services| services.with_slack_host_beta_enabled(enabled));
-        self
-    }
-
-    /// Forward the build-time Slack personal-OAuth redirect-URI signal onto
-    /// the substrate build input. No-op when the services input is absent,
-    /// mirroring `with_slack_host_beta_enabled` above.
-    pub fn with_slack_personal_oauth_redirect_uri_configured(mut self, configured: bool) -> Self {
-        self.services = self
-            .services
-            .map(|services| services.with_slack_personal_oauth_redirect_uri_configured(configured));
         self
     }
 

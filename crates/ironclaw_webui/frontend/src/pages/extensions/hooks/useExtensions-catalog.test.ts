@@ -4,6 +4,10 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 import { productAuthOAuthEventsSource } from "../../../lib/product-auth-oauth-events.vm-inline";
+import { hasChannelSurface } from "../lib/extensions-schema";
+
+// Wire-shaped tool-surface fixture for the surfaces/runtime extension model.
+const toolSurfaces = [{ kind: "tool" }];
 
 function useExtensionsSourceForTest() {
   const source = readFileSync(new URL("./useExtensions.ts", import.meta.url), "utf8");
@@ -27,7 +31,6 @@ function useExtensionsForTest({ extensions, registry }) {
   const queryData = new Map([
     ["extensions", { extensions }],
     ["extension-registry", { entries: registry }],
-    ["connectable-channels", { channels: [] }],
     ["gateway-status-extensions", {}],
   ]);
   const context = {
@@ -46,19 +49,27 @@ function useExtensionsForTest({ extensions, registry }) {
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: (kind) => kind === "wasm_channel" || kind === "channel",
-    listConnectableChannels: () => {},
+    // The real surface-taxonomy helper, so grouping matches production.
+    hasChannelSurface,
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
     useMutation: () => ({ isPending: false, mutate: () => {} }),
-    useQuery: (config) => ({
-      data: queryData.get(config.queryKey[0]) || {},
-      isLoading: false,
-      error: null,
-      isRefetching: false,
-      refetch: () => Promise.resolve(),
-    }),
+    useQuery: (config) => {
+      // Channel discovery rides on the extensions snapshot's `surfaces`; the
+      // hook must not resurrect a separate connectable-channels query.
+      assert.ok(
+        queryData.has(config.queryKey[0]),
+        `useExtensions created an unexpected query: ${config.queryKey[0]}`,
+      );
+      return {
+        data: queryData.get(config.queryKey[0]),
+        isLoading: false,
+        error: null,
+        isRefetching: false,
+        refetch: () => Promise.resolve(),
+      };
+    },
     useQueryClient: () => ({ invalidateQueries: () => {} }),
     useT: () => (key, params = {}) =>
       `${key}${params.name ? `:${params.name}` : ""}`,
@@ -78,18 +89,21 @@ test("useExtensions merges registry and installed entries with installed first",
       {
         package_ref: googleRef,
         display_name: "Google Runtime",
-        kind: "wasm_tool",
+        runtime: "wasm",
+        surfaces: toolSurfaces,
         active: true,
       },
       {
         package_ref: localRef,
         display_name: "Local Tool",
-        kind: "wasm_tool",
+        runtime: "wasm",
+        surfaces: toolSurfaces,
         active: true,
       },
       {
         display_name: "Local No ID",
-        kind: "wasm_tool",
+        runtime: "wasm",
+        surfaces: toolSurfaces,
         active: true,
       },
     ],
@@ -99,18 +113,21 @@ test("useExtensions merges registry and installed entries with installed first",
         display_name: "Google Calendar",
         description: "Calendar access",
         keywords: ["calendar"],
-        kind: "wasm_tool",
+        runtime: "wasm",
+        surfaces: toolSurfaces,
         installed: true,
       },
       {
         package_ref: githubRef,
         display_name: "GitHub",
-        kind: "mcp_server",
+        runtime: "mcp",
+        surfaces: toolSurfaces,
         installed: false,
       },
       {
         display_name: "Registry No ID",
-        kind: "wasm_tool",
+        runtime: "wasm",
+        surfaces: toolSurfaces,
         installed: false,
       },
     ],
@@ -161,8 +178,8 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
+    // The real surface-taxonomy helper, so grouping matches production.
+    hasChannelSurface,
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -230,8 +247,7 @@ test("install/activate auth popups: noopener null is not an error; insecure URLs
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
+    hasChannelSurface,
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -264,7 +280,7 @@ test("install/activate auth popups: noopener null is not an error; insecure URLs
 
   installConfig.onSuccess(
     { success: true, auth_url: "https://slack.com/oauth/v2/authorize" },
-    { displayName: "Slack", kind: "extension" },
+    { displayName: "Slack", surfaces: toolSurfaces },
   );
   assert.equal(lastError(), undefined, "noopener null must not read as a blocked popup");
   // The fresh open must pass the full hardened argument set (see
@@ -313,7 +329,7 @@ test("useOauthSetup waits for flow completion after the OAuth popup closes", asy
             authenticated: false,
             needs_setup: true,
             has_auth: true,
-            activation_status: "installed",
+            installation_state: "installed",
             onboarding_state: "auth_required",
           },
         ],
@@ -352,9 +368,8 @@ test("useOauthSetup waits for flow completion after the OAuth popup closes", asy
     fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
+    hasChannelSurface,
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},

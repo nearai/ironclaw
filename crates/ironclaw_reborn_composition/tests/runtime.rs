@@ -23,7 +23,6 @@ use ironclaw_reborn_composition::{
     RebornRuntimeIdentity, RebornRuntimeInput, RebornSkillSourceKind, RebornTurnDriveOutcome,
     TurnRunnerSettings, build_reborn_runtime,
 };
-#[cfg(feature = "libsql")]
 use ironclaw_reborn_composition::{
     RebornCompositionProfile, local_runtime_build_input_with_options,
 };
@@ -64,7 +63,6 @@ async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
     assert!(reason.contains("profile=disabled must not start live Reborn runtime traffic"));
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn runtime_rejects_migration_dry_run_before_live_traffic() {
     let dir = tempfile::tempdir().unwrap();
@@ -120,7 +118,6 @@ async fn runtime_requires_resolved_runtime_policy_for_local_dev() {
     assert!(reason.contains("resolved runtime policy"));
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn hosted_single_tenant_volume_builds_live_runtime() {
     // Regression for #5346: the runtime profile match was hardcoded after

@@ -8,14 +8,14 @@ mod tests {
         http::{Method, Request, header},
     };
     use ironclaw_auth::{
-        AuthFlowManager, AuthProviderId, AuthSurface, CredentialAccountLabel,
-        CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-        NewCredentialAccount, ProviderScope,
+        AuthEngine, AuthEngineDeps, AuthFlowManager, AuthProviderId, AuthSurface,
+        CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus,
+        CredentialOwnership, EngineCallbackBase, NewCredentialAccount, ProviderScope,
+        ResolvedVendorAuthRecipe, StaticAuthRecipeResolver,
     };
-    use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
     use ironclaw_host_api::{
-        MissionId, NetworkMethod, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId,
+        MissionId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId, VendorAuthRecipe,
     };
     use ironclaw_product_workflow::WebUiAuthenticatedCaller;
     use ironclaw_secrets::FilesystemSecretStore;
@@ -25,10 +25,6 @@ mod tests {
     use uuid::Uuid;
 
     use crate::RebornAuthContinuationDispatcher;
-    use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
-    use crate::product_auth::oauth::oauth_dcr::{
-        OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
-    };
 
     #[derive(Debug)]
     struct NoopDispatcher;
@@ -39,6 +35,12 @@ mod tests {
             &self,
             _event: ironclaw_auth::AuthContinuationEvent,
         ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
             Ok(())
         }
     }
@@ -65,52 +67,83 @@ mod tests {
     }
 
     #[derive(Debug)]
-    struct RouteDcrSetupEgress;
+    struct PanicEgress;
 
     #[async_trait]
-    impl RuntimeHttpEgress for RouteDcrSetupEgress {
+    impl RuntimeHttpEgress for PanicEgress {
         async fn execute(
             &self,
             request: RuntimeHttpEgressRequest,
         ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
-            let body = match request.url.as_str() {
-            "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource" => {
-                br#"{"authorization_servers":["https://oauth.notion.com"]}"#.to_vec()
-            }
-            "https://oauth.notion.com/.well-known/oauth-authorization-server" => {
-                br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token","registration_endpoint":"https://oauth.notion.com/register"}"#.to_vec()
-            }
-            "https://oauth.notion.com/register" => br#"{"client_id":"dcr-client","registration_client_uri":"https://oauth.notion.com/register/dcr-client","registration_access_token":"registration-token"}"#.to_vec(),
-            "https://oauth.notion.com/register/dcr-client"
-                if request.method == NetworkMethod::Delete =>
-            {
-                br#"{}"#.to_vec()
-            }
-            other => panic!("unexpected DCR route egress URL: {other}"),
-        };
-            Ok(RuntimeHttpEgressResponse {
-                status: 200,
-                headers: Vec::new(),
-                request_bytes: request.body.len() as u64,
-                response_bytes: body.len() as u64,
-                body,
-                saved_body: None,
-                redaction_applied: false,
-            })
+            panic!(
+                "start-route flow preparation must not reach a vendor: {}",
+                request.url
+            );
         }
     }
 
     #[derive(Debug)]
-    struct NoopObligationHandler;
+    struct StaticCredentials;
 
     #[async_trait]
-    impl CapabilityObligationHandler for NoopObligationHandler {
-        async fn satisfy(
+    impl ironclaw_auth::EngineClientCredentialsSource for StaticCredentials {
+        async fn resolve(
             &self,
-            _request: CapabilityObligationRequest<'_>,
-        ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
-            Ok(())
+            vendor: &str,
+            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+        ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
+            Ok(ironclaw_auth::EngineOAuthClientMaterial {
+                client_id: ironclaw_auth::OAuthClientId::new(format!("{vendor}-client-id"))?,
+                client_secret: None,
+            })
         }
+    }
+
+    fn vendor_recipe(vendor: &str, scopes: &[&str]) -> ResolvedVendorAuthRecipe {
+        let recipe: VendorAuthRecipe = serde_json::from_value(json!({
+            "method": "oauth2_code",
+            "display_name": format!("{vendor} account"),
+            "authorization_endpoint": format!("https://auth.{vendor}.example/authorize"),
+            "token_endpoint": format!("https://auth.{vendor}.example/token"),
+            "scopes": scopes,
+            "client_credentials": { "client_id_handle": format!("{vendor}_oauth_client_id") },
+            "token_response": { "access_token": "/access_token" },
+        }))
+        .expect("recipe parses");
+        ResolvedVendorAuthRecipe {
+            vendor: vendor.to_string(),
+            recipe,
+            token_exchange_resource: None,
+        }
+    }
+
+    fn test_engine(recipes: Vec<ResolvedVendorAuthRecipe>) -> Arc<AuthEngine> {
+        Arc::new(AuthEngine::new(AuthEngineDeps {
+            recipes: Arc::new(StaticAuthRecipeResolver::new(recipes)),
+            client_credentials: Arc::new(StaticCredentials),
+            egress: Arc::new(PanicEgress),
+            secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
+            callback_base: EngineCallbackBase::new(
+                "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
+            )
+            .expect("callback base"),
+            dcr_client_name: "Ironclaw".to_string(),
+        }))
+    }
+
+    fn engine_backed_route_state(
+        shared: Arc<ironclaw_auth::InMemoryAuthProductServices>,
+        recipes: Vec<ResolvedVendorAuthRecipe>,
+    ) -> ProductAuthRouteState {
+        let product_auth = RebornProductAuthServices::from_shared(shared, Arc::new(NoopDispatcher))
+            .with_auth_engine(test_engine(recipes));
+        ProductAuthRouteState::new(
+            Arc::new(product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_test_installed_extension_lookup()
     }
 
     #[tokio::test]
@@ -121,35 +154,8 @@ mod tests {
         // `invocation_id` (fresh per flow) — the old `scope_matches`
         // full-equality compared `invocation_id` and so never matched, forking a
         // new account on every reconnect. The bind is now owner-granularity.
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-        let dcr_provider = Arc::new(
-            OAuthDcrProvider::new(
-                OAuthDcrProviderConfig {
-                    spec: notion_provider_spec(),
-                    callback_origin: "http://127.0.0.1:3000".to_string(),
-                    client_name: "Ironclaw".to_string(),
-                    account_label: CredentialAccountLabel::new("notion").expect("label"),
-                    scopes: Vec::new(),
-                },
-                Arc::new(RouteDcrSetupEgress),
-                secret_store,
-                Arc::new(NoopObligationHandler),
-            )
-            .expect("DCR provider"),
-        );
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let product_auth =
-            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
-                .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![
-                    dcr_provider,
-                ])));
-        let state = ProductAuthRouteState::new(
-            Arc::new(product_auth),
-            TenantId::new("tenant-alpha").expect("tenant"),
-            None,
-            None,
-        )
-        .with_test_installed_extension_lookup();
+        let state = engine_backed_route_state(shared.clone(), vec![vendor_recipe("notion", &[])]);
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -223,35 +229,8 @@ mod tests {
         // agent must never be bound by this owner's reconnect. tenant/user/
         // agent/project stay hard-`==` in the owner match, so a cross-owner
         // account is invisible and the flow starts with no update binding.
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-        let dcr_provider = Arc::new(
-            OAuthDcrProvider::new(
-                OAuthDcrProviderConfig {
-                    spec: notion_provider_spec(),
-                    callback_origin: "http://127.0.0.1:3000".to_string(),
-                    client_name: "Ironclaw".to_string(),
-                    account_label: CredentialAccountLabel::new("notion").expect("label"),
-                    scopes: Vec::new(),
-                },
-                Arc::new(RouteDcrSetupEgress),
-                secret_store,
-                Arc::new(NoopObligationHandler),
-            )
-            .expect("DCR provider"),
-        );
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let product_auth =
-            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
-                .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![
-                    dcr_provider,
-                ])));
-        let state = ProductAuthRouteState::new(
-            Arc::new(product_auth),
-            TenantId::new("tenant-alpha").expect("tenant"),
-            None,
-            None,
-        )
-        .with_test_installed_extension_lookup();
+        let state = engine_backed_route_state(shared.clone(), vec![vendor_recipe("notion", &[])]);
         let app = product_auth_route_mount(state)
             .protected
             .layer(axum::Extension(test_caller()));
@@ -317,32 +296,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn extension_google_oauth_start_rebinds_account_authorized_in_a_different_thread() {
-        // #4935 user-visible regression: a Google account a user authorized in
-        // one chat thread/mission must be rebound — not forked — when the OAuth
+    async fn extension_oauth_start_rebinds_account_authorized_in_a_different_thread() {
+        // #4935 user-visible regression: an account a user authorized in one
+        // chat thread/mission must be rebound — not forked — when the OAuth
         // reconnect starts from a different context. The bind is owner-
         // granularity (tenant/user/agent/project), so the account's
         // `thread_id`/`mission_id` are stripped from the match; the old
         // `scope_matches` full-equality would have missed this account and
         // forked a duplicate on every reconnect.
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
+        let state = engine_backed_route_state(
             shared.clone(),
-            Arc::new(NoopDispatcher),
-        ));
-        let state = ProductAuthRouteState::new(
-            product_auth,
-            TenantId::new("tenant-alpha").expect("tenant"),
-            None,
-            None,
-        )
-        .with_test_installed_extension_lookup()
-        .with_google_oauth(
-            GoogleOAuthRouteConfig::new(
-                "google-client.apps.googleusercontent.com",
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
-            )
-            .expect("google oauth route config"),
+            vec![vendor_recipe("driveco", &["files:read"])],
         );
         let app = product_auth_route_mount(state)
             .protected
@@ -356,23 +321,20 @@ mod tests {
         let account = shared
             .create_account(NewCredentialAccount {
                 scope: existing_scope,
-                provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).expect("provider"),
-                label: CredentialAccountLabel::new("google-drive google").expect("label"),
+                provider: AuthProviderId::new("driveco").expect("provider"),
+                label: CredentialAccountLabel::new("drive account").expect("label"),
                 status: CredentialAccountStatus::Configured,
                 ownership: CredentialOwnership::UserReusable,
                 owner_extension: None,
                 granted_extensions: Vec::new(),
-                access_secret: Some(SecretHandle::new("google-drive-access").expect("secret")),
-                refresh_secret: Some(SecretHandle::new("google-drive-refresh").expect("secret")),
-                scopes: vec![
-                    ProviderScope::new("https://www.googleapis.com/auth/drive")
-                        .expect("provider scope"),
-                ],
+                access_secret: Some(SecretHandle::new("drive-access").expect("secret")),
+                refresh_secret: Some(SecretHandle::new("drive-refresh").expect("secret")),
+                scopes: vec![ProviderScope::new("files:read").expect("provider scope")],
             })
             .await
-            .expect("seed configured google account");
+            .expect("seed configured account");
 
-        // The reconnect starts from a different context: the Google start route
+        // The reconnect starts from a different context: the start route
         // carries no thread/mission, so the flow scope has neither — i.e. a
         // different thread/mission than where the account was authorized.
         let flow_invocation_id = InvocationId::new();
@@ -380,13 +342,13 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/webchat/v2/extensions/google-drive/setup/oauth/start")
+                    .uri("/api/webchat/v2/extensions/drive-ext/setup/oauth/start")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         json!({
-                            "provider": GOOGLE_PROVIDER_ID,
-                            "account_label": "google-drive google",
-                            "scopes": ["https://www.googleapis.com/auth/drive"],
+                            "provider": "driveco",
+                            "account_label": "drive account",
+                            "scopes": ["files:read"],
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -418,5 +380,64 @@ mod tests {
             .update_binding
             .expect("cross-thread reconnect must rebind the owner's existing account");
         assert_eq!(update_binding.account_id, account.id);
+    }
+
+    /// The engine start path rejects scopes outside the vendor recipe ceiling
+    /// before any flow is created (AUTH-4 at the route tier), and an empty
+    /// scope list defaults to the recipe ceiling.
+    #[tokio::test]
+    async fn extension_oauth_start_enforces_the_recipe_scope_ceiling() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let state = engine_backed_route_state(
+            shared.clone(),
+            vec![vendor_recipe("acmevendor", &["msg:read", "msg:write"])],
+        );
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+
+        let start = |scopes: serde_json::Value| {
+            let app = app.clone();
+            async move {
+                app.oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/api/webchat/v2/extensions/acme-messenger/setup/oauth/start")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(
+                            json!({
+                                "provider": "acmevendor",
+                                "account_label": "acme account",
+                                "scopes": scopes,
+                                "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                                "invocation_id": InvocationId::new().to_string(),
+                            })
+                            .to_string(),
+                        ))
+                        .expect("request"),
+                )
+                .await
+                .expect("route response")
+            }
+        };
+
+        // Widening beyond the ceiling is rejected before any flow exists.
+        let response = start(json!(["admin"])).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Empty scopes default to the full recipe ceiling.
+        let response = start(json!([])).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let url = url::Url::parse(json["authorization_url"].as_str().expect("url")).expect("parse");
+        let scope = url
+            .query_pairs()
+            .find(|(key, _)| key == "scope")
+            .map(|(_, value)| value.into_owned())
+            .expect("scope param");
+        assert_eq!(scope, "msg:read msg:write");
     }
 }

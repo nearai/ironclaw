@@ -18,11 +18,10 @@ use ironclaw_loop_host::{
 use ironclaw_turns::{
     LoopGateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort,
-        ProviderToolCallReplay, ProviderToolDefinition, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, resolution,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+        CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion, ConcurrencyHint,
+        LoopCapabilityPort, LoopRequest, LoopRequestBatch, ProviderToolCallReplay,
+        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
 use serde_json::json;
@@ -37,7 +36,7 @@ pub struct RecordingTestCapabilityPort {
     mode: CapabilityMode,
     expose_spawn_subagent: bool,
     use_subagent_allowed_tool: bool,
-    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    invocations: Arc<Mutex<Vec<LoopRequest>>>,
     next_result: Arc<AtomicUsize>,
     approval_calls: Arc<AtomicUsize>,
 }
@@ -141,7 +140,7 @@ impl RecordingTestCapabilityPort {
         ))
     }
 
-    pub(crate) fn invocations(&self) -> Vec<CapabilityInvocation> {
+    pub(crate) fn invocations(&self) -> Vec<LoopRequest> {
         self.invocations.lock().unwrap().clone()
     }
 
@@ -260,7 +259,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations.lock().unwrap().push(request);
         if matches!(self.mode, CapabilityMode::InvocationError) {
@@ -300,7 +299,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let stop_on_first_suspension = request.stop_on_first_suspension;
         let mut resolutions = Vec::new();
