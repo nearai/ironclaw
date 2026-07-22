@@ -1062,7 +1062,7 @@ async fn trigger_poller_does_not_fire_trigger_with_future_next_run_at() {
 }
 
 #[tokio::test]
-async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
+async fn trigger_poller_does_not_submit_turn_for_conflicting_actor_pairing() {
     let root = tempfile::tempdir().expect("tempdir");
     let recording_gateway = Arc::new(RecordingGateway {
         requests: Arc::new(TokioMutex::new(Vec::new())),
@@ -1080,18 +1080,30 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     let repo = runtime
         .trigger_repository()
         .expect("local-dev runtime exposes trigger repository");
-
-    // Intentionally do NOT call pair_external_actor — the actor is unpaired.
+    let pairing = runtime
+        .trigger_conversation_pairing()
+        .expect("trigger poller runtime exposes conversation pairing service");
 
     let tenant_id = TenantId::new(TENANT).expect("tenant id");
     let user_id = UserId::new(USER).expect("user id");
     let agent_id = AgentId::new(AGENT).expect("agent id");
     let trigger_id = TriggerId::new();
 
-    // Seed a past-due one-shot trigger. An unpaired external actor blocks
-    // trusted trigger materialization before any turn can be submitted. This
-    // is retryable: the trigger records the failed attempt, clears the active
-    // claim, and remains Scheduled until the actor is paired.
+    pairing
+        .pair_external_actor(
+            tenant_id.clone(),
+            AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+            AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                .expect("installation id"),
+            ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, user_id.as_str())
+                .expect("actor ref"),
+            UserId::new("different-trigger-owner").expect("user id"),
+        )
+        .await
+        .expect("pair external actor to a conflicting owner");
+
+    // A pairing owned by a different user must block trusted trigger
+    // materialization before any turn can be submitted.
     let fire_at = Utc::now() - chrono::Duration::seconds(120);
     let record = TriggerRecord {
         trigger_id,
@@ -1140,7 +1152,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     // Safety guarantee: no turn was ever submitted to the LLM gateway.
     assert!(
         captured_contents.is_empty(),
-        "LLM gateway should not have received any requests for an unpaired actor — \
+        "LLM gateway should not have received any requests for a conflicting actor pairing — \
          captured: {:?}",
         captured_contents
     );
@@ -1150,7 +1162,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     assert_eq!(
         current.state,
         TriggerState::Scheduled,
-        "unpaired one-shot trigger must remain Scheduled after blocked pre-submit failure — \
+        "conflicting actor pairing must leave the one-shot trigger Scheduled — \
          state: {:?}, last_status: {:?}",
         current.state,
         current.last_status
@@ -1158,7 +1170,7 @@ async fn trigger_poller_does_not_submit_turn_for_unpaired_actor() {
     assert_eq!(
         current.last_status,
         Some(TriggerRunStatus::Error),
-        "unpaired trigger must record the retryable failure — record: {current:?}"
+        "conflicting actor pairing must record the retryable failure — record: {current:?}"
     );
     assert_eq!(
         current.active_fire_slot, None,

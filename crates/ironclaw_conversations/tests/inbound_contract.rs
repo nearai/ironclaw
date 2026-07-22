@@ -14,6 +14,10 @@ use ironclaw_conversations::{
     ValidateReplyTargetRequest,
 };
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_triggers::{
+    TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID, TRIGGER_TRUSTED_ADAPTER_KIND,
+    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RetryTurnRequest,
@@ -803,6 +807,81 @@ async fn trusted_owner_is_persisted_on_first_bind() {
             .map(UserId::as_str),
         Some("owner-alpha")
     );
+}
+
+#[tokio::test]
+async fn trusted_owner_does_not_self_pair_non_trigger_adapter() {
+    let services = InMemoryConversationServices::default();
+
+    let err = services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request(
+                telegram(),
+                external_actor("telegram-user-1"),
+                external_conversation("chat-trusted-owner-unpaired", None),
+                "telegram-event-trusted-owner-unpaired",
+            ),
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+            Some(user("owner-alpha")),
+        )
+        .await
+        .expect_err("non-trigger trusted owner must still require actor pairing");
+
+    assert!(matches!(err, InboundTurnError::BindingRequired { .. }));
+}
+
+#[tokio::test]
+async fn failed_trusted_trigger_self_pair_does_not_authorize_later_untrusted_resolve() {
+    let services = InMemoryConversationServices::default();
+
+    services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request_with(
+                tenant(),
+                trigger_adapter(),
+                trigger_installation(),
+                trusted_trigger_actor("owner-alpha"),
+                external_conversation("trusted-trigger-authorized-route", None),
+                "trusted-trigger-shared-event",
+            ),
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+            Some(user("owner-alpha")),
+        )
+        .await
+        .expect("trusted trigger owner can self-pair on successful resolve");
+
+    let err = services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request_with(
+                tenant(),
+                trigger_adapter(),
+                trigger_installation(),
+                trusted_trigger_actor("owner-beta"),
+                external_conversation("trusted-trigger-rejected-route", None),
+                "trusted-trigger-shared-event",
+            ),
+            Some(AgentId::new("agent-beta").unwrap()),
+            Some(ProjectId::new("project-beta").unwrap()),
+            Some(user("owner-beta")),
+        )
+        .await
+        .expect_err("route mismatch must reject before committing self-pairing");
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+
+    let err = services
+        .resolve_or_create_binding(resolve_request_with(
+            tenant(),
+            trigger_adapter(),
+            trigger_installation(),
+            trusted_trigger_actor("owner-beta"),
+            external_conversation("trusted-trigger-beta-after-rejection", None),
+            "trusted-trigger-beta-after-rejection-event",
+        ))
+        .await
+        .expect_err("rejected trusted trigger resolve must not seed actor pairing");
+    assert!(matches!(err, InboundTurnError::BindingRequired { .. }));
 }
 
 #[tokio::test]
@@ -3237,8 +3316,20 @@ fn default_installation() -> AdapterInstallationId {
     AdapterInstallationId::new("default-installation").unwrap()
 }
 
+fn trigger_adapter() -> AdapterKind {
+    AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).unwrap()
+}
+
+fn trigger_installation() -> AdapterInstallationId {
+    AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID).unwrap()
+}
+
 fn external_actor(id: &str) -> ExternalActorRef {
     ExternalActorRef::new("user", id).unwrap()
+}
+
+fn trusted_trigger_actor(id: &str) -> ExternalActorRef {
+    ExternalActorRef::new(TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, id).unwrap()
 }
 
 fn external_conversation(

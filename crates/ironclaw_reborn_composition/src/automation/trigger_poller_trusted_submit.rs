@@ -1457,6 +1457,20 @@ mod tests {
         let tenant_id = TenantId::new("trigger-binding-failure-tenant").expect("tenant id");
         let agent_id = AgentId::new("trigger-binding-failure-agent").expect("agent id");
         let creator_user_id = UserId::new("trigger-binding-failure-user").expect("user id");
+        conversations
+            .pair_external_actor(
+                tenant_id.clone(),
+                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
+                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
+                    .expect("installation id"),
+                ExternalActorRef::new(
+                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
+                    creator_user_id.as_str(),
+                )
+                .expect("actor ref"),
+                UserId::new("trigger-binding-failure-other-user").expect("user id"),
+            )
+            .await;
         let trigger_id = TriggerId::new();
         let fire_slot = Utc::now();
         repo.upsert_trigger(test_trigger_record(TestTriggerRecordInput {
@@ -1937,7 +1951,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn materialize_and_submit_pipeline_persists_trigger_creator_as_explicit_thread_owner() {
+    async fn materialize_and_submit_pipeline_self_pairs_trigger_creator_as_explicit_thread_owner() {
         let conversations = ironclaw_conversations::InMemoryConversationServices::default();
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let repo = Arc::new(InMemoryTriggerRepository::default());
@@ -1949,20 +1963,6 @@ mod tests {
         let trigger_id = TriggerId::new();
         let fire_slot = Utc::now();
         let prompt = "summarize unread mail for owner scope test";
-        conversations
-            .pair_external_actor(
-                tenant_id.clone(),
-                AdapterKind::new(TRIGGER_TRUSTED_ADAPTER_KIND).expect("adapter kind"),
-                AdapterInstallationId::new(TRIGGER_TRUSTED_ADAPTER_INSTALLATION_ID)
-                    .expect("installation id"),
-                ExternalActorRef::new(
-                    TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE,
-                    creator_user_id.as_str(),
-                )
-                .expect("actor ref"),
-                creator_user_id.clone(),
-            )
-            .await;
         repo.upsert_trigger(TriggerRecord {
             trigger_id,
             tenant_id: tenant_id.clone(),

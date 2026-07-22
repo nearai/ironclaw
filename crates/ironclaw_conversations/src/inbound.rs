@@ -850,6 +850,86 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn submit_trusted_trigger_fire_self_pairs_unpaired_trigger_creator() {
+        let services = InMemoryConversationServices::default();
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let submitter =
+            trusted_trigger_fire_submitter(services.clone(), services.clone(), coordinator.clone());
+
+        let creator = UserId::new("user-trigger-legacy-creator").expect("user id");
+        let fire_slot = Utc.with_ymd_and_hms(2026, 6, 1, 9, 5, 0).unwrap();
+        let fire = TriggerFire {
+            identity: TriggerFireIdentity::new(tenant(), TriggerId::new(), fire_slot),
+            creator_user_id: creator.clone(),
+            agent_id: Some(agent()),
+            project_id: Some(project()),
+            prompt: "test trigger prompt".to_string(),
+            delivery_target: None,
+        };
+        let materialized_prompt = TriggerMaterializedPrompt::for_fire(
+            &fire,
+            TriggerInboundContentRef::new("content:unpaired-trigger-creator").expect("content ref"),
+        );
+
+        let first = submitter
+            .submit_trusted_trigger_fire(TrustedTriggerSubmitRequest::new_for_test(
+                fire.clone(),
+                materialized_prompt.clone(),
+                fire_slot,
+            ))
+            .await
+            .expect("unpaired trusted trigger creator self-pairs and submits");
+
+        let TrustedTriggerFireSubmitOutcome::Accepted {
+            run_id, turn_scope, ..
+        } = first
+        else {
+            panic!("expected accepted trigger fire");
+        };
+        assert_eq!(turn_scope.explicit_owner_user_id(), Some(&creator));
+        let submissions = coordinator.submissions();
+        assert_eq!(
+            submissions.len(),
+            1,
+            "first fire must submit exactly one turn"
+        );
+        assert_eq!(submissions[0].scope.thread_id, turn_scope.thread_id);
+        assert_eq!(submissions[0].actor.user_id, creator);
+        assert_eq!(
+            submissions[0].product_context.as_ref().map(|c| c.origin),
+            Some(TurnOriginKind::ScheduledTrigger)
+        );
+
+        let messages = services.accepted_messages().await;
+        assert_eq!(messages.len(), 1, "trigger prompt must be accepted once");
+        assert_eq!(messages[0].accepted.thread_id, turn_scope.thread_id);
+        assert_eq!(messages[0].accepted.actor.user_id, creator);
+
+        let replay = submitter
+            .submit_trusted_trigger_fire(TrustedTriggerSubmitRequest::new_for_test(
+                fire,
+                materialized_prompt,
+                fire_slot,
+            ))
+            .await
+            .expect("duplicate trusted trigger fire replays");
+
+        assert!(matches!(
+            replay,
+            TrustedTriggerFireSubmitOutcome::Replayed {
+                original_run_id,
+                thread_id: Some(replayed_thread_id),
+                ..
+            } if original_run_id == run_id && replayed_thread_id == turn_scope.thread_id
+        ));
+        assert_eq!(
+            coordinator.submissions().len(),
+            1,
+            "duplicate fire must replay the stored turn submission"
+        );
+    }
+
     #[test]
     fn submit_trusted_trigger_outcome_preserves_received_at_for_accepted_and_replayed_fires() {
         let submitted_at = Utc.with_ymd_and_hms(2026, 5, 6, 12, 30, 0).unwrap();

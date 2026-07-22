@@ -743,11 +743,10 @@ struct TriggerPollerServices {
     >,
     /// Test-support handle on the SAME conversation services instance the
     /// poller-side materializer/submitter use, so integration tests can call
-    /// the production `pair_external_actor` API to seed the trigger
-    /// creator's actor pairing before driving the poller. Without this
-    /// pre-seed, real `ConversationContentRefMaterializer` fails closed with
-    /// `BindingRequired` — by design — and the trusted-ingress turn is
-    /// never submitted.
+    /// the production `pair_external_actor` API when they need explicit
+    /// pairing setup. Trusted trigger resolution can also self-pair the
+    /// host-owned creator identity, which keeps legacy/imported triggers from
+    /// failing before a run thread is attached.
     #[cfg(any(test, feature = "test-support"))]
     pairing_service: Arc<dyn ironclaw_conversations::ConversationActorPairingService>,
 }
