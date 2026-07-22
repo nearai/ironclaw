@@ -133,7 +133,9 @@ pub use llm_config::{
 };
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
 pub use operator_command_views::{OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_STATUS_VIEW};
-pub use operator_config_views::{OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW};
+pub use operator_config_views::{
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
+};
 pub use outbound_views::{OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
@@ -2494,19 +2496,6 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    async fn validate_operator_config(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornOperatorConfigValidateRequest,
-    ) -> Result<RebornOperatorConfigValidateResponse, RebornServicesError> {
-        let _ = caller;
-        let diagnostics = operator_config_validation_diagnostics(request.keys);
-        Ok(RebornOperatorConfigValidateResponse {
-            valid: diagnostics.is_empty(),
-            diagnostics,
-        })
-    }
-
     async fn run_operator_service_lifecycle(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4018,6 +4007,10 @@ where
                 let response = self
                     .build_operator_config_key_view(caller, query.params)
                     .await?;
+                views::view_page(response)
+            }
+            id if id == OPERATOR_CONFIG_VALIDATE_VIEW.id => {
+                let response = self.build_operator_config_validate_view(query.params)?;
                 views::view_page(response)
             }
             id if id == OPERATOR_DIAGNOSTICS_VIEW.id => {

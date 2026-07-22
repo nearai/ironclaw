@@ -5,10 +5,12 @@ use serde::Deserialize;
 
 use super::{
     AUTO_APPROVE_CONFIG_KEY, ProductCapabilityInvoker, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornServices, RebornServicesError, RebornViewDescriptor,
-    RebornViewProvider, TOOL_CONFIG_PREFIX, WebUiAuthenticatedCaller, auto_approve_config_entry,
-    caller_resource_scope, find_operator_tool, operator_config_not_wired_response,
-    operator_config_unknown_key_error, operator_tool_permission_context, tool_config_entry,
+    RebornOperatorConfigListResponse, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornServices, RebornServicesError,
+    RebornViewDescriptor, RebornViewProvider, TOOL_CONFIG_PREFIX, WebUiAuthenticatedCaller,
+    auto_approve_config_entry, caller_resource_scope, find_operator_tool,
+    operator_config_not_wired_response, operator_config_unknown_key_error,
+    operator_config_validation_diagnostics, operator_tool_permission_context, tool_config_entry,
     tool_config_entry_with_context,
 };
 
@@ -19,6 +21,11 @@ pub const OPERATOR_CONFIG_LIST_VIEW: RebornViewDescriptor = RebornViewDescriptor
 
 pub const OPERATOR_CONFIG_KEY_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "operator_config_key",
+    paginated: false,
+};
+
+pub const OPERATOR_CONFIG_VALIDATE_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "operator_config_validate",
     paginated: false,
 };
 
@@ -88,5 +95,18 @@ where
             return Err(operator_config_unknown_key_error("key"));
         };
         Ok(RebornOperatorConfigGetResponse { entry })
+    }
+
+    pub(super) fn build_operator_config_validate_view(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<RebornOperatorConfigValidateResponse, RebornServicesError> {
+        let request: RebornOperatorConfigValidateRequest =
+            serde_json::from_value(params).map_err(RebornServicesError::internal_from)?;
+        let diagnostics = operator_config_validation_diagnostics(request.keys);
+        Ok(RebornOperatorConfigValidateResponse {
+            valid: diagnostics.is_empty(),
+            diagnostics,
+        })
     }
 }

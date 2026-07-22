@@ -56,12 +56,12 @@ use ironclaw_product_workflow::{
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW, OperatorLogsService,
-    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
-    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
-    ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW,
+    OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
+    OutboundPreferencesProductFacade, PendingApprovalInteractionView, ProductAgentBoundCaller,
+    ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError,
+    ProjectFsFile, ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
     RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
@@ -73,30 +73,30 @@ use ironclaw_product_workflow::{
     RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
-    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornRunArtifact,
-    RebornRunArtifactRequest, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewQuery, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SetActiveLlmRequest, StaticOperatorStatusService,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    RebornViewQuery, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
+    StaticOperatorStatusService, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -9852,6 +9852,24 @@ async fn operator_config_reads_are_available_as_product_views() {
     assert_eq!(key.entry.key, "tool.tool.alpha");
     assert_eq!(key.entry.value["state"], "always_allow");
     assert_eq!(key.entry.value["effective_source"], "global");
+
+    let validate_page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: OPERATOR_CONFIG_VALIDATE_VIEW.id.to_string(),
+                params: json!({ "keys": ["provider.default", "legacy.old"] }),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("operator config validate view");
+    let validate: RebornOperatorConfigValidateResponse =
+        serde_json::from_value(validate_page.payload).expect("operator config validate payload");
+    assert!(!validate.valid);
+    assert!(validate.diagnostics.iter().any(|diagnostic| {
+        diagnostic.reason_code == "operator_config_deprecated" && diagnostic.key == "legacy.old"
+    }));
 }
 
 #[tokio::test]
