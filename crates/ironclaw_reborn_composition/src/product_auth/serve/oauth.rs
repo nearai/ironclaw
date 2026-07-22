@@ -265,7 +265,9 @@ pub(super) async fn oauth_callback_handler(
     let scope = scope_from_callback_query(&state, &query)?;
     let state_hash = opaque_state_hash(state_value.as_str())?;
 
-    let flow_provider = if is_authorized_callback_candidate(&query) {
+    let flow_provider = if is_authorized_callback_candidate(&query)
+        || callback_error_outcome(query.error.as_deref()).is_some()
+    {
         Some(
             run_with_backend_timeout(state.product_auth.ensure_oauth_callback_flow_known(
                 &scope,
@@ -393,6 +395,27 @@ async fn vendor_oauth_callback_attempt(
         ));
     }
 
+    let flow_provider = match run_with_backend_timeout(
+        state
+            .product_auth
+            .ensure_oauth_callback_flow_known(callback_scope, flow_id, &state_hash),
+    )
+    .await
+    {
+        Ok(flow_provider) => flow_provider,
+        Err(error) => {
+            state.remove_pkce_verifier(flow_id);
+            return Err(error);
+        }
+    };
+    // Cross-vendor rejection: a state minted for one vendor's flow cannot
+    // complete through another vendor's callback path, including denial and
+    // terminal provider-error callbacks that do not carry an auth code.
+    if flow_provider != provider {
+        state.remove_pkce_verifier(flow_id);
+        return Err(ProductAuthRouteFailure::malformed_callback());
+    }
+
     if let Some(outcome) = callback_error_outcome(query.error.as_deref()) {
         let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
             RebornOAuthCallbackRequest {
@@ -409,25 +432,6 @@ async fn vendor_oauth_callback_attempt(
         return oauth_callback_route_result_response(headers, response);
     }
 
-    let flow_provider = match run_with_backend_timeout(
-        state
-            .product_auth
-            .ensure_oauth_callback_flow_known(callback_scope, flow_id, &state_hash),
-    )
-    .await
-    {
-        Ok(flow_provider) => flow_provider,
-        Err(error) => {
-            state.remove_pkce_verifier(flow_id);
-            return Err(error);
-        }
-    };
-    // Cross-vendor rejection: a state minted for one vendor's flow cannot
-    // complete through another vendor's callback path.
-    if flow_provider != provider {
-        state.remove_pkce_verifier(flow_id);
-        return Err(ProductAuthRouteFailure::malformed_callback());
-    }
     let Some(code) = query.code.as_ref() else {
         state.remove_pkce_verifier(flow_id);
         return Err(ProductAuthRouteFailure::malformed_callback());
@@ -716,6 +720,15 @@ pub(super) async fn callback_outcome_from_query(
     query: &OAuthCallbackQuery,
 ) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
     if let Some(outcome) = callback_error_outcome(query.error.as_deref()) {
+        let flow_provider =
+            flow_provider.ok_or_else(ProductAuthRouteFailure::malformed_callback)?;
+        if let Some(query_provider) = query.provider.as_deref() {
+            let query_provider = AuthProviderId::new(query_provider.to_string())
+                .map_err(|_| ProductAuthRouteFailure::malformed_callback())?;
+            if &query_provider != flow_provider {
+                return Err(ProductAuthRouteFailure::malformed_callback());
+            }
+        }
         return Ok(outcome);
     }
 

@@ -596,7 +596,7 @@ impl ironclaw_host_api::RuntimeHttpEgress for PanicVendorEgress {
 /// authorize params mirror the bundled manifest recipe, so route behavior
 /// (ceiling rejection, host-built params) is exercised as production data
 /// would drive it.
-fn google_test_engine() -> Arc<ironclaw_auth::AuthEngine> {
+fn google_test_recipe() -> ironclaw_auth::ResolvedVendorAuthRecipe {
     let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(json!({
         "method": "oauth2_code",
         "display_name": "Google account",
@@ -617,19 +617,35 @@ fn google_test_engine() -> Arc<ironclaw_auth::AuthEngine> {
         },
     }))
     .expect("google test recipe parses");
-    vendor_test_engine(ironclaw_auth::ResolvedVendorAuthRecipe {
+    ironclaw_auth::ResolvedVendorAuthRecipe {
         vendor: "google".to_string(),
         recipe,
         token_exchange_resource: None,
-    })
+    }
+}
+
+fn google_test_engine() -> Arc<ironclaw_auth::AuthEngine> {
+    vendor_test_engine(google_test_recipe())
+}
+
+fn google_and_secondary_vendor_test_engine() -> Arc<ironclaw_auth::AuthEngine> {
+    let mut secondary = google_test_recipe();
+    secondary.vendor = "secondary".to_string();
+    vendor_test_engine_with_recipes(vec![google_test_recipe(), secondary])
 }
 
 fn vendor_test_engine(
     recipe: ironclaw_auth::ResolvedVendorAuthRecipe,
 ) -> Arc<ironclaw_auth::AuthEngine> {
+    vendor_test_engine_with_recipes(vec![recipe])
+}
+
+fn vendor_test_engine_with_recipes(
+    recipes: Vec<ironclaw_auth::ResolvedVendorAuthRecipe>,
+) -> Arc<ironclaw_auth::AuthEngine> {
     Arc::new(ironclaw_auth::AuthEngine::new(
         ironclaw_auth::AuthEngineDeps {
-            recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
+            recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(recipes)),
             configuration: Arc::new(StaticVendorClientCredentials),
             egress: Arc::new(PanicVendorEgress),
             secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
@@ -643,13 +659,19 @@ fn vendor_test_engine(
 }
 
 fn build_app_with_google_oauth() -> (axum::Router, Arc<RecordingAuthDispatcher>) {
+    build_app_with_google_oauth_engine(google_test_engine())
+}
+
+fn build_app_with_google_oauth_engine(
+    engine: Arc<ironclaw_auth::AuthEngine>,
+) -> (axum::Router, Arc<RecordingAuthDispatcher>) {
     let dispatcher = Arc::new(RecordingAuthDispatcher::default());
     let product_auth = Arc::new(
         RebornProductAuthServices::from_shared(
             Arc::new(InMemoryAuthProductServices::new()),
             dispatcher.clone(),
         )
-        .with_auth_engine(google_test_engine()),
+        .with_auth_engine(engine),
     );
     (
         build_app_with_product_auth_service_config_and_extensions(product_auth, &["google-tools"]),
@@ -1855,7 +1877,10 @@ async fn product_auth_google_oauth_callback_provider_denial_is_sanitized() {
 #[tokio::test]
 async fn product_auth_google_oauth_callback_provider_error_terminalizes_as_failed() {
     let (app, dispatcher) = build_app_with_google_oauth();
-    let (_, state) = start_google_oauth_flow(&app).await;
+    let (start_json, state) = start_google_oauth_flow(&app).await;
+    let expected_flow_id = AuthFlowId::from_uuid(
+        Uuid::parse_str(start_json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+    );
 
     let response = app
         .oneshot(callback_request(format!(
@@ -1871,12 +1896,50 @@ async fn product_auth_google_oauth_callback_provider_error_terminalizes_as_faile
     assert!(!body.contains("server_error"));
     let events = dispatcher.events();
     assert_eq!(events.len(), 1);
+    assert_eq!(events[0].flow_id, expected_flow_id);
+    assert_eq!(events[0].continuation, AuthContinuationRef::SetupOnly);
     assert_eq!(
         events[0].outcome,
         AuthFlowOutcome::Failed {
             error: AuthErrorCode::MalformedCallback
         }
     );
+}
+
+#[tokio::test]
+async fn product_auth_vendor_error_callback_rejects_cross_vendor_state_before_resolution() {
+    let (app, dispatcher) =
+        build_app_with_google_oauth_engine(google_and_secondary_vendor_test_engine());
+    let (_, state) = start_google_oauth_flow(&app).await;
+
+    let mismatch = app
+        .clone()
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/secondary/callback?state={state}&error=access_denied"
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        read_body_string(mismatch)
+            .await
+            .contains("\"code\":\"malformed_callback\"")
+    );
+    assert!(dispatcher.events().is_empty());
+
+    let correct = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&error=access_denied"
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(correct.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        read_body_string(correct)
+            .await
+            .contains("\"code\":\"provider_denied\"")
+    );
+    assert_eq!(dispatcher.events().len(), 1);
 }
 
 #[tokio::test]
@@ -1976,6 +2039,8 @@ async fn product_auth_callback_provider_error_terminalizes_as_failed() {
         json!({}),
     )
     .await;
+    let expected_flow_id =
+        AuthFlowId::from_uuid(Uuid::parse_str(&started.flow_id).expect("flow id must be a UUID"));
 
     let response = app
         .oneshot(callback_request(callback_uri(
@@ -1995,12 +2060,63 @@ async fn product_auth_callback_provider_error_terminalizes_as_failed() {
     assert!(!body.contains("temporarily_unavailable"));
     let events = dispatcher.events();
     assert_eq!(events.len(), 1);
+    assert_eq!(events[0].flow_id, expected_flow_id);
+    assert_eq!(events[0].continuation, AuthContinuationRef::SetupOnly);
     assert_eq!(
         events[0].outcome,
         AuthFlowOutcome::Failed {
             error: AuthErrorCode::MalformedCallback
         }
     );
+}
+
+#[tokio::test]
+async fn product_auth_error_callback_rejects_mismatched_provider_before_resolution() {
+    let (app, dispatcher) = build_app_with_product_auth();
+    let started = start_oauth_flow(
+        &app,
+        "provider-mismatch-state",
+        "provider-mismatch-pkce",
+        json!({}),
+    )
+    .await;
+
+    let mismatch = app
+        .clone()
+        .oneshot(callback_request(callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "provider-mismatch-state",
+            "&provider=google&error=access_denied",
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        read_body_string(mismatch)
+            .await
+            .contains("\"code\":\"malformed_callback\"")
+    );
+    assert!(dispatcher.events().is_empty());
+
+    let correct = app
+        .oneshot(callback_request(callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "provider-mismatch-state",
+            "&error=access_denied",
+        )))
+        .await
+        .expect("oneshot");
+    assert_eq!(correct.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        read_body_string(correct)
+            .await
+            .contains("\"code\":\"provider_denied\"")
+    );
+    assert_eq!(dispatcher.events().len(), 1);
 }
 
 #[tokio::test]

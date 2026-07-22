@@ -32,7 +32,9 @@ where
         // Owner decision 2026-07-15: cancel on both Deactivate and Uninstall.
         // Shared-vendor safe by construction — the removal caller only
         // selects a provider exclusive to the removed extension. Idempotent:
-        // a concurrently terminal flow is skipped, never an error.
+        // an already-resolved flow is skipped. A callback-owned `Processing`
+        // flow returns retryable `BackendConflict` so a later retry can see
+        // and revoke the account written by that callback.
         //
         // F2 · Any enumerated flow whose `TurnGateResume` continuation was
         // never acknowledged — freshly canceled here or already terminal — is
