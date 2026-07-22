@@ -56,8 +56,9 @@ pub use runtime_event::{
     sanitize_error_kind, sanitize_error_summary, sanitize_hook_id, sanitize_hook_label,
 };
 pub use security_audit::{
+    DurableAuditError, DurableSecurityAudit, InMemoryDurableSecurityAudit,
     InMemorySecurityAuditSink, NoopSecurityAuditSink, SecurityAuditEvent, SecurityAuditSink,
-    SecurityBoundary, SecurityDecision, TracingSecurityAuditSink,
+    SecurityBoundary, SecurityDecision, TracingSecurityAuditSink, checkpoint_or_refuse,
 };
 pub use sink::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
