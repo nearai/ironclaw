@@ -144,3 +144,26 @@ google:
       parent_google_ids:
         - root
       data: "This Drive item belongs only to the secondary identity."
+  documents:
+    - id: doc_reborn_strategy
+      user_email: e2e.google@example.com
+      title: NEAR AI Strategy
+      body: "NEAR AI Strategy: user-owned agents keep credentials and data under user control."
+  spreadsheets:
+    - id: sheet_reborn_abc
+      user_email: e2e.google@example.com
+      title: ABC
+      sheets:
+        - id: 0
+          title: Sheet1
+          values:
+            - [Company, Contact, Source, Status, QA Marker]
+            - [NEAR AI, partnerships@near.ai, Gmail, New, REBORN_QA_SEEDED]
+    - id: sheet_reborn_bug_tracker
+      user_email: e2e.google@example.com
+      title: Reborn QA Bug Tracker
+      sheets:
+        - id: 0
+          title: Sheet1
+          values:
+            - [Summary, Reporter, Slack Timestamp, Status, QA Marker]
