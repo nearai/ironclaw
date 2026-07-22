@@ -16,9 +16,17 @@ SCRIPT = ROOT / "scripts" / "live-canary" / "scrub-artifacts.sh"
 
 
 class ScrubArtifactsTests(unittest.TestCase):
-    def run_scrub(self, artifact_dir: Path, *, strict: bool) -> subprocess.CompletedProcess[str]:
+    def run_scrub(
+        self,
+        artifact_dir: Path,
+        *,
+        strict: bool,
+        bundled_skills_root: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["STRICT_ARTIFACT_SCRUB"] = "true" if strict else "false"
+        if bundled_skills_root is not None:
+            env["LIVE_CANARY_BUNDLED_SKILLS_ROOT"] = str(bundled_skills_root)
         runner_temp = artifact_dir.parent / f"{artifact_dir.name}-runner-temp"
         runner_temp.mkdir(parents=True, exist_ok=True)
         env["RUNNER_TEMP"] = str(runner_temp)
@@ -31,6 +39,69 @@ class ScrubArtifactsTests(unittest.TestCase):
             stderr=subprocess.STDOUT,
             check=False,
         )
+
+    @staticmethod
+    def bundle_hash(name: str, source_dir: Path) -> str:
+        value = 0xCBF29CE484222325
+
+        def update(data: bytes) -> None:
+            nonlocal value
+            for byte in data:
+                value ^= byte
+                value = (value * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+
+        update(name.encode())
+        source_files = sorted(path for path in source_dir.rglob("*") if path.is_file())
+        for source_file in source_files:
+            update(source_file.relative_to(source_dir).as_posix().encode())
+            update(b"\0")
+            update(source_file.read_bytes())
+            update(b"\0")
+        return f"{value:016x}"
+
+    def write_bundled_skill_fixture(
+        self,
+        artifact_dir: Path,
+        *,
+        source_body: str,
+        staged_body: str | None = None,
+        marker: dict[str, object] | str | None = None,
+    ) -> tuple[Path, Path]:
+        trusted_root = artifact_dir.parent / "trusted-skills"
+        trusted_skill = trusted_root / "local-test"
+        trusted_skill.mkdir(parents=True)
+        (trusted_skill / "SKILL.md").write_text(source_body, encoding="utf-8")
+
+        staged_skill = (
+            artifact_dir
+            / "lane"
+            / "reborn-home"
+            / "case-a"
+            / "local-dev"
+            / "system"
+            / "skills"
+            / "local-test"
+        )
+        staged_skill.mkdir(parents=True)
+        (staged_skill / "SKILL.md").write_text(
+            source_body if staged_body is None else staged_body,
+            encoding="utf-8",
+        )
+        marker_payload = marker or {
+            "owner": "ironclaw_reborn_composition_bundled_skill",
+            "format": 1,
+            "content_hash": self.bundle_hash("local-test", trusted_skill),
+        }
+        marker_text = (
+            marker_payload
+            if isinstance(marker_payload, str)
+            else json.dumps(marker_payload)
+        )
+        (staged_skill / ".ironclaw-reborn-bundled.json").write_text(
+            marker_text,
+            encoding="utf-8",
+        )
+        return trusted_root, staged_skill
 
     def test_strict_scrub_redacts_diagnostics_and_preserves_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -128,34 +199,15 @@ class ScrubArtifactsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertFalse(unsafe.exists())
 
-    def test_strict_scrub_prunes_only_managed_bundled_skill_snapshots(self) -> None:
+    def test_strict_scrub_prunes_only_verified_bundled_skill_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            skills_root = (
-                root
-                / "lane"
-                / "reborn-home"
-                / "case-a"
-                / "local-dev"
-                / "system"
-                / "skills"
+            root = Path(tmpdir) / "artifacts"
+            root.mkdir()
+            trusted_root, bundled = self.write_bundled_skill_fixture(
+                root,
+                source_body="docker run -e NEARAI_API_KEY=dummy ironclaw-test\n",
             )
-            bundled = skills_root / "local-test"
-            bundled.mkdir(parents=True)
-            (bundled / ".ironclaw-reborn-bundled.json").write_text(
-                json.dumps(
-                    {
-                        "owner": "ironclaw_reborn_composition_bundled_skill",
-                        "format": 1,
-                        "content_hash": "fixture-hash",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            (bundled / "SKILL.md").write_text(
-                "docker run -e NEARAI_API_KEY=dummy ironclaw-test\n",
-                encoding="utf-8",
-            )
+            skills_root = bundled.parent
             unmanaged = skills_root / "operator-skill"
             unmanaged.mkdir()
             (unmanaged / "SKILL.md").write_text(
@@ -163,38 +215,72 @@ class ScrubArtifactsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            result = self.run_scrub(root, strict=True)
+            result = self.run_scrub(
+                root,
+                strict=True,
+                bundled_skills_root=trusted_root,
+            )
 
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertFalse(bundled.exists())
             self.assertTrue((unmanaged / "SKILL.md").exists())
 
+    def test_strict_scrub_rejects_malformed_bundled_marker_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "artifacts"
+            root.mkdir()
+            trusted_root, bundled = self.write_bundled_skill_fixture(
+                root,
+                source_body="api_key: live-secret-value\n",
+                marker='{"owner":"ironclaw_reborn_composition_bundled_skill"',
+            )
+
+            result = self.run_scrub(
+                root,
+                strict=True,
+                bundled_skills_root=trusted_root,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertTrue(bundled.exists())
+            self.assertFalse((bundled / "SKILL.md").exists())
+
+    def test_strict_scrub_rejects_spoofed_bundled_skill_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "artifacts"
+            root.mkdir()
+            trusted_root, bundled = self.write_bundled_skill_fixture(
+                root,
+                source_body="safe source-controlled instructions\n",
+                staged_body="api_key: live-secret-value\n",
+            )
+
+            result = self.run_scrub(
+                root,
+                strict=True,
+                bundled_skills_root=trusted_root,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertTrue(bundled.exists())
+            self.assertFalse((bundled / "SKILL.md").exists())
+
     def test_strict_scrub_still_rejects_secret_outside_bundled_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            bundled = (
-                root
-                / "lane"
-                / "reborn-home"
-                / "case-a"
-                / "local-dev"
-                / "system"
-                / "skills"
-                / "local-test"
-            )
-            bundled.mkdir(parents=True)
-            (bundled / ".ironclaw-reborn-bundled.json").write_text(
-                '{"owner": "ironclaw_reborn_composition_bundled_skill"}',
-                encoding="utf-8",
-            )
-            (bundled / "SKILL.md").write_text(
-                "NEARAI_API_KEY=dummy\n",
-                encoding="utf-8",
+            root = Path(tmpdir) / "artifacts"
+            root.mkdir()
+            trusted_root, bundled = self.write_bundled_skill_fixture(
+                root,
+                source_body="docker run -e NEARAI_API_KEY=dummy ironclaw-test\n",
             )
             unsafe = root / "operator-state.txt"
             unsafe.write_text("api_key: live-secret-value\n", encoding="utf-8")
 
-            result = self.run_scrub(root, strict=True)
+            result = self.run_scrub(
+                root,
+                strict=True,
+                bundled_skills_root=trusted_root,
+            )
 
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertFalse(bundled.exists())
@@ -202,13 +288,23 @@ class ScrubArtifactsTests(unittest.TestCase):
 
     def test_non_strict_scrub_is_report_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
+            root = Path(tmpdir) / "artifacts"
+            root.mkdir()
+            trusted_root, bundled = self.write_bundled_skill_fixture(
+                root,
+                source_body="docker run -e NEARAI_API_KEY=dummy ironclaw-test\n",
+            )
             artifact = root / "raw.html"
             artifact.write_text("api_key: secret-value\n", encoding="utf-8")
 
-            result = self.run_scrub(root, strict=False)
+            result = self.run_scrub(
+                root,
+                strict=False,
+                bundled_skills_root=trusted_root,
+            )
 
             self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertTrue((bundled / "SKILL.md").exists())
             self.assertTrue(artifact.exists())
             matches = (root / "scrub-matches.txt").read_text(encoding="utf-8")
             self.assertIn("<REDACTED>", matches)

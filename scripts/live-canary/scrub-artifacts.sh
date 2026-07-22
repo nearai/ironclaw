@@ -7,6 +7,8 @@ set -euo pipefail
 
 ARTIFACT_DIR="${1:-${RUN_DIR:-artifacts/live-canary}}"
 STRICT_ARTIFACT_SCRUB="${STRICT_ARTIFACT_SCRUB:-false}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+BUNDLED_SKILLS_ROOT="${LIVE_CANARY_BUNDLED_SKILLS_ROOT:-${REPO_ROOT}/skills}"
 BUNDLED_SKILL_MARKER=".ironclaw-reborn-bundled.json"
 BUNDLED_SKILL_OWNER="ironclaw_reborn_composition_bundled_skill"
 
@@ -15,29 +17,137 @@ if [[ ! -d "${ARTIFACT_DIR}" ]]; then
   exit 2
 fi
 
+is_verified_bundled_skill() {
+  local marker="$1"
+  local skill_dir="$2"
+  local skill_name
+  skill_name="$(basename "${skill_dir}")"
+
+  python3 - "${marker}" "${BUNDLED_SKILLS_ROOT}/${skill_name}" "${skill_dir}" \
+    "${skill_name}" "${BUNDLED_SKILL_OWNER}" "${BUNDLED_SKILL_MARKER}" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+
+marker_path = Path(sys.argv[1])
+trusted_dir = Path(sys.argv[2])
+staged_dir = Path(sys.argv[3])
+skill_name = sys.argv[4]
+expected_owner = sys.argv[5]
+marker_name = sys.argv[6]
+
+
+def regular_files(root: Path, *, omit_marker: bool) -> list[tuple[str, Path]]:
+    if not root.is_dir() or root.is_symlink():
+        raise ValueError("bundle root is not a real directory")
+    files: list[tuple[str, Path]] = []
+    for current, directories, filenames in os.walk(root, followlinks=False):
+        current_path = Path(current)
+        for directory in directories:
+            if (current_path / directory).is_symlink():
+                raise ValueError("bundle contains a symlinked directory")
+        for filename in filenames:
+            path = current_path / filename
+            relative = path.relative_to(root).as_posix()
+            if omit_marker and relative == marker_name:
+                continue
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError("bundle contains a non-regular file")
+            files.append((relative, path))
+    return sorted(files)
+
+
+def update_fnv64(value: int, data: bytes) -> int:
+    for byte in data:
+        value ^= byte
+        value = (value * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return value
+
+
+def trusted_content_hash(files: list[tuple[str, Path]]) -> str:
+    value = update_fnv64(0xCBF29CE484222325, skill_name.encode())
+    for relative, path in files:
+        value = update_fnv64(value, relative.encode())
+        value = update_fnv64(value, b"\0")
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                value = update_fnv64(value, chunk)
+        value = update_fnv64(value, b"\0")
+    return f"{value:016x}"
+
+
+def files_equal(left: Path, right: Path) -> bool:
+    if left.stat().st_size != right.stat().st_size:
+        return False
+    with left.open("rb") as left_file, right.open("rb") as right_file:
+        while True:
+            left_chunk = left_file.read(1024 * 1024)
+            right_chunk = right_file.read(1024 * 1024)
+            if left_chunk != right_chunk:
+                return False
+            if not left_chunk:
+                return True
+
+
+try:
+    if marker_path.stat().st_size > 4096:
+        raise ValueError("bundle marker is too large")
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    if not isinstance(marker, dict):
+        raise ValueError("bundle marker is not an object")
+    content_hash = marker.get("content_hash")
+    if (
+        marker.get("owner") != expected_owner
+        or type(marker.get("format")) is not int
+        or marker.get("format") != 1
+        or not isinstance(content_hash, str)
+        or re.fullmatch(r"[0-9a-f]{16}", content_hash) is None
+    ):
+        raise ValueError("bundle marker is invalid")
+
+    trusted_files = regular_files(trusted_dir, omit_marker=False)
+    staged_files = regular_files(staged_dir, omit_marker=True)
+    if any(relative == marker_name for relative, _ in trusted_files):
+        raise ValueError("trusted source contains a runtime marker")
+    if content_hash != trusted_content_hash(trusted_files):
+        raise ValueError("bundle marker hash does not match trusted source")
+    if [relative for relative, _ in trusted_files] != [relative for relative, _ in staged_files]:
+        raise ValueError("staged bundle file set differs from trusted source")
+    if not all(
+        files_equal(trusted_path, staged_path)
+        for (_, trusted_path), (_, staged_path) in zip(trusted_files, staged_files)
+    ):
+        raise ValueError("staged bundle content differs from trusted source")
+except (OSError, UnicodeError, ValueError):
+    sys.exit(1)
+PY
+}
+
 # Reborn live QA copies each case's full home into the artifact staging tree.
-# System skills carrying this marker are byte-for-byte runtime installations of
-# source-controlled bundles, so retaining them adds no run-specific evidence.
-# Some bundles intentionally contain dummy credential examples, which strict
-# scanning must not mistake for leaked live material. Remove only directories
-# with Ironclaw's managed-bundle marker; unmanaged/operator system skills remain
-# in the artifact tree and are scanned normally.
-while IFS= read -r -d '' marker; do
-  if ! grep -qE "\"owner\"[[:space:]]*:[[:space:]]*\"${BUNDLED_SKILL_OWNER}\"" "${marker}"; then
-    continue
-  fi
-  skill_dir="$(dirname "${marker}")"
-  case "${skill_dir}" in
-    "${ARTIFACT_DIR}"/*/reborn-home/*/local-dev/system/skills/*|\
-    "${ARTIFACT_DIR}"/reborn-home/*/local-dev/system/skills/*)
-      rm -rf -- "${skill_dir}"
-      ;;
-  esac
-done < <(
-  find "${ARTIFACT_DIR}" -type f \
-    -path '*/reborn-home/*/local-dev/system/skills/*/.ironclaw-reborn-bundled.json' \
-    -print0
-)
+# In strict mode, remove only managed system-skill installations whose marker,
+# stable content hash, file set, and bytes all match the source-controlled
+# bundle. Unverified and operator-owned skills remain in scope for scanning.
+if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" ]]; then
+  while IFS= read -r -d '' marker; do
+    skill_dir="$(dirname "${marker}")"
+    case "${skill_dir}" in
+      "${ARTIFACT_DIR}"/*/reborn-home/*/local-dev/system/skills/*|\
+      "${ARTIFACT_DIR}"/reborn-home/*/local-dev/system/skills/*)
+        if is_verified_bundled_skill "${marker}" "${skill_dir}"; then
+          rm -rf -- "${skill_dir}"
+        fi
+        ;;
+    esac
+  done < <(
+    find "${ARTIFACT_DIR}" -type f \
+      -path '*/reborn-home/*/local-dev/system/skills/*/.ironclaw-reborn-bundled.json' \
+      -print0
+  )
+fi
 
 patterns=(
   'bearer[[:space:]]+[A-Za-z0-9._~+/=-]+'

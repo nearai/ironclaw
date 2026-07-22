@@ -144,10 +144,11 @@ Artifacts are written under:
 artifacts/live-canary/<lane>/<provider>/<timestamp>/
 ```
 
-Before upload, strict scrubbing removes only marker-owned copies of bundled
-system skills from staged Reborn homes. Those files are reproducible from the
-tested commit; unmanaged system skills and all other run-specific artifacts
-remain present and are scanned for secret material.
+Before upload, strict scrubbing removes only bundled system-skill copies whose
+managed marker, stable content hash, file set, and bytes match the
+source-controlled bundle from the tested commit. Unverified or unmanaged system
+skills and all other run-specific artifacts remain present and are scanned for
+secret material. Non-strict scrubbing is report-only and does not prune them.
 
 ## Secrets And Account Material
 
