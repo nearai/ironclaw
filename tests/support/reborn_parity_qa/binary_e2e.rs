@@ -87,7 +87,7 @@ use crate::reborn_support::harness::{
 };
 use crate::reborn_support::product_workflow::RebornProductWorkflowHarness;
 use crate::reborn_support::session_thread::RebornThreadHarness;
-use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+use crate::reborn_support::test_adapter::RebornTestIngress;
 
 pub type HarnessWaitConfig = WaitConfig;
 
@@ -469,8 +469,7 @@ impl RebornBinaryE2EHarness {
     async fn resolve_default_binding_subject_user(
         conversation_id: &str,
     ) -> HarnessResult<ironclaw_host_api::UserId> {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1")?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new("reborn-test", "install-1")?;
         let envelope = ingress.verified_text_envelope_with_trigger(
             "extension-lifecycle-actor-probe",
             "alice",
@@ -726,8 +725,7 @@ impl RebornBinaryE2EHarness {
         installation_id: &str,
         initial_actor_id: &str,
     ) -> HarnessResult<Self> {
-        let adapter = RebornTestProductAdapter::new(adapter_id, installation_id)?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new(adapter_id, installation_id)?;
         let product_harness = if let Some(storage) = shared_storage.as_ref() {
             RebornProductWorkflowHarness::filesystem_shared_backend(
                 product_scope.clone(),
@@ -1032,7 +1030,7 @@ impl RebornBinaryE2EHarness {
             binding.subject_user_id.clone(),
         );
         let actor = TurnActor::new(binding.actor_user_id.clone());
-        let ack = self.workflow.accept_inbound(envelope).await?;
+        let ack = self.workflow.submit_inbound(envelope).await?;
         let run_id = match &ack {
             ProductInboundAck::Accepted {
                 submitted_run_id, ..
@@ -1598,3 +1596,4 @@ pub fn assert_milestone_order(
             .collect::<Vec<_>>()
     );
 }
+// arch-exempt: large_file, binary parity coverage remains centralized, plan #6175

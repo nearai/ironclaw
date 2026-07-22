@@ -12,9 +12,26 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    Authorized, CapabilityId, ExtensionId, HostRemediation, ResourceReceipt, ResourceUsage,
-    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle,
+    Authorized, CapabilityId, ExtensionId, HostRemediation, MountView, ResourceEstimate,
+    ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage, RunId,
+    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle, UserId,
 };
+
+/// Internal adapter request produced after a sealed [`Authorized`] witness is
+/// consumed by the dispatcher.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapabilityDispatchRequest {
+    pub capability_id: CapabilityId,
+    pub scope: ResourceScope,
+    pub authenticated_actor_user_id: Option<UserId>,
+    /// Loop turn-run identity forwarded from `ExecutionContext::run_id`.
+    /// `None` for non-loop callers.
+    pub run_id: Option<RunId>,
+    pub estimate: ResourceEstimate,
+    pub mounts: Option<MountView>,
+    pub resource_reservation: Option<ResourceReservation>,
+    pub input: Value,
+}
 
 /// Display-only preview metadata for a completed capability result.
 ///

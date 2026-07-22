@@ -802,10 +802,7 @@ pub trait ResourceGovernor: Send + Sync {
 
     /// Validates that a prepared reservation is still active and matches the
     /// reservation facts being handed to a runtime before side effects start.
-    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
-        let _ = reservation;
-        Ok(())
-    }
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError>;
 
     /// Releases an active reservation without usage when work is cancelled or fails before reconciliation.
     fn release(

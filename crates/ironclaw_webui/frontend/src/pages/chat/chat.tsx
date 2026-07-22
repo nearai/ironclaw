@@ -111,9 +111,9 @@ export function Chat({
   // A channel-pairing gate is a `manual_token` auth gate that also carries a
   // `connection` requirement (gates.ts normalizes it onto `pendingGate.connection`).
   // Render the pairing card off the live gate — wired to a redeem submit and a
-  // run-cancel dismiss — instead of the plain token card. This is the generic,
-  // non-Slack channel-connect path; the durable-timeline `pendingOnboarding` panel
-  // is the separate, no-active-gate entry point below.
+  // run-cancel dismiss — instead of the plain token card. This is the generic
+  // proof-code channel-connect path; the durable-timeline `pendingOnboarding`
+  // panel is the separate, no-active-gate entry point below.
   const channelConnectionGate =
     pendingGate?.kind === "auth_required" &&
     pendingGate?.challengeKind === "manual_token" &&

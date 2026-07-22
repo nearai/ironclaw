@@ -6,11 +6,12 @@ use ironclaw_product_adapters::{
     LinkedThreadActionPayload, OutboundDeliverySink, ParsedProductInbound, ProductAdapterId,
     ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundAck, ProductInboundEnvelope,
     ProductInboundPayload, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductProjectionItem, ProductProjectionState, ProductRejection, ProductRejectionDisposition,
-    ProductRejectionKind, ProductSurfaceKind, ProductTriggerReason, ProductWorkflow,
-    ProjectionCursor, ProjectionStream, ProjectionSubscriptionPayload,
-    ProjectionSubscriptionRequest, ProtocolAuthEvidence, ProtocolHttpEgress,
-    ProtocolHttpEgressError, RedactedString, TrustedInboundContext, UserMessagePayload,
+    ProductProjectionItem, ProductProjectionState, ProductProjectionSubscribeInput,
+    ProductRejection, ProductRejectionDisposition, ProductRejectionKind, ProductSurfaceKind,
+    ProductTriggerReason, ProductWorkflow, ProjectionCursor, ProjectionStream,
+    ProjectionSubscriptionPayload, ProjectionSubscriptionRequest, ProtocolAuthEvidence,
+    ProtocolHttpEgress, ProtocolHttpEgressError, RedactedString, TrustedInboundContext,
+    UserMessagePayload,
 };
 use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnRunId};
 
@@ -314,11 +315,11 @@ async fn fakes_match_workflow_dedupe_and_delivery_semantics() {
     );
 
     workflow
-        .accept_inbound(first)
+        .submit_inbound(first)
         .await
         .expect("first accepted");
     workflow
-        .accept_inbound(second_same_event_different_source)
+        .submit_inbound(second_same_event_different_source)
         .await
         .expect("different source accepted");
     assert_eq!(workflow.accepted_count(), 2);
@@ -331,7 +332,7 @@ async fn fakes_match_workflow_dedupe_and_delivery_semantics() {
         )),
     );
     let rejected = workflow
-        .accept_inbound(envelope("update:reject", conversation(Some("message-c"))))
+        .submit_inbound(envelope("update:reject", conversation(Some("message-c"))))
         .await
         .expect("rejected ack");
     assert!(matches!(rejected, ProductInboundAck::Rejected(_)));
@@ -349,7 +350,7 @@ async fn fakes_match_workflow_dedupe_and_delivery_semantics() {
         )),
     );
     let retryable_first = workflow
-        .accept_inbound(envelope(
+        .submit_inbound(envelope(
             "update:retryable",
             conversation(Some("message-d")),
         ))
@@ -357,7 +358,7 @@ async fn fakes_match_workflow_dedupe_and_delivery_semantics() {
         .expect("retryable rejection");
     assert!(!retryable_first.is_durable_outcome());
     let retryable_redelivery = workflow
-        .accept_inbound(envelope(
+        .submit_inbound(envelope(
             "update:retryable",
             conversation(Some("message-d")),
         ))
@@ -509,7 +510,10 @@ async fn projection_resolution_uses_trusted_inbound_envelope_context() {
     );
     assert_eq!(
         workflow
-            .resolve_projection_subscription(request_envelope)
+            .subscribe_projection(
+                ProductProjectionSubscribeInput::from_inbound_envelope(&request_envelope)
+                    .expect("projection input"),
+            )
             .await
             .expect("resolved"),
         resolved

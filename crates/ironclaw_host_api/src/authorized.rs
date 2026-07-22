@@ -160,6 +160,23 @@ impl Authorized {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seal_for_test_with_mounts(
+        invocation: Invocation,
+        lane: RuntimeLane,
+        mounts: Option<MountView>,
+        reservation: Option<ResourceReservation>,
+        deadline: Timestamp,
+    ) -> Self {
+        Self {
+            invocation,
+            lane,
+            mounts,
+            reservation,
+            deadline,
+        }
+    }
+
     /// The exact invocation this witness authorized.
     pub fn invocation(&self) -> &Invocation {
         &self.invocation

@@ -1,5 +1,7 @@
-use ironclaw_extensions::{ExtensionManifestRecord, MANIFEST_SCHEMA_VERSION, ManifestSource};
-use ironclaw_host_api::HostPortCatalog;
+use ironclaw_extensions::{
+    CapabilitySurfaceDeclV2, ExtensionManifestRecord, MANIFEST_SCHEMA_VERSION, ManifestSource,
+};
+use ironclaw_host_api::{CapabilitySurfaceKind, HostPortCatalog};
 use ironclaw_product_adapter_registry::{
     ManifestHash, RegistryError, parse_product_adapter_manifest_record, product_adapter_sections,
 };
@@ -264,5 +266,58 @@ flags = ["inbound_messages"]
     assert!(
         err.to_string().contains("invalid adapter_id"),
         "expected adapter_id validation error, got {err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Capability-surface projection through the real product-adapter contract
+// ---------------------------------------------------------------------------
+
+#[test]
+fn external_channel_section_projects_a_channel_capability_surface() {
+    let record = parse(&manifest("")).unwrap();
+    let surfaces = record.manifest().capability_surfaces();
+    let channels: Vec<_> = surfaces
+        .iter()
+        .filter(|surface| surface.kind() == CapabilitySurfaceKind::Channel)
+        .collect();
+    assert_eq!(channels.len(), 1, "{surfaces:?}");
+    match channels[0] {
+        CapabilitySurfaceDeclV2::HostApiSection {
+            kind,
+            host_api,
+            section,
+        } => {
+            assert_eq!(*kind, CapabilitySurfaceKind::Channel);
+            assert_eq!(host_api.as_str(), "ironclaw.product_adapter/v1");
+            assert_eq!(section.as_str(), "product_adapter.inbound");
+        }
+        other => panic!("expected a host-API channel surface, got {other:?}"),
+    }
+    // An adapter-only manifest declares no tools: the wasm runtime kind must
+    // not leak a tool (or any other) surface into the product taxonomy.
+    assert!(
+        surfaces
+            .iter()
+            .all(|surface| surface.kind() == CapabilitySurfaceKind::Channel),
+        "{surfaces:?}"
+    );
+}
+
+#[test]
+fn host_native_product_surface_kinds_project_no_channel_surface() {
+    // `web` / `cli` / `synchronous_api` product-adapter sections describe
+    // host-native surfaces; they are not extension channel surfaces.
+    let toml = manifest("").replace(
+        r#"surface_kind = "external_channel""#,
+        r#"surface_kind = "web""#,
+    );
+    let record = parse(&toml).unwrap();
+    let surfaces = record.manifest().capability_surfaces();
+    assert!(
+        surfaces
+            .iter()
+            .all(|surface| surface.kind() != CapabilitySurfaceKind::Channel),
+        "{surfaces:?}"
     );
 }

@@ -546,7 +546,7 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_host_api::{ReservationStatus, ResourceEstimate};
+    use ironclaw_host_api::{ReservationStatus, ResourceEstimate, ResourceReservation};
     use ironclaw_resources::{
         AccountSnapshot, ReservationOutcome, ResourceAccount, ResourceError, ResourceLimits,
     };
@@ -617,6 +617,15 @@ mod tests {
         ) -> Result<ResourceReceipt, ResourceError> {
             self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Self::receipt(reservation_id, ReservationStatus::Reconciled))
+        }
+
+        fn validate_reservation(
+            &self,
+            _reservation: &ResourceReservation,
+        ) -> Result<(), ResourceError> {
+            Err(ResourceError::Storage {
+                reason: "validate_reservation unused in guard unit tests".to_string(),
+            })
         }
 
         fn release(

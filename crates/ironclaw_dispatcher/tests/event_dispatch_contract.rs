@@ -1,62 +1,50 @@
-mod support;
+//! Dispatch event semantics at the resolver seam (part of TOOL-3).
+//!
+//! The event sequence, best-effort sink behavior, and redacted failure kinds
+//! are unchanged by the prebound-resolver cutover: `dispatch_requested` →
+//! `runtime_selected` (from the resolved binding's provider/runtime) →
+//! `dispatch_succeeded`/`dispatch_failed`.
 
-use support::{
-    CapabilityDispatchRequest, RecordingExecutor, authorized, legacy_capability_fixture_to_v2,
-};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::*;
 use ironclaw_events::*;
-use ironclaw_extensions::*;
-use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use tracing::Instrument;
 use tracing_test::traced_test;
 
 #[tokio::test]
-async fn dispatcher_emits_events_for_wasm_and_script_success() {
-    let fs = filesystem_with_echo_extensions();
-    let registry = discover_legacy_fixture_registry(&fs).await;
-    let governor = InMemoryResourceGovernor::new();
-    let executor = RecordingExecutor::new()
-        .echo(RuntimeKind::Wasm)
-        .echo(RuntimeKind::Script);
+async fn dispatcher_emits_events_for_resolved_dispatch_success() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = InMemoryEventSink::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor, executor).with_event_sink(&events);
+    let resolver = ScriptedResolver::from_entries([
+        (
+            "echo-wasm.say",
+            resolved_echo("echo-wasm", RuntimeKind::Wasm, &governor),
+        ),
+        (
+            "echo-script.say",
+            resolved_echo("echo-script", RuntimeKind::Script, &governor),
+        ),
+    ]);
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
 
     dispatcher
-        .dispatch_json(authorized(CapabilityDispatchRequest {
-            run_id: None,
-            capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
-            scope: sample_scope(),
-            authenticated_actor_user_id: None,
-            estimate: ResourceEstimate::default()
-                .set_concurrency_slots(1)
-                .set_output_bytes(10_000),
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "hello wasm"}),
-        }))
+        .dispatch_json(sample_request(
+            "echo-wasm.say",
+            json!({"message": "hello wasm"}),
+        ))
         .await
         .unwrap();
-
     dispatcher
-        .dispatch_json(authorized(CapabilityDispatchRequest {
-            run_id: None,
-            capability_id: CapabilityId::new("echo-script.say").unwrap(),
-            scope: sample_scope(),
-            authenticated_actor_user_id: None,
-            estimate: ResourceEstimate::default()
-                .set_concurrency_slots(1)
-                .set_process_count(1)
-                .set_output_bytes(10_000),
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "hello script"}),
-        }))
+        .dispatch_json(sample_request(
+            "echo-script.say",
+            json!({"message": "hello script"}),
+        ))
         .await
         .unwrap();
 
@@ -92,27 +80,19 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
 
 #[tokio::test]
 async fn dispatcher_ignores_event_sink_failures_on_success() {
-    let fs = filesystem_with_echo_extensions();
-    let registry = discover_legacy_fixture_registry(&fs).await;
-    let governor = InMemoryResourceGovernor::new();
-    let executor = RecordingExecutor::new().echo(RuntimeKind::Wasm);
+    let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = FailingEventSink;
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor, executor).with_event_sink(&events);
+    let resolver = ScriptedResolver::from_entries([(
+        "echo-wasm.say",
+        resolved_echo("echo-wasm", RuntimeKind::Wasm, &governor),
+    )]);
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
 
     let result = dispatcher
-        .dispatch_json(authorized(CapabilityDispatchRequest {
-            run_id: None,
-            capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
-            scope: sample_scope(),
-            authenticated_actor_user_id: None,
-            estimate: ResourceEstimate::default()
-                .set_concurrency_slots(1)
-                .set_output_bytes(10_000),
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "event sink fails"}),
-        }))
+        .dispatch_json(sample_request(
+            "echo-wasm.say",
+            json!({"message": "event sink fails"}),
+        ))
         .await
         .unwrap();
 
@@ -121,52 +101,39 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
 
 #[tokio::test]
 async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
-    let fs = filesystem_with_echo_extensions();
-    let registry = discover_legacy_fixture_registry(&fs).await;
-    let governor = InMemoryResourceGovernor::new();
+    let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = FailingEventSink;
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new())
-        .with_event_sink(&events);
+    let resolver = ScriptedResolver::empty();
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
 
     let err = dispatcher
-        .dispatch_json(authorized(CapabilityDispatchRequest {
-            run_id: None,
-            capability_id: CapabilityId::new("echo-script.say").unwrap(),
-            scope: sample_scope(),
-            authenticated_actor_user_id: None,
-            estimate: ResourceEstimate::default()
-                .set_concurrency_slots(1)
-                .set_process_count(1),
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "missing backend"}),
-        }))
+        .dispatch_json(sample_request(
+            "echo-script.say",
+            json!({"message": "unknown capability"}),
+        ))
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::MissingRuntimeBackend {
-            runtime: RuntimeKind::Script
-        }
-    ));
+    assert!(matches!(err, DispatchError::UnknownCapability { .. }));
 }
 
 #[tokio::test]
 #[traced_test]
 async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
-    let fs = filesystem_with_echo_extensions();
-    let registry = discover_legacy_fixture_registry(&fs).await;
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
+    // A reservation the governor never issued: releasing it fails, and that
+    // failure must be logged without masking the dispatch error.
     let reservation = ResourceReservation {
         id: ResourceReservationId::new(),
         scope: scope.clone(),
-        estimate: ResourceEstimate::default()
-            .set_concurrency_slots(1)
-            .set_process_count(1),
+        estimate: ResourceEstimate {
+            concurrency_slots: Some(1),
+            ..ResourceEstimate::default()
+        },
     };
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new());
+    let resolver = ScriptedResolver::empty();
+    let dispatcher = RuntimeDispatcher::new(&resolver, &governor);
 
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
@@ -174,12 +141,13 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
-            estimate: ResourceEstimate::default()
-                .set_concurrency_slots(1)
-                .set_process_count(1),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
             mounts: None,
             resource_reservation: Some(reservation.clone()),
-            input: json!({"message": "missing backend"}),
+            input: json!({"message": "unknown capability"}),
         }))
         .instrument(tracing::info_span!(
             "dispatcher_logs_release_failure_without_masking_dispatch_error"
@@ -187,12 +155,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::MissingRuntimeBackend {
-            runtime: RuntimeKind::Script
-        }
-    ));
+    assert!(matches!(err, DispatchError::UnknownCapability { .. }));
     assert!(logs_contain(
         "failed to release prepared resource reservation after dispatcher validation failure"
     ));
@@ -200,29 +163,29 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
 }
 
 #[tokio::test]
-async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
-    let fs = filesystem_with_echo_extensions();
-    let registry = discover_legacy_fixture_registry(&fs).await;
-    let governor = InMemoryResourceGovernor::new();
-    let executor = RecordingExecutor::new()
-        .failing(RuntimeKind::Script, RuntimeDispatchErrorKind::ExitFailure);
+async fn dispatcher_emits_redacted_runtime_error_kind_for_binding_failure() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = InMemoryEventSink::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor, executor).with_event_sink(&events);
+    let resolver = ScriptedResolver::from_entries([(
+        "echo-script.say",
+        ResolvedCapability {
+            provider: ExtensionId::new("echo-script").unwrap(),
+            runtime: RuntimeKind::Script,
+            adapter: Arc::new(FailingBinding {
+                error: || DispatchError::Script {
+                    kind: RuntimeDispatchErrorKind::ExitFailure,
+                    model_visible_cause: None,
+                },
+            }),
+        },
+    )]);
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
 
     let err = dispatcher
-        .dispatch_json(authorized(CapabilityDispatchRequest {
-            run_id: None,
-            capability_id: CapabilityId::new("echo-script.say").unwrap(),
-            scope: sample_scope(),
-            authenticated_actor_user_id: None,
-            estimate: ResourceEstimate::default()
-                .set_concurrency_slots(1)
-                .set_process_count(1),
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "adapter fails"}),
-        }))
+        .dispatch_json(sample_request(
+            "echo-script.say",
+            json!({"message": "binding fails"}),
+        ))
         .await
         .unwrap_err();
 
@@ -236,64 +199,24 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
 
     let recorded = events.events();
     assert_eq!(recorded.len(), 3);
+    assert_eq!(recorded[1].kind, RuntimeEventKind::RuntimeSelected);
     assert_eq!(recorded[2].kind, RuntimeEventKind::DispatchFailed);
     assert_eq!(recorded[2].error_kind.as_deref(), Some("exit_failure"));
-}
-
-#[tokio::test]
-async fn dispatcher_emits_events_for_mcp_success() {
-    let fs = filesystem_with_echo_extensions();
-    let mut registry = ExtensionRegistry::new();
-    registry
-        .insert(package_from_manifest(MCP_MANIFEST))
-        .unwrap();
-    let governor = InMemoryResourceGovernor::new();
-    let executor =
-        RecordingExecutor::new().static_output(RuntimeKind::Mcp, json!({"matches": ["ironclaw"]}));
-    let events = InMemoryEventSink::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&registry, &fs, &governor, executor).with_event_sink(&events);
-
-    dispatcher
-        .dispatch_json(authorized(CapabilityDispatchRequest {
-            run_id: None,
-            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
-            scope: sample_scope(),
-            authenticated_actor_user_id: None,
-            estimate: ResourceEstimate::default()
-                .set_concurrency_slots(1)
-                .set_process_count(1)
-                .set_output_bytes(10_000),
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"query": "ironclaw"}),
-        }))
-        .await
-        .unwrap();
-
-    let recorded = events.events();
-    assert_eq!(recorded.len(), 3);
-    assert_eq!(recorded[0].kind, RuntimeEventKind::DispatchRequested);
-    assert_eq!(recorded[1].kind, RuntimeEventKind::RuntimeSelected);
-    assert_eq!(recorded[1].runtime, Some(RuntimeKind::Mcp));
-    assert_eq!(recorded[2].kind, RuntimeEventKind::DispatchSucceeded);
+    assert_eq!(recorded[2].runtime, Some(RuntimeKind::Script));
     assert_eq!(
         recorded[2].provider,
-        Some(ExtensionId::new("github-mcp").unwrap())
+        Some(ExtensionId::new("echo-script").unwrap())
     );
-    assert!(recorded[2].output_bytes.unwrap() > 0);
 }
 
 #[tokio::test]
-async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
-    let fs = filesystem_with_echo_extensions();
-    let registry = discover_legacy_fixture_registry(&fs).await;
-    let governor = InMemoryResourceGovernor::new();
+async fn dispatcher_emits_failed_event_for_unknown_capability_without_reserving() {
+    let governor = Arc::new(InMemoryResourceGovernor::new());
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
     let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor, RecordingExecutor::new())
-        .with_event_sink(&events);
+    let resolver = ScriptedResolver::empty();
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
 
     let err = dispatcher
         .dispatch_json(authorized(CapabilityDispatchRequest {
@@ -301,9 +224,10 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
             authenticated_actor_user_id: None,
-            estimate: ResourceEstimate::default()
-                .set_concurrency_slots(1)
-                .set_process_count(1),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                ..ResourceEstimate::default()
+            },
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
@@ -311,12 +235,7 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::MissingRuntimeBackend {
-            runtime: RuntimeKind::Script
-        }
-    ));
+    assert!(matches!(err, DispatchError::UnknownCapability { .. }));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
 
@@ -324,10 +243,11 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
     assert_eq!(recorded.len(), 2);
     assert_eq!(recorded[0].kind, RuntimeEventKind::DispatchRequested);
     assert_eq!(recorded[1].kind, RuntimeEventKind::DispatchFailed);
-    assert_eq!(recorded[1].runtime, Some(RuntimeKind::Script));
+    assert_eq!(recorded[1].provider, None);
+    assert_eq!(recorded[1].runtime, None);
     assert_eq!(
         recorded[1].error_kind.as_deref(),
-        Some("missing_runtime_backend")
+        Some("unknown_capability")
     );
 }
 
@@ -342,63 +262,161 @@ impl EventSink for FailingEventSink {
     }
 }
 
-fn filesystem_with_echo_extensions() -> DiskFilesystem {
-    let storage = tempfile::tempdir().unwrap().keep();
-    write_echo_extensions(&storage);
-
-    let mut fs = DiskFilesystem::new();
-    fs.mount_local(
-        VirtualPath::new("/system/extensions").unwrap(),
-        HostPath::from_path_buf(storage),
-    )
-    .unwrap();
-    fs
+struct ScriptedResolver {
+    bindings: HashMap<CapabilityId, ResolvedCapability>,
 }
 
-async fn discover_legacy_fixture_registry(fs: &DiskFilesystem) -> ExtensionRegistry {
-    ExtensionDiscovery::discover_with_manifest_contracts(
-        fs,
-        &VirtualPath::new("/system/extensions").unwrap(),
-        ManifestSource::HostBundled,
-        &HostPortCatalog::empty(),
-        &HostApiContractRegistry::new(),
-    )
-    .await
-    .unwrap()
+impl ScriptedResolver {
+    fn empty() -> Self {
+        Self {
+            bindings: HashMap::new(),
+        }
+    }
+
+    fn from_entries<const N: usize>(entries: [(&str, ResolvedCapability); N]) -> Self {
+        Self {
+            bindings: entries
+                .into_iter()
+                .map(|(id, resolved)| (CapabilityId::new(id).unwrap(), resolved))
+                .collect(),
+        }
+    }
 }
 
-fn write_echo_extensions(root: &std::path::Path) {
-    let wasm_root = root.join("echo-wasm");
-    std::fs::create_dir_all(wasm_root).unwrap();
-    std::fs::write(
-        root.join("echo-wasm/manifest.toml"),
-        legacy_capability_fixture_to_v2(WASM_MANIFEST),
-    )
-    .unwrap();
-
-    let script_root = root.join("echo-script");
-    std::fs::create_dir_all(&script_root).unwrap();
-    std::fs::write(
-        script_root.join("manifest.toml"),
-        legacy_capability_fixture_to_v2(SCRIPT_MANIFEST),
-    )
-    .unwrap();
+impl ToolResolver for ScriptedResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        self.bindings.get(capability_id).cloned()
+    }
 }
 
-fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = parse_manifest(manifest);
-    let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
-    ExtensionPackage::from_manifest(manifest, root).unwrap()
+fn resolved_echo(
+    provider: &str,
+    runtime: RuntimeKind,
+    governor: &Arc<InMemoryResourceGovernor>,
+) -> ResolvedCapability {
+    ResolvedCapability {
+        provider: ExtensionId::new(provider).unwrap(),
+        runtime,
+        adapter: Arc::new(EchoBinding {
+            governor: Arc::clone(governor),
+        }),
+    }
 }
 
-fn parse_manifest(manifest: &str) -> ExtensionManifest {
-    let manifest = legacy_capability_fixture_to_v2(manifest);
-    ExtensionManifest::parse(
-        &manifest,
-        ManifestSource::InstalledLocal,
-        &HostPortCatalog::empty(),
+/// Echoes the input back and reconciles usage against the governor, mirroring
+/// the real lane legs.
+struct EchoBinding {
+    governor: Arc<InMemoryResourceGovernor>,
+}
+
+#[async_trait]
+impl BoundCapabilityAdapter for EchoBinding {
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let output: Value = request.input;
+        let output_bytes = serde_json::to_vec(&output).unwrap().len() as u64;
+        let usage = ResourceUsage {
+            output_bytes,
+            ..ResourceUsage::default()
+        };
+        let reservation = match request.resource_reservation {
+            Some(reservation) => reservation,
+            None => self
+                .governor
+                .reserve(request.scope.clone(), request.estimate.clone())
+                .map_err(|_| DispatchError::Wasm {
+                    kind: RuntimeDispatchErrorKind::Resource,
+                    model_visible_cause: None,
+                })?,
+        };
+        let receipt = self
+            .governor
+            .reconcile(reservation.id, usage.clone())
+            .map_err(|_| DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::Resource,
+                model_visible_cause: None,
+            })?;
+        Ok(RuntimeAdapterResult {
+            output,
+            display_preview: None,
+            output_bytes,
+            usage,
+            receipt,
+        })
+    }
+}
+
+struct FailingBinding<F>
+where
+    F: Fn() -> DispatchError + Send + Sync,
+{
+    error: F,
+}
+
+#[async_trait]
+impl<F> BoundCapabilityAdapter for FailingBinding<F>
+where
+    F: Fn() -> DispatchError + Send + Sync,
+{
+    async fn dispatch_json(
+        &self,
+        _request: CapabilityDispatchRequest,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        Err((self.error)())
+    }
+}
+
+fn authorized(request: CapabilityDispatchRequest) -> Authorized {
+    let lane = match request.capability_id.as_str() {
+        id if id.contains("mcp") => RuntimeLane::Mcp,
+        id if id.contains("script") => RuntimeLane::Process,
+        id if id.contains("first_party") => RuntimeLane::FirstParty,
+        _ => RuntimeLane::Wasm,
+    };
+    let invocation = Invocation {
+        activity_id: ActivityId::new(),
+        capability: request.capability_id,
+        input: request.input,
+        scope: request.scope,
+        actor: request
+            .authenticated_actor_user_id
+            .map(Actor::Sealed)
+            .unwrap_or(Actor::System),
+        origin: request
+            .run_id
+            .map(InvocationOrigin::LoopRun)
+            .unwrap_or_else(|| InvocationOrigin::Product(ProductKind::new("test").unwrap())),
+        estimate: request.estimate,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+    };
+    Authorized::seal_for_test_with_mounts(
+        invocation,
+        lane,
+        request.mounts,
+        request.resource_reservation,
+        chrono::DateTime::<chrono::Utc>::MAX_UTC,
     )
-    .unwrap()
+}
+
+fn sample_request(capability_id: &str, input: Value) -> Authorized {
+    authorized(CapabilityDispatchRequest {
+        run_id: None,
+        capability_id: CapabilityId::new(capability_id).unwrap(),
+        scope: sample_scope(),
+        authenticated_actor_user_id: None,
+        estimate: ResourceEstimate {
+            concurrency_slots: Some(1),
+            output_bytes: Some(10_000),
+            ..ResourceEstimate::default()
+        },
+        mounts: None,
+        resource_reservation: None,
+        input,
+    })
 }
 
 fn sample_scope() -> ResourceScope {
@@ -412,64 +430,3 @@ fn sample_scope() -> ResourceScope {
         invocation_id: InvocationId::new(),
     }
 }
-
-const WASM_MANIFEST: &str = r#"
-id = "echo-wasm"
-name = "Echo WASM"
-version = "0.1.0"
-description = "Echo WASM demo extension"
-trust = "untrusted"
-
-[runtime]
-kind = "wasm"
-module = "wasm/echo.wasm"
-
-[[capabilities]]
-id = "echo-wasm.say"
-description = "Echo WASM"
-effects = ["dispatch_capability"]
-default_permission = "allow"
-parameters_schema = { type = "object" }
-"#;
-
-const MCP_MANIFEST: &str = r#"
-id = "github-mcp"
-name = "GitHub MCP"
-version = "0.1.0"
-description = "GitHub MCP adapter"
-trust = "untrusted"
-
-[runtime]
-kind = "mcp"
-transport = "stdio"
-command = "github-mcp"
-args = ["--stdio"]
-
-[[capabilities]]
-id = "github-mcp.search"
-description = "Search GitHub"
-effects = ["network", "dispatch_capability"]
-default_permission = "ask"
-parameters_schema = { type = "object" }
-"#;
-
-const SCRIPT_MANIFEST: &str = r#"
-id = "echo-script"
-name = "Echo Script"
-version = "0.1.0"
-description = "Echo Script demo extension"
-trust = "untrusted"
-
-[runtime]
-kind = "script"
-runner = "sandboxed_process"
-command = "sh"
-args = ["-c", "cat"]
-
-[[capabilities]]
-id = "echo-script.say"
-description = "Echo script"
-effects = ["dispatch_capability"]
-default_permission = "allow"
-parameters_schema = { type = "object" }
-"#;

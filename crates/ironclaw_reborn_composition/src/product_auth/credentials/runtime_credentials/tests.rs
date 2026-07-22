@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical §4.3 secret-store swap only (InMemorySecretStore -> FilesystemSecretStore::ephemeral), plan #6168
+// arch-exempt: large_file, mechanical §4.3 secret-store swap only (FilesystemSecretStore -> FilesystemSecretStore::ephemeral), plan #6168
 use chrono::Utc;
 use ironclaw_auth::{
     CredentialAccountLabel, CredentialAccountService, CredentialOwnership,
@@ -7,8 +7,8 @@ use ironclaw_auth::{
 use ironclaw_filesystem::{Fault, FaultInjecting, FilesystemOperation, InMemoryBackend};
 use ironclaw_host_api::{
     AgentId, CredentialStageError, ExtensionId, InvocationId, MissionId, ProjectId, ResourceScope,
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, SecretHandle, TenantId, ThreadId, UserId,
+    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, SecretHandle, TenantId,
+    ThreadId, UserId, VendorId,
 };
 use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
 
@@ -433,7 +433,7 @@ async fn resolver_resolves_shared_admin_account_from_new_thread() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &thread_b.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[gmail_scope.to_string()],
             requester_extension: &requester,
@@ -460,7 +460,7 @@ async fn resolver_returns_configured_product_auth_access_secret() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -489,7 +489,7 @@ async fn resolver_uses_host_managed_nearai_account_for_nearai_requester() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &user_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            provider: &VendorId::new("nearai").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("nearai").unwrap(),
@@ -520,7 +520,7 @@ async fn resolver_uses_tenant_agent_level_host_managed_nearai_account_for_projec
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &user_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            provider: &VendorId::new("nearai").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("nearai").unwrap(),
@@ -556,7 +556,7 @@ async fn resolver_prefers_user_nearai_account_over_host_managed_nearai_account()
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &user_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            provider: &VendorId::new("nearai").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("nearai").unwrap(),
@@ -583,7 +583,7 @@ async fn resolver_does_not_share_host_managed_nearai_account_with_other_requeste
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &user_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            provider: &VendorId::new("nearai").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("third-party").unwrap(),
@@ -610,7 +610,7 @@ async fn resolver_does_not_share_host_managed_nearai_account_across_tenant() {
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &other_tenant_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            provider: &VendorId::new("nearai").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("nearai").unwrap(),
@@ -637,7 +637,7 @@ async fn resolver_does_not_share_host_managed_nearai_account_across_agent() {
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &other_agent_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            provider: &VendorId::new("nearai").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("nearai").unwrap(),
@@ -665,7 +665,7 @@ async fn resolver_does_not_share_project_scoped_host_managed_nearai_account_acro
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &other_project_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            provider: &VendorId::new("nearai").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("nearai").unwrap(),
@@ -695,7 +695,7 @@ async fn resolver_uses_project_scoped_host_managed_nearai_account_for_same_proje
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &same_project_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            provider: &VendorId::new("nearai").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("nearai").unwrap(),
@@ -722,7 +722,7 @@ async fn resolver_does_not_share_host_managed_scope_for_other_provider() {
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &user_scope.resource,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -752,7 +752,7 @@ async fn resolver_refreshes_oauth_account_before_staging_access_secret() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[drive_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-drive").unwrap(),
@@ -792,7 +792,7 @@ async fn resolver_refreshes_gsuite_owned_account_with_owner_authority_for_siblin
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[calendar_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-calendar").unwrap(),
@@ -823,7 +823,7 @@ async fn resolver_refreshes_oauth_account_for_each_runtime_staging() {
         .create(&accounts)
         .await;
     let resolver = resolver_with_refresh(accounts.clone());
-    let provider = RuntimeCredentialAccountProviderId::new("google").unwrap();
+    let provider = VendorId::new("google").unwrap();
     let setup = RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() };
     let provider_scopes = vec![drive_scope.as_str().to_string()];
     let requester_extension = ExtensionId::new("google-drive").unwrap();
@@ -870,7 +870,7 @@ async fn resolver_stages_oauth_access_secret_when_refresh_secret_is_absent() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[drive_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-drive").unwrap(),
@@ -916,7 +916,7 @@ async fn resolver_stages_oauth_access_secret_when_proactive_refresh_backend_is_u
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[drive_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-drive").unwrap(),
@@ -963,7 +963,7 @@ async fn resolver_propagates_backend_error_when_stale_access_token_cannot_refres
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[drive_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-drive").unwrap(),
@@ -995,7 +995,7 @@ async fn resolver_propagates_backend_error_when_access_secret_metadata_is_missin
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[drive_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-drive").unwrap(),
@@ -1050,7 +1050,7 @@ async fn resolver_propagates_backend_error_when_access_secret_metadata_is_unread
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[drive_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-drive").unwrap(),
@@ -1080,7 +1080,7 @@ async fn resolver_maps_oauth_refresh_failure_to_auth_required() {
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[drive_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-drive").unwrap(),
@@ -1108,7 +1108,7 @@ async fn resolver_accepts_unscoped_github_manual_token_for_scoped_runtime_reques
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &required_scopes,
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -1139,7 +1139,7 @@ async fn resolver_does_not_use_reusable_account_from_different_user() {
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &admin_scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("gmail").unwrap(),
@@ -1171,7 +1171,7 @@ async fn resolver_matches_callback_setup_account_from_runtime_invocation() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -1205,7 +1205,7 @@ async fn resolver_matches_reusable_setup_account_from_new_thread() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -1239,7 +1239,7 @@ async fn resolver_matches_reusable_setup_account_from_new_mission() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -1282,7 +1282,7 @@ async fn resolver_resolves_extension_owned_account_from_new_thread() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &runtime_scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -1303,7 +1303,7 @@ async fn resolver_maps_missing_account_to_auth_required() {
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -1331,7 +1331,7 @@ async fn resolver_requires_requested_provider_scopes() {
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &required_scopes,
             requester_extension: &ExtensionId::new("google-drive").unwrap(),
@@ -1358,7 +1358,7 @@ async fn resolver_does_not_treat_unscoped_google_account_as_scoped() {
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth {
                 scopes: required_scopes.clone(),
             },
@@ -1392,7 +1392,7 @@ async fn resolver_reuses_gsuite_owned_google_account_for_gsuite_requester() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[calendar_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-calendar").unwrap(),
@@ -1421,7 +1421,7 @@ async fn resolver_does_not_share_unbound_google_account_with_third_party_request
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[google_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("third-party").unwrap(),
@@ -1454,7 +1454,7 @@ async fn resolver_allows_google_account_explicitly_granted_to_third_party_reques
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[google_scope.as_str().to_string()],
             requester_extension: &requester,
@@ -1481,7 +1481,7 @@ async fn resolver_maps_unconfigured_account_status_to_auth_required() {
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -1508,7 +1508,7 @@ async fn resolver_maps_configured_account_without_access_secret_to_backend() {
     let error = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -1538,7 +1538,7 @@ async fn activation_preflight_maps_configured_account_without_access_secret_to_b
         &selector,
         &scope,
         vec![RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: VendorId::new("github").unwrap(),
             setup: Default::default(),
             requester_extension: ExtensionId::new("github").unwrap(),
             provider_scopes: Vec::new(),
@@ -1581,7 +1581,7 @@ async fn resolver_uses_most_recent_account_across_multiple_reusable_logins() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: &VendorId::new("github").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("github").unwrap(),
@@ -1647,7 +1647,7 @@ async fn resolver_skips_inline_refresh_when_access_token_is_fresh() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[drive_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-drive").unwrap(),
@@ -1693,7 +1693,7 @@ async fn resolver_refreshes_when_access_token_is_within_margin() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &scope,
-            provider: &RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: &VendorId::new("google").unwrap(),
             setup: &RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
             provider_scopes: &[drive_scope.as_str().to_string()],
             requester_extension: &ExtensionId::new("google-drive").unwrap(),

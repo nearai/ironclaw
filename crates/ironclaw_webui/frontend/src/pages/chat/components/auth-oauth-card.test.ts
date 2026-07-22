@@ -87,7 +87,7 @@ function renderCard({ gate, blockPopup = false } = {}) {
 
 function defaultGate(overrides = {}) {
   return {
-    provider: "slack_personal",
+    provider: "slack",
     authorizationUrl: "https://slack.com/oauth/v2/authorize?client_id=abc",
     gateRef: "gate-1",
     runId: "run-1",
@@ -115,8 +115,12 @@ test("AuthOauthCard renders a display name, never the raw provider id", () => {
   const { rendered } = renderCard({ gate: defaultGate() });
   const body = JSON.stringify(rendered);
   assert.match(body, /Slack/);
-  assert.doesNotMatch(body, /Slack_personal/i);
-  assert.doesNotMatch(body, /slack_personal/);
+  // The raw provider id must never render as its own value; lowercase
+  // "slack" may legitimately appear inside the authorize URL host.
+  assert.ok(
+    !rendered.values.includes("slack"),
+    "raw provider id must not render as a standalone value"
+  );
 });
 
 test("AuthOauthCard prettifies unknown provider ids instead of leaking underscores", () => {

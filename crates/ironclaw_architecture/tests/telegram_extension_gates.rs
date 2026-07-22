@@ -79,7 +79,7 @@ fn generic_channel_delivery_is_not_owned_by_composition() {
         .join("crates/ironclaw_reborn_composition/src/outbound/channel_delivery.rs");
     assert!(
         !old_owner.exists(),
-        "generic channel-delivery behavior must be owned by ironclaw_channel_delivery, not {}",
+        "generic channel-delivery behavior must be owned by ironclaw_extension_host, not {}",
         old_owner.display()
     );
 }
@@ -198,28 +198,17 @@ fn telegram_production_files_meet_the_line_budget() {
 
 #[test]
 fn telegram_composition_is_assembly_only() {
-    let path = workspace_root()
-        .join("crates/ironclaw_reborn_composition/src/telegram/telegram_host_beta.rs");
-    let source = std::fs::read_to_string(&path).expect("Telegram composition source readable");
-    let production = source
-        .split_once("\n#[cfg(test)]\nmod tests")
-        .map_or(source.as_str(), |(production, _)| production);
-    let forbidden = [
-        "TelegramRevisionWorkflowParts",
-        "DynamicTelegramTriggeredRunDeliveryHook",
-        "CachedTelegramTriggeredRunDriver",
-        "NoopTelegramDeliverySink",
-        "NoopTelegramConversationBindingService",
-        "impl TelegramRevisionWorkflowBuilder",
-    ];
-    let offenders = forbidden
-        .into_iter()
-        .filter(|symbol| production.contains(symbol))
-        .collect::<Vec<_>>();
-    let line_count = production.lines().count();
+    // Stronger than the original assembly-only budget: the generic-runtime
+    // fold removed composition's telegram module entirely. Telegram host
+    // behavior rides the generic channel-host/ingress/delivery seams, so
+    // composition may not own any telegram-specific source at all.
+    let telegram_module_root =
+        workspace_root().join("crates/ironclaw_reborn_composition/src/telegram");
     assert!(
-        offenders.is_empty() && line_count <= 450,
-        "Telegram composition must contain assembly only; behavior symbols={offenders:?}, production lines={line_count} (budget 450)"
+        !telegram_module_root.exists(),
+        "composition must not own telegram-specific modules; telegram host \
+         behavior rides the generic extension seams: {}",
+        telegram_module_root.display()
     );
 }
 

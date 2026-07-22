@@ -187,22 +187,21 @@ pub struct AdvanceSubscriptionCursorRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundDeliveryStatus {
+    /// Coordinator lifecycle: the attempt is persisted, no vendor egress has
+    /// happened yet (crash here → safe to retry).
+    Prepared,
+    /// Coordinator lifecycle: vendor egress is in flight. An attempt found in
+    /// this state after a crash becomes [`Self::Unknown`] — never blindly
+    /// resent (the vendor may have accepted the message).
+    Sending,
+    /// Legacy pre-coordinator state (kept for persisted rows).
     Pending,
     Delivered,
     Failed,
+    /// Terminal-ambiguous: the process died after possible vendor success.
+    /// Resend only when a vendor idempotency key makes it provably safe.
+    Unknown,
     DeadLettered,
-}
-
-#[allow(dead_code)] // retained for future debug/log surfaces — not yet wired
-impl OutboundDeliveryStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Delivered => "delivered",
-            Self::Failed => "failed",
-            Self::DeadLettered => "dead_lettered",
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

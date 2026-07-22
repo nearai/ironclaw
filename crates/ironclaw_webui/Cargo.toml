@@ -75,10 +75,10 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = 
 # Handler contract test (moved from ironclaw_webui_v2) constructs
 # `ProductOutboundEnvelope` fixtures with the canonical newtype constructors.
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
-# `tests/slack_host_beta_webui_v2.rs` drives the Slack host-beta surface
-# composed into `webui_v2_app`. It builds a local-dev
-# runtime through composition's public builders, so it needs composition's
-# `test-support` + `libsql` seams plus the model-gateway / capability-port traits.
+# The serve/auth integration tests (`tests/serve_loop.rs`, `tests/auth_route_contract.rs`,
+# `tests/session_round_trip.rs`, …) build a local-dev runtime through composition's
+# public builders, so they need composition's `test-support` + `libsql` seams plus
+# the model-gateway / capability-port traits.
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
 tempfile = "3"

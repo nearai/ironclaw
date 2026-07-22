@@ -10,11 +10,11 @@ use std::sync::{
 use async_trait::async_trait;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_dispatcher::{
-    RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher, RuntimeExecutor,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
+    RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
-use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
@@ -39,8 +39,8 @@ fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRu
 
 #[tokio::test]
 async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_and_events() {
-    let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"via":"host-runtime"})));
-    let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
+    let (registry, dispatcher, governor, events, adapter) =
+        runtime_dispatcher_stack(json!({"via":"host-runtime"}));
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
     let expected_mounts = representative_mounts();
     let authorizer = Arc::new(MountingAuthorizer::new(expected_mounts.clone()));
@@ -111,8 +111,8 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
 
 #[tokio::test]
 async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispatch() {
-    let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"must_not":"dispatch"})));
-    let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
+    let (registry, dispatcher, governor, events, adapter) =
+        runtime_dispatcher_stack(json!({"must_not":"dispatch"}));
     let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(dispatcher);
     let run_state = Arc::new(ironclaw_run_state::in_memory_backed_run_state_store());
     let runtime = DefaultHostRuntime::new(
@@ -178,13 +178,15 @@ struct RecordedRuntimeRequest {
 
 struct RecordingRuntimeAdapter {
     output: Value,
+    governor: Arc<InMemoryResourceGovernor>,
     requests: Mutex<Vec<RecordedRuntimeRequest>>,
 }
 
 impl RecordingRuntimeAdapter {
-    fn new(output: Value) -> Self {
+    fn new(output: Value, governor: Arc<InMemoryResourceGovernor>) -> Self {
         Self {
             output,
+            governor,
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -199,15 +201,10 @@ impl RecordingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
-    fn supports_lane(&self, lane: RuntimeLane) -> bool {
-        lane == RuntimeLane::Wasm
-    }
-
+impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        _lane: RuntimeLane,
-        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedRuntimeRequest {
             capability_id: request.capability_id.clone(),
@@ -222,7 +219,7 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunt
             .set_output_bytes(serde_json::to_vec(&output).unwrap().len() as u64);
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
-            None => request
+            None => self
                 .governor
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
@@ -231,7 +228,7 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunt
                 })?,
         };
         let output_bytes = usage.output_bytes;
-        let receipt = request
+        let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
@@ -245,6 +242,17 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunt
             receipt,
             output_bytes,
         })
+    }
+}
+
+struct SingleCapabilityResolver {
+    capability_id: CapabilityId,
+    resolved: ResolvedCapability,
+}
+
+impl ToolResolver for SingleCapabilityResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        (capability_id == &self.capability_id).then(|| self.resolved.clone())
     }
 }
 
@@ -302,33 +310,30 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
     }
 }
 
-type RecordingDispatcher = RuntimeDispatcher<
-    'static,
-    DiskFilesystem,
-    InMemoryResourceGovernor,
-    Arc<RecordingRuntimeAdapter>,
->;
-
 fn runtime_dispatcher_stack(
-    adapter: Arc<RecordingRuntimeAdapter>,
+    output: Value,
 ) -> (
     Arc<ExtensionRegistry>,
-    RecordingDispatcher,
+    RuntimeDispatcher<'static, InMemoryResourceGovernor>,
     Arc<InMemoryResourceGovernor>,
     InMemoryEventSink,
+    Arc<RecordingRuntimeAdapter>,
 ) {
     let registry = Arc::new(registry_with_echo_capability());
-    let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        Arc::clone(&registry),
-        filesystem,
-        Arc::clone(&governor),
-        adapter,
-    )
-    .with_event_sink_arc(Arc::new(events.clone()));
-    (registry, dispatcher, governor, events)
+    let adapter = Arc::new(RecordingRuntimeAdapter::new(output, Arc::clone(&governor)));
+    let resolver: Arc<dyn ToolResolver> = Arc::new(SingleCapabilityResolver {
+        capability_id: capability_id(),
+        resolved: ResolvedCapability {
+            provider: ExtensionId::new("echo").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            adapter: Arc::clone(&adapter) as Arc<dyn BoundCapabilityAdapter>,
+        },
+    });
+    let dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&governor))
+        .with_event_sink_arc(Arc::new(events.clone()));
+    (registry, dispatcher, governor, events, adapter)
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
@@ -349,6 +354,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -445,3 +451,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

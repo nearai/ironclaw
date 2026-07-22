@@ -41,7 +41,7 @@ product surface.
 | `ironclaw_outbound::OutboundResolutionEngine` | Optional internal helper for candidate selection inside `OutboundPolicyService` | Public caller boundary, target validation authority, delivery-attempt records |
 | `ironclaw_conversations` | Ingress identity, source-route binding, reply-target binding semantics | Outbound policy selection, product-specific reply behavior |
 | `ironclaw_event_projections` / `ironclaw_event_streams` | Durable event facts, projection rebuilds, notification/fan-out surfaces | Final outbound target choice, transport send, send authority |
-| `ProductAdapter` implementations and transport glue | Rendering after outbound policy approves a candidate; host-provided transport execution | Communication policy selection, durable delivery state |
+| `ChannelAdapter` implementations and transport glue | Rendering after outbound policy approves a candidate; host-provided transport execution | Communication policy selection, durable delivery state |
 
 The resolver must stay host-owned and deterministic. Product adapters can
 describe capabilities, but they do not get to define the resolver's policy

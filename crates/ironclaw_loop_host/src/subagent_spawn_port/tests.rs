@@ -3790,3 +3790,4 @@ async fn new_with_schema_propagates_schema_to_spawn_tool_definition() {
         "parameters must carry the marker schema injected via new_with_schema"
     );
 }
+// arch-exempt: large_file, subagent port contract coverage remains centralized, plan #6175

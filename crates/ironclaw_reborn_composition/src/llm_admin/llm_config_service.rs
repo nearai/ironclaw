@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical §4.3 secret-store swap only (InMemorySecretStore -> FilesystemSecretStore::ephemeral), plan #6168
+// arch-exempt: large_file, mechanical §4.3 secret-store swap only (FilesystemSecretStore -> FilesystemSecretStore::ephemeral), plan #6168
 //! Composition-side implementation of the WebChat v2 LLM-config port.
 //!
 //! Ties together the read/set-active surface ([`RebornProviderAdmin`]), the

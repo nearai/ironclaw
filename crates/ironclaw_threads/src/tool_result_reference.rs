@@ -718,7 +718,7 @@ fn validate_model_observation_text(
 /// boundary and keep matching exactly as before.
 ///
 /// This scan runs on UNTRUSTED text only. Host-authored remediation — which
-/// legitimately names `config set google.client_secret` — is exempted upstream
+/// legitimately names `config set provider.client_secret` — is exempted upstream
 /// by PROVENANCE (`ObservationProvenance::HostAuthored`), not by a content
 /// heuristic here. A previous revision tried the heuristic route
 /// (`is_config_set_key_reference`, a byte-walking parser for the exact

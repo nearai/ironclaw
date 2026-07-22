@@ -15,8 +15,6 @@ test-support = ["ironclaw_host_api/test-support"]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ironclaw_events = { path = "../ironclaw_events" }
-ironclaw_extensions = { path = "../ironclaw_extensions" }
-ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 serde_json = "1"

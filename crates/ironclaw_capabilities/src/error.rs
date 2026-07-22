@@ -205,8 +205,8 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{
         DispatchFailureDetail, DispatchInputIssue, DispatchInputIssueCode, ExtensionId,
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-        RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+        RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle,
+        VendorId,
     };
 
     fn cap() -> CapabilityId {
@@ -395,7 +395,7 @@ mod tests {
     #[test]
     fn from_dispatch_auth_required_round_trips_credential_requirements() {
         let requirement = RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+            provider: VendorId::new("google").unwrap(),
             setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                 scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
             },

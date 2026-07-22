@@ -1,0 +1,58 @@
+[package]
+name = "ironclaw_extension_host"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+description = "Generic extension lifecycle host, active snapshot, loaders, and resolvers for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.ironclaw]
+layer = "products"
+
+[features]
+# Lightweight in-crate test fakes (fixtures, scripted adapters) reused by
+# downstream integration tests. Zero-byte in production.
+test-support = []
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+hmac = "0.13"
+ironclaw_auth = { path = "../ironclaw_auth" }
+ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+toml = "1.1"
+
+[[test]]
+name = "lifecycle_contract"
+required-features = ["test-support"]
+
+[[test]]
+name = "ingress_router_contract"
+required-features = ["test-support"]
+
+[[test]]
+name = "admin_configuration_store_contract"
+
+[[test]]
+name = "admin_configuration_service_contract"

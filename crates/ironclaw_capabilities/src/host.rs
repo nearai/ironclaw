@@ -3518,8 +3518,8 @@ fn enrich_dispatch_error_credential_requirements(
 mod tests {
     use super::*;
     use ironclaw_host_api::{
-        CapabilityId, ExtensionId, Obligation, RuntimeCredentialAccountProviderId,
-        RuntimeCredentialAccountSetup, SecretHandle,
+        CapabilityId, ExtensionId, Obligation, RuntimeCredentialAccountSetup, SecretHandle,
+        VendorId,
     };
 
     fn auth_required_empty(cap: &str) -> DispatchError {
@@ -3544,7 +3544,7 @@ mod tests {
             capability: CapabilityId::new(cap).unwrap(),
             required_secrets: Vec::new(),
             credential_requirements: vec![RuntimeCredentialAuthRequirement {
-                provider: RuntimeCredentialAccountProviderId::new(provider).unwrap(),
+                provider: VendorId::new(provider).unwrap(),
                 setup: RuntimeCredentialAccountSetup::ManualToken,
                 requester_extension: ExtensionId::new(provider).unwrap(),
                 provider_scopes: Vec::new(),
@@ -3555,7 +3555,7 @@ mod tests {
     fn inject_credential_obligation(provider: &str) -> Obligation {
         Obligation::InjectCredentialAccountOnce {
             handle: SecretHandle::new(format!("{provider}_pat")).unwrap(),
-            provider: RuntimeCredentialAccountProviderId::new(provider).unwrap(),
+            provider: VendorId::new(provider).unwrap(),
             setup: RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: Vec::new(),
             requester_extension: ExtensionId::new(provider).unwrap(),
@@ -3580,7 +3580,7 @@ mod tests {
         assert_eq!(credential_requirements.len(), 1);
         assert_eq!(
             credential_requirements[0].provider,
-            RuntimeCredentialAccountProviderId::new("github").unwrap()
+            VendorId::new("github").unwrap()
         );
     }
 
@@ -3629,7 +3629,7 @@ mod tests {
         assert_eq!(credential_requirements.len(), 1);
         assert_eq!(
             credential_requirements[0].provider,
-            RuntimeCredentialAccountProviderId::new("mcp_provider").unwrap(),
+            VendorId::new("mcp_provider").unwrap(),
             "original mcp_provider must be retained, not replaced by github"
         );
     }
@@ -3798,7 +3798,13 @@ trust = "third_party"
 kind = "wasm"
 module = "echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "echo.say"
 description = "Echoes input"
 effects = ["dispatch_capability"]
@@ -3809,12 +3815,22 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
 "#;
 
     fn echo_registry() -> ExtensionRegistry {
-        use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ManifestSource};
+        use ironclaw_extensions::{
+            CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
+            HostApiContractRegistry, ManifestSource,
+        };
         use ironclaw_host_api::{HostPortCatalog, VirtualPath};
+        let mut contracts = HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                CapabilityProviderHostApiContract::new().expect("capability provider contract"),
+            ))
+            .expect("register capability provider contract");
         let manifest = ExtensionManifest::parse(
             ECHO_MANIFEST_FIXTURE,
             ManifestSource::InstalledLocal,
             &HostPortCatalog::empty(),
+            &contracts,
         )
         .unwrap();
         let package = ExtensionPackage::from_manifest(

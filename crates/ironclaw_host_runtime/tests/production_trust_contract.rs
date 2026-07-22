@@ -176,6 +176,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -268,3 +269,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

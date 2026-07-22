@@ -80,6 +80,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             post_edit_check,
             mut component_types,
         } = self;
@@ -125,6 +126,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             post_edit_check,
             component_types,
         }
@@ -189,6 +191,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             post_edit_check,
             mut component_types,
         } = self;
@@ -244,6 +247,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             post_edit_check,
             component_types,
         }

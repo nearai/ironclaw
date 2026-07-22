@@ -1202,6 +1202,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -1401,7 +1402,7 @@ async fn inject_credential_account_once_fails_when_no_resolver_wired() {
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
@@ -1442,7 +1443,7 @@ async fn inject_credential_account_once_fails_when_resolver_returns_auth_require
     let provider_scopes = vec!["https://www.googleapis.com/auth/drive.readonly".to_string()];
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: provider_scopes.clone(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
@@ -1506,7 +1507,7 @@ async fn inject_credential_account_once_resolves_and_stages_secret() {
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: injection_slot.clone(),
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
@@ -1560,7 +1561,7 @@ async fn inject_credential_account_once_reads_from_resolved_source_scope() {
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: injection_slot,
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
@@ -1602,7 +1603,7 @@ async fn inject_credential_account_once_maps_unknown_resolved_secret_to_auth_req
     let estimate = ResourceEstimate::default();
     let obligations = vec![Obligation::InjectCredentialAccountOnce {
         handle: ironclaw_host_api::SecretHandle::new("github_runtime_token").unwrap(),
-        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: ironclaw_host_api::VendorId::new("github").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::ManualToken,
         provider_scopes: Vec::new(),
         requester_extension: ironclaw_host_api::ExtensionId::new("github").unwrap(),
@@ -1651,3 +1652,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

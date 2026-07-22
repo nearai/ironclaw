@@ -8,7 +8,10 @@
 use std::fmt;
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{
+    AgentId, CapabilitySurfaceKind, ChannelPresentation, InstallationState, ProjectId, TenantId,
+    UserId,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
@@ -122,29 +125,6 @@ impl LifecyclePackageRef {
         self.require_kind(LifecyclePackageKind::Extension)?;
         Ok(self)
     }
-}
-
-/// Browser lifecycle contract phases.
-///
-/// Some phases are forward-declared. The first local facades currently emit
-/// only the states they can prove from their backing systems; future
-/// extension/skill stores may make the remaining states reachable without
-/// changing the wire enum.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecyclePhase {
-    Discovered,
-    Installing,
-    Installed,
-    Configured,
-    Activating,
-    Active,
-    Disabled,
-    UpgradeRequired,
-    Failed,
-    Removing,
-    Removed,
-    UnsupportedOrLegacy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +281,10 @@ impl LifecycleProductAction {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelConnectionRequirement {
     pub channel: String,
+    /// User-facing channel name from the manifest (S5 wire gap). The frontend
+    /// renders this instead of deriving a label from the channel id, so the
+    /// connect affordance carries no per-extension copy.
+    pub display_name: String,
     pub strategy: RebornChannelConnectStrategy,
     pub instructions: String,
     pub input_placeholder: String,
@@ -351,6 +335,18 @@ pub enum LifecycleProductPayload {
     },
 }
 
+/// Directional shape of an extension's channel surface, derived from the
+/// manifest's product-adapter capability flags: `inbound` when the surface
+/// receives external messages (`inbound_messages`), `outbound` when the host
+/// can push final replies/notifications to it (`external_final_reply_push`).
+/// The agent-facing rule this pins: final answers are delivered by the host
+/// on outbound channel surfaces; model tools never deliver them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleChannelDirections {
+    pub inbound: bool,
+    pub outbound: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleExtensionSummary {
     pub package_ref: LifecyclePackageRef,
@@ -360,7 +356,20 @@ pub struct LifecycleExtensionSummary {
     pub source: LifecycleExtensionSource,
     pub runtime_kind: LifecycleExtensionRuntimeKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub surface_kinds: Vec<LifecycleExtensionSurfaceKind>,
+    pub surface_kinds: Vec<CapabilitySurfaceKind>,
+    /// Present iff `surface_kinds` contains [`CapabilitySurfaceKind::Channel`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_directions: Option<LifecycleChannelDirections>,
+    /// Connect affordance for the channel surface (strategy + copy), present
+    /// when the surface requires a caller-scoped account binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_connection: Option<ChannelConnectionRequirement>,
+    /// The channel surface's declared `[channel.presentation]` facts (markdown
+    /// support, message length cap), present iff `surface_kinds` contains
+    /// `Channel`. Fed into prompt construction so the model formats replies to
+    /// fit the channel it is answering on (OUT-11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_presentation: Option<ChannelPresentation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub visible_capability_ids: Vec<String>,
     pub visible_read_only_capability_ids: Vec<String>,
@@ -374,8 +383,10 @@ pub struct LifecycleExtensionSummary {
 pub struct LifecycleSearchExtensionSummary {
     #[serde(flatten)]
     pub summary: LifecycleExtensionSummary,
+    /// The installed state of this catalog result for the caller, or `None`
+    /// when the caller has no visible installation of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub installation_phase: Option<LifecyclePhase>,
+    pub installation_phase: Option<InstallationState>,
 }
 
 /// Whether an installed extension is tenant-shared or private to the caller
@@ -393,7 +404,8 @@ pub enum LifecycleInstallScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LifecycleInstalledExtensionSummary {
     pub summary: LifecycleExtensionSummary,
-    pub phase: LifecyclePhase,
+    /// The projected installation state (§6.1) for the caller's installation.
+    pub phase: InstallationState,
     /// `None` only when the caller has no visible installation (projection of
     /// an uninstalled package); list responses always carry `Some`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -439,12 +451,6 @@ pub enum LifecycleExtensionSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LifecycleExtensionSurfaceKind {
-    ExternalChannel,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum LifecycleExtensionRuntimeKind {
     WasmTool,
     McpServer,
@@ -454,12 +460,15 @@ pub enum LifecycleExtensionRuntimeKind {
 }
 
 impl LifecycleExtensionRuntimeKind {
-    pub fn wire_kind(self) -> &'static str {
+    /// Honest runtime name for the wire: implementation detail, clearly
+    /// labeled — never product taxonomy (surfaces carry that).
+    pub fn runtime_wire_name(self) -> &'static str {
         match self {
-            Self::McpServer => "mcp_server",
+            Self::McpServer => "mcp",
             Self::FirstParty => "first_party",
             Self::System => "system",
-            Self::WasmTool | Self::Script => "wasm_tool",
+            Self::WasmTool => "wasm",
+            Self::Script => "script",
         }
     }
 }
@@ -486,7 +495,12 @@ pub enum LifecycleSkillSource {
 pub struct LifecycleProductResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package_ref: Option<LifecyclePackageRef>,
-    pub phase: LifecyclePhase,
+    /// The package's resting installation state for a single-package action
+    /// (install → `Installed`, activate → `Active`, remove → `Removed`,
+    /// failure → `Failed` / `Unsupported`). For multi-item responses (search /
+    /// list) this is a neutral `Installed`; the per-item states ride the
+    /// payload.
+    pub phase: InstallationState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -498,7 +512,7 @@ pub struct LifecycleProductResponse {
 impl LifecycleProductResponse {
     pub fn projection(
         package_ref: Option<LifecyclePackageRef>,
-        phase: LifecyclePhase,
+        phase: InstallationState,
         blockers: Vec<LifecycleReadinessBlocker>,
     ) -> Self {
         Self {
@@ -554,6 +568,24 @@ pub trait LifecycleProductFacade: Send + Sync {
             reason: "extension import is not supported by this runtime".to_string(),
         })
     }
+
+    /// Redacted activation error for each installed extension whose activation
+    /// failed, keyed by extension id — sourced from the durable installation
+    /// record's typed `last_error`. The extensions-list facade threads this
+    /// into `RebornExtensionInfo::activation_error` so a failed extension shows
+    /// *why* it failed instead of collapsing to a bare `installed`/`failed`
+    /// state with no reason.
+    ///
+    /// Default: none. A facade that does not surface durable installation
+    /// errors reports no reason and the wire's `activation_error` stays absent;
+    /// the production extension-host facade overrides this to read the
+    /// installation records' `last_error`.
+    async fn installed_activation_errors(
+        &self,
+        _context: LifecycleProductContext,
+    ) -> Result<std::collections::HashMap<String, String>, ProductWorkflowError> {
+        Ok(std::collections::HashMap::new())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -592,7 +624,7 @@ impl UnsupportedLifecycleProductFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Ok(LifecycleProductResponse::projection(
             package_ref,
-            LifecyclePhase::UnsupportedOrLegacy,
+            InstallationState::Unsupported,
             vec![LifecycleReadinessBlocker::runtime(Some(
                 self.runtime_ref.clone(),
             ))?],

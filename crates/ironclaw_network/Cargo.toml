@@ -14,8 +14,9 @@ percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"
 url = "2"
 zeroize = "1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "time", "net", "io-util"] }

@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
+// arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 //! Filesystem-backed [`OutboundStateStore`] implementation.
 //!
 //! Persists outbound metadata under a fixed [`ScopedPath`] tree rooted at the

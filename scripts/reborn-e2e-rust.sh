@@ -49,8 +49,9 @@ run_runtimes() {
   run_test ironclaw_dispatcher boundary_contract
   run_test ironclaw_dispatcher dispatch_contract
   run_test ironclaw_dispatcher event_dispatch_contract
-  run_test ironclaw_dispatcher runtime_dispatcher_integration
-  run_test ironclaw_dispatcher vertical_slice_contract
+  # main's runtime_dispatcher_integration / vertical_slice_contract test the
+  # retired RuntimeAdapter<F, G> architecture; the ToolResolver/BoundCapabilityAdapter
+  # pipeline is pinned by the three dispatcher contract suites above.
   run_test ironclaw_wasm wasm_dispatch_integration
   run_test ironclaw_wasm wasm_http_adapter_contract
   run_test ironclaw_wasm wit_tool_runtime_contract

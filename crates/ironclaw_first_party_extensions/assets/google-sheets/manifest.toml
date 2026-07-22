@@ -1,4 +1,4 @@
-schema_version = "reborn.extension_manifest.v2"
+schema_version = "reborn.extension_manifest.v3"
 id = "google-sheets"
 name = "Google Sheets"
 version = "0.1.0"
@@ -9,167 +9,220 @@ trust = "first_party_requested"
 kind = "wasm"
 module = "wasm/google_sheets_tool.wasm"
 
-[[capabilities]]
+[admin_configuration]
+group_id = "vendor.google"
+display_name = "Google OAuth client credentials"
+description = "Deployment OAuth client credentials shared by Google extensions."
+fields = [
+  { handle = "google_oauth_client_id", label = "Google OAuth client ID", secret = false, required = true },
+  { handle = "google_oauth_client_secret", label = "Google OAuth client secret", secret = true, required = true },
+]
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.create_spreadsheet"
 description = "Create a new spreadsheet."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/create_spreadsheet.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/create_spreadsheet.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.get_spreadsheet"
 description = "Get spreadsheet metadata by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/get_spreadsheet.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/get_spreadsheet.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.read_values"
 description = "Read cell values from a range by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/read_values.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/read_values.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.batch_read_values"
 description = "Read values from multiple ranges."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/batch_read_values.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/batch_read_values.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.write_values"
 description = "Write values to a range."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/write_values.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/write_values.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.append_values"
 description = "Append rows after existing data by spreadsheet ID. If the user only provided a spreadsheet name/title, search Google Drive first."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/append_values.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/append_values.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.clear_values"
 description = "Clear values from a range."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/clear_values.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/clear_values.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.add_sheet"
 description = "Add a sheet tab."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/add_sheet.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/add_sheet.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.delete_sheet"
 description = "Delete a sheet tab."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/delete_sheet.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/delete_sheet.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.rename_sheet"
 description = "Rename a sheet tab."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/rename_sheet.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/rename_sheet.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
 origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "google-sheets.format_cells"
 description = "Format cells in a range."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "google_runtime_token", source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/spreadsheets"] } }, provider_scopes = ["https://www.googleapis.com/auth/spreadsheets"], audience = { scheme = "https", host_pattern = "sheets.googleapis.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-sheets/format_cells.input.v1.json"
-output_schema_ref = "schemas/google-sheets/raw_output.v1.json"
 prompt_doc_ref = "prompts/google-sheets/format_cells.md"
-required_host_ports = ["host.runtime.http_egress"]
+
+[[tools.credentials]]
+handle = "google_runtime_token"
+vendor = "google"
+scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+audience = { scheme = "https", host = "sheets.googleapis.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[auth.google]
+method = "oauth2_code"
+display_name = "Google account"
+authorization_endpoint = "https://accounts.google.com/o/oauth2/v2/auth"
+token_endpoint = "https://oauth2.googleapis.com/token"
+pkce = "s256"
+scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/spreadsheets.readonly"]
+extra_authorize_params = { access_type = "offline", include_granted_scopes = "true", prompt = "consent" }
+client_credentials = { client_id_handle = "google_oauth_client_id", client_secret_handle = "google_oauth_client_secret" }
+
+[auth.google.refresh]
+# Google refresh tokens for apps in "testing" publishing status expire after
+# 7 days of inactivity; the host auth engine's keepalive sweep proactively
+# refreshes idle accounts well before this vendor lifetime.
+keepalive_idle_seconds = 604800
+
+[auth.google.token_response]
+access_token = "/access_token"
+refresh_token = "/refresh_token"
+expires_in = "/expires_in"
+scope = { path = "/scope" }

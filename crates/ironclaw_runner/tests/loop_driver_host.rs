@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
+// arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::{
@@ -1181,6 +1181,7 @@ impl CommunicationContextProvider for StubCommunicationContextProvider {
                 name: "test-channel".to_string(),
                 authenticated: true,
                 active: true,
+                presentation: None,
             }]),
             delivery_target: DeliveryTargetState::NoneSet,
             delivery_tools_visible: false,
@@ -8394,6 +8395,7 @@ fn e2e_registry_with_manifest(manifest: &str) -> ExtensionRegistry {
         manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     let package = ExtensionPackage::from_manifest(
@@ -8446,7 +8448,13 @@ runner = "sandboxed_process"
 command = "echo-script"
 args = []
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo text through Reborn adapter e2e"
 effects = ["dispatch_capability"]
@@ -9718,4 +9726,15 @@ impl LoopModelBudgetAccountant for RejectingSystemInferenceBudgetAccountant {
     ) -> Result<(), LoopModelGatewayError> {
         panic!("post_model_work must not run when pre_model_work rejects")
     }
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

@@ -562,7 +562,7 @@ pub struct RuntimeCredentialRequirement {
 
 pub enum RuntimeCredentialRequirementSource {
     SecretHandle,
-    ProductAuthAccount { provider: RuntimeCredentialAccountProviderId },
+    ProductAuthAccount { provider: VendorId, setup: RuntimeCredentialAccountSetup },
 }
 ```
 
@@ -714,6 +714,14 @@ pub trait CapabilityDispatcher {
 pub enum DispatchError;
 pub enum RuntimeDispatchErrorKind;
 ```
+
+Implementation evidence: `crates/ironclaw_host_api/src/authorized.rs`
+defines `Authorized`, `ProcessAuthorizedContinuation`, and the exhaustive
+`ProcessAuthorizedContinuation::from_authorized` conversion; `crates/ironclaw_host_api/src/dispatch.rs`
+defines `CapabilityDispatcher::dispatch_json(Authorized)`; `crates/ironclaw_capabilities/src/trust.rs`
+writes process continuations during authorization, and
+`crates/ironclaw_host_runtime/src/services/process_executor.rs` re-mints through
+the process-record-backed port.
 
 Rules:
 

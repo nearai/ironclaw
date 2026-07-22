@@ -75,6 +75,8 @@ def _is_retryable_service_unavailable(response: httpx.Response) -> bool:
         body = response.json()
     except ValueError:
         return False
+    if not isinstance(body, dict):
+        return False
     error = body.get("error")
     if isinstance(error, dict) and error.get("code") == "service_unavailable":
         return True

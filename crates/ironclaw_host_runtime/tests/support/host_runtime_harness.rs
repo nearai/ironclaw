@@ -1245,6 +1245,10 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
         Err(ResourceError::ReservationMismatch { id: reservation_id })
     }
 
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        Err(ResourceError::ReservationMismatch { id: reservation.id })
+    }
+
     fn release(
         &self,
         reservation_id: ResourceReservationId,
@@ -1642,7 +1646,13 @@ pub(crate) fn parse_manifest_from_source(
     source: ManifestSource,
 ) -> ExtensionManifest {
     let manifest = legacy_capability_fixture_to_v2(manifest);
-    ExtensionManifest::parse(&manifest, source, &HostPortCatalog::empty()).unwrap()
+    ExtensionManifest::parse(
+        &manifest,
+        source,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap()
 }
 
 pub(crate) fn execution_context_without_grants() -> ExecutionContext {
@@ -2285,7 +2295,7 @@ effects = ["dispatch_capability", "use_secret"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "script_api_token"
 source = { type = "secret_handle" }
 audience = { scheme = "https", host_pattern = "api.example.com" }
@@ -2556,3 +2566,14 @@ pub(crate) const HTTP_TOOL_WAT: &str = r#"
   (export "_initialize" (func $_initialize))
 )
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

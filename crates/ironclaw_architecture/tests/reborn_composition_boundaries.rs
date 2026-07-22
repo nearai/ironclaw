@@ -37,13 +37,10 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_loop_host",
     "ironclaw_runner",
     "ironclaw_reborn_openai_compat",
-    "ironclaw_channel_host",
-    "ironclaw_channel_delivery",
     "ironclaw_telegram_extension",
     "ironclaw_product_adapters",
     "ironclaw_product_workflow",
     "ironclaw_triggers",
-    "ironclaw_wasm_product_adapters",
 ];
 
 #[test]

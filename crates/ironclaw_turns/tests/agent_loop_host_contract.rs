@@ -4262,6 +4262,7 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
                     name: "Slack".to_string(),
                     authenticated: true,
                     active: true,
+                    presentation: None,
                 }]),
                 delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
                     display_name: "#general".to_string(),
