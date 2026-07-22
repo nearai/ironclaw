@@ -76,6 +76,7 @@ pub(super) struct MockHost {
     cancel_after_poll_inputs: Arc<Mutex<bool>>,
     cancel_after_prompt_bundle_count: Arc<Mutex<Option<usize>>>,
     cancel_after_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
+    crash_after_checkpoint_progress: Arc<Mutex<Option<LoopCheckpointKind>>>,
     cancel_after_model_response: Arc<Mutex<bool>>,
     cancel_after_batch_invocation: Arc<Mutex<bool>>,
     fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
@@ -122,6 +123,7 @@ impl MockHost {
             cancel_after_poll_inputs: Arc::new(Mutex::new(false)),
             cancel_after_prompt_bundle_count: Arc::new(Mutex::new(None)),
             cancel_after_checkpoint: Arc::new(Mutex::new(None)),
+            crash_after_checkpoint_progress: Arc::new(Mutex::new(None)),
             cancel_after_model_response: Arc::new(Mutex::new(false)),
             cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
             fail_checkpoint: Arc::new(Mutex::new(None)),
@@ -315,6 +317,11 @@ impl MockHost {
 
     pub(super) fn cancel_after_checkpoint(self, kind: LoopCheckpointKind) -> Self {
         *self.cancel_after_checkpoint.lock().expect("lock") = Some(kind);
+        self
+    }
+
+    pub(super) fn crash_after_checkpoint_progress(self, kind: LoopCheckpointKind) -> Self {
+        *self.crash_after_checkpoint_progress.lock().expect("lock") = Some(kind);
         self
     }
 
@@ -917,7 +924,23 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockHost {
                 "progress sink unavailable",
             ));
         }
+        let checkpoint_kind = match &event {
+            ironclaw_turns::run_profile::LoopProgressEvent::CheckpointWritten { kind, .. } => {
+                Some(*kind)
+            }
+            _ => None,
+        };
         self.progress_events.lock().expect("lock").push(event);
+        let mut crash_after = self.crash_after_checkpoint_progress.lock().expect("lock");
+        let should_crash = checkpoint_kind.is_some_and(|kind| crash_after.as_ref() == Some(&kind));
+        if should_crash {
+            *crash_after = None;
+        }
+        drop(crash_after);
+        assert!(
+            !should_crash,
+            "scripted worker crash after checkpoint commit"
+        );
         Ok(())
     }
 }

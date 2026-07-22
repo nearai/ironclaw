@@ -243,8 +243,18 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
                     }
                     let retry_action =
-                        apply_model_retry_alteration(ctx, &mut state, scope, alter.as_ref())
-                            .await?;
+                        prepare_model_retry_alteration(&mut state, scope, alter.as_ref())?;
+                    // Persist the consumed retry/observation budget before the
+                    // next model attempt. Otherwise a worker restart reloads
+                    // the pre-error BeforeModel checkpoint and grants the
+                    // same recovery attempt again. For iteration retries this
+                    // also makes the compaction request and pending
+                    // observation survive the restart window.
+                    state = CheckpointStage
+                        .write(ctx, state, CheckpointKind::BeforeModel)
+                        .await?
+                        .state;
+                    wait_for_model_retry_backoff(ctx, alter.as_ref()).await;
                     // A cancel request can wake the backoff sleep early;
                     // observe it here so cancellation exits at this boundary
                     // instead of issuing another call.
@@ -352,28 +362,14 @@ async fn budget_approval_blocked_exit(
     })))
 }
 
-async fn apply_model_retry_alteration(
-    ctx: StageContext<'_>,
+fn prepare_model_retry_alteration(
     state: &mut LoopExecutionState,
     scope: RetryScope,
     alteration: Option<&RetryAlteration>,
 ) -> Result<ModelRetryAction, AgentLoopExecutorError> {
     honor_retry_alteration(alteration)?;
     match alteration {
-        Some(RetryAlteration::Backoff { delay_ms }) => {
-            // Cancellation-aware backoff: availability backoffs run up to
-            // 60s, and a cancel request must not wait one out. The caller's
-            // boundary check right after this helper observes the signal and
-            // produces the cancelled exit.
-            let sleep = tokio::time::sleep(std::time::Duration::from_millis(delay_ms.as_u64()));
-            tokio::pin!(sleep);
-            let cancellation = ctx.host.cancellation_requested();
-            tokio::pin!(cancellation);
-            tokio::select! {
-                () = &mut sleep => {}
-                _signal = &mut cancellation => {}
-            }
-        }
+        Some(RetryAlteration::Backoff { .. }) => {}
         Some(RetryAlteration::ShrinkContext) => {
             if scope != RetryScope::Iteration {
                 return Err(AgentLoopExecutorError::PlannerContract {
@@ -397,4 +393,21 @@ async fn apply_model_retry_alteration(
         RetryScope::Call => ModelRetryAction::RetryCall,
         RetryScope::Iteration => ModelRetryAction::RetryIteration,
     })
+}
+
+async fn wait_for_model_retry_backoff(ctx: StageContext<'_>, alteration: Option<&RetryAlteration>) {
+    let Some(RetryAlteration::Backoff { delay_ms }) = alteration else {
+        return;
+    };
+    // Availability backoffs run up to 60s. The retry transition is already
+    // durable at this point, and cancellation wakes the delay so the caller's
+    // next boundary check can produce the cancelled exit promptly.
+    let sleep = tokio::time::sleep(std::time::Duration::from_millis(delay_ms.as_u64()));
+    tokio::pin!(sleep);
+    let cancellation = ctx.host.cancellation_requested();
+    tokio::pin!(cancellation);
+    tokio::select! {
+        () = &mut sleep => {}
+        _signal = &mut cancellation => {}
+    }
 }

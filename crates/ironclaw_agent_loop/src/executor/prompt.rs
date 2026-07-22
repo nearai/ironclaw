@@ -723,7 +723,8 @@ pub(super) async fn build_prompt_bundle_for_surface(
     }
     if let Some(observation) = state.pending_model_error_observation.as_ref() {
         context_request.inline_messages.push(
-            model_error_observation_control_message(observation).map_err(|_| {
+            model_error_observation_control_message(observation).map_err(|error| {
+                debug!(%error, "model-error observation control text rejected");
                 AgentLoopExecutorError::PlannerContract {
                     detail: "model-error observation control text was invalid",
                 }

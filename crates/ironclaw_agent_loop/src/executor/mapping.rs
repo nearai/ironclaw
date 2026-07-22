@@ -452,6 +452,7 @@ mod tests {
             (K::Unavailable, Some(C::Unavailable)),
             (K::Internal, Some(C::Internal)),
             (K::InvalidOutput, Some(C::InvalidOutput)),
+            (K::ContentFiltered, Some(C::ContentFiltered)),
             (K::BudgetExceeded, Some(C::ContextOverflow)),
             // Model-fixable-by-rebuild: iteration retry refreshes the surface
             // and prompt bundle; exhaustion -> `model_stale_request`.

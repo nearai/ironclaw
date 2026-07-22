@@ -1,5 +1,5 @@
 // arch-exempt: large_file, canonical executor regression remains with shared loop fixtures, plan #4088
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use ironclaw_host_api::{
     ApprovalRequestId, CorrelationId, DispatchInputIssueCode, ProviderToolName,
@@ -14,8 +14,9 @@ use ironclaw_turns::{
         CapabilityResumeToken, LoopCancelReasonKind, LoopCancellationSignal, LoopCheckpointKind,
         LoopCompactionError, LoopCompactionOutcome, LoopCompactionResponse,
         LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInterruptKind, LoopProcessRef, LoopProgressEvent, LoopRunInfoPort, LoopSafeSummary,
-        LoopSummaryArtifactId, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
+        LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleModelErrorObservation,
         ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
         ProviderToolCallReplay, SameCallRetryConstraint, ToolObservationDetail,
         ToolObservationStatus, VisibleCapabilityRequest, resolution,
@@ -24,8 +25,8 @@ use ironclaw_turns::{
 
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
-    LoopExecutionState, MessageIndexEntry, PendingApprovalResume, PendingAuthResume,
-    RepeatedCallWarningPhase, RepeatedCallWarningState,
+    LoopExecutionState, MessageIndexEntry, ModelErrorObservationClass, PendingApprovalResume,
+    PendingAuthResume, RepeatedCallWarningPhase, RepeatedCallWarningState,
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
@@ -43,9 +44,10 @@ use super::{
     AgentLoopExecutor, AgentLoopExecutorError, AssistantReplyInput, AssistantReplyStage, BatchStep,
     BudgetInput, BudgetStage, BudgetStep, CanonicalAgentLoopExecutor, CapabilityInput,
     CapabilityStage, DrainInput, ExecutorStage, ExitInput, ExitStage, GateInput, GateStage,
-    HostStage, InputStage, InputStep, PendingInputAck, PromptInput, PromptStage, PromptStep,
-    StageContext, StopInput, StopStage, StopStep, TurnCompletedStep, UserFacingInputDrainMode,
-    consume_drainable_inputs, sanitize_result_ref_suffix, synthetic_provider_error_result_ref,
+    HostStage, InputStage, InputStep, ModelInput, ModelStage, PendingInputAck, PromptInput,
+    PromptStage, PromptStep, StageContext, StopInput, StopStage, StopStep, TurnCompletedStep,
+    UserFacingInputDrainMode, consume_drainable_inputs, sanitize_result_ref_suffix,
+    synthetic_provider_error_result_ref,
 };
 
 #[allow(dead_code)]
@@ -3769,6 +3771,83 @@ async fn model_error_observation_attempt_is_bounded_before_terminal_failure() {
         1,
         "the exhausted class gets exactly one observation-assisted attempt"
     );
+}
+
+#[tokio::test]
+async fn model_retry_transition_survives_checkpoint_reload_before_retry() {
+    let content_filtered = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ContentFiltered,
+            "model completion was filtered",
+        )
+    };
+    let host = Arc::new(
+        MockHost::new(Vec::new())
+            .with_model_errors(vec![content_filtered(), content_filtered()])
+            .crash_after_checkpoint_progress(LoopCheckpointKind::BeforeModel),
+    );
+    let crashed_host = Arc::clone(&host);
+    let crash = match tokio::spawn(async move {
+        let family = crate::families::default();
+        let ctx = StageContext {
+            planner: family.planner(),
+            host: crashed_host.as_ref(),
+        };
+        let state = LoopExecutionState::initial_for_run(crashed_host.run_context());
+        ModelStage
+            .process(
+                ctx,
+                ModelInput {
+                    state,
+                    messages: Vec::new(),
+                    inline_messages: Vec::new(),
+                    surface_version: surface_version(),
+                    capability_view: LoopModelCapabilityView {
+                        visible_capability_ids: Vec::new(),
+                    },
+                },
+            )
+            .await
+    })
+    .await
+    {
+        Err(join_error) => join_error,
+        Ok(_) => panic!("scripted worker crash must stop before the retry"),
+    };
+    assert!(crash.is_panic());
+
+    let restored = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeModel);
+    assert!(
+        restored
+            .recovery_state
+            .observation_attempted_for(ModelErrorObservationClass::ContentFiltered)
+    );
+    assert_eq!(
+        restored.pending_model_error_observation,
+        Some(ModelVisibleModelErrorObservation::content_filtered())
+    );
+
+    // Simulate a new worker loading the last committed BeforeModel payload.
+    // The same provider failure must now abort instead of granting a second
+    // observation-assisted attempt.
+    let family = crate::families::default();
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&family, host.as_ref(), restored)
+        .await
+        .expect("reloaded retry state should fail through the typed exit");
+
+    assert!(matches!(
+        exit,
+        LoopExit::Failed(ref failed) if failed.reason_kind == LoopFailureKind::ModelError
+    ));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("completion refused by content filter; rephrase")
+    }));
 }
 
 #[tokio::test]
