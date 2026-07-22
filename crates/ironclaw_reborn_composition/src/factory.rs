@@ -727,9 +727,12 @@ impl RebornServices {
         )));
         let workspace_filesystem = self.read_write_workspace_filesystem()?;
         let project_filesystem: Arc<dyn ironclaw_product_workflow::ProjectFilesystemReader> =
-            Arc::new(crate::support::fs::ProjectScopedFilesystemReader::new(
-                Arc::clone(&workspace_filesystem),
-            ));
+            Arc::new(
+                crate::support::fs::ProjectScopedFilesystemReader::with_max_read_bytes(
+                    Arc::clone(&workspace_filesystem),
+                    ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+                ),
+            );
         let delivery = self.delivery_coordinator.clone().map(|coordinator| {
             crate::extension_host::channel_host::ChannelHostDeliveryDeps {
                 coordinator,

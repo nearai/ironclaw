@@ -31,9 +31,10 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
     ChannelDeliveryResolver, DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy,
-    PreferenceTargetCodec, ProjectFilesystemReader, ProjectFsEntry, ProjectFsError, ProjectFsStat,
-    ResolvedChannelDelivery, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
-    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest, WorkspaceFile,
+    PreferenceTargetCodec, ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind,
+    ProjectFsError, ProjectFsStat, ResolvedChannelDelivery, RunDeliveryObserver,
+    RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest, WorkspaceFile,
 };
 use ironclaw_threads::{
     AppendFinalizedAssistantMessageRequest, EnsureThreadRequest, InMemorySessionThreadService,
@@ -362,9 +363,24 @@ impl ProjectFilesystemReader for ScriptedProjectFilesystemReader {
     async fn stat(
         &self,
         _thread_scope: &ThreadScope,
-        _path: &str,
+        path: &str,
     ) -> Result<ProjectFsStat, ProjectFsError> {
-        Err(ProjectFsError::NotFound)
+        match self
+            .files
+            .lock()
+            .expect("files")
+            .get(path)
+            .cloned()
+            .unwrap_or(Err(ProjectFsError::NotFound))
+        {
+            Ok(file) => Ok(ProjectFsStat {
+                path: file.path.as_str().to_string(),
+                kind: ProjectFsEntryKind::File,
+                size_bytes: file.bytes.len() as u64,
+                mime_type: file.mime_type,
+            }),
+            Err(error) => Err(error),
+        }
     }
 }
 

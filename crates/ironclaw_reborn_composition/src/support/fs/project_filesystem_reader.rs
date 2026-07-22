@@ -47,8 +47,10 @@ impl<F: RootFilesystem> ProjectScopedFilesystemReader<F> {
         }
     }
 
-    #[cfg(test)]
-    fn with_max_read_bytes(filesystem: Arc<ScopedFilesystem<F>>, max_read_bytes: u64) -> Self {
+    pub(crate) fn with_max_read_bytes(
+        filesystem: Arc<ScopedFilesystem<F>>,
+        max_read_bytes: u64,
+    ) -> Self {
         Self {
             filesystem,
             workspace_alias: WORKSPACE_ALIAS.to_string(),

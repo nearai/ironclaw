@@ -37,10 +37,10 @@ use ironclaw_extensions::{
     ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
     ExtensionInstallationStore as _, ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
 };
-use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId,
-    ThreadId, UserId,
+    AgentId, ApprovalRequestId, ExtensionId, InvocationId, MountPermissions, ProjectId,
+    ResourceScope, ScopedPath, TenantId, ThreadId, UserId,
 };
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
@@ -49,9 +49,10 @@ use ironclaw_outbound::{
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
+    ChannelAdapter, ChannelError, DeliveryReport, ExternalActorRef, ExternalConversationRef,
+    ExternalEventId, InboundOutcome, OutboundEnvelope, ParsedProductInbound, PartDeliveryOutcome,
     ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProtocolAuthEvidence, TrustedInboundContext,
+    ProtocolAuthEvidence, TrustedInboundContext, VerifiedInbound,
 };
 use ironclaw_product_workflow::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
@@ -203,6 +204,10 @@ struct Harness {
     /// tests can seed the creator's personal preference.
     outbound:
         Arc<ironclaw_outbound::FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    /// Real composition-scoped workspace used only by the attachment journey.
+    workspace_filesystem: Option<Arc<ScopedFilesystem<InMemoryBackend>>>,
+    /// Vendor-seam capture proving the transient bytes reached the adapter.
+    delivered_files: Option<Arc<Mutex<Vec<WorkspaceFile>>>>,
     /// Keeps the harness extension host (and its published snapshot) alive.
     _host: Arc<ExtensionHost>,
     /// Keeps the assembly (and its reconcile loop + registrations) alive.
@@ -330,6 +335,7 @@ struct HarnessOptions {
     /// (empty `list_pending`) so bare gate replies exercise the
     /// delivered-gate-route fallback.
     foreign_scope_approvals: bool,
+    capture_attachment_delivery: bool,
 }
 
 impl HarnessOptions {
@@ -339,8 +345,17 @@ impl HarnessOptions {
             max_wait: Duration::from_secs(2),
             auth_challenges: None,
             foreign_scope_approvals: false,
+            capture_attachment_delivery: false,
         }
     }
+}
+
+async fn build_attachment_harness(assistant_text: &str) -> Harness {
+    let mut options = HarnessOptions::new(TurnMode::Complete {
+        assistant_text: assistant_text.to_string(),
+    });
+    options.capture_attachment_delivery = true;
+    build_harness_with_options(options).await
 }
 
 async fn build_harness(mode: TurnMode) -> Harness {
@@ -422,7 +437,10 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let preferences: Arc<dyn CommunicationPreferenceRepository> = outbound.clone();
     let egress = RecordingEgress::default();
 
-    let host = slack_test_extension_host().await;
+    let delivered_files = options
+        .capture_attachment_delivery
+        .then(|| Arc::new(Mutex::new(Vec::new())));
+    let host = slack_test_extension_host(delivered_files.clone()).await;
     let ingress = build_extension_ingress(
         host.snapshot_watch(),
         Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
@@ -456,6 +474,25 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     )]));
 
     let channel_config = configured_channel_config().await;
+    let workspace_filesystem = options.capture_attachment_delivery.then(|| {
+        Arc::new(ScopedFilesystem::with_fixed_view(
+            Arc::new(InMemoryBackend::new()),
+            crate::local_dev_mounts::workspace_mount_view(MountPermissions::read_write(), &[])
+                .expect("test workspace mount"),
+        ))
+    });
+    let project_filesystem: Arc<dyn ProjectFilesystemReader> =
+        workspace_filesystem.as_ref().map_or_else(
+            || Arc::new(NoProjectFilesystem) as Arc<dyn ProjectFilesystemReader>,
+            |filesystem| {
+                Arc::new(
+                    crate::support::fs::ProjectScopedFilesystemReader::with_max_read_bytes(
+                        Arc::clone(filesystem),
+                        ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64,
+                    ),
+                ) as Arc<dyn ProjectFilesystemReader>
+            },
+        );
     let deps = GenericChannelHostDeps {
         watch: host.snapshot_watch(),
         deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
@@ -482,7 +519,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             outbound_store,
             route_store: Arc::clone(&route_store),
             communication_preferences: preferences,
-            project_filesystem: Arc::new(NoProjectFilesystem),
+            project_filesystem,
             approval_context: None,
             blocked_auth_prompts: options.auth_challenges.map(|provider| {
                 Arc::new(ProductAuthBlockedAuthPromptSource::new(Some(provider)))
@@ -528,6 +565,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         identity_lookup,
         channel_config,
         outbound,
+        workspace_filesystem,
+        delivered_files,
         _host: host,
         assembly,
     }
@@ -632,7 +671,45 @@ impl ChannelConfigReactivation for NoopChannelConfigReactivation {
 /// A minimal `ExtensionHost` with the REAL bundled channel manifest active
 /// (binding the real `SlackChannelAdapter`) — the snapshot both the ingress
 /// router and the delivery resolver read.
-async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHost> {
+struct CapturingAttachmentAdapter {
+    files: Arc<Mutex<Vec<WorkspaceFile>>>,
+}
+
+#[async_trait]
+impl ChannelAdapter for CapturingAttachmentAdapter {
+    fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+        ironclaw_slack_extension::SlackChannelAdapter.inbound(request)
+    }
+
+    async fn deliver(
+        &self,
+        envelope: OutboundEnvelope,
+        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        let mut files = self
+            .files
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for part in &envelope.parts {
+            if let ironclaw_product_adapters::OutboundPart::File(file) = part {
+                files.push(file.clone());
+            }
+        }
+        Ok(DeliveryReport {
+            parts: envelope
+                .parts
+                .iter()
+                .map(|_| PartDeliveryOutcome::Sent {
+                    vendor_message_ref: Some("captured".to_string()),
+                })
+                .collect(),
+        })
+    }
+}
+
+async fn slack_test_extension_host(
+    delivered_files: Option<Arc<Mutex<Vec<WorkspaceFile>>>>,
+) -> Arc<ironclaw_extension_host::ExtensionHost> {
     use ironclaw_extension_host::test_support::{
         FakeEgressFactory, FakeToolAdapter, RecordingDrain,
     };
@@ -642,20 +719,37 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
         LoadedExtension, RehydratedInstallationRecordStore,
     };
 
-    struct SlackTestEntrypoint;
+    struct SlackTestEntrypoint {
+        delivered_files: Option<Arc<Mutex<Vec<WorkspaceFile>>>>,
+    }
     impl ExtensionEntrypoint for SlackTestEntrypoint {
         fn bind(&self, _ctx: BindContext) -> Result<ExtensionBindings, BindError> {
+            let channel: Arc<dyn ChannelAdapter> = self.delivered_files.as_ref().map_or_else(
+                || {
+                    Arc::new(ironclaw_slack_extension::SlackChannelAdapter)
+                        as Arc<dyn ChannelAdapter>
+                },
+                |files| {
+                    Arc::new(CapturingAttachmentAdapter {
+                        files: Arc::clone(files),
+                    }) as Arc<dyn ChannelAdapter>
+                },
+            );
             Ok(ExtensionBindings {
                 tools: Some(Arc::new(FakeToolAdapter)),
-                channel: Some(Arc::new(ironclaw_slack_extension::SlackChannelAdapter)),
+                channel: Some(channel),
             })
         }
     }
-    struct SlackTestLoader;
+    struct SlackTestLoader {
+        delivered_files: Option<Arc<Mutex<Vec<WorkspaceFile>>>>,
+    }
     #[async_trait]
     impl ExtensionLoader for SlackTestLoader {
         async fn load(&self, _ctx: &LoadContext) -> Result<LoadedExtension, BindError> {
-            Ok(LoadedExtension::new(Box::new(SlackTestEntrypoint)))
+            Ok(LoadedExtension::new(Box::new(SlackTestEntrypoint {
+                delivered_files: self.delivered_files.clone(),
+            })))
         }
     }
 
@@ -676,7 +770,7 @@ async fn slack_test_extension_host() -> Arc<ironclaw_extension_host::ExtensionHo
     let host = Arc::new(
         ExtensionHost::new(ExtensionHostDeps {
             store: Arc::new(RehydratedInstallationRecordStore::default()),
-            loader: Arc::new(SlackTestLoader),
+            loader: Arc::new(SlackTestLoader { delivered_files }),
             drain: Arc::new(RecordingDrain::default()),
             egress: Arc::new(FakeEgressFactory),
             reserved_capability_ids: Default::default(),
@@ -1063,7 +1157,7 @@ struct TriggeredDeliveryFixture {
 async fn triggered_delivery_fixture(
     outbound_store: Arc<dyn OutboundStateStore>,
 ) -> TriggeredDeliveryFixture {
-    let host = slack_test_extension_host().await;
+    let host = slack_test_extension_host(None).await;
     let driver_egress = RecordingEgress::default();
     let delivery_coordinator = Arc::new(DeliveryCoordinator::new(
         outbound_store,
@@ -2220,6 +2314,46 @@ async fn slack_dm_retry_delivery_is_idempotent() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], CHANNEL);
     assert_eq!(messages[0]["text"], "hello from reborn");
+}
+
+#[tokio::test]
+async fn final_reply_reads_real_scoped_workspace_bytes_into_the_channel_adapter() {
+    let path = "/workspace/reports/final.bin";
+    let expected = b"production-scoped-workspace-bytes";
+    let harness = build_attachment_harness(&format!("attachment: {path}")).await;
+    let workspace = harness
+        .workspace_filesystem
+        .as_ref()
+        .expect("attachment harness uses the real scoped workspace");
+    let thread_scope = ThreadScope {
+        tenant_id: TenantId::new(TENANT).expect("tenant"),
+        agent_id: AgentId::new(AGENT).expect("agent"),
+        project_id: Some(ProjectId::new(PROJECT).expect("project")),
+        owner_user_id: Some(UserId::new(USER).expect("user")),
+        mission_id: None,
+    };
+    workspace
+        .write_bytes(
+            &thread_scope.to_resource_scope(),
+            &ScopedPath::new(path).expect("scoped attachment path"),
+            expected.to_vec(),
+        )
+        .await
+        .expect("seed workspace through the real scoped mount");
+
+    let response = harness.post_event(dm_message("Ev-final", "hello")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    harness.drain().await;
+
+    let files = harness
+        .delivered_files
+        .as_ref()
+        .expect("attachment harness captures the vendor seam")
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].path.as_str(), path);
+    assert_eq!(files[0].bytes, expected);
 }
 
 #[tokio::test]

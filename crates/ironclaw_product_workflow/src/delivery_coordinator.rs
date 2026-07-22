@@ -47,7 +47,7 @@ use crate::ProductWorkflowError;
 use crate::outbound_delivery::{
     ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata,
 };
-use crate::{ProjectFilesystemReader, ProjectFsError};
+use crate::{ProjectFilesystemReader, ProjectFsEntryKind, ProjectFsError};
 
 /// The nine semantic intents (§5.4). Emitters express *what* is being
 /// communicated; the coordinator decides targeting, persistence, and retry.
@@ -230,6 +230,8 @@ pub enum CoordinatedDeliveryError {
     WorkspaceAttachmentRead(#[source] ProjectFsError),
     #[error("workspace attachments exceed the delivery budget")]
     WorkspaceAttachmentBudgetExceeded,
+    #[error("caller-supplied materialized workspace attachments are not accepted")]
+    PreMaterializedWorkspaceAttachment,
 }
 
 /// Retry policy for retryable per-part outcomes (bounded, jitter-free by
@@ -357,6 +359,7 @@ impl DeliveryCoordinator {
                 intent: request.intent,
             });
         }
+        reject_caller_supplied_files(&request.parts)?;
         self.ensure_scope_recovered(&request.delivery.resolution_request.scope)
             .await;
 
@@ -420,6 +423,7 @@ impl DeliveryCoordinator {
                 intent: request.intent,
             });
         }
+        reject_caller_supplied_files(&request.parts)?;
         self.ensure_scope_recovered(&request.scope).await;
 
         // Persist the attempt before anything else. The synthetic reply
@@ -514,6 +518,13 @@ impl DeliveryCoordinator {
             }
         };
 
+        // Resolve the generation-pinned adapter and stored reply context
+        // before touching workspace bytes. A missing channel or failed
+        // context lookup must not cause file materialization as a side effect.
+        let (channel, reply_context) = self
+            .resolve_channel_context(&attempt, extension_id, &metadata.external_conversation_ref)
+            .await?;
+
         let parts =
             match materialize_workspace_file_parts(intent, parts, project_filesystem, thread_scope)
                 .await
@@ -530,12 +541,13 @@ impl DeliveryCoordinator {
                 }
             };
 
-        self.drive_resolved(
+        self.drive_prepared(
             attempt,
-            extension_id,
+            channel,
             metadata.external_conversation_ref,
             thread_anchor,
             parts,
+            reply_context,
         )
         .await
     }
@@ -551,10 +563,30 @@ impl DeliveryCoordinator {
         thread_anchor: Option<String>,
         parts: Vec<OutboundPart>,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
-        // 3. Resolve the channel from ONE snapshot read (generation-pinned).
+        let (channel, reply_context) = self
+            .resolve_channel_context(&attempt, extension_id, &conversation)
+            .await?;
+        self.drive_prepared(
+            attempt,
+            channel,
+            conversation,
+            thread_anchor,
+            parts,
+            reply_context,
+        )
+        .await
+    }
+
+    async fn resolve_channel_context(
+        &self,
+        attempt: &OutboundDeliveryAttempt,
+        extension_id: &str,
+        conversation: &ExternalConversationRef,
+    ) -> Result<(ResolvedChannelDelivery, Option<Vec<u8>>), CoordinatedDeliveryError> {
+        // Resolve the channel from ONE snapshot read (generation-pinned).
         let Some(channel) = self.resolver.resolve_channel_delivery(extension_id) else {
             self.mark_terminal(
-                &attempt,
+                attempt,
                 OutboundDeliveryStatus::Failed,
                 Some(DeliveryFailureKind::TransportUnavailable),
             )
@@ -564,7 +596,7 @@ impl DeliveryCoordinator {
             });
         };
 
-        // 4. Stored reply context for source-route replies (ING-11).
+        // Stored reply context for source-route replies (ING-11).
         let reply_context = self
             .reply_context
             .reply_context(
@@ -574,6 +606,18 @@ impl DeliveryCoordinator {
             )
             .await;
 
+        Ok((channel, reply_context))
+    }
+
+    async fn drive_prepared(
+        &self,
+        attempt: OutboundDeliveryAttempt,
+        channel: ResolvedChannelDelivery,
+        conversation: ExternalConversationRef,
+        thread_anchor: Option<String>,
+        parts: Vec<OutboundPart>,
+        reply_context: Option<Vec<u8>>,
+    ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         let envelope = OutboundEnvelope {
             extension_id: channel.extension_id.clone(),
             installation_id: channel.installation_id.clone(),
@@ -731,6 +775,7 @@ async fn materialize_workspace_file_parts(
     project_filesystem: &dyn ProjectFilesystemReader,
     thread_scope: &ThreadScope,
 ) -> Result<Vec<OutboundPart>, CoordinatedDeliveryError> {
+    reject_caller_supplied_files(&parts)?;
     if !matches!(
         intent,
         DeliveryIntent::FinalReply | DeliveryIntent::TriggeredDelivery
@@ -754,6 +799,37 @@ async fn materialize_workspace_file_parts(
     }
     if paths.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
         return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
+    }
+
+    // Preflight every file before reading any bytes. The production delivery
+    // reader is independently capped at max_file_bytes, while this metadata
+    // pass avoids even bounded allocations when the declared set already
+    // violates per-file or aggregate budgets.
+    let mut declared_total_bytes = 0u64;
+    for path in &paths {
+        let stat = project_filesystem
+            .stat(thread_scope, path)
+            .await
+            .map_err(CoordinatedDeliveryError::WorkspaceAttachmentRead)?;
+        if stat.path != *path {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentRead(
+                ProjectFsError::Internal,
+            ));
+        }
+        if stat.kind != ProjectFsEntryKind::File {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentRead(
+                ProjectFsError::NotAFile,
+            ));
+        }
+        if stat.size_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes as u64 {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
+        }
+        declared_total_bytes = declared_total_bytes
+            .checked_add(stat.size_bytes)
+            .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded)?;
+        if declared_total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes as u64 {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
+        }
     }
 
     let mut total_bytes = 0usize;
@@ -781,7 +857,43 @@ async fn materialize_workspace_file_parts(
         files.push(OutboundPart::File(file));
     }
     parts.extend(files);
+    validate_final_workspace_files(&parts)?;
     Ok(parts)
+}
+
+fn reject_caller_supplied_files(parts: &[OutboundPart]) -> Result<(), CoordinatedDeliveryError> {
+    if parts
+        .iter()
+        .any(|part| matches!(part, OutboundPart::File(_)))
+    {
+        return Err(CoordinatedDeliveryError::PreMaterializedWorkspaceAttachment);
+    }
+    Ok(())
+}
+
+fn validate_final_workspace_files(parts: &[OutboundPart]) -> Result<(), CoordinatedDeliveryError> {
+    let mut count = 0usize;
+    let mut total_bytes = 0usize;
+    for file in parts.iter().filter_map(|part| match part {
+        OutboundPart::File(file) => Some(file),
+        OutboundPart::Text(_) | OutboundPart::Retract { .. } => None,
+    }) {
+        count = count
+            .checked_add(1)
+            .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded)?;
+        if count > DEFAULT_ATTACHMENT_BUDGETS.max_count
+            || file.bytes.len() > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes
+        {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
+        }
+        total_bytes = total_bytes
+            .checked_add(file.bytes.len())
+            .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded)?;
+        if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
+        }
+    }
+    Ok(())
 }
 
 /// Synthetic reply-target ref naming a notice's source conversation. Hashed:
