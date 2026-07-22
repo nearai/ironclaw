@@ -203,16 +203,37 @@ impl RebornSandboxConfig {
         self
     }
 
+    /// Docker `--network` value for the sandbox container.
+    ///
+    /// - `disable_network: false` (`with_network_enabled`, unused in
+    ///   production today): `None` (Docker default bridge) — a deliberate
+    ///   fully-open mode, unrelated to the brokered-egress cases below.
+    /// - `disable_network: true` with no broker, or a Unix-socket broker
+    ///   (`requires_docker_network() == false`): `Some("none")` — no network
+    ///   interfaces at all.
+    /// - `disable_network: true` with an HTTP-proxy broker
+    ///   (`requires_docker_network() == true`): joins the pinned internal
+    ///   network (`broker::SANDBOX_EGRESS_NETWORK_NAME`) instead of the
+    ///   default bridge. **E1**: the default bridge NATs to the internet, so
+    ///   a container there could dial out directly and ignore the proxy env
+    ///   — "proxy-allowlist egress" would be advisory, not enforced. The
+    ///   internal network has no route off-host except back to its own
+    ///   gateway, where the proxy is reached (see
+    ///   `broker::SANDBOX_EGRESS_NETWORK_GATEWAY` and
+    ///   `exec_transport::ensure_egress_network`, which creates the network
+    ///   idempotently before a container joins it).
     fn container_network_mode(&self) -> Option<String> {
-        if self.disable_network
-            && !self
-                .network_broker
-                .as_ref()
-                .is_some_and(RebornSandboxNetworkBroker::requires_docker_network)
-        {
-            Some("none".to_string())
+        if !self.disable_network {
+            return None;
+        }
+        let requires_docker_network = self
+            .network_broker
+            .as_ref()
+            .is_some_and(RebornSandboxNetworkBroker::requires_docker_network);
+        if requires_docker_network {
+            Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
         } else {
-            None
+            Some("none".to_string())
         }
     }
 
@@ -681,13 +702,19 @@ mod tests {
     }
 
     #[test]
-    fn network_broker_exposes_proxy_env_without_none_network_mode() {
+    fn network_broker_proxy_url_joins_internal_egress_network_not_default_bridge() {
         let config = RebornSandboxConfig::new("/tmp/reborn-sandbox")
             .with_network_broker_proxy_url("http://broker.internal:8181")
             .unwrap();
         let env = config.command_env(HashMap::new()).unwrap();
 
-        assert_eq!(config.container_network_mode(), None);
+        // E1: an HTTP-proxy broker must NOT leave the container on Docker's
+        // default bridge (which NATs to the internet) — it joins the
+        // pinned internal network instead.
+        assert_eq!(
+            config.container_network_mode(),
+            Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
+        );
         assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
         assert!(
             env.contains(&"IRONCLAW_REBORN_HTTP_PROXY=http://broker.internal:8181".to_string())
@@ -699,13 +726,22 @@ mod tests {
     }
 
     #[test]
-    fn network_broker_port_uses_docker_host_gateway_proxy_url() {
+    fn network_broker_port_uses_pinned_internal_network_gateway_proxy_url() {
         let config = RebornSandboxConfig::new("/tmp/reborn-sandbox").with_network_broker_port(8181);
         let env = config.command_env(HashMap::new()).unwrap();
-        let proxy_url = format!("http://{}:8181", broker::docker_host_gateway());
+        let proxy_url = format!("http://{}:8181", broker::SANDBOX_EGRESS_NETWORK_GATEWAY);
 
+        // E1: the default-port broker's proxy URL must point at the pinned
+        // internal network's gateway (reachable once the container joins
+        // `SANDBOX_EGRESS_NETWORK_NAME`), not the Docker default-bridge
+        // host-gateway address — that was the E1 hole (default bridge NATs
+        // to the internet).
         assert!(env.contains(&format!("IRONCLAW_REBORN_HTTP_PROXY={proxy_url}")));
         assert!(env.contains(&format!("http_proxy={proxy_url}")));
+        assert_eq!(
+            config.container_network_mode(),
+            Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
+        );
     }
 
     #[test]
@@ -847,7 +883,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn user_container_launch_config_applies_http_proxy_broker_env_and_drops_none_network() {
+    async fn user_container_launch_config_applies_http_proxy_broker_env_and_joins_internal_egress_network()
+     {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
@@ -865,7 +902,14 @@ mod tests {
         let binds = host_config.binds.unwrap();
         let env = launch.env.unwrap();
 
-        assert_eq!(host_config.network_mode, None);
+        // E1: the applied Docker HostConfig must attach to the pinned
+        // internal egress network, never silently fall back to the default
+        // bridge (which would NAT to the internet and defeat the proxy
+        // allowlist).
+        assert_eq!(
+            host_config.network_mode,
+            Some(broker::SANDBOX_EGRESS_NETWORK_NAME.to_string())
+        );
         assert!(env.contains(&"IRONCLAW_REBORN_NETWORK_MODE=brokered".to_string()));
         assert!(env.contains(&"http_proxy=http://broker.internal:8181".to_string()));
         assert!(env.contains(&"HTTPS_PROXY=http://broker.internal:8181".to_string()));

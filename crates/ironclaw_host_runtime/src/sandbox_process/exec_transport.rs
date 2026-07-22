@@ -19,8 +19,10 @@ use bollard::{
         Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions, LogOutput,
         StartContainerOptions,
     },
+    errors::Error as DockerError,
     exec::{CreateExecOptions, StartExecOptions, StartExecResults},
-    models::HostConfig,
+    models::{HostConfig, Ipam, IpamConfig},
+    network::CreateNetworkOptions,
 };
 use futures_util::StreamExt;
 use ironclaw_host_api::{TenantId, UserId};
@@ -29,6 +31,9 @@ use crate::{CommandExecutionOutput, RuntimeProcessError};
 
 use super::{
     ContainerWorkdir, LABEL_PREFIX, RebornSandboxConfig, RebornSandboxUserKey,
+    broker::{
+        SANDBOX_EGRESS_NETWORK_GATEWAY, SANDBOX_EGRESS_NETWORK_NAME, SANDBOX_EGRESS_NETWORK_SUBNET,
+    },
     registry::{self, build_user_container_labels, user_container_label_filter},
     shell_single_quote,
 };
@@ -45,6 +50,7 @@ pub(super) async fn ensure_container(
     user_id: &UserId,
     workspace: &Path,
 ) -> Result<String, RuntimeProcessError> {
+    ensure_egress_network(docker, config).await?;
     let filters = user_container_label_filter(LABEL_PREFIX, tenant_id, user_id);
     let found = docker
         .list_containers(Some(ListContainersOptions {
@@ -105,6 +111,78 @@ async fn ensure_running(docker: &Docker, container_id: &str) -> Result<(), Runti
             })?;
     }
     Ok(())
+}
+
+/// Idempotently creates the pinned internal egress network (E1) before a
+/// container that needs it joins. A no-op unless `config` actually resolves
+/// to [`SANDBOX_EGRESS_NETWORK_NAME`] (no-net and fully-open-bridge configs
+/// never call the Docker network API here).
+///
+/// Docker network creation is not atomic-on-conflict the way `CREATE TABLE
+/// IF NOT EXISTS` is, so a losing racer against a concurrent create (e.g.
+/// two users' first sandbox commands landing at once) gets a server error
+/// back instead of success — [`is_network_already_exists_error`] treats that
+/// as success too, since the end state (the network exists) is what this
+/// function promises.
+async fn ensure_egress_network(
+    docker: &Docker,
+    config: &RebornSandboxConfig,
+) -> Result<(), RuntimeProcessError> {
+    if config.container_network_mode().as_deref() != Some(SANDBOX_EGRESS_NETWORK_NAME) {
+        return Ok(());
+    }
+    match docker
+        .create_network(sandbox_egress_network_create_options())
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if is_network_already_exists_error(&error) => Ok(()),
+        Err(error) => Err(RuntimeProcessError::ExecutionFailed(format!(
+            "sandbox egress network ensure failed: {error}"
+        ))),
+    }
+}
+
+/// Pure builder for the `internal: true`, pinned-subnet network Docker
+/// creates for [`SANDBOX_EGRESS_NETWORK_NAME`] — kept as a standalone
+/// function so its shape is unit-testable without a Docker daemon (mirrors
+/// how [`user_container_launch_config`] separates config assembly from the
+/// `docker.create_container` call).
+fn sandbox_egress_network_create_options() -> CreateNetworkOptions<String> {
+    CreateNetworkOptions {
+        name: SANDBOX_EGRESS_NETWORK_NAME.to_string(),
+        check_duplicate: true,
+        driver: "bridge".to_string(),
+        // The load-bearing setting: no default route off-host, so the
+        // egress proxy (reached at the pinned gateway, see
+        // `SANDBOX_EGRESS_NETWORK_GATEWAY`) is the only way out.
+        internal: true,
+        ipam: Ipam {
+            config: Some(vec![IpamConfig {
+                subnet: Some(SANDBOX_EGRESS_NETWORK_SUBNET.to_string()),
+                gateway: Some(SANDBOX_EGRESS_NETWORK_GATEWAY.to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// True when `error` indicates the network already exists (a prior boot, or
+/// a concurrent racer, created it first) — the outcome
+/// [`ensure_egress_network`] wants, not a failure. Matches on Docker's
+/// typical 409-conflict status as well as the "already exists" message
+/// text, since different Docker/DinD versions have been observed to surface
+/// this either way.
+fn is_network_already_exists_error(error: &DockerError) -> bool {
+    match error {
+        DockerError::DockerResponseServerError {
+            status_code,
+            message,
+        } => *status_code == 409 || message.to_lowercase().contains("already exists"),
+        _ => false,
+    }
 }
 
 async fn create_and_start_user_container(
@@ -544,6 +622,79 @@ mod tests {
         }
         let host_config = launch.host_config.unwrap();
         assert_eq!(host_config.auto_remove, Some(false));
+    }
+
+    #[test]
+    fn sandbox_egress_network_create_options_pins_internal_subnet_and_gateway() {
+        let options = sandbox_egress_network_create_options();
+
+        assert_eq!(options.name, SANDBOX_EGRESS_NETWORK_NAME);
+        assert!(
+            options.internal,
+            "must have no default route off-host (E1) — that's what makes the proxy the only way out"
+        );
+        let ipam_config = options
+            .ipam
+            .config
+            .as_ref()
+            .and_then(|configs| configs.first())
+            .expect("network create options must pin an IPAM config");
+        assert_eq!(
+            ipam_config.subnet.as_deref(),
+            Some(SANDBOX_EGRESS_NETWORK_SUBNET)
+        );
+        assert_eq!(
+            ipam_config.gateway.as_deref(),
+            Some(SANDBOX_EGRESS_NETWORK_GATEWAY)
+        );
+    }
+
+    #[test]
+    fn already_exists_network_error_is_treated_as_idempotent_success() {
+        let conflict = DockerError::DockerResponseServerError {
+            status_code: 409,
+            message: format!("network with name {SANDBOX_EGRESS_NETWORK_NAME} already exists"),
+        };
+        assert!(is_network_already_exists_error(&conflict));
+
+        let message_only = DockerError::DockerResponseServerError {
+            status_code: 500,
+            message: "Error: network with name ironclaw-sandbox-egress already exists".to_string(),
+        };
+        assert!(is_network_already_exists_error(&message_only));
+
+        let unrelated = DockerError::DockerResponseServerError {
+            status_code: 500,
+            message: "internal server error".to_string(),
+        };
+        assert!(!is_network_already_exists_error(&unrelated));
+    }
+
+    #[tokio::test]
+    async fn ensure_egress_network_is_a_no_op_for_none_network_configs() {
+        // No live Docker daemon needed: `ensure_egress_network` must return
+        // early (never issue a `docker.create_network` call) for a config
+        // whose `container_network_mode()` isn't the egress network, so an
+        // unreachable `Docker` handle is never actually used. Building an
+        // HTTP-transport `Docker` client is lazy (no connection attempt
+        // until a request is sent), unlike `connect_with_local_defaults`,
+        // which stats the Unix socket path at construction and fails
+        // immediately in this sandboxed environment (no
+        // `/var/run/docker.sock`) — this exercises the guard clause without
+        // either.
+        let docker =
+            Docker::connect_with_http("http://127.0.0.1:0", 120, bollard::API_DEFAULT_VERSION)
+                .expect("HTTP-transport client construction performs no I/O");
+        let temp = tempfile::tempdir().unwrap();
+
+        let none_network_config = RebornSandboxConfig::new(temp.path().join("workspaces"));
+        assert_eq!(
+            none_network_config.container_network_mode(),
+            Some("none".to_string())
+        );
+        ensure_egress_network(&docker, &none_network_config)
+            .await
+            .expect("no-net config must skip the network API entirely");
     }
 }
 
