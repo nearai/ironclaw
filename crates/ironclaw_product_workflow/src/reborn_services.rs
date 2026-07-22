@@ -44,6 +44,7 @@ use ironclaw_turns::{
     SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use secrecy::{ExposeSecret as _, SecretString};
+use serde::Serialize;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, mpsc};
 use url::Url;
 use uuid::Uuid;
@@ -81,6 +82,7 @@ mod llm_config;
 mod log_views;
 mod operator_command_views;
 mod operator_config_views;
+mod outbound_views;
 mod project_fs;
 mod projects;
 mod run_artifact;
@@ -131,6 +133,7 @@ pub use llm_config::{
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
 pub use operator_command_views::{OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_STATUS_VIEW};
 pub use operator_config_views::{OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW};
+pub use outbound_views::{OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW};
 pub use project_fs::{
     ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
     ProjectFsStat, RebornProjectFsListRequest, RebornProjectFsListResponse,
@@ -3085,6 +3088,24 @@ where
         self
     }
 
+    async fn invoke_json_capability<T>(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability_id: &str,
+        input: T,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError>
+    where
+        T: Serialize,
+    {
+        let capability =
+            CapabilityId::new(capability_id).map_err(RebornServicesError::internal_from)?;
+        let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
+        self.product_capability_invoker
+            .invoke(caller, capability, input, activity_id)
+            .await
+    }
+
     /// Wire the generic channel-config configure port. Without it, the
     /// setup facade renders no channel-config fields and rejects
     /// channel-config submissions as unavailable.
@@ -3730,12 +3751,10 @@ where
                 .value
                 .as_bool()
                 .ok_or_else(|| operator_config_invalid_value("value"))?;
-            let capability = CapabilityId::new(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID)
-                .map_err(RebornServicesError::internal_from)?;
             let resolution = self
-                .invoke(
+                .invoke_json_capability(
                     caller.clone(),
-                    capability,
+                    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
                     serde_json::json!({ "enabled": enabled }),
                     ActivityId::new(),
                 )
@@ -4119,12 +4138,7 @@ where
                     .map_err(RebornServicesError::internal_from)?;
                 let response = self.build_logs_view(caller, request, query.cursor).await?;
                 let next_cursor = response.next_cursor.clone();
-                let payload =
-                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor,
-                })
+                views::view_page_with_cursor(response, next_cursor)
             }
             id if id == OPERATOR_LOGS_VIEW.id => {
                 let request = serde_json::from_value(query.params)
@@ -4136,74 +4150,49 @@ where
                     .logs
                     .as_ref()
                     .and_then(|logs| logs.next_cursor.clone());
-                let payload =
-                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor,
-                })
+                views::view_page_with_cursor(response, next_cursor)
             }
             id if id == LLM_CONFIG_VIEW.id => {
-                operator_command_views::parse_empty_operator_view_params(query.params)?;
+                views::parse_empty_view_params(query.params)?;
                 let response = self.build_llm_config_view(caller).await?;
-                let payload =
-                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor: None,
-                })
+                views::view_page(response)
+            }
+            id if id == OUTBOUND_PREFERENCES_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_outbound_preferences_view(caller).await?;
+                views::view_page(response)
+            }
+            id if id == OUTBOUND_DELIVERY_TARGETS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_outbound_delivery_targets_view(caller).await?;
+                views::view_page(response)
             }
             id if id == RUN_ARTIFACT_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(RebornServicesError::internal_from)?;
                 let artifact = self.build_run_artifact(caller, request).await?;
-                let payload =
-                    serde_json::to_value(artifact).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor: None,
-                })
+                views::view_page(artifact)
             }
             id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
-                operator_command_views::parse_empty_operator_view_params(query.params)?;
+                views::parse_empty_view_params(query.params)?;
                 let response = self.build_operator_config_list_view(caller).await?;
-                let payload =
-                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor: None,
-                })
+                views::view_page(response)
             }
             id if id == OPERATOR_CONFIG_KEY_VIEW.id => {
                 let response = self
                     .build_operator_config_key_view(caller, query.params)
                     .await?;
-                let payload =
-                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor: None,
-                })
+                views::view_page(response)
             }
             id if id == OPERATOR_DIAGNOSTICS_VIEW.id => {
-                operator_command_views::parse_empty_operator_view_params(query.params)?;
+                views::parse_empty_view_params(query.params)?;
                 let response = self.build_operator_diagnostics_view(caller).await?;
-                let payload =
-                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor: None,
-                })
+                views::view_page(response)
             }
             id if id == OPERATOR_STATUS_VIEW.id => {
-                operator_command_views::parse_empty_operator_view_params(query.params)?;
+                views::parse_empty_view_params(query.params)?;
                 let response = self.build_operator_status_view(caller).await?;
-                let payload =
-                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
-                Ok(RebornViewPage {
-                    payload,
-                    next_cursor: None,
-                })
+                views::view_page(response)
             }
             _ => Err(RebornServicesError::not_found()),
         }
@@ -4977,9 +4966,17 @@ where
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        self.outbound_preferences_facade
-            .get_outbound_preferences(caller)
-            .await
+        let page = self
+            .query(
+                caller,
+                RebornViewQuery {
+                    view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
+                    params: serde_json::json!({}),
+                    cursor: None,
+                },
+            )
+            .await?;
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
     }
 
     async fn set_outbound_preferences(
@@ -4996,9 +4993,17 @@ where
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
-        self.outbound_preferences_facade
-            .list_outbound_delivery_targets(caller)
-            .await
+        let page = self
+            .query(
+                caller,
+                RebornViewQuery {
+                    view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
+                    params: serde_json::json!({}),
+                    cursor: None,
+                },
+            )
+            .await?;
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
     }
 
     async fn list_extensions(

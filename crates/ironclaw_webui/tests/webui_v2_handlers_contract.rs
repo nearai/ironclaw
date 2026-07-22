@@ -31,21 +31,22 @@ use ironclaw_product_workflow::{
     FsMount, LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageRef, LlmActiveSelection,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
-    OPERATOR_LOGS_VIEW, OPERATOR_STATUS_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind,
-    ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    OPERATOR_LOGS_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
+    ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -730,6 +731,25 @@ impl RebornServicesApi for StubServices {
                     next_cursor: None,
                 })
             }
+            id if id == OUTBOUND_PREFERENCES_VIEW.id => {
+                *self.get_outbound_preferences_calls.lock().expect("lock") += 1;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(outbound_preferences_response("slack-dm-alpha"))
+                        .expect("outbound preferences payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OUTBOUND_DELIVERY_TARGETS_VIEW.id => {
+                *self
+                    .list_outbound_delivery_targets_calls
+                    .lock()
+                    .expect("lock") += 1;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(outbound_delivery_targets_response())
+                        .expect("outbound delivery targets payload"),
+                    next_cursor: None,
+                })
+            }
             id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
                 *self.list_operator_config_calls.lock().expect("lock") += 1;
                 Ok(RebornViewPage {
@@ -1392,33 +1412,7 @@ impl RebornServicesApi for StubServices {
             .list_outbound_delivery_targets_calls
             .lock()
             .expect("lock") += 1;
-        Ok(RebornOutboundDeliveryTargetListResponse {
-            targets: vec![
-                RebornOutboundDeliveryTargetOption {
-                    target: outbound_target_summary("slack-dm-alpha"),
-                    capabilities: RebornOutboundDeliveryTargetCapabilities {
-                        final_replies: true,
-                        gate_prompts: true,
-                        auth_prompts: true,
-                    },
-                },
-                RebornOutboundDeliveryTargetOption {
-                    target: RebornOutboundDeliveryTargetSummary::new(
-                        outbound_target_id("slack-status-alpha"),
-                        "slack",
-                        "Slack status",
-                        None,
-                    )
-                    .expect("valid target summary"),
-                    capabilities: RebornOutboundDeliveryTargetCapabilities {
-                        final_replies: false,
-                        gate_prompts: false,
-                        auth_prompts: false,
-                    },
-                },
-            ],
-            next_cursor: None,
-        })
+        Ok(outbound_delivery_targets_response())
     }
 
     async fn list_extension_registry(
@@ -1668,6 +1662,36 @@ fn outbound_preferences_response(target_id: &str) -> RebornOutboundPreferencesRe
         final_reply_target: Some(outbound_target_summary(target_id)),
         final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
         default_modality: Default::default(),
+    }
+}
+
+fn outbound_delivery_targets_response() -> RebornOutboundDeliveryTargetListResponse {
+    RebornOutboundDeliveryTargetListResponse {
+        targets: vec![
+            RebornOutboundDeliveryTargetOption {
+                target: outbound_target_summary("slack-dm-alpha"),
+                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                    final_replies: true,
+                    gate_prompts: true,
+                    auth_prompts: true,
+                },
+            },
+            RebornOutboundDeliveryTargetOption {
+                target: RebornOutboundDeliveryTargetSummary::new(
+                    outbound_target_id("slack-status-alpha"),
+                    "slack",
+                    "Slack status",
+                    None,
+                )
+                .expect("valid target summary"),
+                capabilities: RebornOutboundDeliveryTargetCapabilities {
+                    final_replies: false,
+                    gate_prompts: false,
+                    auth_prompts: false,
+                },
+            },
+        ],
+        next_cursor: None,
     }
 }
 
@@ -3124,6 +3148,14 @@ async fn get_outbound_preferences_dispatches_through_facade() {
             .expect("lock"),
         1
     );
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert!(view_ids.contains(&OUTBOUND_PREFERENCES_VIEW.id.to_string()));
 }
 
 #[tokio::test]
@@ -3255,6 +3287,14 @@ async fn list_outbound_delivery_targets_dispatches_through_facade() {
             .expect("lock"),
         1
     );
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert!(view_ids.contains(&OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string()));
 }
 
 #[tokio::test]

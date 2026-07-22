@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{RebornServicesError, WebUiAuthenticatedCaller};
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyViewParams {}
+
 /// Stable metadata for one read-only product view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RebornViewDescriptor {
@@ -27,6 +31,28 @@ pub struct RebornViewPage {
     pub payload: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+}
+
+pub(super) fn parse_empty_view_params(
+    params: serde_json::Value,
+) -> Result<(), RebornServicesError> {
+    serde_json::from_value::<EmptyViewParams>(params)
+        .map(|_| ())
+        .map_err(RebornServicesError::internal_from)
+}
+
+pub(super) fn view_page<T: Serialize>(payload: T) -> Result<RebornViewPage, RebornServicesError> {
+    view_page_with_cursor(payload, None)
+}
+
+pub(super) fn view_page_with_cursor<T: Serialize>(
+    payload: T,
+    next_cursor: Option<String>,
+) -> Result<RebornViewPage, RebornServicesError> {
+    Ok(RebornViewPage {
+        payload: serde_json::to_value(payload).map_err(RebornServicesError::internal_from)?,
+        next_cursor,
+    })
 }
 
 /// One composition-supplied implementation behind the generic view conduit.

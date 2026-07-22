@@ -831,6 +831,15 @@ stream. Never a method. This generalizes §13.3's synthetic-capability
 promotion: the four synthetic product tools are simply the *first four* facade
 operations to make the migration every mutation makes.
 
+Implementation approach during migration: do not introduce macros for each
+capability or view. Keep descriptor IDs and typed builders explicit, and use
+small helper functions for repeated boundary mechanics: empty-parameter
+validation, JSON serialization into `RebornViewPage`, capability-id parsing,
+and serializable input conversion before `ProductSurface::invoke`. Add input
+structs only when they own real validation, versioned contract shape, secret
+handling, or meaningful `deny_unknown_fields` behavior; trivial adapter
+mappings should pass plain serializable values through the helper.
+
 ### 5.2.1 Origin is part of the `Invocation`; policy is an origin→gate matrix
 
 ```rust

@@ -56,7 +56,8 @@ use ironclaw_product_workflow::{
     LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_STATUS_VIEW, OperatorLogsService,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_STATUS_VIEW,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW, OperatorLogsService,
     OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
     PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
     ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
@@ -6208,6 +6209,56 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
     let list_calls = outbound_facade.list_calls();
     assert_eq!(list_calls.len(), 1);
     assert_eq!(list_calls[0].user_id.as_str(), "user-charlie");
+}
+
+#[tokio::test]
+async fn outbound_preferences_reads_are_available_as_product_views() {
+    let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_outbound_preferences_facade(outbound_facade.clone());
+    let preferences_caller = caller_for_user("user-outbound-preferences");
+    let targets_caller = caller_for_user("user-outbound-targets");
+
+    let preferences_page = services
+        .query(
+            preferences_caller.clone(),
+            RebornViewQuery {
+                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("outbound preferences view");
+    let preferences: RebornOutboundPreferencesResponse =
+        serde_json::from_value(preferences_page.payload).expect("outbound preferences payload");
+    assert_eq!(
+        preferences
+            .final_reply_target
+            .as_ref()
+            .map(|target| target.target_id.as_str()),
+        Some("slack-dm-alpha")
+    );
+
+    let targets_page = services
+        .query(
+            targets_caller.clone(),
+            RebornViewQuery {
+                view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("outbound targets view");
+    let targets: RebornOutboundDeliveryTargetListResponse =
+        serde_json::from_value(targets_page.payload).expect("outbound targets payload");
+    assert_eq!(targets.targets.len(), 1);
+    assert_eq!(outbound_facade.get_calls(), vec![preferences_caller]);
+    assert_eq!(outbound_facade.list_calls(), vec![targets_caller]);
 }
 
 #[tokio::test]

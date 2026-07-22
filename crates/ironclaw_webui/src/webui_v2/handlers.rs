@@ -32,7 +32,8 @@ use ironclaw_product_workflow::{
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_STATUS_VIEW,
-    ProductOutboundEnvelope, ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW, ProductOutboundEnvelope,
+    ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
     RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
     RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
     RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
@@ -1452,7 +1453,19 @@ pub async fn get_outbound_preferences(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
-    let response = state.services().get_outbound_preferences(caller).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1477,10 +1490,19 @@ pub async fn list_outbound_delivery_targets(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
-    let response = state
+    let page = state
         .services()
-        .list_outbound_delivery_targets(caller)
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
         .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1775,18 +1797,18 @@ pub async fn replace_extension_admin_configuration(
     let activity_id =
         admin_configuration_activity_id(&caller, &path.group_id, &body.idempotency_key)?;
     let expected_revision = body.expected_revision;
-    let input = serde_json::to_value(ReplaceExtensionAdminConfigurationInput {
-        group_id: path.group_id.clone(),
-        values: body.values,
-        expected_revision,
-    })
-    .map_err(RebornServicesError::internal_from)?;
-    let capability = CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)
-        .map_err(RebornServicesError::internal_from)?;
-    let resolution = state
-        .services()
-        .invoke(caller.clone(), capability, input, activity_id)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID,
+        ReplaceExtensionAdminConfigurationInput {
+            group_id: path.group_id.clone(),
+            values: body.values,
+            expected_revision,
+        },
+        activity_id,
+    )
+    .await?;
 
     match resolution {
         Resolution::Done(outcome) => {
@@ -1825,6 +1847,24 @@ pub async fn replace_extension_admin_configuration(
         Resolution::Blocked(blocked) => Err(admin_configuration_blocked(blocked).into()),
         Resolution::Suspended(_) => Err(admin_configuration_unavailable(true).into()),
     }
+}
+
+async fn invoke_product_capability<T>(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    capability_id: &str,
+    input: T,
+    activity_id: ActivityId,
+) -> Result<Resolution, RebornServicesError>
+where
+    T: Serialize,
+{
+    let capability =
+        CapabilityId::new(capability_id).map_err(RebornServicesError::internal_from)?;
+    let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
+    services
+        .invoke(caller, capability, input, activity_id)
+        .await
 }
 
 async fn query_extension_admin_configuration(

@@ -1,7 +1,5 @@
 //! Descriptor-backed operator command-plane read projections.
 
-use serde::Deserialize;
-
 use super::{
     OperatorSetupHostState, ProductCapabilityInvoker, RebornOperatorArea,
     RebornOperatorCommandPlaneResponse, RebornOperatorSurfaceStatus, RebornServices,
@@ -21,18 +19,6 @@ pub const OPERATOR_STATUS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "operator_status",
     paginated: false,
 };
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct EmptyOperatorViewParams {}
-
-pub(super) fn parse_empty_operator_view_params(
-    params: serde_json::Value,
-) -> Result<(), RebornServicesError> {
-    serde_json::from_value::<EmptyOperatorViewParams>(params)
-        .map(|_| ())
-        .map_err(RebornServicesError::internal_from)
-}
 
 impl<I, V> RebornServices<I, V>
 where

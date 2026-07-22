@@ -176,6 +176,14 @@ Preference fields are candidates only. The outbound service must revalidate
 tenant ownership, exact owner where required, target capability, delivery kind,
 and modality before recording a delivery attempt.
 
+Product-facing outbound reads are descriptor-backed ProductSurface query views:
+`outbound_preferences` for the authenticated caller's preference projection and
+`outbound_delivery_targets` for the caller-scoped target inventory. The legacy
+`get_outbound_preferences` and `list_outbound_delivery_targets` facade methods
+are compatibility wrappers over those views while `RebornServicesApi` shrinks
+toward the generic read conduit. Preference writes remain side-effecting and
+must move through the capability path.
+
 ---
 
 ## 6. P0 Rule Order
