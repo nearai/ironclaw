@@ -1687,7 +1687,7 @@ async fn tool_response_to_host(
             "model response was truncated before completion",
         )),
         FinishReason::ContentFilter => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::PolicyDenied,
+            HostManagedModelErrorKind::ContentFiltered,
             "model response was blocked by provider policy",
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
@@ -2015,7 +2015,7 @@ fn response_to_host_reply(
             "model response was truncated before completion",
         )),
         FinishReason::ContentFilter => Err(HostManagedModelError::safe(
-            HostManagedModelErrorKind::PolicyDenied,
+            HostManagedModelErrorKind::ContentFiltered,
             "model response was blocked by provider policy",
         )),
         FinishReason::ToolUse => Err(HostManagedModelError::safe(
@@ -2044,6 +2044,7 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::BudgetAccountingFailed => {
             HostManagedModelErrorKind::BudgetAccountingFailed
         }
+        AgentLoopHostErrorKind::ContentFiltered => HostManagedModelErrorKind::ContentFiltered,
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::StaleSurface => HostManagedModelErrorKind::StaleRequest,
         AgentLoopHostErrorKind::Invalid

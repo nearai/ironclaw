@@ -2193,7 +2193,7 @@ async fn gateway_rejects_content_filtered_provider_responses() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, HostManagedModelErrorKind::PolicyDenied);
+    assert_eq!(error.kind, HostManagedModelErrorKind::ContentFiltered);
 }
 
 #[tokio::test]

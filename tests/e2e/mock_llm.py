@@ -7,6 +7,7 @@ via TOOL_CALL_PATTERNS.
 
 import argparse
 import asyncio
+from copy import deepcopy
 import json
 import os
 import re
@@ -208,6 +209,16 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
                 f"trace.steps[{index}].request_hint.min_message_count "
                 "must be a non-negative integer"
             )
+        expected_failed_result = request_hint.get(
+            "expected_failed_tool_result_contains"
+        )
+        if expected_failed_result is not None and (
+            not isinstance(expected_failed_result, str) or not expected_failed_result
+        ):
+            raise ValueError(
+                f"trace.steps[{index}].request_hint."
+                "expected_failed_tool_result_contains must be a non-empty string"
+            )
         responses.append(response)
         request_hints.append(request_hint)
         pending_user_input = False
@@ -271,21 +282,169 @@ def _next_llm_trace_response(
             )
             raise web.HTTPConflict(text=state["error"])
 
-    response = responses[next_index]
+    failed_result = _failed_tool_result(messages)
+    expected_failed_result = request_hint.get("expected_failed_tool_result_contains")
+    if failed_result is None and expected_failed_result is not None:
+        state["error"] = (
+            "recorded LLM trace expected a failed capability result containing "
+            f"{expected_failed_result!r} before response {next_index}"
+        )
+        raise web.HTTPConflict(text=state["error"])
+    if failed_result is not None and (
+        expected_failed_result is None
+        or expected_failed_result not in failed_result["content"]
+    ):
+        state["error"] = (
+            "recorded LLM trace observed a failed capability result before response "
+            f"{next_index}: {failed_result['summary']}"
+        )
+        raise web.HTTPConflict(text=state["error"])
+
+    response = deepcopy(responses[next_index])
     if response["type"] == "tool_calls":
+        available_tool_names = set(available_tool_names)
+        for result in _find_named_tool_results(messages, "capability_info"):
+            parsed = _parse_trace_result_content(result.get("content"))
+            disclosed_name = _find_trace_result_field(parsed, ["name"])
+            if isinstance(disclosed_name, str):
+                available_tool_names.add(disclosed_name)
+                available_tool_names.add(disclosed_name.replace(".", "__"))
         missing = {
             tool_call["name"]
             for tool_call in response["tool_calls"]
             if tool_call["name"] not in available_tool_names
         }
         if missing:
-            state["error"] = "recorded LLM trace requested unavailable tools: " + ", ".join(
-                sorted(missing)
+            available_provider_tools = sorted(
+                name
+                for name in available_tool_names
+                if "__" in name and not name.startswith("builtin__")
+            )
+            state["error"] = (
+                "recorded LLM trace requested unavailable tools: "
+                + ", ".join(sorted(missing))
+                + "; available provider tools: "
+                + ", ".join(available_provider_tools)
+                + "; all available tools: "
+                + ", ".join(sorted(available_tool_names))
             )
             raise web.HTTPConflict(text=state["error"])
+        try:
+            response["tool_calls"] = _resolve_trace_result_bindings(
+                response["tool_calls"], messages
+            )
+        except ValueError as error:
+            state["error"] = str(error)
+            raise web.HTTPConflict(text=state["error"]) from error
 
     state["next_response"] += 1
     return response
+
+
+def _resolve_trace_result_bindings(value: object, messages: list[dict]) -> object:
+    """Resolve test-only arguments from earlier real capability results.
+
+    Harvested traces necessarily contain the provider IDs returned during the
+    live run. Full-path replay creates fresh Docs and Sheets resources, so a
+    later recorded call must consume the ID returned by the local provider,
+    not the stale live ID. Tests opt into that behavior with an argument value
+    shaped like::
+
+        {"$trace_result": {"tool": "google-docs__create_document",
+                            "fields": ["documentId", "document_id", "id"]}}
+
+    The marker is accepted only inside the mock server; committed trace files
+    remain unchanged and production code never sees it.
+    """
+    if isinstance(value, list):
+        return [_resolve_trace_result_bindings(item, messages) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    if set(value) == {"$trace_result"}:
+        binding = value["$trace_result"]
+        if not isinstance(binding, dict):
+            raise ValueError("$trace_result binding must be an object")
+        tool = binding.get("tool")
+        fields = binding.get("fields")
+        if not isinstance(tool, str) or not tool:
+            raise ValueError("$trace_result.tool must be a non-empty string")
+        if (
+            not isinstance(fields, list)
+            or not fields
+            or not all(isinstance(field, str) and field for field in fields)
+        ):
+            raise ValueError("$trace_result.fields must be non-empty strings")
+
+        named_results = _find_named_tool_results(messages, tool)
+        for result in reversed(named_results):
+            payload = _parse_trace_result_content(result.get("content"))
+            found = _find_trace_result_field(payload, fields)
+            if found is not None:
+                return found
+        observed = [
+            {
+                "name": result.get("name"),
+                "content": str(result.get("content", ""))[:500],
+            }
+            for result in _find_tool_results(messages)
+        ]
+        raise ValueError(
+            f"recorded LLM trace could not bind a result from {tool} "
+            f"using fields {fields}; observed tool results: {observed}"
+        )
+
+    return {
+        key: _resolve_trace_result_bindings(item, messages)
+        for key, item in value.items()
+    }
+
+
+def _parse_trace_result_content(content: object) -> object:
+    if not isinstance(content, str):
+        return content
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        return content
+
+
+def _find_trace_result_field(value: object, fields: list[str]) -> object | None:
+    if isinstance(value, dict):
+        for field in fields:
+            candidate = value.get(field)
+            if isinstance(candidate, (str, int)) and not isinstance(candidate, bool):
+                return candidate
+        for child in value.values():
+            candidate = _find_trace_result_field(child, fields)
+            if candidate is not None:
+                return candidate
+    elif isinstance(value, list):
+        for child in value:
+            candidate = _find_trace_result_field(child, fields)
+            if candidate is not None:
+                return candidate
+    elif isinstance(value, str) and value[:1] in {"{", "["}:
+        try:
+            nested = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return _find_trace_result_field(nested, fields)
+    return None
+
+
+def _failed_tool_result(messages: list[dict]) -> dict | None:
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        parsed = _parse_trace_result_content(message.get("content"))
+        status = _find_trace_result_field(parsed, ["status"])
+        if status in {"failed", "error"}:
+            return {
+                "content": json.dumps(parsed, sort_keys=True),
+                "summary": f"{message.get('name', 'unknown tool')} status={status}",
+            }
+    return None
 
 TOOL_FAILURE_TRIGGER = re.compile(r"issue 1780 tool failure", re.IGNORECASE)
 TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
@@ -1651,6 +1810,33 @@ def _advertised_tool_names(tools: object) -> set[str]:
     return names
 
 
+def _available_tool_names(tools: object) -> set[str]:
+    """Include deferred tools named by the runtime's tool-search catalog."""
+    names = _advertised_tool_names(tools)
+    if not isinstance(tools, list):
+        return names
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        description = function.get("description")
+        if not isinstance(name, str) or not name.endswith("tool_search"):
+            continue
+        if not isinstance(description, str):
+            continue
+        for line in description.splitlines():
+            candidate = line.removeprefix("- ") if line.startswith("- ") else ""
+            if candidate and all(
+                character.isalnum() or character in "_.-" for character in candidate
+            ):
+                names.add(candidate)
+                names.add(candidate.replace(".", "__"))
+    return names
+
+
 def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
     """Return the list of tool calls to emit for the latest user message.
 
@@ -2688,7 +2874,7 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
     stream = body.get("stream", False)
     tools = body.get("tools")
     has_tools = bool(tools)
-    available_tool_names = _advertised_tool_names(tools)
+    available_tool_names = _available_tool_names(tools)
     cid = f"mock-{uuid.uuid4().hex[:8]}"
 
     trace_response = _next_llm_trace_response(
@@ -3230,7 +3416,38 @@ async def google_oauth_token(request: web.Request) -> web.Response:
     data = await request.post()
     if data.get("grant_type") != "authorization_code":
         return web.json_response({"error": "unsupported_grant_type"}, status=400)
-    if data.get("code") != "mock_auth_code":
+    # Full-path QA uses one pre-consented reusable Google identity. Google may
+    # report the account's cumulative grants during a narrower scope-upgrade
+    # flow, so the extension-specific codes expose that deterministic union.
+    all_reborn_google_scopes = " ".join(
+        (
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/documents",
+            "https://www.googleapis.com/auth/documents.readonly",
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/spreadsheets.readonly",
+        )
+    )
+    scopes_by_code = {
+        "mock_auth_code": (
+            "https://www.googleapis.com/auth/drive.readonly "
+            "https://www.googleapis.com/auth/drive"
+        ),
+        "mock_auth_code_gmail": all_reborn_google_scopes,
+        "mock_auth_code_google_calendar": all_reborn_google_scopes,
+        "mock_auth_code_google_drive": all_reborn_google_scopes,
+        "mock_auth_code_google_docs": all_reborn_google_scopes,
+        "mock_auth_code_google_sheets": all_reborn_google_scopes,
+    }
+    code = data.get("code")
+    scope = scopes_by_code.get(code)
+    if scope is None:
         return web.json_response({"error": "invalid_grant"}, status=400)
     return web.json_response(
         {
@@ -3238,10 +3455,7 @@ async def google_oauth_token(request: web.Request) -> web.Response:
             "refresh_token": "mock-refreshed-access-token",
             "token_type": "Bearer",
             "expires_in": 3600,
-            "scope": (
-                "https://www.googleapis.com/auth/drive.readonly "
-                "https://www.googleapis.com/auth/drive"
-            ),
+            "scope": scope,
         }
     )
 

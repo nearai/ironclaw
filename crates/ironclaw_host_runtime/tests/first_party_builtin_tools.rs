@@ -31,15 +31,16 @@ use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     PROFILE_SET_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityFailure,
     RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind,
-    TIME_CAPABILITY_ID, TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID,
-    TRACE_COMMONS_CREDITS_CAPABILITY_ID, TRACE_COMMONS_ONBOARD_CAPABILITY_ID,
-    TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID, TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID,
-    TRACE_COMMONS_STATUS_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
-    TenantSandboxProcessPort, ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
+    SPAWN_SUBAGENT_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    TRACE_COMMONS_ACCOUNT_LOGIN_LINK_CAPABILITY_ID, TRACE_COMMONS_CREDITS_CAPABILITY_ID,
+    TRACE_COMMONS_ONBOARD_CAPABILITY_ID, TRACE_COMMONS_PROFILE_SET_CAPABILITY_ID,
+    TRACE_COMMONS_PROFILE_TOKEN_CAPABILITY_ID, TRACE_COMMONS_STATUS_CAPABILITY_ID,
+    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID, TenantSandboxProcessPort,
+    ToolCallHttpEgress, TriggerCreateHook, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_handlers_for_process_backend,
     builtin_first_party_handlers_with_trigger_create_hook, builtin_first_party_package,
     builtin_first_party_package_for_process_backend,
@@ -86,6 +87,8 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
             | SHELL_CAPABILITY_ID
             | SPAWN_SUBAGENT_CAPABILITY_ID
             | SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_UPDATE_CAPABILITY_ID
+            | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
             | SKILL_REMOVE_CAPABILITY_ID
             | TRIGGER_CREATE_CAPABILITY_ID
             | TRIGGER_PAUSE_CAPABILITY_ID
@@ -211,10 +214,15 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
             "{}: ConsentSufficient is Product-only; not valid on automation",
             descriptor.id
         );
+        let expected_product =
+            if product_surface_builtin_capabilities().contains(&descriptor.id.as_str()) {
+                OriginGatePolicy::ConsentSufficient
+            } else {
+                OriginGatePolicy::Forbidden
+            };
         assert_eq!(
-            matrix.product,
-            OriginGatePolicy::Forbidden,
-            "{} product must be deny-by-default",
+            matrix.product, expected_product,
+            "{} product origin policy mismatch",
             descriptor.id
         );
         assert_eq!(
@@ -270,6 +278,15 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
             "{gated}"
         );
     }
+}
+
+fn product_surface_builtin_capabilities() -> &'static [&'static str] {
+    &[
+        SKILL_INSTALL_CAPABILITY_ID,
+        "builtin.skill_update",
+        "builtin.skill_auto_activate_set",
+        SKILL_REMOVE_CAPABILITY_ID,
+    ]
 }
 
 #[tokio::test]
@@ -9306,6 +9323,8 @@ fn all_builtin_capability_ids() -> Vec<&'static str> {
         APPLY_PATCH_CAPABILITY_ID,
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_UPDATE_CAPABILITY_ID,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,

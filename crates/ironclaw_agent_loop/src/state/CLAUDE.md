@@ -9,6 +9,7 @@ Owns the typed, resumable state carried by the canonical loop executor.
 - `slots.rs` defines per-strategy state slots.
 - `bounded_ring.rs` defines fixed-window observation history.
 - `signature.rs` defines repeat-detection signatures for capability calls.
+- `model_recovery.rs` defines checkpointed, typed model-recovery controls.
 
 ## Boundaries
 

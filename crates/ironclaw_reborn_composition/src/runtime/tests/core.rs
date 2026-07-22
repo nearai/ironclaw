@@ -5658,15 +5658,16 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
         UserId::new("runtime-webui-diagnostics-owner").unwrap(),
         Some(AgentId::new("runtime-webui-diagnostics-agent").unwrap()),
         None,
-    );
+    )
+    .with_operator_webui_config(true);
     let router = webui_v2_router(WebUiV2State::new(
         bundle.api,
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
     ))
+    .layer(axum::Extension(caller))
     .layer(axum::Extension(WebUiV2Capabilities {
         operator_webui_config: true,
-    }))
-    .layer(axum::Extension(caller));
+    }));
 
     let response = router
         .oneshot(

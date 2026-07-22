@@ -2397,6 +2397,14 @@ fn extension_lifecycle_mutation_succeeded(
                 field: None,
                 validation_code: Some(WebUiInboundValidationCode::InvalidValue),
             }),
+            Some(FailureKind::OperationFailed) => Err(RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            }),
             Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
                 Err(extension_lifecycle_forbidden())
             }

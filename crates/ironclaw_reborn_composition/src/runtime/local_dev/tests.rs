@@ -2003,6 +2003,7 @@ mod tests {
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
                 EffectKind::UseSecret,
+                EffectKind::ModifyApproval,
                 EffectKind::ExternalWrite
             ]
         );
