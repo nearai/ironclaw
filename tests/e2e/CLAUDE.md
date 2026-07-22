@@ -39,7 +39,7 @@ pip install -e .
 playwright install chromium
 ```
 
-Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js. CI installs Node 24, builds `serrrfirat/emulate` at commit `e5d62318f2ee546660b974ee92d627cf39b97951`, and passes its CLI through `IRONCLAW_EMULATE_CLI`. Without that override, unrelated local Emulate tests retain the `emulate@0.7.0` fallback.
+Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js. CI installs Node 24, builds `serrrfirat/emulate` at commit `92bd9c2157a74613c47549eb5cfcccc7c0740adf`, and passes its CLI through `IRONCLAW_EMULATE_CLI`. Without that override, unrelated local Emulate tests retain the `emulate@0.7.0` fallback.
 
 ## Running Tests
 
@@ -178,11 +178,13 @@ recorded-trace tests load harvested `LlmTrace` JSON through `mock_llm.py`'s
 model response from every case in the live-canary manifest. Its closed-set
 assertions require new fixtures and provider operations to be classified
 instead of silently losing coverage. `test_reborn_qa_trace_full_path.py`
-additionally proves the whole runtime seam for the harvested Drive connection
-case: it executes the recorded decision through standalone `ironclaw serve`,
-routes Google HTTP through
-`emulate_google_server`, and asserts Emulate-seeded Drive data rather than the
-model's final prose.
+discovers every manifest journey with an Emulate-supported provider call and
+executes that provider leg through standalone `ironclaw serve`, installed and
+authenticated first-party extensions, the credential/network boundaries, and
+the pinned Emulate fork. Cross-provider ordering is retained, fresh Docs and
+Sheets IDs are bound from earlier real tool results, redacted provider IDs are
+mapped to deterministic seeded resources, and assertions target capability
+success plus provider readback rather than recorded final-answer wording.
 Debug E2E binaries honor `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP` only for
 loopback IP socket targets after the original destination has passed the normal
 network policy and DNS checks. Release binaries fail startup if that test-only
