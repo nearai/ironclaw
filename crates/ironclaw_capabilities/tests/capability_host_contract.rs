@@ -101,6 +101,40 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
 }
 
 #[tokio::test]
+async fn capability_host_authorize_fold_seals_actorless_run_origin_from_run_id() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = recording_dispatcher();
+    let authorizer = GrantAuthorizer::new();
+    let host = capability_host(&registry, &dispatcher, &authorizer);
+    let mut context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let run_id = RunId::new();
+    context.origin = None;
+    context.run_id = Some(run_id);
+    context.authenticated_actor_user_id = None;
+    context.validate().unwrap();
+
+    host.invoke_json(
+        context,
+        capability_id(),
+        ResourceEstimate::default(),
+        json!({"message": "legacy loop origin"}),
+    )
+    .await
+    .unwrap();
+
+    let recorded = dispatcher.last_request().unwrap();
+    assert_eq!(recorded.authenticated_actor_user_id, None);
+    assert_eq!(recorded.invocation.actor, Actor::System);
+    assert_eq!(
+        recorded.invocation.origin,
+        InvocationOrigin::LoopRun(run_id)
+    );
+    assert_eq!(recorded.run_id, Some(run_id));
+}
+
+#[tokio::test]
 async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_persisted() {
     let registry = registry_with_echo_capability();
     let dispatcher = recording_dispatcher();
