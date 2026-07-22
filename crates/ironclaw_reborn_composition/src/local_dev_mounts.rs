@@ -54,6 +54,29 @@ pub(crate) fn ambient_workspace_mount_view(
     MountView::new(mounts)
 }
 
+/// Virtual target for the `HostedSingleTenantVolumeSandboxed` profile's
+/// `/workspace` grant. Alias and target coincide at `/workspace` because the
+/// abstract-FS mount registered by `mount_sandbox_user_workspace_root` in
+/// `factory.rs` IS the per-user sandbox workspace directory — unlike
+/// `ambient_workspace_mount_view`, there is no intermediate
+/// `/projects/workspace` indirection here, by design.
+const SANDBOX_WORKSPACE_TARGET: &str = "/workspace";
+
+/// Workspace `MountView` for the `HostedSingleTenantVolumeSandboxed` profile:
+/// redirects the runtime `/workspace` grant onto the per-user sandbox
+/// workspace mount instead of `/projects/workspace`, so `read_file`/
+/// `write_file` resolve the same host directory the sandbox container's own
+/// `/workspace` bind (Task A3) uses.
+pub(crate) fn sandbox_user_workspace_mount_view(
+    permissions: MountPermissions,
+) -> Result<MountView, HostApiError> {
+    MountView::new(vec![grant(
+        WORKSPACE_ALIAS,
+        SANDBOX_WORKSPACE_TARGET,
+        permissions,
+    )?])
+}
+
 pub(crate) fn scoped_skill_context_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {

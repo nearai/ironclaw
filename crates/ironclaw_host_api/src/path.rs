@@ -68,6 +68,11 @@ const VIRTUAL_ROOTS: &[&str] = &[
     "/system/skills",
     "/users",
     "/projects",
+    // Sandboxed-profile boot-owner workspace mount (Task A8): the abstract-FS
+    // backend root the `HostedSingleTenantVolumeSandboxed` profile registers
+    // via `mount_sandbox_user_workspace_root`, redirecting the `/workspace`
+    // capability grant directly onto it instead of `/projects/workspace`.
+    "/workspace",
     "/memory",
     "/artifacts",
     "/tmp",

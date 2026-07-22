@@ -46,8 +46,9 @@ use crate::extension_host::{
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
 use crate::local_dev_mounts::{
-    ambient_workspace_mount_view, memory_mount_view, scoped_skill_context_mount_view,
-    skill_management_mount_view, system_extensions_lifecycle_mount_view, workspace_mount_view,
+    ambient_workspace_mount_view, memory_mount_view, sandbox_user_workspace_mount_view,
+    scoped_skill_context_mount_view, skill_management_mount_view,
+    system_extensions_lifecycle_mount_view, workspace_mount_view,
 };
 use crate::outbound::outbound_preferences_capability::{
     extend_builtin_first_party_package as extend_builtin_outbound_preferences_package,
@@ -186,6 +187,22 @@ type WorkspaceFilesystems = (
     Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     MountView,
 );
+
+/// Which host directory the runtime `MountView`'s `/workspace` grant (and,
+/// for the sandboxed variant, the abstract-FS `/workspace` catalog mount)
+/// resolve against. Computed once per build; both filesystem-assembly
+/// functions below take it by reference instead of an `Option<&Path>` +
+/// `bool` pair so "sandboxed but no path" and "ambient but a path was
+/// supplied" are unrepresentable.
+enum WorkspaceRootMode {
+    /// Non-sandboxed profiles: the existing `/projects/workspace` +
+    /// optional host-home ambient view (local-dev, local-dev-yolo,
+    /// hosted-single-tenant).
+    Ambient,
+    /// `HostedSingleTenantVolumeSandboxed`: the boot owner's per-user
+    /// sandbox workspace directory, mounted directly at `/workspace`.
+    SandboxUser(PathBuf),
+}
 
 const LOCAL_DEV_DEFAULT_SYSTEM_PROMPT_PATH: &str = "system/prompts/default-system.md";
 const LOCAL_DEV_LEGACY_SKILLS_BACKFILL_MARKER: &str = ".legacy-skills-backfilled";
@@ -1906,11 +1923,37 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         }
     })?;
     crate::extension_host::bundled_skills::ensure_bundled_reborn_skills_installed(&root).await?;
+    // Which host directory the runtime `/workspace` grant resolves against.
+    // Sandboxed-profile builds redirect it onto the boot owner's per-user
+    // sandbox workspace directory (Task A1's `RebornSandboxUserKey`) instead
+    // of the ambient `/projects/workspace` mount, so `read_file`/`write_file`
+    // and the sandbox container's own `/workspace` bind (Task A3) resolve the
+    // same host directory. Computed once, before `owner_user_id` and
+    // `local_runtime_identity` move into `RebornStoreGraphInput` below.
+    let workspace_root_mode = if is_sandboxed_profile {
+        let owner_scope = match &local_runtime_identity {
+            Some(identity) => configured_runtime_owner_scope(owner_user_id.clone(), identity),
+            None => default_runtime_owner_scope(owner_user_id.clone()).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: error.to_string(),
+                }
+            })?,
+        };
+        let path = ironclaw_host_runtime::RebornSandboxUserKey::from_scope(&owner_scope)
+            .workspace_path(&root);
+        std::fs::create_dir_all(&path).map_err(|_| RebornBuildError::InvalidConfig {
+            reason: "sandbox user workspace root could not be initialized".to_string(),
+        })?;
+        WorkspaceRootMode::SandboxUser(path)
+    } else {
+        WorkspaceRootMode::Ambient
+    };
     let filesystem_bundle = build_local_runtime_root_filesystem(
         &root,
         &workspace_root,
         host_home_root.as_ref(),
         storage_backend_input,
+        &workspace_root_mode,
     )
     .await?;
     let extension_installation_state_path =
@@ -1945,6 +1988,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             Arc::clone(&filesystem),
             &workspace_root,
             host_home_root.as_ref(),
+            &workspace_root_mode,
         )?;
     let http_body_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::clone(&filesystem),
@@ -3360,6 +3404,7 @@ async fn build_local_runtime_root_filesystem(
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
     storage_backend_input: StorageBackendInput,
+    workspace_root_mode: &WorkspaceRootMode,
 ) -> Result<RootFilesystemBundle, RebornBuildError> {
     let local = Arc::new(local_dev_project_filesystem(
         root,
@@ -3379,6 +3424,9 @@ async fn build_local_runtime_root_filesystem(
         }
     };
     mount_local_dev_project_roots(&mut composite, local)?;
+    if let WorkspaceRootMode::SandboxUser(sandbox_workspace_root) = workspace_root_mode {
+        mount_sandbox_user_workspace_root(&mut composite, sandbox_workspace_root)?;
+    }
     Ok(RootFilesystemBundle {
         filesystem: Arc::new(composite),
         durable_backend,
@@ -3495,6 +3543,7 @@ pub(crate) async fn open_local_dev_root_filesystem_for_test(
         &workspace_root,
         None,
         StorageBackendInput::LocalDefault,
+        &WorkspaceRootMode::Ambient,
     )
     .await?;
     Ok(bundle.filesystem)
@@ -3522,6 +3571,7 @@ pub(crate) async fn open_local_dev_extension_installation_store_for_test(
         &workspace_root,
         None,
         StorageBackendInput::LocalDefault,
+        &WorkspaceRootMode::Ambient,
     )
     .await?;
     let filesystem: Arc<dyn RootFilesystem> = bundle.filesystem;
@@ -3746,6 +3796,35 @@ fn mount_local_dev_project_roots(
             BackendCapabilities::bytes_only(),
         )?,
         local,
+    )?;
+    Ok(())
+}
+
+/// Registers the per-user sandbox workspace directory as an abstract-FS mount
+/// at virtual root `/workspace`, so `read_file`/`write_file` (via the
+/// `Workspace`-profile `MountView`) and the sandbox container's `/workspace`
+/// bind (Task A3, `RebornSandboxMountSources::add_local_source`) resolve to
+/// the identical host directory. Sandboxed-profile builds only.
+fn mount_sandbox_user_workspace_root(
+    root: &mut CompositeRootFilesystem,
+    workspace_root: &Path,
+) -> Result<(), RebornBuildError> {
+    let mut disk = DiskFilesystem::new();
+    disk.mount_local(
+        VirtualPath::new("/workspace")?,
+        HostPath::from_path_buf(workspace_root.to_path_buf()),
+    )?;
+    root.mount(
+        local_dev_mount_descriptor(
+            "/workspace",
+            "sandbox-user-workspace",
+            BackendKind::DiskFilesystem,
+            StorageClass::FileContent,
+            ContentKind::ProjectFile,
+            IndexPolicy::NotIndexed,
+            BackendCapabilities::bytes_only(),
+        )?,
+        Arc::new(disk),
     )?;
     Ok(())
 }
@@ -4238,27 +4317,39 @@ fn build_workspace_filesystems(
     filesystem: Arc<CompositeRootFilesystem>,
     workspace_root: &Path,
     host_home_root: Option<&HostHomeRoot>,
+    workspace_root_mode: &WorkspaceRootMode,
 ) -> Result<WorkspaceFilesystems, RebornBuildError> {
     let read_only_workspace_mounts = workspace_mount_view(MountPermissions::read_only(), &[])
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         })?;
-    let host_home_aliases = host_home_root
-        .map(|root| root.aliases())
-        .unwrap_or_default();
-    let workspace_aliases = if host_home_root.is_some() {
-        vec![workspace_root]
-    } else {
-        Vec::new()
+    let runtime_workspace_mounts = match workspace_root_mode {
+        WorkspaceRootMode::SandboxUser(_) => {
+            sandbox_user_workspace_mount_view(MountPermissions::read_write()).map_err(|error| {
+                RebornBuildError::InvalidConfig {
+                    reason: error.to_string(),
+                }
+            })?
+        }
+        WorkspaceRootMode::Ambient => {
+            let host_home_aliases = host_home_root
+                .map(|root| root.aliases())
+                .unwrap_or_default();
+            let workspace_aliases = if host_home_root.is_some() {
+                vec![workspace_root]
+            } else {
+                Vec::new()
+            };
+            ambient_workspace_mount_view(
+                MountPermissions::read_write(),
+                &workspace_aliases,
+                &host_home_aliases,
+            )
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            })?
+        }
     };
-    let runtime_workspace_mounts = ambient_workspace_mount_view(
-        MountPermissions::read_write(),
-        &workspace_aliases,
-        &host_home_aliases,
-    )
-    .map_err(|error| RebornBuildError::InvalidConfig {
-        reason: error.to_string(),
-    })?;
     let skill_filesystem = Arc::new(ScopedFilesystem::new(
         Arc::clone(&filesystem),
         scoped_skill_context_mount_view,
