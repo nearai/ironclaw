@@ -23,7 +23,9 @@ use crate::process_output::{
     CapturedCommandOutput, SavedCommandOutput, StreamCapture, capture_command_output,
     read_stream_capped, truncate_output_to,
 };
-use crate::sandbox_process::shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
+use crate::sandbox_process::shell_limits::{
+    clamp_shell_output_limit_bytes, clamp_shell_timeout_secs,
+};
 
 /// Environment variables safe to forward to local child processes.
 const SAFE_ENV_VARS: &[&str] = &[
@@ -509,7 +511,10 @@ mod tests {
         .unwrap();
 
         // An over-cap timeout is clamped, not rejected.
-        assert_eq!(transport.requests.lock().unwrap()[0].timeout_secs, Some(600));
+        assert_eq!(
+            transport.requests.lock().unwrap()[0].timeout_secs,
+            Some(600)
+        );
     }
 
     #[tokio::test]

@@ -71,7 +71,10 @@ mod tests {
             clamp_shell_timeout_secs(Some(6_000)),
             Duration::from_secs(SHELL_TIMEOUT_MAX_SECS)
         );
-        assert_eq!(clamp_shell_timeout_secs(Some(601)), Duration::from_secs(600));
+        assert_eq!(
+            clamp_shell_timeout_secs(Some(601)),
+            Duration::from_secs(600)
+        );
     }
 
     #[test]
@@ -99,10 +102,7 @@ mod tests {
             clamp_shell_output_limit_bytes(Some(10 * 1024 * 1024)),
             SHELL_OUTPUT_LIMIT_MAX_BYTES as usize
         );
-        assert_eq!(
-            clamp_shell_output_limit_bytes(Some(1_048_577)),
-            1_048_576
-        );
+        assert_eq!(clamp_shell_output_limit_bytes(Some(1_048_577)), 1_048_576);
     }
 
     #[test]

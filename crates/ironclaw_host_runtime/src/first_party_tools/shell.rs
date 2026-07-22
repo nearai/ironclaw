@@ -60,7 +60,9 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
                 max_input_tokens: None,
                 max_output_tokens: None,
                 max_wall_clock_ms: Some(MAX_SHELL_WALL_CLOCK_MS),
-                max_output_bytes: Some(FIRST_PARTY_MAX_OUTPUT_BYTES.max(SHELL_OUTPUT_LIMIT_MAX_BYTES)),
+                max_output_bytes: Some(
+                    FIRST_PARTY_MAX_OUTPUT_BYTES.max(SHELL_OUTPUT_LIMIT_MAX_BYTES),
+                ),
                 sandbox: Some(SandboxQuota {
                     process_count: Some(1),
                     ..SandboxQuota::default()
