@@ -9,7 +9,7 @@ use ironclaw_turns::{
 };
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CheckpointKind, LoopExecutionState, TerminalWarningKind},
     strategies::{ReplyAdmissionOutcome, StopKind},
 };
 
@@ -268,12 +268,19 @@ impl ExitStage {
                 // `recent_output_token_counts` on AcceptFinal); the caller only
                 // owns `assistant_refs`. Keep the checkpoint write single and
                 // shared across both outcomes.
-                let completed = match try_final_answer_nudge(ctx, &mut state).await? {
-                    Some(reply_ref) => {
-                        state.assistant_refs.push(reply_ref);
-                        true
+                let completed = if state
+                    .terminal_warning_state
+                    .attempted(TerminalWarningKind::NoProgressDetected)
+                {
+                    false
+                } else {
+                    match try_final_answer_nudge(ctx, &mut state).await? {
+                        Some(reply_ref) => {
+                            state.assistant_refs.push(reply_ref);
+                            true
+                        }
+                        None => false,
                     }
-                    None => false,
                 };
                 // Failed branch only (§5a.2, loop-failure matrix): when the
                 // nudge declines, attach the same failure explanation other

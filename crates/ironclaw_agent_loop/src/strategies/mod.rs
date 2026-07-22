@@ -44,6 +44,7 @@ pub(crate) use compaction::{
 pub(crate) use context::{
     ContextPlan, ContextStrategy, DefaultContextStrategy,
     invalid_model_output_repair_control_message, model_error_observation_control_message,
+    terminal_warning_control_message,
 };
 pub(crate) use drain::{DefaultInputDrainStrategy, InputDrainStrategy};
 pub(crate) use gate::{

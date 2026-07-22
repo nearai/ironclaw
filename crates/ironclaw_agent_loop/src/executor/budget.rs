@@ -1,12 +1,11 @@
 use async_trait::async_trait;
 use ironclaw_turns::{LoopExit, LoopFailureKind};
 
-use crate::state::{CheckpointKind, LoopExecutionState};
+use crate::state::{CheckpointKind, LoopExecutionState, TerminalWarningObservation};
 
 use super::{
     AgentLoopExecutorError, CancelCheck, CheckpointStage, ExecutorStage, FailedExitDetails,
-    PendingInputAck, StageContext, attach_failure_explanation, completed_exit, failed_exit,
-    loop_exit::try_final_answer_nudge,
+    PendingInputAck, StageContext, attach_failure_explanation, failed_exit,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -36,30 +35,26 @@ impl ExecutorStage<BudgetInput> for BudgetStage {
     ) -> Result<BudgetStep, AgentLoopExecutorError> {
         let mut pending_input_ack = input.pending_input_ack;
         let mut state = input.state;
-        if state.iteration < ctx.planner.budget().iteration_limit(&state) {
+        let iteration_limit = ctx.planner.budget().iteration_limit(&state);
+        if state.iteration < iteration_limit || state.terminal_warning_state.pending().is_some() {
             return Ok(BudgetStep::Continue {
                 state: Box::new(state),
                 pending_input_ack,
             });
         }
 
-        // Before failing closed (empty, no synthesis), try one tool-free
-        // final-answer nudge so the turn ends with a real answer instead of
-        // nothing. No-op unless the run profile enables driver-specific nudges.
-        if let Some(reply_ref) = try_final_answer_nudge(ctx, &mut state).await? {
-            state.assistant_refs.push(reply_ref);
-            let checked = CheckpointStage
-                .write(ctx, state, CheckpointKind::Final)
-                .await?;
-            pending_input_ack.ack(ctx.host).await?;
-            return Ok(BudgetStep::Exit(completed_exit(
-                ctx.host,
-                checked.state,
-                Some(checked.checkpoint_id),
-            )?));
+        if state
+            .terminal_warning_state
+            .schedule(TerminalWarningObservation::iteration_limit(iteration_limit))
+        {
+            return Ok(BudgetStep::Continue {
+                state: Box::new(state),
+                pending_input_ack,
+            });
         }
 
-        // The nudge did not yield a reply: fall back to explained failure.
+        // The one model-visible final iteration was already consumed: preserve
+        // the existing explained terminal failure.
         let mut state = match CheckpointStage
             .cancel_if_requested_after_pending_input_ack(ctx, state, &mut pending_input_ack)
             .await?

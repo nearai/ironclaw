@@ -5,6 +5,7 @@ mod bounded_ring;
 mod model_recovery;
 mod signature;
 mod slots;
+mod terminal_warning;
 
 pub use bounded_ring::BoundedRing;
 pub use ironclaw_turns::LoopFailureKind;
@@ -21,6 +22,7 @@ pub use slots::{
     RepeatedCallWarningPhase, RepeatedCallWarningState, ReplyAdmissionRejection,
     ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState, StopStrategyState,
 };
+pub use terminal_warning::{TerminalWarningKind, TerminalWarningObservation, TerminalWarningState};
 
 use ironclaw_host_api::{ApprovalRequestId, CapabilityId, CorrelationId};
 use ironclaw_turns::{
@@ -115,6 +117,12 @@ pub struct LoopExecutionState {
     /// from the retry-transition checkpoint after worker restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_model_retry_directive: Option<PendingModelRetryDirective>,
+
+    /// One-shot warning state for otherwise-terminal no-progress and iteration
+    /// limit conditions. Pending prompt context and the consumed budget remain
+    /// checkpointed until the executor issues the recovery model request.
+    #[serde(default)]
+    pub terminal_warning_state: TerminalWarningState,
 
     /// Whether the most recent admitted assistant reply "trailed off" without a
     /// real closing answer (empty after trim, or ends with a colon — a narrated
@@ -331,6 +339,7 @@ impl LoopExecutionState {
             completion_nudge_pending: false,
             pending_model_error_observation: None,
             pending_model_retry_directive: None,
+            terminal_warning_state: TerminalWarningState::default(),
             last_reply_trailed_off: false,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),

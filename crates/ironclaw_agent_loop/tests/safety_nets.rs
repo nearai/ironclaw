@@ -4,7 +4,7 @@ use chrono::{TimeZone, Utc};
 use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, CanonicalAgentLoopExecutor},
     families,
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CheckpointKind, LoopExecutionState, TerminalWarningObservation},
     test_support::{
         MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedCapabilityCall,
         ScriptedCapabilityOutcome, ScriptedModelResponse, capability_id, surface_version,
@@ -15,7 +15,7 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostErrorKind, CapabilityInputRef, ContentDigest, LoopCancelReasonKind,
         LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopRequest,
-        LoopRequestBatch, LoopRunInfoPort,
+        LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
     },
 };
 
@@ -128,7 +128,7 @@ async fn repeated_signature_stops_after_rendered_warning_and_no_progress_result(
             )],
         ]);
     let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
-    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let state = state_after_no_progress_warning_attempt(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
         .execute_family(&families::default(), &host, state)
@@ -151,6 +151,63 @@ async fn repeated_signature_stops_after_rendered_warning_and_no_progress_result(
     // which fails soft against the exhausted script.
     assert_eq!(host.model_call_count(), 5);
     assert_eq!(repeated_call_warning_prompt_count(&host), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_progress_warning_gives_model_one_turn_to_change_approach() {
+    let script = ScenarioScript {
+        model_responses: VecDeque::from([
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Calls(vec![ScriptedCapabilityCall::new("demo.echo")]),
+            ScriptedModelResponse::Reply {
+                text: "recovered after no-progress warning".to_string(),
+            },
+        ]),
+        capability_outcomes: VecDeque::from([
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-1")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-2")],
+            vec![ScriptedCapabilityOutcome::completed("result:repeat-3")],
+            vec![ScriptedCapabilityOutcome::completed_no_change(
+                "result:repeat-4",
+            )],
+        ]),
+        single_call_retry_outcomes: VecDeque::new(),
+        pending_inputs: VecDeque::new(),
+    };
+    let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&families::default(), &host, state)
+        .await
+        .expect("loop execution should succeed");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    assert_eq!(
+        host.finalized_assistant_messages(),
+        vec!["recovered after no-progress warning"]
+    );
+    assert_eq!(host.model_call_count(), 5);
+    let warning_request = host
+        .prompt_requests()
+        .into_iter()
+        .find(|request| {
+            request
+                .inline_messages
+                .iter()
+                .any(|message| message.safe_body.as_str().contains("no progress detected"))
+        })
+        .expect("no-progress warning reaches a prompt request");
+    assert!(
+        !warning_request
+            .capability_view
+            .expect("warning prompt has a capability view")
+            .visible_capability_ids
+            .is_empty(),
+        "the warning prompt keeps the normal capability surface"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -246,7 +303,7 @@ async fn repeated_identical_output_digest_trips_no_progress() {
         pending_inputs: VecDeque::new(),
     };
     let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
-    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let state = state_after_no_progress_warning_attempt(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
         .execute_family(&families::default(), &host, state)
@@ -355,7 +412,7 @@ async fn typed_no_progress_results_escape_without_repeated_call_signature() {
         pending_inputs: VecDeque::new(),
     };
     let (host, _) = MockAgentLoopDriverHost::builder().script(script).build();
-    let state = LoopExecutionState::initial_for_run(host.run_context());
+    let state = state_after_no_progress_warning_attempt(host.run_context());
 
     let exit = CanonicalAgentLoopExecutor
         .execute_family(&families::default(), &host, state)
@@ -625,6 +682,17 @@ fn assert_no_progress_typed_failure(
         "a no-progress failure may only finalize its failure-explanation message, got {:?}",
         host.finalized_assistant_messages()
     );
+}
+
+fn state_after_no_progress_warning_attempt(context: &LoopRunContext) -> LoopExecutionState {
+    let mut state = LoopExecutionState::initial_for_run(context);
+    assert!(
+        state
+            .terminal_warning_state
+            .schedule(TerminalWarningObservation::no_progress(None, None))
+    );
+    state.terminal_warning_state.clear_pending();
+    state
 }
 
 fn call_with_input(input_ref: &str) -> ScriptedCapabilityCall {

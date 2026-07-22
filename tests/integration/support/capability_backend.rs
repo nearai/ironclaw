@@ -22,6 +22,9 @@ pub(super) enum RebornCapabilityBackend {
     /// Echo recorder: records capability invocations, executes nothing. Default —
     /// a text-only turn invokes no tool.
     Echo,
+    /// Echo-shaped capability whose successful results are typed `NoChange`,
+    /// used to drive the production no-progress detector deterministically.
+    NoProgressEcho,
     /// Real first-party tool runtime (`builtin.http` + friends) with the recording
     /// `RuntimeHttpEgress` (scripted body, no network) — the §3.7 Tier-2 capture.
     BuiltinHttpTools,
@@ -124,6 +127,7 @@ impl RebornCapabilityBackend {
         } = scripting;
         Ok(match self {
             RebornCapabilityBackend::Echo => GroupCapability::Recording,
+            RebornCapabilityBackend::NoProgressEcho => GroupCapability::RecordingNoProgress,
             RebornCapabilityBackend::BuiltinHttpTools => {
                 // Slice 5: `.with_live_shell()` opts into the real HostProcessPort;
                 // `Inert`/`Scripted` both use the inert RecordingProcessPort (the

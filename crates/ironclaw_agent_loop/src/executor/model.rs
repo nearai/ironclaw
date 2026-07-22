@@ -111,6 +111,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
             // once, which is safer than losing a consumed recovery budget.
             state.pending_model_error_observation = None;
             state.pending_model_retry_directive = None;
+            state.terminal_warning_state.clear_pending();
             match model_result {
                 Ok(response) => {
                     match &response.output {

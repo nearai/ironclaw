@@ -6,6 +6,7 @@ use ironclaw_agent_loop::{
         DeferredCompactionWatermark, LoopExecutionState, ModelErrorObservationClass,
         ModelErrorRecoveryObservation, PendingModelRetryDirective, RecoveryAttemptClass,
         RecoveryStrategyState, RepeatedCallWarningPhase, RepeatedCallWarningState,
+        TerminalWarningKind, TerminalWarningObservation,
     },
     test_support::{
         LoopExecutionStateBuilder, MockAgentLoopDriverHost, ScenarioScript, capability_id,
@@ -122,6 +123,58 @@ fn legacy_checkpoint_without_model_error_observation_fields_decodes_to_defaults(
             .recovery_state
             .observation_attempted_for(ModelErrorObservationClass::InvalidOutput)
     );
+}
+
+#[test]
+fn terminal_warning_attempt_and_pending_observation_survive_checkpoint_reload() {
+    let context = test_run_context("terminal-warning-round-trip");
+    let mut state = LoopExecutionState::initial_for_run(&context);
+    assert!(
+        state
+            .terminal_warning_state
+            .schedule(TerminalWarningObservation::no_progress(
+                Some(4),
+                Some(LoopFailureKind::PolicyDenied),
+            ))
+    );
+
+    let payload = serde_json::to_vec(&state).expect("state should serialize");
+    let restored =
+        LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeModel)
+            .expect("checkpoint payload should reload");
+
+    assert_eq!(
+        restored.terminal_warning_state,
+        state.terminal_warning_state
+    );
+    assert!(
+        restored
+            .terminal_warning_state
+            .attempted(TerminalWarningKind::NoProgressDetected)
+    );
+    assert_eq!(
+        restored
+            .terminal_warning_state
+            .pending()
+            .map(TerminalWarningObservation::kind),
+        Some(TerminalWarningKind::NoProgressDetected)
+    );
+}
+
+#[test]
+fn legacy_checkpoint_without_terminal_warning_state_decodes_to_default() {
+    let context = test_run_context("legacy-terminal-warning-checkpoint");
+    let state = LoopExecutionState::initial_for_run(&context);
+    let mut value = serde_json::to_value(&state).expect("state should serialize");
+    value
+        .as_object_mut()
+        .expect("state serializes as object")
+        .remove("terminal_warning_state");
+
+    let restored: LoopExecutionState =
+        serde_json::from_value(value).expect("legacy checkpoint should deserialize");
+
+    assert_eq!(restored.terminal_warning_state, Default::default());
 }
 
 #[test]

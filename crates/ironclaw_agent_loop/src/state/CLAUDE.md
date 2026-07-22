@@ -10,6 +10,8 @@ Owns the typed, resumable state carried by the canonical loop executor.
 - `bounded_ring.rs` defines fixed-window observation history.
 - `signature.rs` defines repeat-detection signatures for capability calls.
 - `model_recovery.rs` defines checkpointed, typed model-recovery controls.
+- `terminal_warning.rs` defines checkpointed pre-termination warnings and
+  their one-shot accounting.
 
 ## Boundaries
 

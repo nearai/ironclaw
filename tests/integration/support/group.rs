@@ -277,7 +277,7 @@ impl GroupSharedStorage {
                 scope.user_id = arc.user_id().clone();
                 Some(scope)
             }
-            GroupCapability::Recording => None,
+            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
         }
     }
 
@@ -296,7 +296,7 @@ impl GroupSharedStorage {
                 scope.user_id = owner.clone();
                 Some(scope)
             }
-            GroupCapability::Recording => None,
+            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
         }
     }
 }
@@ -312,6 +312,8 @@ pub(crate) enum GroupCapability {
     /// Echo recorder — records invocations, executes nothing. Default for a
     /// text-only single-shot harness; no stores to share.
     Recording,
+    /// Recording echo whose results deliberately report `NoChange`.
+    RecordingNoProgress,
     /// Real first-party or MCP host runtime, shared across all threads.
     /// All approval/auto-approve/credential/memory state is common because the
     /// `Arc` is cloned per thread.
@@ -329,6 +331,9 @@ impl GroupCapability {
             Self::Recording => {
                 HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::echo())
             }
+            Self::RecordingNoProgress => {
+                HarnessCapabilityMode::Recording(RecordingTestCapabilityPort::no_progress())
+            }
             Self::HostRuntime(arc) => HarnessCapabilityMode::HostRuntime(Arc::clone(arc)),
         }
     }
@@ -341,7 +346,7 @@ impl GroupCapability {
     pub(crate) fn gate_record_store(&self) -> Option<Arc<dyn ironclaw_run_state::GateRecordStore>> {
         match self {
             Self::HostRuntime(harness) => harness.gate_record_store(),
-            Self::Recording => None,
+            Self::Recording | Self::RecordingNoProgress => None,
         }
     }
 
@@ -358,7 +363,7 @@ impl GroupCapability {
     ) -> HarnessResult<()> {
         let harness = match self {
             Self::HostRuntime(arc) => arc,
-            Self::Recording => {
+            Self::Recording | Self::RecordingNoProgress => {
                 return Err("no host-runtime capability backend for durable reopen".into());
             }
         };
@@ -428,6 +433,7 @@ impl RebornIntegrationGroup {
             hook_dispatcher_builder_factory: None,
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
+            planned_default_iteration_limit: None,
             real_gate_dispatch_services: false,
             channel_connection: None,
         }
@@ -493,7 +499,7 @@ impl RebornIntegrationGroup {
     pub fn capability_harness(&self) -> Option<&Arc<HostRuntimeCapabilityHarness>> {
         match &self.shared.capability {
             GroupCapability::HostRuntime(arc) => Some(arc),
-            GroupCapability::Recording => None,
+            GroupCapability::Recording | GroupCapability::RecordingNoProgress => None,
         }
     }
 
@@ -654,6 +660,8 @@ pub struct RebornIntegrationGroupBuilder {
     /// `lease_recovery_interval` (default 10s) when set. Builder method lives
     /// in `group_options.rs`. Default `None` (today's behavior, byte-identical).
     lease_recovery_interval_override: Option<Duration>,
+    /// Test-only override for the canonical loop's default iteration limit.
+    planned_default_iteration_limit: Option<std::num::NonZeroU32>,
     /// When `true`, wire the REAL approval/auth interaction services into
     /// every thread's `DefaultProductWorkflow` (see
     /// `with_real_gate_dispatch_services`). Default `false` (every workflow
@@ -968,6 +976,7 @@ impl RebornIntegrationGroupBuilder {
                 planned_model_availability_retry_attempts: Some(
                     std::num::NonZeroU32::new(1).expect("nonzero"),
                 ),
+                planned_default_iteration_limit: self.planned_default_iteration_limit,
                 ..DefaultPlannedRuntimeConfig::default()
             },
             model_route_resolver: None,
@@ -1339,7 +1348,7 @@ impl<'g> RebornThreadBuilder<'g> {
         if shared.real_gate_dispatch_services {
             let harness = match &shared.capability {
                 GroupCapability::HostRuntime(arc) => arc,
-                GroupCapability::Recording => {
+                GroupCapability::Recording | GroupCapability::RecordingNoProgress => {
                     return Err(
                         "with_real_gate_dispatch_services requires a HostRuntime capability backend"
                             .into(),
