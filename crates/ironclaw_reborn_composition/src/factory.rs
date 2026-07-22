@@ -667,6 +667,33 @@ impl RebornServices {
             .map(|status| status.connected)
     }
 
+    /// Caller-scoped ids from the production outbound-target registry — tests
+    /// only. This is the same registry `builtin.outbound_delivery_targets_list`
+    /// and per-trigger target validation use; the accessor avoids replacing it
+    /// with an integration harness's synthetic outbound facade.
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn outbound_delivery_target_ids_for_test(
+        &self,
+        caller: ironclaw_product_workflow::WebUiAuthenticatedCaller,
+    ) -> Result<Vec<String>, String> {
+        let local_runtime = self
+            .local_runtime
+            .as_ref()
+            .ok_or_else(|| "local runtime is unavailable".to_string())?;
+        use crate::outbound::OutboundDeliveryTargetProvider as _;
+        local_runtime
+            .outbound_delivery_targets
+            .list_outbound_delivery_targets(&caller)
+            .await
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| entry.summary.target_id.as_str().to_string())
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+    }
+
     /// The generic delivery coordinator (extension-runtime §5.4), when this
     /// composition path built the channel egress transport.
     pub fn delivery_coordinator(
@@ -771,11 +798,12 @@ impl RebornServices {
     /// channel-config secret storage, workflow state substrate, delivery
     /// coordinator + outbound stores) is the production wiring.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn start_channel_host_assembly_for_test(
+    pub async fn start_channel_host_assembly_for_test(
         &self,
         wiring: ChannelHostAssemblyTestWiring,
     ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
-        self.start_channel_host_assembly(ChannelHostAssemblyWiring {
+        let identity = wiring.identity.clone();
+        let assembly = self.start_channel_host_assembly(ChannelHostAssemblyWiring {
             thread_service: wiring.thread_service,
             turn_coordinator: wiring.turn_coordinator,
             approval_interaction: None,
@@ -785,7 +813,45 @@ impl RebornServices {
             blocked_auth_prompts: None,
             auth_flow_cancel: None,
             run_delivery_settings: wiring.run_delivery_settings,
-        })
+        })?;
+
+        for binding in &self.channel_extension_bindings {
+            assembly
+                .register_extras(
+                    &binding.extension_id,
+                    crate::extension_host::channel_host::ChannelExtras {
+                        classifier: binding.inbound_payload_classifier.clone(),
+                        preference_target_codec: binding.preference_target_codec.clone(),
+                        subject_route_resolver: None,
+                        storage_roots: None,
+                    },
+                )
+                .await;
+        }
+
+        if let Some(local_runtime) = self.local_runtime.as_ref()
+            && let (Some(channel_config), Some(dm_targets)) = (
+                local_runtime.channel_config.clone(),
+                local_runtime.channel_dm_target_store.clone(),
+            )
+        {
+            crate::extension_host::channel_outbound_targets::register_generic_channel_outbound_targets(
+                &local_runtime.outbound_delivery_targets,
+                crate::extension_host::channel_outbound_targets::GenericChannelOutboundTargetDeps {
+                    watch: assembly.snapshot_watch(),
+                    assembly: Arc::clone(&assembly),
+                    channel_config,
+                    dm_targets,
+                    identity: crate::extension_host::channel_outbound_targets::ChannelOutboundTargetIdentity {
+                        tenant_id: identity.tenant_id,
+                        agent_id: identity.agent_id,
+                        project_id: identity.project_id,
+                    },
+                },
+            );
+        }
+
+        Some(assembly)
     }
 
     /// The deployment-first channel delivery resolver behind the coordinator.

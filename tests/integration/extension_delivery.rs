@@ -687,7 +687,7 @@ async fn assert_extension_has_no_user_installation(services: &RebornServices, ex
     );
 }
 
-fn start_channel_host_assembly(
+async fn start_channel_host_assembly(
     services: &RebornServices,
     inbound: &RebornIntegrationHarness,
 ) -> Arc<GenericChannelHostAssembly> {
@@ -709,6 +709,7 @@ fn start_channel_host_assembly(
             },
             run_delivery_settings: fast_delivery_settings(),
         })
+        .await
         .expect("production channel host assembly starts")
 }
 
@@ -725,7 +726,7 @@ async fn admin_configured_slack_unconnected_dm_gets_connect_notice_without_insta
         .await
         .expect("inbound thread builds");
     assert_extension_has_no_user_installation(services, "slack").await;
-    let assembly = start_channel_host_assembly(services, &inbound);
+    let assembly = start_channel_host_assembly(services, &inbound).await;
     let _binding = wait_for_production_registration(&assembly, services, "slack").await;
     let ingress = VendorIngress::production(
         services
@@ -837,7 +838,7 @@ async fn admin_configured_telegram_unconnected_dm_gets_connect_notice_without_in
         .await
         .expect("inbound thread builds");
     assert_extension_has_no_user_installation(services, "telegram").await;
-    let assembly = start_channel_host_assembly(services, &inbound);
+    let assembly = start_channel_host_assembly(services, &inbound).await;
     let _binding = wait_for_production_registration(&assembly, services, "telegram").await;
     let ingress = VendorIngress::production(
         services
@@ -1124,6 +1125,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
             },
             run_delivery_settings: fast_delivery_settings(),
         })
+        .await
         .expect("the production channel host assembly starts over the composed runtime");
 
     // Install through the production lifecycle tool (same handshake as the
@@ -1586,6 +1588,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
             },
             run_delivery_settings: fast_delivery_settings(),
         })
+        .await
         .expect("the production channel host assembly starts over the composed runtime");
 
     let lifecycle = group
@@ -1802,6 +1805,30 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
             .await,
         Some(true),
         "consuming the minted code must durably connect the caller"
+    );
+
+    // Routine creation discovers destinations through this caller-scoped
+    // production registry before passing a target id to trigger_create. Keep
+    // the assertion in the real Telegram pairing journey: a connected DM
+    // without a registered vendor codec used to disappear here, making
+    // Telegram routine delivery impossible even though reactive replies
+    // worked. The synthetic capability facade used by the integration harness
+    // is deliberately bypassed so this reads the real composed registry.
+    let telegram_target_id = format!("telegram:personal-dm::{}", paired_user.as_str());
+    let target_ids = services
+        .outbound_delivery_target_ids_for_test(
+            ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+                inbound.binding.tenant_id.clone(),
+                paired_user.clone(),
+                inbound.binding.agent_id.clone(),
+                inbound.binding.project_id.clone(),
+            ),
+        )
+        .await
+        .expect("paired caller's production outbound targets list");
+    assert!(
+        target_ids.contains(&telegram_target_id),
+        "paired Telegram DM must be caller-visible for routine delivery: {target_ids:?}"
     );
     for intercepted_text in [
         "hello, are you there?",
