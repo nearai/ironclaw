@@ -61,7 +61,7 @@ pub struct RefreshingCapabilityPortTestParts {
     /// servers) whose capabilities and provider trust get folded into the
     /// visible-capability grants on every refresh — mirrors production
     /// `capability_wiring`'s
-    /// `ExtensionCapabilitySurfaceSource::new(local_runtime.extension_management.clone())`
+    /// `ExtensionCapabilitySurfaceSource::new(runtime_surfaces.extension_management.clone())`
     /// (`runtime/local_dev.rs:132-133`). `None` (the default a harness gets by
     /// simply omitting extension setup) reproduces the no-op surface this
     /// struct always had before this field existed — extension-lane
@@ -138,7 +138,7 @@ impl ExtensionManagementTestHandle {
     }
 }
 
-/// Reads the same `local_runtime.extension_management` handle production's
+/// Reads the same `runtime_surfaces.extension_management` handle production's
 /// `capability_wiring` reads (`runtime/local_dev.rs:132-133`) off a built
 /// `RebornServices`, for wiring
 /// [`RefreshingCapabilityPortTestParts::extension_management`].
@@ -154,7 +154,7 @@ pub fn build_extension_management_for_test(
     services: &crate::RebornServices,
 ) -> Option<ExtensionManagementTestHandle> {
     let extension_management = services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()?
         .extension_management
         .clone()?;

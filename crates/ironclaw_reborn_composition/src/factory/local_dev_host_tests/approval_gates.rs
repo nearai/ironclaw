@@ -36,8 +36,8 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
     )
     .await
     .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services
@@ -48,7 +48,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo approved"});
     let context = shell_execution_context("local-dev-approval-owner", "thread-local-dev-approval");
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let blocked = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -64,7 +64,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
         panic!("expected approval gate, got {blocked:?}");
     };
     assert_eq!(gate.capability_id, capability_id);
-    let approval = local_runtime
+    let approval = runtime_surfaces
         .approval_requests
         .get(&context.resource_scope, gate.approval_request_id)
         .await
@@ -72,7 +72,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
         .expect("approval request persisted");
     assert_eq!(approval.status, ApprovalStatus::Pending);
 
-    approve_shell_dispatch(local_runtime, &context, &gate).await;
+    approve_shell_dispatch(runtime_surfaces, &context, &gate).await;
 
     let resumed = host_runtime
         .resume_capability(RuntimeCapabilityResumeRequest::new(
@@ -88,7 +88,7 @@ async fn local_dev_ask_destructive_shell_invocation_blocks_then_resumes_with_one
         matches!(resumed, RuntimeCapabilityOutcome::Completed(_)),
         "approved one-shot lease should allow resume, got {resumed:?}"
     );
-    let leases = local_runtime
+    let leases = runtime_surfaces
         .capability_leases
         .leases_for_scope(&context.resource_scope)
         .await;
@@ -112,8 +112,8 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
     )
     .await
     .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services.host_runtime.as_ref().expect("host runtime");
@@ -121,7 +121,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo composed sandbox", "timeout": 9});
     let context = shell_execution_context("sandbox-port-owner", "sandbox-port-thread");
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let blocked = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -135,7 +135,7 @@ async fn local_dev_approved_shell_uses_injected_tenant_sandbox_process_port() {
     let RuntimeCapabilityOutcome::ApprovalRequired(gate) = blocked else {
         panic!("expected approval gate, got {blocked:?}");
     };
-    approve_shell_dispatch(local_runtime, &context, &gate).await;
+    approve_shell_dispatch(runtime_surfaces, &context, &gate).await;
     let resumed = host_runtime
         .resume_capability(RuntimeCapabilityResumeRequest::new(
             context,
@@ -177,8 +177,8 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
     )
     .await
     .expect("local-dev-yolo services build");
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
     let host_runtime = services
@@ -190,7 +190,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
         "local-dev-yolo-approval-owner",
         "thread-local-yolo-approval",
     );
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -209,7 +209,7 @@ async fn local_dev_yolo_shell_invocation_asks_when_global_auto_approve_is_off() 
     };
     assert_eq!(gate.capability_id, capability_id);
     assert_eq!(
-        pending_approval_count(local_runtime, &context).await,
+        pending_approval_count(runtime_surfaces, &context).await,
         1,
         "local-dev-yolo with global auto-approve off must create a pending approval"
     );
@@ -224,8 +224,8 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
     )
     .await
     .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services
@@ -238,7 +238,7 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
         "thread-local-dev-auto-approve",
     );
 
-    local_runtime
+    runtime_surfaces
         .auto_approve_settings
         .set(AutoApproveSettingInput {
             scope: context.resource_scope.clone(),
@@ -263,7 +263,7 @@ async fn local_dev_auto_approve_setting_update_skips_next_shell_gate() {
         "updated auto-approve setting should skip the shell approval gate, got {outcome:?}"
     );
     assert_eq!(
-        pending_approval_count(local_runtime, &context).await,
+        pending_approval_count(runtime_surfaces, &context).await,
         0,
         "auto-approved invocation must not create a pending approval"
     );
@@ -281,8 +281,8 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
     )
     .await
     .expect("local-dev services build"); // safety: test-only local-dev fixture setup.
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only service fixture invariant.
     let host_runtime = services
@@ -308,7 +308,7 @@ async fn local_dev_default_allow_echo_auto_approves_when_global_unset() {
             "unset global auto-approve defaults ON, so eligible echo must auto-approve, got {outcome:?}"
         );
     }
-    let pending_count = pending_approval_count(local_runtime, &context).await;
+    let pending_count = pending_approval_count(runtime_surfaces, &context).await;
     if pending_count != 0 {
         panic!("default-on auto-approve must not create a pending approval");
     }
@@ -323,8 +323,8 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
     let host_runtime = services
@@ -333,7 +333,7 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
         .expect("local-dev host runtime");
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
     let context = echo_spawn_execution_context("local-dev-echo-default-ask", "thread-echo-ask");
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -352,7 +352,7 @@ async fn local_dev_default_allow_echo_asks_when_global_auto_approve_is_off() {
     };
     assert_eq!(gate.capability_id, capability_id);
     assert_eq!(
-        pending_approval_count(local_runtime, &context).await,
+        pending_approval_count(runtime_surfaces, &context).await,
         1,
         "default-allow builtin.echo must create a pending approval when global auto-approve is off"
     );
@@ -367,8 +367,8 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
     let host_runtime = services
@@ -380,7 +380,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     let input = serde_json::json!({"message": "hello ask-each-time"});
     let context = echo_spawn_execution_context("local-dev-echo-ask-resume", "thread-echo-resume");
 
-    local_runtime
+    runtime_surfaces
         .tool_permission_overrides
         .set(ToolPermissionOverrideInput {
             scope: operator_tool_permission_scope_for_test(&context.resource_scope),
@@ -406,7 +406,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     };
     assert_eq!(gate.capability_id, capability_id);
     assert_eq!(
-        pending_approval_count(local_runtime, &context).await,
+        pending_approval_count(runtime_surfaces, &context).await,
         1,
         "explicit ask_each_time must create a pending approval"
     );
@@ -426,7 +426,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
         "pending ask_each_time approval must not allow echo resume, got {premature_resume:?}"
     );
     assert!(
-        local_runtime
+        runtime_surfaces
             .capability_leases
             .leases_for_scope(&context.resource_scope)
             .await
@@ -435,8 +435,8 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     );
 
     let lease = ApprovalResolver::new(
-        local_runtime.approval_requests.as_ref(),
-        local_runtime.capability_leases.as_ref(),
+        runtime_surfaces.approval_requests.as_ref(),
+        runtime_surfaces.capability_leases.as_ref(),
     )
     .approve_dispatch(
         &context.resource_scope,
@@ -445,7 +445,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
     )
     .await
     .expect("approval issues echo lease");
-    let approved_record = local_runtime
+    let approved_record = runtime_surfaces
         .approval_requests
         .get(&context.resource_scope, gate.approval_request_id)
         .await
@@ -476,7 +476,7 @@ async fn local_dev_ask_each_time_echo_approval_resume_uses_one_shot_lease() {
         matches!(resumed, RuntimeCapabilityOutcome::Completed(_)),
         "approved ask_each_time one-shot lease should allow echo resume, got {resumed:?}"
     );
-    let leases = local_runtime
+    let leases = runtime_surfaces
         .capability_leases
         .leases_for_scope(&context.resource_scope)
         .await;
@@ -493,8 +493,8 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
     let host_runtime = services
@@ -504,9 +504,9 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability");
     let context =
         echo_spawn_execution_context("local-dev-echo-legacy-grant", "thread-echo-legacy-grant");
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
-    local_runtime
+    runtime_surfaces
         .persistent_approval_policies
         .allow(PersistentApprovalPolicyInput {
             scope: context.resource_scope.clone(),
@@ -543,7 +543,7 @@ async fn local_dev_legacy_persistent_echo_grant_does_not_override_global_off() {
     };
     assert_eq!(gate.capability_id, capability_id);
     assert_eq!(
-        pending_approval_count(local_runtime, &context).await,
+        pending_approval_count(runtime_surfaces, &context).await,
         1,
         "legacy persistent grant with global auto-approve off must create a pending approval"
     );
@@ -561,8 +561,8 @@ async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
     let host_runtime = services
@@ -575,7 +575,7 @@ async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
         "thread-echo-settings-allow",
     );
 
-    local_runtime
+    runtime_surfaces
         .persistent_approval_policies
         .allow(PersistentApprovalPolicyInput {
             scope: operator_tool_permission_scope_for_test(&context.resource_scope),
@@ -614,7 +614,7 @@ async fn local_dev_settings_page_always_allow_echo_overrides_global_off() {
         "settings-page always_allow policy should override global off for builtin.echo, got {outcome:?}"
     );
     assert_eq!(
-        pending_approval_count(local_runtime, &context).await,
+        pending_approval_count(runtime_surfaces, &context).await,
         0,
         "settings-page always_allow builtin.echo must not create a pending approval"
     );
@@ -632,8 +632,8 @@ async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
     let host_runtime = services
@@ -646,7 +646,7 @@ async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
         "thread-local-dev-settings-allow",
     );
 
-    local_runtime
+    runtime_surfaces
         .persistent_approval_policies
         .allow(PersistentApprovalPolicyInput {
             scope: operator_tool_permission_scope_for_test(&context.resource_scope),
@@ -685,7 +685,7 @@ async fn local_dev_settings_page_always_allow_policy_skips_next_shell_gate() {
         "settings-page always_allow policy should skip the shell approval gate, got {outcome:?}"
     );
     assert_eq!(
-        pending_approval_count(local_runtime, &context).await,
+        pending_approval_count(runtime_surfaces, &context).await,
         0,
         "persistent always_allow policy must not create a pending approval"
     );
@@ -707,8 +707,8 @@ async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
     )
     .await
     .expect("local-dev-yolo services build");
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
     let host_runtime = services
@@ -718,7 +718,7 @@ async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability");
     let context = shell_execution_context("local-dev-yolo-ask-owner", "thread-local-yolo-ask");
 
-    local_runtime
+    runtime_surfaces
         .tool_permission_overrides
         .set(ToolPermissionOverrideInput {
             scope: operator_tool_permission_scope_for_test(&context.resource_scope),
@@ -744,7 +744,7 @@ async fn local_dev_yolo_explicit_ask_each_time_still_requires_approval_gate() {
     };
     assert_eq!(gate.capability_id, capability_id);
     assert_eq!(
-        pending_approval_count(local_runtime, &context).await,
+        pending_approval_count(runtime_surfaces, &context).await,
         1,
         "explicit ask_each_time must create a pending approval"
     );
@@ -787,8 +787,8 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
     let host_runtime = services.host_runtime.as_ref().expect("host runtime");
@@ -796,7 +796,7 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo denied"});
     let context = shell_execution_context("local-dev-deny-owner", "local-dev-deny-thread");
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let blocked = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -812,8 +812,8 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     };
 
     let resolver = ApprovalResolver::new(
-        local_runtime.approval_requests.as_ref(),
-        local_runtime.capability_leases.as_ref(),
+        runtime_surfaces.approval_requests.as_ref(),
+        runtime_surfaces.capability_leases.as_ref(),
     );
     resolver
         .deny(
@@ -841,7 +841,7 @@ async fn local_dev_denied_shell_approval_does_not_issue_resume_lease() {
     };
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert!(
-        local_runtime
+        runtime_surfaces
             .capability_leases
             .leases_for_scope(&context.resource_scope)
             .await
@@ -911,13 +911,13 @@ fn shell_network_policy() -> NetworkPolicy {
 }
 
 async fn approve_shell_dispatch(
-    local_runtime: &RebornRuntimeSubstrate,
+    runtime_surfaces: &RebornRuntimeSurfaces,
     context: &ExecutionContext,
     gate: &RuntimeApprovalGate,
 ) {
     ApprovalResolver::new(
-        local_runtime.approval_requests.as_ref(),
-        local_runtime.capability_leases.as_ref(),
+        runtime_surfaces.approval_requests.as_ref(),
+        runtime_surfaces.capability_leases.as_ref(),
     )
     .approve_dispatch(
         &context.resource_scope,
@@ -929,10 +929,10 @@ async fn approve_shell_dispatch(
 }
 
 async fn pending_approval_count(
-    local_runtime: &RebornRuntimeSubstrate,
+    runtime_surfaces: &RebornRuntimeSurfaces,
     context: &ExecutionContext,
 ) -> usize {
-    local_runtime
+    runtime_surfaces
         .approval_requests
         .records_for_scope(&context.resource_scope)
         .await
@@ -1015,8 +1015,8 @@ async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve
     )
     .await
     .expect("local-dev minimal services build"); // safety: test-only helper in #[cfg(test)] module.
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services
@@ -1025,7 +1025,7 @@ async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve
         .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
     let context = shell_execution_context("local-dev-minimal-owner", "thread-minimal-approval");
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -1042,7 +1042,7 @@ async fn local_dev_minimal_policy_shell_invocation_asks_when_global_auto_approve
     };
     assert_eq!(gate.capability_id, capability_id); // safety: test-only assertion in #[cfg(test)] module.
     assert_eq!(
-        pending_approval_count(local_runtime, &context).await,
+        pending_approval_count(runtime_surfaces, &context).await,
         1,
         "minimal policy with global auto-approve off must create a pending approval"
     );
@@ -1057,8 +1057,8 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
     )
     .await
     .expect("local-dev minimal enterprise services build"); // safety: test-only helper in #[cfg(test)] module.
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services
@@ -1067,7 +1067,7 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
         .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability"); // safety: test-only helper in #[cfg(test)] module.
     let context = shell_execution_context("ent-minimal-owner", "thread-ent-minimal");
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(
@@ -1082,7 +1082,7 @@ async fn local_dev_minimal_with_enterprise_profile_still_gates_shell() {
     let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
         panic!("enterprise profile must keep gating even under Minimal, got {outcome:?}");
     };
-    let approval = local_runtime
+    let approval = runtime_surfaces
         .approval_requests
         .get(&context.resource_scope, gate.approval_request_id)
         .await
@@ -1105,8 +1105,8 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
     )
     .await
     .expect("local-dev services build"); // safety: test-only helper in #[cfg(test)] module.
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services
@@ -1118,7 +1118,7 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
     let input = serde_json::json!({"command": "echo spawn-approved"});
     let context =
         shell_execution_context("local-dev-spawn-approval-owner", "thread-spawn-approval");
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let blocked = host_runtime
         .spawn_capability(RuntimeCapabilityRequest::new(
@@ -1136,8 +1136,8 @@ async fn local_dev_ask_destructive_spawn_capability_blocks_then_resumes() {
     assert_eq!(gate.capability_id, capability_id); // safety: test-only assertion in #[cfg(test)] module.
 
     ApprovalResolver::new(
-        local_runtime.approval_requests.as_ref(),
-        local_runtime.capability_leases.as_ref(),
+        runtime_surfaces.approval_requests.as_ref(),
+        runtime_surfaces.capability_leases.as_ref(),
     )
     .approve_spawn(
         &context.resource_scope,
@@ -1180,8 +1180,8 @@ async fn local_dev_ask_destructive_spawn_dispatch_only_capability_requires_appro
     )
     .await
     .expect("local-dev services build"); // safety: test-only helper in #[cfg(test)] module.
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services
@@ -1190,7 +1190,7 @@ async fn local_dev_ask_destructive_spawn_dispatch_only_capability_requires_appro
         .expect("local-dev host runtime"); // safety: test-only helper in #[cfg(test)] module.
     let capability_id = CapabilityId::new(ECHO_CAPABILITY_ID).expect("echo capability"); // safety: test-only helper in #[cfg(test)] module.
     let context = echo_spawn_execution_context("local-dev-echo-spawn-owner", "thread-echo-spawn");
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
     let outcome = host_runtime
         .spawn_capability(RuntimeCapabilityRequest::new(
@@ -1304,8 +1304,8 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
     )
     .await
     .expect("local-dev services build"); // safety: test-only helper in #[cfg(test)] module.
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let host_runtime = services
@@ -1316,7 +1316,7 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
     let estimate = ResourceEstimate::default();
     let input = serde_json::json!({"command": "echo regate"});
     let context = shell_execution_context("local-dev-regate-owner", "thread-regate");
-    disable_global_auto_approve(local_runtime, &context).await;
+    disable_global_auto_approve(runtime_surfaces, &context).await;
 
     // First invocation — expect approval gate.
     let first_blocked = host_runtime
@@ -1333,7 +1333,7 @@ async fn local_dev_one_shot_lease_regates_on_second_invocation() {
     };
 
     // Approve and resume the first invocation.
-    approve_shell_dispatch(local_runtime, &context, &first_gate).await;
+    approve_shell_dispatch(runtime_surfaces, &context, &first_gate).await;
     let first_resumed = host_runtime
         .resume_capability(RuntimeCapabilityResumeRequest::new(
             context.clone(),

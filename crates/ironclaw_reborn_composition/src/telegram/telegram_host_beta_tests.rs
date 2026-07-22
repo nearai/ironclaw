@@ -247,7 +247,7 @@ async fn unconfigured_dynamic_trigger_hook_records_terminal_skipped_outcome() {
 
     let record = runtime
         .services()
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime")
         .triggered_run_delivery

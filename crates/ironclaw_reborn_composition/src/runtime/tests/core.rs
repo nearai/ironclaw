@@ -86,7 +86,7 @@ output_schema_ref = "schemas/write.output.json"
 /// W5-WEBUI-API-2 follow-up (henrypark133 review): both `*_for_test`
 /// accessors document `None`/`Ok(None)` without a local-dev runtime;
 /// `RebornServices::disabled()` is the non-local-dev shape (no
-/// `local_runtime`), so this covers that branch without standing up a
+/// `runtime_surfaces`), so this covers that branch without standing up a
 /// full runtime.
 #[test]
 fn local_dev_test_support_interaction_service_accessors_return_none_without_local_dev_runtime() {
@@ -1759,12 +1759,12 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     });
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let local_runtime = runtime
+    let runtime_surfaces = runtime
         .services()
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime");
-    let extension_management = local_runtime
+    let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
         .expect("extension management");
@@ -1866,12 +1866,12 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     });
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let local_runtime = runtime
+    let runtime_surfaces = runtime
         .services()
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime");
-    let extension_management = local_runtime
+    let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
         .expect("extension management");
@@ -2729,7 +2729,7 @@ async fn local_dev_yolo_records_trusted_laptop_access_audit_event() {
     );
     let replay = runtime
         .services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime")
         .audit_log
@@ -3071,13 +3071,13 @@ async fn send_user_message_returns_completed_assistant_text_with_recording_gatew
     .with_model_gateway_override(gateway);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let local_runtime = runtime
+    let runtime_surfaces = runtime
         .services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("runtime should use local-dev RebornServices substrate");
     assert!(
-        Arc::ptr_eq(&runtime.thread_service, &local_runtime.thread_service),
+        Arc::ptr_eq(&runtime.thread_service, &runtime_surfaces.thread_service),
         "REPL runtime should use the thread service owned by RebornServices"
     );
     assert!(
@@ -3452,12 +3452,12 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
     .with_model_gateway_override(gateway_for_runtime);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let local_runtime = runtime
+    let runtime_surfaces = runtime
         .services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime services");
-    let extension_management = local_runtime
+    let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
         .expect("extension management");
@@ -5000,16 +5000,16 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     let read_write_filesystem = runtime
         .webui_workspace_filesystem()
         .expect("local-dev runtime composes a read-write webui workspace filesystem");
-    let local_runtime = runtime
+    let runtime_surfaces = runtime
         .services()
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
     // Mirrors production's `attachment_read_port` wiring (read-only
     // `workspace_filesystem`), so the read side is the same authority a
     // vision-capable model's multimodal part would resolve through.
     let read_port = crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
-        &local_runtime.workspace_filesystem,
+        &runtime_surfaces.workspace_filesystem,
     ));
     let lander = crate::support::fs::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
@@ -5319,7 +5319,7 @@ async fn open_reborn_identity_resolver_migrates_legacy_webui_identities_through_
     let substrate = Arc::clone(
         runtime
             .services
-            .local_runtime
+            .runtime_surfaces
             .as_ref()
             .expect("local runtime substrate")
             .identity_substrate_db
@@ -5507,7 +5507,7 @@ async fn open_reborn_identity_resolver_migrates_legacy_verified_email_linking() 
     let substrate = Arc::clone(
         runtime
             .services
-            .local_runtime
+            .runtime_surfaces
             .as_ref()
             .expect("local runtime substrate")
             .identity_substrate_db
@@ -5592,7 +5592,7 @@ async fn build_webui_services_without_local_runtime_returns_503_on_list_automati
     .with_model_gateway_override(gateway);
 
     let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    runtime.services.local_runtime = None;
+    runtime.services.runtime_surfaces = None;
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
     let caller = WebUiAuthenticatedCaller::new(
         TenantId::new("runtime-webui-no-host-tenant").unwrap(),
@@ -5909,14 +5909,14 @@ async fn local_dev_webui_spawn_approval_emits_redacted_audit_and_grants_process(
     let run_id = match submitted {
         SubmitTurnResponse::Accepted { run_id, .. } => run_id,
     };
-    let local_runtime = runtime
+    let runtime_surfaces = runtime
         .services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime services");
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
-    let claimed = local_runtime
+    let claimed = runtime_surfaces
         .turn_state
         .claim_next_run(ClaimRunRequest {
             runner_id,
@@ -5929,7 +5929,7 @@ async fn local_dev_webui_spawn_approval_emits_redacted_audit_and_grants_process(
     assert_eq!(claimed.state.run_id, run_id);
     let request_id = ApprovalRequestId::new();
     let gate_ref = approval_gate_ref(request_id).expect("approval gate");
-    local_runtime
+    runtime_surfaces
         .turn_state
         .block_run(BlockRunRequest {
             run_id,
@@ -5974,7 +5974,7 @@ async fn local_dev_webui_spawn_approval_emits_redacted_audit_and_grants_process(
         )
         .expect("fingerprint"),
     );
-    local_runtime
+    runtime_surfaces
         .approval_requests
         .save_pending(resource_scope.clone(), approval)
         .await
@@ -6029,7 +6029,7 @@ async fn local_dev_webui_spawn_approval_emits_redacted_audit_and_grants_process(
             "approval audit leaked {forbidden}: {serialized}"
         );
     }
-    let leases = local_runtime
+    let leases = runtime_surfaces
         .capability_leases
         .leases_for_scope(&resource_scope)
         .await;
@@ -6365,18 +6365,18 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
 
     // Seed the lifecycle facade before the model gateway runs.
-    let local_runtime = runtime
+    let runtime_surfaces = runtime
         .services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime substrate");
-    let extension_management = local_runtime
+    let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
         .expect("extension management")
         .clone();
     let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-        local_runtime.skill_management.clone(),
+        runtime_surfaces.skill_management.clone(),
     )
     .with_extension_management(extension_management)
     .with_runtime_credential_accounts(Arc::new(MultiToolConfiguredCredentials));

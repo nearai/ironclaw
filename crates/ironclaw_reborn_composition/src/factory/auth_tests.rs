@@ -188,7 +188,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
         .turn_coordinator
         .as_ref()
         .expect("turn coordinator");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
     let scope = turn_scope();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let submit = turn_coordinator
@@ -213,7 +213,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
-    local_runtime
+    runtime_surfaces
         .turn_state
         .claim_next_run(ClaimRunRequest {
             runner_id,
@@ -224,7 +224,7 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
         .expect("claim run")
         .expect("queued run exists");
     let gate_ref = ironclaw_turns::GateRef::new("gate:auth-callback").unwrap();
-    local_runtime
+    runtime_surfaces
         .turn_state
         .block_run(BlockRunRequest {
             run_id,
@@ -607,12 +607,12 @@ async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
         .turn_coordinator
         .as_ref()
         .expect("turn coordinator");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
     let scope = turn_scope();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let run_id = submit_and_block_auth_run(
         turn_coordinator.as_ref(),
-        local_runtime.as_ref(),
+        runtime_surfaces.as_ref(),
         scope.clone(),
         actor.clone(),
         "gate:current-auth",
@@ -652,7 +652,7 @@ async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extens
     .expect("local-dev services build");
     let product_auth = services.product_auth.as_ref().expect("product auth");
     let extension_management = services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .and_then(|runtime| runtime.extension_management.as_ref())
         .expect("extension management");
@@ -732,9 +732,9 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
         .turn_coordinator
         .as_ref()
         .expect("turn coordinator");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
     let extension_management = services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .and_then(|runtime| runtime.extension_management.as_ref())
         .expect("extension management");
@@ -755,7 +755,7 @@ async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
     let blocked_scope = turn_scope();
     let blocked_run = submit_and_block_provider_auth_run(
         turn_coordinator.as_ref(),
-        local_runtime.turn_state.as_ref(),
+        runtime_surfaces.turn_state.as_ref(),
         blocked_scope.clone(),
         TurnActor::new(UserId::new("alice").unwrap()),
         "slack-lifecycle",
@@ -1073,7 +1073,7 @@ fn provider_scope(value: &str) -> ProviderScope {
 #[cfg(test)]
 async fn submit_and_block_auth_run(
     turn_coordinator: &dyn ironclaw_turns::TurnCoordinator,
-    local_runtime: &RebornRuntimeSubstrate,
+    runtime_surfaces: &RebornRuntimeSurfaces,
     scope: TurnScope,
     actor: TurnActor,
     gate_ref: &str,
@@ -1100,7 +1100,7 @@ async fn submit_and_block_auth_run(
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
-    local_runtime
+    runtime_surfaces
         .turn_state
         .claim_next_run(ClaimRunRequest {
             runner_id,
@@ -1110,7 +1110,7 @@ async fn submit_and_block_auth_run(
         .await
         .expect("claim run")
         .expect("queued run exists");
-    local_runtime
+    runtime_surfaces
         .turn_state
         .block_run(BlockRunRequest {
             run_id,

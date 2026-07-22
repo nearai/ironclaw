@@ -188,14 +188,14 @@ async fn submit_and_block_auth_run(
     gate_ref: &GateRef,
     credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
 ) -> TurnRunId {
-    let local_runtime = runtime
+    let runtime_surfaces = runtime
         .services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime");
     let admission = AllowAllTurnAdmissionPolicy;
     let profiles = InMemoryRunProfileResolver::default();
-    let submit = local_runtime
+    let submit = runtime_surfaces
         .turn_state
         .submit_turn(
             SubmitTurnRequest {
@@ -228,7 +228,7 @@ async fn submit_and_block_auth_run(
     let SubmitTurnResponse::Accepted { run_id, .. } = submit;
     let runner_id = TurnRunnerId::new();
     let lease_token = TurnLeaseToken::new();
-    local_runtime
+    runtime_surfaces
         .turn_state
         .claim_next_run(ClaimRunRequest {
             runner_id,
@@ -238,7 +238,7 @@ async fn submit_and_block_auth_run(
         .await
         .expect("claim run")
         .expect("queued run exists");
-    local_runtime
+    runtime_surfaces
         .turn_state
         .block_run(BlockRunRequest {
             run_id,

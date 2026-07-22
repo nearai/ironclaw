@@ -76,12 +76,12 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
     .await
     .expect("local-dev services build");
     let runtime = services.host_runtime.clone().expect("host runtime");
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime substrate"); // safety: test-only assertion in #[cfg(test)] module.
-    let workspace_mounts = local_runtime.workspace_mounts.clone();
-    let memory_mounts = local_runtime.memory_mounts.clone();
+    let workspace_mounts = runtime_surfaces.workspace_mounts.clone();
+    let memory_mounts = runtime_surfaces.memory_mounts.clone();
     let policy = Arc::new(
         crate::builtin_capability_policy::builtin_capability_policy().expect("policy parses"),
     );
@@ -94,7 +94,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         policy,
         workspace_mounts,
         memory_mounts,
-        system_extensions_lifecycle_mounts: local_runtime
+        system_extensions_lifecycle_mounts: runtime_surfaces
             .system_extensions_lifecycle_mounts
             .clone(),
         extension_surface_source: ExtensionCapabilitySurfaceSource::default(),
@@ -102,7 +102,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         result_writer,
         milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
         skill_activation_source: None,
-        project_service: Arc::clone(&local_runtime.project_service),
+        project_service: Arc::clone(&runtime_surfaces.project_service),
         thread_service: Arc::new(ironclaw_threads::InMemorySessionThreadService::default()),
         trajectory_observer: None,
         outbound_preferences_facade: None,
@@ -110,8 +110,8 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         approval_settings: Arc::new(
             crate::profile_approval_authorization::EmptyApprovalSettingsProvider,
         ),
-        approval_requests: local_runtime.approval_requests.clone(),
-        capability_leases: local_runtime.capability_leases.clone(),
+        approval_requests: runtime_surfaces.approval_requests.clone(),
+        capability_leases: runtime_surfaces.capability_leases.clone(),
         gate_record_store: std::sync::Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
             crate::wrap_scoped(std::sync::Arc::new(
                 ironclaw_filesystem::InMemoryBackend::new(),
@@ -135,7 +135,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         let mut scope = run_context.scope.to_resource_scope();
         scope.user_id = UserId::new("local-dev-shell-user").expect("user id");
         ironclaw_approvals::AutoApproveSettingStore::set(
-            local_runtime.auto_approve_settings.as_ref(),
+            runtime_surfaces.auto_approve_settings.as_ref(),
             ironclaw_approvals::AutoApproveSettingInput {
                 updated_by: ironclaw_host_api::Principal::User(scope.user_id.clone()),
                 scope,

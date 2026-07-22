@@ -87,7 +87,7 @@ fn build_reborn_services_uses_filesystem_resource_governor() {
             dir.path().join("local-dev"),
         )))
         .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
     let scope = ResourceScope {
         tenant_id: TenantId::new("resource-governor-tenant").expect("tenant"),
         user_id: UserId::new("resource-governor-user").expect("user"),
@@ -99,17 +99,17 @@ fn build_reborn_services_uses_filesystem_resource_governor() {
     };
     let account = ironclaw_resources::ResourceAccount::tenant(scope.tenant_id.clone());
 
-    let reservation = local_runtime
+    let reservation = runtime_surfaces
         .resource_governor
         .reserve(scope, ResourceEstimate::default().set_usd(dec!(0.10)))
         .expect("reservation");
-    local_runtime
+    runtime_surfaces
         .resource_governor
         .reconcile(reservation.id, ResourceUsage::default().set_usd(dec!(0.10)))
         .expect("reconcile");
 
     assert_eq!(
-        local_runtime
+        runtime_surfaces
             .resource_governor
             .usage_for(&account)
             .expect("usage")
@@ -362,7 +362,7 @@ async fn pair_trigger_creator_maps_pairing_failure_to_sanitized_backend_error() 
     assert_eq!(reason, "trigger creator actor pairing failed");
 }
 
-async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntimeSubstrate> {
+async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntimeSurfaces> {
     let local_dev_root = tempfile::tempdir().expect("tempdir");
     let owner_user_id = "pairing-owner";
     let services = build_reborn_services(RebornBuildInput::local_dev(
@@ -372,7 +372,7 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
     .await
     .expect("local-dev services build");
 
-    let base_runtime = services.local_runtime.expect("local runtime");
+    let base_runtime = services.runtime_surfaces.expect("local runtime");
     let mut failing_root = CompositeRootFilesystem::new();
     failing_root
         .mount(
@@ -399,7 +399,7 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
             ),
         )
         .expect("mount failing backend");
-    Arc::new(RebornRuntimeSubstrate {
+    Arc::new(RebornRuntimeSurfaces {
         scoped_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::new(failing_root),
             MountView::new(vec![MountGrant::new(
@@ -510,12 +510,12 @@ async fn local_dev_services_include_repl_runtime_substrate() {
     assert!(services.host_runtime.is_some());
     assert!(services.turn_coordinator.is_some());
     assert!(services.product_auth.is_some());
-    assert!(services.local_runtime.is_some());
+    assert!(services.runtime_surfaces.is_some());
     assert!(services.runtime_store_graph().is_some());
-    assert!(services.local_runtime.is_some());
+    assert!(services.runtime_surfaces.is_some());
     assert!(
         services
-            .local_runtime
+            .runtime_surfaces
             .as_ref()
             .expect("local runtime")
             .extension_management
@@ -1128,8 +1128,8 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     ))
     .await
     .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
+    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
         .expect("extension management");
@@ -1169,14 +1169,14 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     let gmail_capability =
         CapabilityId::new("gmail.send_message").expect("valid Gmail capability id");
     assert!(matches!(
-        local_runtime.capability_policy.lease_approval_for(
+        runtime_surfaces.capability_policy.lease_approval_for(
             BuiltinApprovalPolicyAction::Dispatch {
                 capability: &gmail_capability,
             },
-            &local_runtime.workspace_mounts,
-            &local_runtime.skill_mounts,
-            &local_runtime.memory_mounts,
-            &local_runtime.system_extensions_lifecycle_mounts,
+            &runtime_surfaces.workspace_mounts,
+            &runtime_surfaces.skill_mounts,
+            &runtime_surfaces.memory_mounts,
+            &runtime_surfaces.system_extensions_lifecycle_mounts,
         ),
         Err(BuiltinCapabilityPolicyError::MissingGrant { .. })
     ));
@@ -1205,7 +1205,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
         .await
         .expect("create Google account");
 
-    disable_global_auto_approve(local_runtime, &gmail_context).await;
+    disable_global_auto_approve(runtime_surfaces, &gmail_context).await;
     let failure = invoke_json(
         &services,
         "gmail.send_message",
@@ -1216,7 +1216,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     .expect_err("missing token should fail after approval resume");
     assert_ne!(failure, RuntimeFailureKind::Authorization);
     assert_ne!(failure, RuntimeFailureKind::MissingRuntime);
-    let gmail_leases = local_runtime
+    let gmail_leases = runtime_surfaces
         .capability_leases
         .leases_for_scope(&gmail_scope)
         .await;
@@ -1226,7 +1226,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     assert_eq!(gmail_leases[0].status, CapabilityLeaseStatus::Revoked);
 
     let calendar_context = gsuite_context("google-calendar.create_event");
-    disable_global_auto_approve(local_runtime, &calendar_context).await;
+    disable_global_auto_approve(runtime_surfaces, &calendar_context).await;
     let failure = invoke_json(
         &services,
         "google-calendar.create_event",
@@ -1255,8 +1255,8 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
+    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
         .expect("extension management");
@@ -1291,7 +1291,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .expect("activate Notion MCP");
 
     let context = notion_mcp_context("notion.notion-search");
-    enable_global_auto_approve_for_context(local_runtime, &context).await;
+    enable_global_auto_approve_for_context(runtime_surfaces, &context).await;
     let outcome = services
         .host_runtime
         .as_ref()
@@ -1324,8 +1324,8 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
     )
     .await
     .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
+    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
         .expect("extension management");
@@ -1348,7 +1348,7 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
         .expect("activate Web Access");
 
     let context = web_access_context("web-access.search");
-    enable_global_auto_approve_for_context(local_runtime, &context).await;
+    enable_global_auto_approve_for_context(runtime_surfaces, &context).await;
     let outcome = services
         .host_runtime
         .as_ref()
@@ -1522,7 +1522,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     let graph = services
         .runtime_store_graph()
         .expect("production runtime store graph");
-    assert!(services.local_runtime.is_none());
+    assert!(services.runtime_surfaces.is_none());
     let scope = ironclaw_turns::TurnScope::new_with_owner(
         tenant,
         Some(agent),
@@ -1760,8 +1760,8 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     ))
     .await
     .expect("local-dev services build");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
+    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
+    let extension_management = runtime_surfaces
         .extension_management
         .as_ref()
         .expect("extension management");
@@ -1891,7 +1891,7 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
         .find(|account| account.provider.as_str() == "nearai")
         .expect("NEAR AI product-auth account");
     let extension_management = first
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime")
         .extension_management
@@ -1956,7 +1956,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
     .await
     .expect("local-dev services build");
     let extension_management = services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime")
         .extension_management
@@ -2072,7 +2072,7 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
             .await
             .expect("first local-dev services build");
     services
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("local runtime")
         .thread_service
@@ -2091,7 +2091,7 @@ async fn local_dev_services_persist_thread_records_across_rebuilds() {
         .await
         .expect("rebuilt local-dev services");
     let history = rebuilt
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .expect("rebuilt local runtime")
         .thread_service
@@ -2123,8 +2123,8 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
     ))
     .await
     .expect("local-dev services build");
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate");
     let scope = ResourceScope::local_default(
@@ -2133,7 +2133,7 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
     )
     .expect("valid resource scope");
 
-    let stat = local_runtime
+    let stat = runtime_surfaces
         .workspace_filesystem
         .stat(
             &scope,
@@ -2143,7 +2143,7 @@ async fn local_dev_setup_marker_workspace_filesystem_is_read_only() {
         .expect("marker stat succeeds");
     assert_eq!(stat.len, 4);
 
-    let error = local_runtime
+    let error = runtime_surfaces
         .workspace_filesystem
         .write_file(
             &scope,
@@ -2402,7 +2402,7 @@ fn disabled_services_do_not_include_repl_runtime_substrate() {
     assert!(services.host_runtime.is_none());
     assert!(services.turn_coordinator.is_none());
     assert!(services.product_auth.is_none());
-    assert!(services.local_runtime.is_none());
+    assert!(services.runtime_surfaces.is_none());
     assert!(services.runtime_store_graph().is_none());
     assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
 }
@@ -2520,10 +2520,10 @@ fn gsuite_context(capability_id: &str) -> ExecutionContext {
 /// first-party tool dispatch; enabling it here mirrors the operator
 /// having flipped it on before letting the agent run tools.
 async fn enable_global_auto_approve_for_context(
-    local_runtime: &RebornRuntimeSubstrate,
+    runtime_surfaces: &RebornRuntimeSurfaces,
     context: &ExecutionContext,
 ) {
-    local_runtime
+    runtime_surfaces
         .auto_approve_settings
         .set(AutoApproveSettingInput {
             updated_by: Principal::User(context.resource_scope.user_id.clone()),
@@ -2725,7 +2725,7 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 /// trait-object roles.
 ///
 /// The assertion reads the four trait-object pointers from the built
-/// `RebornRuntimeSubstrate` and compares their data halves via
+/// `RebornRuntimeSurfaces` and compares their data halves via
 /// `std::ptr::addr_eq` (trait objects of different traits cannot be compared
 /// with `Arc::ptr_eq` directly).
 #[tokio::test]
@@ -2738,13 +2738,13 @@ async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles
     .await
     .expect("local-dev services build");
 
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+    let runtime_surfaces = services.runtime_surfaces.as_ref().expect("local runtime");
 
     // Cast each fat-pointer's data half to *const () for cross-trait comparison.
-    let pref_ptr = Arc::as_ptr(&local_runtime.outbound_preferences) as *const ();
-    let state_ptr = Arc::as_ptr(&local_runtime.outbound_state) as *const ();
-    let gate_ptr = Arc::as_ptr(&local_runtime.delivered_gate_routes) as *const ();
-    let delivery_ptr = Arc::as_ptr(&local_runtime.triggered_run_delivery) as *const ();
+    let pref_ptr = Arc::as_ptr(&runtime_surfaces.outbound_preferences) as *const ();
+    let state_ptr = Arc::as_ptr(&runtime_surfaces.outbound_state) as *const ();
+    let gate_ptr = Arc::as_ptr(&runtime_surfaces.delivered_gate_routes) as *const ();
+    let delivery_ptr = Arc::as_ptr(&runtime_surfaces.triggered_run_delivery) as *const ();
 
     assert!(
         std::ptr::addr_eq(pref_ptr, state_ptr),

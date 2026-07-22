@@ -25,7 +25,7 @@ impl RebornServices {
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError> {
-        let Some(local_runtime) = self.local_runtime.as_ref() else {
+        let Some(runtime_surfaces) = self.runtime_surfaces.as_ref() else {
             return Ok(None);
         };
         let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
@@ -34,7 +34,7 @@ impl RebornServices {
             }
         })?);
         Ok(Some(build_approval_interaction_service(
-            local_runtime,
+            runtime_surfaces,
             builtin_capability_policy,
             turn_coordinator,
             None,
@@ -51,10 +51,10 @@ impl RebornServices {
         &self,
         turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Option<Arc<dyn AuthInteractionService>> {
-        let local_runtime = self.local_runtime.as_ref()?;
+        let runtime_surfaces = self.runtime_surfaces.as_ref()?;
         Some(build_webui_auth_interaction_service(
             self.product_auth.as_deref(),
-            Arc::clone(&local_runtime.turn_state),
+            Arc::clone(&runtime_surfaces.turn_state),
             turn_coordinator,
         ))
     }
@@ -63,7 +63,7 @@ impl RebornServices {
     /// the caller substitute the turn-run snapshot source the interaction
     /// service's approval locator reads from — for harnesses whose real runs
     /// live in a DIFFERENT `TurnStateStore` composition than this
-    /// `RebornServices`' own `local_runtime.turn_state` (e.g.
+    /// `RebornServices`' own `runtime_surfaces.turn_state` (e.g.
     /// `RebornIntegrationGroup`, whose runs execute against its own
     /// `shared.turn_store` via a separate `build_default_planned_runtime`).
     /// Generic over `F` so any `FilesystemTurnStateRowStore<F>`-backed store can be
@@ -83,7 +83,7 @@ impl RebornServices {
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
     {
-        let Some(local_runtime) = self.local_runtime.as_ref() else {
+        let Some(runtime_surfaces) = self.runtime_surfaces.as_ref() else {
             return Ok(None);
         };
         let builtin_capability_policy = Arc::new(builtin_capability_policy().map_err(|error| {
@@ -93,7 +93,7 @@ impl RebornServices {
         })?);
         Ok(Some(
             build_approval_interaction_service_with_turn_run_source(
-                local_runtime,
+                runtime_surfaces,
                 builtin_capability_policy,
                 turn_coordinator,
                 None,
@@ -119,7 +119,7 @@ impl RebornServices {
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
     {
-        self.local_runtime.as_ref()?;
+        self.runtime_surfaces.as_ref()?;
         Some(build_webui_auth_interaction_service_with_turn_run_source(
             self.product_auth.as_deref(),
             turn_state as Arc<dyn TurnRunSnapshotSource>,

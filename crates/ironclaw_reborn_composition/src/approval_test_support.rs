@@ -9,7 +9,7 @@ use ironclaw_run_state::ApprovalRequestStore;
 use crate::builtin_capability_policy::{
     BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError, builtin_one_shot_lease_approval,
 };
-use crate::{RebornServices, factory::RebornRuntimeSubstrate};
+use crate::{RebornServices, factory::RebornRuntimeSurfaces};
 
 /// Turn the global auto-approve switch off for `context`'s actor scope.
 /// Global auto-approve defaults ON, so any test exercising the per-tool approval
@@ -17,10 +17,10 @@ use crate::{RebornServices, factory::RebornRuntimeSubstrate};
 /// integration-test and root-crate binaries keep their own copies (they cannot
 /// see this crate-internal helper).
 pub(crate) async fn disable_global_auto_approve(
-    local_runtime: &RebornRuntimeSubstrate,
+    runtime_surfaces: &RebornRuntimeSurfaces,
     context: &ExecutionContext,
 ) {
-    local_runtime
+    runtime_surfaces
         .auto_approve_settings
         .set(AutoApproveSettingInput {
             scope: context.resource_scope.clone(),
@@ -54,8 +54,8 @@ pub(crate) async fn invoke_with_local_dev_approval(
         .host_runtime
         .as_ref()
         .expect("host runtime composed"); // safety: test-only helper in #[cfg(test)] module.
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .expect("local-dev runtime substrate"); // safety: test-only helper in #[cfg(test)] module.
     let capability = CapabilityId::new(capability_id).expect("valid capability id"); // safety: test-only helper in #[cfg(test)] module.
@@ -71,7 +71,7 @@ pub(crate) async fn invoke_with_local_dev_approval(
         .expect("runtime invocation completes"); // safety: test-only helper in #[cfg(test)] module.
     match outcome {
         RuntimeCapabilityOutcome::ApprovalRequired(gate) => {
-            let approval_record = local_runtime
+            let approval_record = runtime_surfaces
                 .approval_requests
                 .get(&context.resource_scope, gate.approval_request_id)
                 .await
@@ -85,12 +85,12 @@ pub(crate) async fn invoke_with_local_dev_approval(
             // capability policy (single source of truth, can't drift from production).
             // For extension capabilities not registered in the builtin policy (e.g.
             // third-party skills like gsuite), fall back to the execution context grants.
-            let approval = match local_runtime.capability_policy.lease_approval_for(
+            let approval = match runtime_surfaces.capability_policy.lease_approval_for(
                 policy_action,
-                &local_runtime.workspace_mounts,
-                &local_runtime.skill_mounts,
-                &local_runtime.memory_mounts,
-                &local_runtime.system_extensions_lifecycle_mounts,
+                &runtime_surfaces.workspace_mounts,
+                &runtime_surfaces.skill_mounts,
+                &runtime_surfaces.memory_mounts,
+                &runtime_surfaces.system_extensions_lifecycle_mounts,
             ) {
                 Ok(approval) => approval,
                 Err(BuiltinCapabilityPolicyError::MissingGrant { .. }) => {
@@ -101,8 +101,8 @@ pub(crate) async fn invoke_with_local_dev_approval(
                 }
             };
             let resolver = ApprovalResolver::new(
-                local_runtime.approval_requests.as_ref(),
-                local_runtime.capability_leases.as_ref(),
+                runtime_surfaces.approval_requests.as_ref(),
+                runtime_surfaces.capability_leases.as_ref(),
             );
             match approval_record.request.action.as_ref() {
                 Action::Dispatch { .. } => resolver

@@ -69,7 +69,7 @@ pub(super) async fn build_runtime_mounts(
 ) -> Result<SlackHostBetaMounts, SlackHostBetaBuildError> {
     let parts = Arc::new(SlackHostBetaRuntimeParts::from_runtime(runtime)?);
     let state = Arc::new(FilesystemSlackHostState::new(
-        Arc::clone(&parts.local_runtime.host_state_filesystem),
+        Arc::clone(&parts.runtime_surfaces.host_state_filesystem),
         config.tenant_id.clone(),
         config.operator_user_id.clone(),
         config.agent_id.clone(),
@@ -97,7 +97,7 @@ pub(super) async fn build_runtime_mounts(
     // root filesystem, shared with the idempotency ledger.
     let conversation_services = Arc::new(
         RebornFilesystemConversationServices::new(Arc::clone(
-            &parts.local_runtime.host_state_filesystem,
+            &parts.runtime_surfaces.host_state_filesystem,
         ))
         .await
         .map_err(
@@ -144,7 +144,7 @@ pub(super) async fn build_runtime_mounts(
         Arc::clone(&channel_route_store),
         Arc::clone(&setup_service),
     );
-    if let Some(extension_management) = &parts.local_runtime.extension_management {
+    if let Some(extension_management) = &parts.runtime_surfaces.extension_management {
         channel_routes = channel_routes.with_setup_activation(Arc::new(
             DynamicSlackChannelSetupActivation::new(Arc::clone(extension_management)),
         ));
@@ -189,7 +189,7 @@ pub(super) async fn build_runtime_mounts(
         }
     }
     let delivery_store: Arc<dyn TriggeredRunDeliveryStore> =
-        Arc::clone(&parts.local_runtime.triggered_run_delivery);
+        Arc::clone(&parts.runtime_surfaces.triggered_run_delivery);
     let trigger_delivery_hook: Arc<dyn PostSubmitDeliveryHook> =
         Arc::new(DynamicSlackTriggeredRunDeliveryHook::new(
             Arc::clone(&parts),

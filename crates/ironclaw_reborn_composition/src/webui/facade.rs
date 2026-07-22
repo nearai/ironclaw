@@ -209,7 +209,7 @@ pub(crate) fn build_webui_services_with_connectable_channels(
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
-    if services.local_runtime.is_some()
+    if services.runtime_surfaces.is_some()
         && let Some(provider) = runtime.outbound_delivery_target_provider()
     {
         outbound_delivery_target_providers.push(provider);
@@ -292,20 +292,20 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             },
         );
     }
-    if let Some(local_runtime) = &services.local_runtime {
+    if let Some(runtime_surfaces) = &services.runtime_surfaces {
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-            local_runtime.tool_permission_overrides.clone();
+            runtime_surfaces.tool_permission_overrides.clone();
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-            local_runtime.auto_approve_settings.clone();
+            runtime_surfaces.auto_approve_settings.clone();
         let persistent_approval_policies: Arc<
             dyn ironclaw_approvals::PersistentApprovalPolicyStore,
-        > = local_runtime.persistent_approval_policies.clone();
-        let tool_registry = local_runtime
+        > = runtime_surfaces.persistent_approval_policies.clone();
+        let tool_registry = runtime_surfaces
             .shared_extension_registry
             .clone()
             .unwrap_or_else(|| {
                 Arc::new(SharedExtensionRegistry::new(
-                    local_runtime.extension_registry.as_ref().clone(),
+                    runtime_surfaces.extension_registry.as_ref().clone(),
                 ))
             });
         let synthetic_operator_tools = if outbound_delivery_target_providers.is_empty() {
@@ -331,16 +331,16 @@ pub(crate) fn build_webui_services_with_connectable_channels(
             Arc::new(ActiveRegistryOperatorToolCatalog::new(
                 tool_registry,
                 synthetic_operator_tools,
-                local_runtime.extension_management.clone(),
+                runtime_surfaces.extension_management.clone(),
             )),
         );
         let mut lifecycle_facade =
-            RebornLocalLifecycleFacade::new(local_runtime.skill_management.clone());
-        if let Some(extension_management) = &local_runtime.extension_management {
+            RebornLocalLifecycleFacade::new(runtime_surfaces.skill_management.clone());
+        if let Some(extension_management) = &runtime_surfaces.extension_management {
             lifecycle_facade =
                 lifecycle_facade.with_extension_management(extension_management.clone());
         }
-        if let Some(runtime_http_egress) = &local_runtime.runtime_http_egress {
+        if let Some(runtime_http_egress) = &runtime_surfaces.runtime_http_egress {
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
         }
@@ -355,14 +355,14 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         // Share the activation selector's live master switch so a Settings
         // toggle here changes the next turn's selection. Only the local-dev
         // runtime builds a selector that reads this flag, so it is wired only
-        // when `local_runtime` is present. When absent (e.g. the production
+        // when `runtime_surfaces` is present. When absent (e.g. the production
         // assembly, which has no flag-reading selector), the facade gets `None`
         // and the toggle reports unavailable rather than silently writing to an
         // orphan flag that controls nothing.
         let auto_activate_flag = services
-            .local_runtime
+            .runtime_surfaces
             .as_ref()
-            .map(|local_runtime| Arc::clone(&local_runtime.skill_auto_activate_learned));
+            .map(|runtime_surfaces| Arc::clone(&runtime_surfaces.skill_auto_activate_learned));
         api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
             Arc::clone(skill_management),
             auto_activate_flag,
@@ -385,15 +385,15 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         ));
     }
     // First-class projects + membership (ACL). Built once per runtime over the
-    // scoped substrate — local-dev from `local_runtime`, production-shaped from
+    // scoped substrate — local-dev from `runtime_surfaces`, production-shaped from
     // the production store graph — via the shared `reborn_project_service`
     // accessor so both build paths wire the same access-controlled facade.
     if let Some(project_service) = runtime.reborn_project_service() {
         api = api.with_project_service(project_service);
     }
-    if let Some(local_runtime) = &services.local_runtime {
+    if let Some(runtime_surfaces) = &services.runtime_surfaces {
         api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
-            Arc::clone(&local_runtime.outbound_preferences),
+            Arc::clone(&runtime_surfaces.outbound_preferences),
             Arc::new(OutboundDeliveryTargetRegistry::new(
                 outbound_delivery_target_providers,
             )),
@@ -414,12 +414,12 @@ pub(crate) fn build_webui_services_with_connectable_channels(
         services.readiness.clone(),
     )));
     api = api.with_operator_logs_service(crate::operator_log_buffer());
-    if let Some(local_runtime) = &services.local_runtime {
+    if let Some(runtime_surfaces) = &services.runtime_surfaces {
         let webui_boot_config = runtime.webui_boot_config();
         api = api.with_operator_service_lifecycle_service(Arc::new(
             RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
-                local_runtime.owner_user_id.clone(),
+                runtime_surfaces.owner_user_id.clone(),
                 webui_boot_config,
             ),
         ));
@@ -493,7 +493,7 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 struct LocalSkillsProductFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     // The skill activation selector's live master switch (see
-    // `RebornRuntimeSubstrate::skill_auto_activate_learned`); writing it here
+    // `RebornRuntimeSurfaces::skill_auto_activate_learned`); writing it here
     // changes the next turn's selection without a runtime rebuild. `None` when no
     // flag-reading selector is wired (the production assembly) — the toggle then
     // reports unavailable instead of writing to a flag nothing reads.

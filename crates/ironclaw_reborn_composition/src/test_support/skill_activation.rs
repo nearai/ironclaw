@@ -51,7 +51,7 @@ pub fn build_skill_context_source_for_test(
     tenant_id: &ironclaw_host_api::TenantId,
     regex_skill_activation_enabled: bool,
 ) -> Option<SkillActivationTestSource> {
-    let local_runtime = services.local_runtime.as_ref()?;
+    let runtime_surfaces = services.runtime_surfaces.as_ref()?;
     // `None` means "no local runtime composed" (a legitimate backend shape,
     // handled by the `?` above). A build *error* is a genuine misconfiguration
     // of the local-dev skill filesystem, so surface it loudly rather than
@@ -60,7 +60,7 @@ pub fn build_skill_context_source_for_test(
     // panic is the right failure mode.
     let (source, activation_source) =
         crate::runtime::local_dev_filesystem_skill_context_source_for_test(
-            local_runtime,
+            runtime_surfaces,
             tenant_id,
             regex_skill_activation_enabled,
         )

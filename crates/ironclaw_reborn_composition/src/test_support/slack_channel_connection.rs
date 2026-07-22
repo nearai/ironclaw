@@ -2,7 +2,7 @@
 //!
 //! Builds the REAL [`SlackChannelConnectionFacade`] over the composed
 //! local-dev runtime's durable Slack host state and late-binds it into
-//! `RebornRuntimeSubstrate::channel_connection_facade_slot`, mirroring the
+//! `RebornRuntimeSurfaces::channel_connection_facade_slot`, mirroring the
 //! production wiring in
 //! `slack_connectable_channel::build_webui_services_with_slack_host_beta_mounts`
 //! (facade construction + `set_channel_connection_facade`). With the slot
@@ -89,8 +89,8 @@ pub fn build_slack_channel_connection_for_test(
     services: &RebornServices,
     config: SlackChannelConnectionTestConfig,
 ) -> Result<SlackChannelConnectionTestBundle, String> {
-    let local_runtime = services
-        .local_runtime
+    let runtime_surfaces = services
+        .runtime_surfaces
         .as_ref()
         .ok_or("slack channel-connection test support requires a local-dev runtime")?;
     let tenant_id = TenantId::new(config.tenant_id).map_err(|error| error.to_string())?;
@@ -106,7 +106,7 @@ pub fn build_slack_channel_connection_for_test(
     // (`slack_host_beta.rs`), over the SAME `host_state_filesystem` the
     // production Slack host uses.
     let state = Arc::new(FilesystemSlackHostState::new(
-        Arc::clone(&local_runtime.host_state_filesystem),
+        Arc::clone(&runtime_surfaces.host_state_filesystem),
         tenant_id.clone(),
         host_user_id.clone(),
         agent_id.clone(),
@@ -149,7 +149,7 @@ pub fn build_slack_channel_connection_for_test(
             personal_dm_target_store: state,
             personal_credential_cleanup,
         });
-    if local_runtime
+    if runtime_surfaces
         .channel_connection_facade_slot
         .set(Arc::clone(&facade))
         .is_err()

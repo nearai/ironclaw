@@ -703,7 +703,7 @@ mod tests {
             .as_ref()
             .expect("host runtime composed");
         let extension_management = services
-            .local_runtime
+            .runtime_surfaces
             .as_ref()
             .expect("local runtime substrate")
             .extension_management
@@ -1183,7 +1183,7 @@ credential_handle = "channel_ext_token"
         let channel_connection_trait: Arc<dyn ChannelConnectionFacade> = channel_connection.clone();
         assert!(
             services
-                .local_runtime
+                .runtime_surfaces
                 .as_ref()
                 .expect("local runtime substrate")
                 .channel_connection_facade_slot
@@ -1372,7 +1372,7 @@ credential_handle = "channel_ext_token"
         .await
         .expect("local-dev services build");
         let extension_management = services
-            .local_runtime
+            .runtime_surfaces
             .as_ref()
             .expect("local runtime substrate")
             .extension_management
@@ -1598,7 +1598,7 @@ credential_handle = "channel_ext_token"
         .await
         .expect("local-dev services build");
         let extension_management = services
-            .local_runtime
+            .runtime_surfaces
             .as_ref()
             .expect("local runtime substrate")
             .extension_management
@@ -1665,7 +1665,7 @@ credential_handle = "channel_ext_token"
         .await
         .expect("local-dev services build");
         let extension_management = services
-            .local_runtime
+            .runtime_surfaces
             .as_ref()
             .expect("local runtime substrate")
             .extension_management
@@ -1729,7 +1729,7 @@ credential_handle = "channel_ext_token"
         .await
         .expect("local-dev services build");
         let extension_management = services
-            .local_runtime
+            .runtime_surfaces
             .as_ref()
             .expect("local runtime substrate")
             .extension_management
@@ -1780,7 +1780,7 @@ credential_handle = "channel_ext_token"
         .await
         .expect("local-dev services build");
         let extension_management = services
-            .local_runtime
+            .runtime_surfaces
             .as_ref()
             .expect("local runtime substrate")
             .extension_management

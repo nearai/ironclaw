@@ -110,12 +110,12 @@ pub async fn build_telegram_host_runtime_mounts(
     runtime: &RebornRuntime,
     config: TelegramHostRuntimeConfig,
 ) -> Result<TelegramHostMounts, TelegramHostBuildError> {
-    let local_runtime = runtime
+    let runtime_surfaces = runtime
         .services()
-        .local_runtime
+        .runtime_surfaces
         .as_ref()
         .ok_or(TelegramHostBuildError::DurableHostStateUnavailable)?;
-    let host_state_filesystem = Arc::clone(&local_runtime.telegram_host_state_filesystem);
+    let host_state_filesystem = Arc::clone(&runtime_surfaces.telegram_host_state_filesystem);
     let state = Arc::new(FilesystemTelegramHostState::new(
         Arc::clone(&host_state_filesystem),
         config.tenant_id.clone(),
@@ -123,7 +123,7 @@ pub async fn build_telegram_host_runtime_mounts(
         config.agent_id.clone(),
         config.project_id.clone(),
     ));
-    let host_egress = local_runtime
+    let host_egress = runtime_surfaces
         .host_runtime_http_egress
         .clone()
         .ok_or(TelegramHostBuildError::RuntimeHttpEgressUnavailable)?;
@@ -159,10 +159,10 @@ pub async fn build_telegram_host_runtime_mounts(
     let approval_interactions = Arc::new(
         crate::delivered_gate_routing::DeliveredGateRoutingApprovalService::new(
             runtime.webui_approval_interaction_service(),
-            Arc::clone(&local_runtime.delivered_gate_routes),
+            Arc::clone(&runtime_surfaces.delivered_gate_routes),
         ),
     );
-    let setup_activation = local_runtime
+    let setup_activation = runtime_surfaces
         .extension_management
         .as_ref()
         .map(|management| {
@@ -193,11 +193,11 @@ pub async fn build_telegram_host_runtime_mounts(
         approval_interactions,
         auth_interactions: runtime.webui_auth_interaction_service(),
         delivery_services: TelegramDeliveryServicePorts {
-            outbound_store: Arc::clone(&local_runtime.outbound_state),
-            delivered_gate_routes: Arc::clone(&local_runtime.delivered_gate_routes),
-            communication_preferences: Arc::clone(&local_runtime.outbound_preferences),
-            triggered_run_delivery: Arc::clone(&local_runtime.triggered_run_delivery),
-            approval_requests: local_runtime.approval_requests.clone(),
+            outbound_store: Arc::clone(&runtime_surfaces.outbound_state),
+            delivered_gate_routes: Arc::clone(&runtime_surfaces.delivered_gate_routes),
+            communication_preferences: Arc::clone(&runtime_surfaces.outbound_preferences),
+            triggered_run_delivery: Arc::clone(&runtime_surfaces.triggered_run_delivery),
+            approval_requests: runtime_surfaces.approval_requests.clone(),
             auth_challenges: runtime.auth_challenge_provider(),
             auth_flow_canceller: runtime.blocked_auth_flow_canceller(),
         },
@@ -236,7 +236,7 @@ pub async fn build_telegram_host_runtime_mounts(
             "Telegram triggered-run delivery hook is already wired for a different Telegram host config",
         ));
     }
-    connect_account_status(local_runtime, account_status)?;
+    connect_account_status(runtime_surfaces, account_status)?;
 
     Ok(TelegramHostMounts {
         events,
@@ -247,10 +247,10 @@ pub async fn build_telegram_host_runtime_mounts(
 }
 
 fn connect_account_status(
-    local_runtime: &crate::factory::RebornRuntimeSubstrate,
+    runtime_surfaces: &crate::factory::RebornRuntimeSurfaces,
     account_status: Arc<dyn ironclaw_product_workflow::AccountConnectionStatusSource>,
 ) -> Result<(), TelegramHostBuildError> {
-    let Some(extension_management) = &local_runtime.extension_management else {
+    let Some(extension_management) = &runtime_surfaces.extension_management else {
         return Ok(());
     };
     let extension_id = ExtensionId::new(ironclaw_telegram_extension::TELEGRAM_EXTENSION_ID)

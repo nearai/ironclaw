@@ -87,13 +87,15 @@ pub async fn build_openai_compat_route_mount(
     default_agent_id: AgentId,
     default_project_id: Option<ProjectId>,
 ) -> Result<ProtectedRouteMount, RebornBuildError> {
-    let local_runtime = runtime.services().local_runtime.as_ref().ok_or_else(|| {
-        RebornBuildError::InvalidConfig {
+    let runtime_surfaces = runtime
+        .services()
+        .runtime_surfaces
+        .as_ref()
+        .ok_or_else(|| RebornBuildError::InvalidConfig {
             reason: "OpenAI-compatible routes require local runtime services".to_string(),
-        }
-    })?;
+        })?;
     let conversations = Arc::new(
-        local_runtime
+        runtime_surfaces
             .durable_trigger_conversation_services()
             .await
             .map_err(|error| RebornBuildError::InvalidConfig {
@@ -150,7 +152,7 @@ pub async fn build_openai_compat_route_mount(
             inbound,
             Arc::new(RebornFilesystemIdempotencyLedger::new(
                 openai_compat_ledger_filesystem(
-                    local_runtime.extension_filesystem.clone(),
+                    runtime_surfaces.extension_filesystem.clone(),
                     &tenant_id,
                 )?,
                 openai_compat_ledger_scope(
@@ -170,7 +172,7 @@ pub async fn build_openai_compat_route_mount(
         });
     let product_workflow: Arc<dyn ProductWorkflow> = default_product_workflow;
 
-    let ref_filesystem: Arc<dyn RootFilesystem> = local_runtime.extension_filesystem.clone();
+    let ref_filesystem: Arc<dyn RootFilesystem> = runtime_surfaces.extension_filesystem.clone();
     let ref_store: Arc<dyn OpenAiCompatRefStore> =
         Arc::new(FilesystemOpenAiCompatRefStore::with_root(
             ref_filesystem,
@@ -184,7 +186,7 @@ pub async fn build_openai_compat_route_mount(
     // host: the host records parked calls + completes them from submitted
     // outputs; the Responses surface registers specs, submits outputs, and reads
     // parked calls back here.
-    let external_tool_catalog = local_runtime.external_tool_catalog.clone();
+    let external_tool_catalog = runtime_surfaces.external_tool_catalog.clone();
     let responses_projection_reader = Arc::new(
         OpenAiResponsesThreadProjectionReader::new(
             runtime.webui_thread_service(),
