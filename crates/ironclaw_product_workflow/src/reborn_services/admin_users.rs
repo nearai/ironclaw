@@ -106,6 +106,12 @@ pub struct AdminCreatedUser {
     pub record: AdminUserRecord,
 }
 
+/// One-time response value for an explicitly requested private-user login
+/// credential. The plaintext bearer is never persisted by this contract.
+pub struct AdminIssuedLoginToken {
+    pub token: SecretString,
+}
+
 /// Failure modes of the admin user port. Deliberately coarse and free of
 /// backend detail — the composition adapter maps identity/secret errors into
 /// these, and the facade maps these into the sanitized `RebornServicesError`
@@ -199,6 +205,18 @@ pub trait AdminUserService: Send + Sync {
     async fn delete_user(&self, tenant: &TenantId, user_id: &UserId) -> Result<(), AdminUserError>;
 
     async fn count_active_admins(&self, tenant: &TenantId) -> Result<usize, AdminUserError>;
+}
+
+/// Narrow authentication port for issuing a login credential to a private
+/// user. Implementations must reject managed subjects and cross-tenant targets.
+#[async_trait]
+pub trait AdminUserLoginTokenIssuer: Send + Sync {
+    async fn issue_login_token(
+        &self,
+        tenant: &TenantId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
+    ) -> Result<AdminIssuedLoginToken, AdminUserError>;
 }
 
 /// Narrow data-plane port for administrator-on-behalf access to managed-user
@@ -319,6 +337,20 @@ impl AdminUserService for RejectingAdminUserService {
 
 pub(crate) struct RejectingAdminManagedResourceService;
 
+pub(crate) struct RejectingAdminUserLoginTokenIssuer;
+
+#[async_trait]
+impl AdminUserLoginTokenIssuer for RejectingAdminUserLoginTokenIssuer {
+    async fn issue_login_token(
+        &self,
+        _tenant: &TenantId,
+        _actor_user_id: &UserId,
+        _subject_user_id: &UserId,
+    ) -> Result<AdminIssuedLoginToken, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+}
+
 #[async_trait]
 impl AdminManagedResourceService for RejectingAdminManagedResourceService {
     async fn list_secrets(
@@ -387,6 +419,10 @@ pub struct RebornAdminCreateUserRequest {
     #[serde(default)]
     pub display_name: Option<String>,
     pub role: AdminUserRole,
+    /// Mint and return a login bearer exactly once. Omitted/false preserves
+    /// the safe invitation-style default.
+    #[serde(default)]
+    pub issue_login_token: bool,
 }
 
 /// Body for `POST /admin/agents`.
@@ -417,11 +453,23 @@ impl From<RebornAdminCreateManagedUserRequest> for AdminUserCreationRequest {
     }
 }
 
-/// Response for private-user or managed-agent creation. It intentionally has
-/// no bearer/token field.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Response for private-user or managed-agent creation. `login_token` is
+/// present only when explicitly requested for a private user.
+#[derive(Serialize)]
 pub struct RebornAdminUserCreatedResponse {
     pub user: AdminUserRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_token: Option<String>,
+}
+
+impl std::fmt::Debug for RebornAdminUserCreatedResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornAdminUserCreatedResponse")
+            .field("user", &self.user)
+            .field("login_token_issued", &self.login_token.is_some())
+            .finish()
+    }
 }
 
 /// Body for `PATCH /admin/users/{id}` — partial profile update.

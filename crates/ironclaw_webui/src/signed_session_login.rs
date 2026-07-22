@@ -58,9 +58,9 @@ pub struct SignedSessionLoginConfig {
     /// directory (distinct user per identity); a single-operator host
     /// can inject one that always resolves to the operator.
     pub user_directory: Arc<dyn UserDirectory>,
-    /// Operator secret the session-token HMAC key is derived from. The
-    /// same value typically backs the env-bearer authenticator.
-    pub operator_secret: SecretString,
+    /// Host-owned signed-session store shared with every session issuer so
+    /// logout revocation is observed consistently within this process.
+    pub session_store: Arc<SignedTokenSessionStore>,
     /// Public base URL used to build provider callback URLs.
     pub base_url: String,
     /// Configured OAuth providers. An empty list disables the login
@@ -91,8 +91,7 @@ pub fn build_signed_session_login(
         return None;
     }
 
-    let session_store =
-        SignedTokenSessionStore::from_operator_secret(&config.operator_secret, &config.tenant_id);
+    let session_store = config.session_store;
     let session_authenticator: Arc<dyn WebuiAuthenticator> =
         Arc::new(SessionAuthenticator::new(session_store.clone()));
 
@@ -852,10 +851,14 @@ mod tests {
     }
 
     fn login_config(providers: Vec<Arc<dyn OAuthProvider>>) -> SignedSessionLoginConfig {
+        let tenant_id = tenant();
         SignedSessionLoginConfig {
-            tenant_id: tenant(),
+            session_store: signed_session_store(
+                &SecretString::from("operator-secret".to_string()),
+                &tenant_id,
+            ),
+            tenant_id,
             user_directory: Arc::new(StubUserDirectory),
-            operator_secret: SecretString::from("operator-secret".to_string()),
             base_url: "https://app.example".to_string(),
             providers,
             env_authenticator: Arc::new(OneToken {

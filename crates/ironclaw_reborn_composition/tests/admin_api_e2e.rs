@@ -7,9 +7,8 @@
 //! bearer authenticator, and drives the whole admin surface over HTTP through
 //! `tower::ServiceExt::oneshot`.
 //!
-//! The flagship proofs are that private-user and managed-agent creation return
-//! no credential, and only a real tenant admin may manage resources belonging
-//! to a same-tenant managed subject.
+//! The flagship proofs cover default credential-free creation, explicit
+//! private-user token issuance, and managed-subject policy enforcement.
 
 #![cfg(feature = "test-support")]
 
@@ -29,8 +28,8 @@ use ironclaw_loop_host::{
     HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn_composition::{
-    PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
-    build_reborn_runtime, build_webui_services,
+    AdminLoginTokenMinter, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, build_reborn_runtime, build_webui_services,
 };
 use ironclaw_webui::{
     EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore, signed_session_store,
@@ -48,6 +47,25 @@ const OPERATOR_TOKEN: &str = "operator-secret-token";
 // ─── no-op model gateway (admin ops never invoke the model) ───────────────
 
 struct NoOpGateway;
+
+struct TestLoginTokenMinter {
+    store: Arc<SignedTokenSessionStore>,
+}
+
+#[async_trait]
+impl AdminLoginTokenMinter for TestLoginTokenMinter {
+    async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
+        self.store
+            .create_session(
+                tenant.clone(),
+                user_id.clone(),
+                chrono::Duration::hours(1),
+                false,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 #[async_trait]
 impl HostManagedModelGateway for NoOpGateway {
@@ -146,7 +164,10 @@ async fn build_admin_harness_from(
             interval: std::time::Duration::from_millis(10),
             max_total: std::time::Duration::from_secs(10),
         })
-        .with_model_gateway_override(Arc::new(NoOpGateway));
+        .with_model_gateway_override(Arc::new(NoOpGateway))
+        .with_admin_login_token_minter(Arc::new(TestLoginTokenMinter {
+            store: Arc::clone(&session_store),
+        }));
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
@@ -236,12 +257,24 @@ impl AdminApiDriver {
         display_name: &str,
         role: &str,
     ) -> (StatusCode, Value) {
+        self.create_user_with_token(email, display_name, role, false)
+            .await
+    }
+
+    async fn create_user_with_token(
+        &self,
+        email: Option<&str>,
+        display_name: &str,
+        role: &str,
+        issue_login_token: bool,
+    ) -> (StatusCode, Value) {
         let mut body = serde_json::Map::new();
         if let Some(email) = email {
             body.insert("email".to_string(), json!(email));
         }
         body.insert("display_name".to_string(), json!(display_name));
         body.insert("role".to_string(), json!(role));
+        body.insert("issue_login_token".to_string(), json!(issue_login_token));
         self.send(
             Method::POST,
             "/api/webchat/v2/admin/users",
@@ -337,14 +370,14 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
         "no users exist before the admin creates any"
     );
 
-    // Private user creation preserves normal RBAC lifecycle but never returns
-    // an admin-minted login credential.
+    // Private user creation preserves normal RBAC lifecycle and defaults to no
+    // admin-minted login credential.
     let (status, admin) = operator
         .create_user(Some("admin@acme.test"), "Ada Admin", "admin")
         .await;
     assert_eq!(status, StatusCode::OK, "operator creates an admin user");
     let admin_id = user_id_of(&admin);
-    assert!(admin.get("api_token").is_none());
+    assert!(admin.get("login_token").is_none());
     assert_eq!(
         admin["user"]["content_access_policy"].as_str(),
         Some("private")
@@ -361,12 +394,43 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
         .expect("simulate verified admin login");
     let admin_session = operator.as_bearer(admin_token.expose_secret());
 
+    // An administrator may explicitly request a private user's login token.
+    // The returned bearer authenticates as that UserId, not as the operator.
+    let (status, token_user) = operator
+        .create_user_with_token(Some("token-user@acme.test"), "Token User", "member", true)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let token_user_id = user_id_of(&token_user);
+    let login_token = token_user["login_token"]
+        .as_str()
+        .expect("explicit request returns the login token once");
+    let session = harness
+        .session_store
+        .lookup(login_token)
+        .await
+        .expect("issued token resolves")
+        .expect("issued token has a live session");
+    assert_eq!(session.user_id.as_str(), token_user_id);
+    let (status, _) = operator.as_bearer(login_token).list_users().await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "the token authenticates as the member rather than inheriting admin rights"
+    );
+    harness.session_store.revoke(login_token).await;
+    let (status, _) = operator.as_bearer(login_token).list_users().await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "revocation invalidates it"
+    );
+
     // Managed-agent creation is a separate workflow but still returns an
     // ordinary UserId. It is fixed to Member and carries no credential.
     let (status, managed) = admin_session.create_managed_agent("Managed Agent").await;
     assert_eq!(status, StatusCode::OK, "operator creates a managed agent");
     let managed_id = user_id_of(&managed);
-    assert!(managed.get("api_token").is_none());
+    assert!(managed.get("login_token").is_none());
     assert_eq!(managed["user"]["role"].as_str(), Some("member"));
     assert_eq!(
         managed["user"]["content_access_policy"].as_str(),
@@ -376,8 +440,8 @@ async fn admin_creation_and_managed_resource_policy_over_http() {
     let (_, users) = operator.list_users().await;
     assert_eq!(
         users["users"].as_array().map(Vec::len),
-        Some(2),
-        "both ordinary UserId records are enumerated"
+        Some(3),
+        "private and managed subjects are ordinary UserId records"
     );
 
     // Immutable policy: a managed subject cannot be promoted to Admin.

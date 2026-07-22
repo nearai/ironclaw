@@ -16,10 +16,10 @@ use anyhow::anyhow;
 use ironclaw_reborn_composition::host_api::TenantId;
 use ironclaw_reborn_composition::{PublicRouteMount, RebornIdentityResolver};
 use ironclaw_webui::{
-    CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig, WebuiAuthenticator,
-    build_signed_session_login, empty_webui_v2_auth_providers_mount, signed_session_store,
+    CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig,
+    SignedTokenSessionStore, WebuiAuthenticator, build_signed_session_login,
+    empty_webui_v2_auth_providers_mount,
 };
-use secrecy::SecretString;
 
 use crate::commands::serve_sso::SsoStartupConfig;
 use crate::commands::user_directory::WebuiUserDirectory;
@@ -54,7 +54,7 @@ pub(crate) async fn build_webui_auth_surface(
     sso_startup: Option<SsoStartupConfig>,
     identity_resolver: Option<Arc<dyn RebornIdentityResolver>>,
     tenant_id: TenantId,
-    session_signing_secret: SecretString,
+    session_store: Arc<SignedTokenSessionStore>,
     env_authenticator: Arc<dyn WebuiAuthenticator>,
 ) -> anyhow::Result<WebuiAuthSurface> {
     let Some(sso) = sso_startup else {
@@ -63,12 +63,11 @@ pub(crate) async fn build_webui_auth_surface(
         // `SessionAuthenticator` over the same signed store.
         // Compose the env-bearer (operator) authenticator with a session
         // authenticator over that store so minted tokens work without SSO;
-        // operator capabilities still follow the env token only, so the session
-        // bearer stays non-operator. Admin user creation never reaches this
-        // store and never mints a session.
-        let session_authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(
-            SessionAuthenticator::new(signed_session_store(&session_signing_secret, &tenant_id)),
-        );
+        // operator capabilities still follow the env token only, so every
+        // session bearer stays non-operator. The same store is shared with the
+        // explicit private-user token issuer so revocation state is coherent.
+        let session_authenticator: Arc<dyn WebuiAuthenticator> =
+            Arc::new(SessionAuthenticator::new(session_store));
         let authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(CompositeAuthenticator::new(
             session_authenticator,
             env_authenticator,
@@ -100,7 +99,7 @@ pub(crate) async fn build_webui_auth_surface(
     let wiring = build_signed_session_login(SignedSessionLoginConfig {
         tenant_id,
         user_directory: Arc::new(user_directory),
-        operator_secret: session_signing_secret,
+        session_store,
         base_url: sso.base_url,
         providers: sso.providers,
         env_authenticator,
@@ -179,7 +178,10 @@ mod tests {
             Some(sso),
             None, // no resolver — the fail-closed branch under test
             TenantId::new("tenant-host").expect("tenant"),
-            SecretString::from("session-signing-secret".to_string()),
+            ironclaw_webui::signed_session_store(
+                &secrecy::SecretString::from("session-signing-secret".to_string()),
+                &TenantId::new("tenant-host").expect("tenant"),
+            ),
             Arc::new(RejectingAuth),
         )
         .await;
@@ -204,7 +206,10 @@ mod tests {
             None,
             None,
             TenantId::new("tenant-host").expect("tenant"),
-            SecretString::from("session-signing-secret".to_string()),
+            ironclaw_webui::signed_session_store(
+                &secrecy::SecretString::from("session-signing-secret".to_string()),
+                &TenantId::new("tenant-host").expect("tenant"),
+            ),
             Arc::new(RejectingAuth),
         )
         .await;
@@ -242,7 +247,10 @@ mod tests {
                 &TenantId::new("sso-bootstrap-tenant").expect("tenant"),
             )),
             TenantId::new("sso-bootstrap-tenant").expect("tenant"),
-            SecretString::from("operator-session-secret".to_string()),
+            ironclaw_webui::signed_session_store(
+                &secrecy::SecretString::from("operator-session-secret".to_string()),
+                &TenantId::new("sso-bootstrap-tenant").expect("tenant"),
+            ),
             Arc::new(RejectingAuth),
         )
         .await

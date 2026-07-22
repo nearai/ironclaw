@@ -229,11 +229,29 @@ test("createAdminUser POSTs a private user payload and returns no login credenti
     email: "new@example.com",
     display_name: "New",
     role: "member",
+    issue_login_token: false,
   });
 
   assert.equal(result.id, "u-9");
   assert.equal(result.user_id, "u-9");
   assert.equal(result.content_access_policy, "private");
+  assert.equal(result.login_token, null);
+});
+
+test("createAdminUser requests and returns an explicit one-time login token", async () => {
+  stubFetch(() => ({
+    user: { user_id: "u-token", content_access_policy: "private" },
+    login_token: "signed-user-session",
+  }));
+
+  const result = await createAdminUser({
+    display_name: "Token User",
+    role: "member",
+    issue_login_token: true,
+  });
+
+  assert.equal(jsonBody(calls[0]).issue_login_token, true);
+  assert.equal(result.login_token, "signed-user-session");
 });
 
 test("createAdminUser passes an explicit role through unchanged", async () => {

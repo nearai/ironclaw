@@ -28,11 +28,13 @@ function buildFilters(t) {
   ];
 }
 
-function CreateUserForm({ onCreate, isCreating, error, resetError }) {
+export function CreateUserForm({ onCreate, isCreating, error, resetError }) {
   const t = useT();
   const [name, setName] = React.useState("");
   const [email, setEmail] = React.useState("");
   const [role, setRole] = React.useState("member");
+  const [issueLoginToken, setIssueLoginToken] = React.useState(false);
+  const [loginToken, setLoginToken] = React.useState(null);
   const [isOpen, setIsOpen] = React.useState(false);
   const roleOptions = React.useMemo(() => buildRoleOptions(t), [t]);
 
@@ -41,14 +43,36 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
     if (!name.trim()) return;
     resetError?.();
     try {
-      await onCreate({ display_name: name.trim(), email: email.trim() || undefined, role });
+      const created = await onCreate({
+        display_name: name.trim(),
+        email: email.trim() || undefined,
+        role,
+        issue_login_token: issueLoginToken,
+      });
       setName("");
       setEmail("");
+      setIssueLoginToken(false);
+      setLoginToken(created?.login_token || null);
       setIsOpen(false);
     } catch (_) {
       // Keep the form open; the mutation exposes its sanitized error below.
     }
   };
+
+  if (loginToken) {
+    return (
+      <Panel className="p-5 sm:p-6" data-testid="admin-user-login-token">
+        <h3 className="font-semibold text-iron-100">{t("admin.users.loginTokenReady")}</h3>
+        <p className="mt-1 text-sm text-iron-300">{t("admin.users.loginTokenOnce")}</p>
+        <code className="mt-3 block break-all rounded-md border border-iron-700 bg-iron-900 p-3 text-xs text-signal">
+          {loginToken}
+        </code>
+        <Button className="mt-3" variant="secondary" onClick={() => setLoginToken(null)}>
+          {t("common.done")}
+        </Button>
+      </Panel>
+    );
+  }
 
   if (!isOpen) {
     return (
@@ -97,6 +121,21 @@ function CreateUserForm({ onCreate, isCreating, error, resetError }) {
             />
           </div>
         </div>
+        <label className="flex items-start gap-2 text-sm text-iron-300">
+          <input
+            type="checkbox"
+            checked={issueLoginToken}
+            onChange={(event) => setIssueLoginToken(event.currentTarget.checked)}
+            data-testid="admin-user-issue-login-token"
+            className="mt-0.5"
+          />
+          <span>
+            {t("admin.users.issueLoginToken")}
+            <span className="mt-0.5 block text-xs text-iron-700">
+              {t("admin.users.issueLoginTokenDesc")}
+            </span>
+          </span>
+        </label>
         {error && (<p className="text-sm text-[var(--v2-danger-text)]">{error.message}</p>)}
         <div className="flex gap-2">
           <Button type="submit" disabled={isCreating}>

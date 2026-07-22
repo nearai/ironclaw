@@ -126,7 +126,7 @@ function baseAdminState(overrides = {}) {
 function loadUsersView(harness) {
   return runVmModuleForTest(
     "./users-tab.tsx",
-    ["AdminUsersTabView", "ConfirmModal", "UserRow"],
+    ["AdminUsersTabView", "ConfirmModal", "CreateUserForm", "UserRow"],
     {
       React: harness.React,
       useT: () => translate,
@@ -155,6 +155,47 @@ function loadUsersView(harness) {
     import.meta.url,
   );
 }
+
+test("private-user form opts into and renders the one-time login token", async () => {
+  const harness = createReactHarness();
+  const { CreateUserForm } = loadUsersView(harness);
+  const createdPayloads = [];
+  const props = {
+    onCreate: async (payload) => {
+      createdPayloads.push(payload);
+      return { id: "user-token", login_token: "signed-user-session" };
+    },
+    isCreating: false,
+    error: null,
+    resetError: () => {},
+  };
+
+  let rendered = harness.render(CreateUserForm, props);
+  // Button functions do not retain identity in the VM harness, so invoke the
+  // first button's click handler discovered from the rendered tree.
+  let openButton = null;
+  visit(rendered, (node) => {
+    if (!openButton && typeof node === "object" && node.props?.onClick) openButton = node;
+  });
+  openButton.props.onClick();
+
+  rendered = harness.render(CreateUserForm, props);
+  findByTestId(rendered, "admin-user-issue-login-token").props.onChange({
+    currentTarget: { checked: true },
+  });
+  const inputs = [];
+  visit(rendered, (node) => {
+    if (typeof node === "object" && node.type === "input") inputs.push(node);
+  });
+  inputs[0].props.onChange({ currentTarget: { value: "Token User" } });
+  rendered = harness.render(CreateUserForm, props);
+  await findByType(rendered, "form").props.onSubmit({ preventDefault() {} });
+
+  assert.equal(createdPayloads[0].issue_login_token, true);
+  rendered = harness.render(CreateUserForm, props);
+  assert.ok(findByTestId(rendered, "admin-user-login-token"));
+  assert.ok(collectScalars(rendered).includes("signed-user-session"));
+});
 
 function loadDetailModule(harness) {
   return runVmModuleForTest(

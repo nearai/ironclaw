@@ -93,10 +93,11 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_product_workflow::{
     AdminCreateManagedUserFields, AdminCreatePrivateUserFields, AdminCreatedUser,
-    AdminManagedResourceService, AdminUserContentAccessPolicy, AdminUserError, AdminUserRecord,
-    AdminUserRole, AdminUserSecretMeta, AdminUserService, AdminUserStatus,
-    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
+    AdminIssuedLoginToken, AdminManagedResourceService, AdminUserContentAccessPolicy,
+    AdminUserError, AdminUserLoginTokenIssuer, AdminUserRecord, AdminUserRole, AdminUserSecretMeta,
+    AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
+    RebornAdminUserListQuery,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -12592,6 +12593,46 @@ impl AdminManagedResourceService for FakeAdminUsers {
     }
 }
 
+#[async_trait]
+impl AdminUserLoginTokenIssuer for FakeAdminUsers {
+    async fn issue_login_token(
+        &self,
+        _tenant: &TenantId,
+        actor_user_id: &UserId,
+        subject_user_id: &UserId,
+    ) -> Result<AdminIssuedLoginToken, AdminUserError> {
+        let users = self.users.lock().unwrap();
+        let actor = users
+            .get(actor_user_id.as_str())
+            .ok_or(AdminUserError::Forbidden)?;
+        let subject = users
+            .get(subject_user_id.as_str())
+            .ok_or(AdminUserError::Forbidden)?;
+        if !actor.role.is_admin()
+            || subject.content_access_policy != AdminUserContentAccessPolicy::Private
+        {
+            return Err(AdminUserError::Forbidden);
+        }
+        Ok(AdminIssuedLoginToken {
+            token: SecretString::from(format!("login-for-{}", subject_user_id.as_str())),
+        })
+    }
+}
+
+struct FailingLoginTokenIssuer;
+
+#[async_trait]
+impl AdminUserLoginTokenIssuer for FailingLoginTokenIssuer {
+    async fn issue_login_token(
+        &self,
+        _tenant: &TenantId,
+        _actor_user_id: &UserId,
+        _subject_user_id: &UserId,
+    ) -> Result<AdminIssuedLoginToken, AdminUserError> {
+        Err(AdminUserError::Unavailable)
+    }
+}
+
 fn authorize_fake_managed_resource(
     users: &Mutex<HashMap<String, AdminUserRecord>>,
     actor_user_id: &UserId,
@@ -12620,6 +12661,7 @@ fn admin_services(fake: FakeAdminUsers) -> RebornServices {
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_admin_user_service(Arc::new(fake.clone()))
+    .with_admin_user_login_token_issuer(Arc::new(fake.clone()))
     .with_admin_managed_resource_service(Arc::new(fake))
 }
 
@@ -12655,6 +12697,7 @@ async fn assert_every_admin_verb_forbidden(services: &RebornServices) {
                     email: None,
                     display_name: None,
                     role: AdminUserRole::Member,
+                    issue_login_token: false,
                 }
                 .into(),
             )
@@ -12808,6 +12851,7 @@ async fn admin_caller_lists_and_creates_private_user_without_a_token() {
                 email: Some("new@acme.com".to_string()),
                 display_name: Some("New".to_string()),
                 role: AdminUserRole::Member,
+                issue_login_token: false,
             }
             .into(),
         )
@@ -12815,8 +12859,74 @@ async fn admin_caller_lists_and_creates_private_user_without_a_token() {
         .expect("an admin may create a user");
     let encoded = serde_json::to_value(created).expect("creation response serializes");
     assert!(
-        encoded.get("api_token").is_none(),
-        "admin-created private users must never expose a bearer token"
+        encoded.get("login_token").is_none(),
+        "private-user creation must omit a bearer unless explicitly requested"
+    );
+}
+
+#[tokio::test]
+async fn admin_explicitly_issues_a_private_user_login_token() {
+    let services = admin_services(FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]));
+    let created = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: Some("token@acme.com".to_string()),
+                display_name: Some("Token User".to_string()),
+                role: AdminUserRole::Member,
+                issue_login_token: true,
+            }
+            .into(),
+        )
+        .await
+        .expect("an admin may explicitly issue a private-user login token");
+    assert_eq!(
+        created.login_token.as_deref(),
+        Some(format!("login-for-{}", created.user.user_id.as_str()).as_str())
+    );
+}
+
+#[tokio::test]
+async fn failed_login_token_issuance_rolls_back_private_user_creation() {
+    let fake = FakeAdminUsers::with([admin_record(
+        "user-alpha",
+        AdminUserRole::Admin,
+        AdminUserStatus::Active,
+    )]);
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_admin_user_service(Arc::new(fake.clone()))
+    .with_admin_user_login_token_issuer(Arc::new(FailingLoginTokenIssuer));
+
+    let error = services
+        .create_admin_user(
+            caller(),
+            RebornAdminCreateUserRequest {
+                email: Some("rollback@acme.com".to_string()),
+                display_name: Some("Rollback User".to_string()),
+                role: AdminUserRole::Member,
+                issue_login_token: true,
+            }
+            .into(),
+        )
+        .await
+        .expect_err("token issuance failure must surface");
+    assert_eq!(error.status_code, 503);
+    assert!(
+        fake.get_user(
+            &TenantId::new("tenant-alpha").expect("tenant"),
+            &UserId::new("created-user").expect("user")
+        )
+        .await
+        .expect("lookup")
+        .is_none(),
+        "failed issuance must not leave a partially created login user"
     );
 }
 

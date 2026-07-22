@@ -582,6 +582,7 @@ pub struct RebornRuntime {
     outbound_delivery_target_registry: Option<Arc<MutableOutboundDeliveryTargetRegistry>>,
     budget_event_projection: Option<crate::observability::budget_events::BudgetEventProjection>,
     poll_settings: PollSettings,
+    admin_login_token_minter: Option<Arc<dyn crate::AdminLoginTokenMinter>>,
     actor_user_id: UserId,
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
@@ -1492,6 +1493,10 @@ impl RebornRuntime {
             return Some(directory);
         }
         None
+    }
+
+    pub(crate) fn admin_login_token_minter(&self) -> Option<Arc<dyn crate::AdminLoginTokenMinter>> {
+        self.admin_login_token_minter.clone()
     }
 
     /// Test-only accessor for the admin user directory the WebUI facade wires.
@@ -2979,6 +2984,7 @@ pub async fn build_reborn_runtime(
         budget_defaults,
         budget_event_observer,
         trajectory_observer,
+        admin_login_token_minter,
         #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
         #[cfg(any(test, feature = "test-support"))]
@@ -4200,6 +4206,7 @@ pub async fn build_reborn_runtime(
         outbound_delivery_target_registry,
         budget_event_projection,
         poll_settings: poll,
+        admin_login_token_minter,
         actor_user_id,
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,

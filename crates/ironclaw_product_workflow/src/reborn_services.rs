@@ -93,17 +93,18 @@ pub use admin_configuration::{
 };
 use admin_users::{
     ADMIN_USER_LIST_DEFAULT_LIMIT, ADMIN_USER_LIST_MAX_LIMIT, RejectingAdminManagedResourceService,
-    RejectingAdminUserService,
+    RejectingAdminUserLoginTokenIssuer, RejectingAdminUserService,
 };
 pub use admin_users::{
     AdminCreateManagedUserFields, AdminCreatePrivateUserFields, AdminCreatedUser,
-    AdminManagedResourceService, AdminUserContentAccessPolicy, AdminUserCreationRequest,
-    AdminUserError, AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserService,
-    AdminUserStatus, RebornAdminCreateManagedUserRequest, RebornAdminCreateUserRequest,
-    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
-    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+    AdminIssuedLoginToken, AdminManagedResourceService, AdminUserContentAccessPolicy,
+    AdminUserCreationRequest, AdminUserError, AdminUserLoginTokenIssuer, AdminUserRecord,
+    AdminUserRole, AdminUserSecretMeta, AdminUserService, AdminUserStatus,
+    RebornAdminCreateManagedUserRequest, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse,
+    RebornAdminUserDeletedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
+    RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
 };
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use trace_credits::{
@@ -2825,6 +2826,7 @@ pub struct RebornServices<
     approval_interactions: Arc<dyn ApprovalInteractionService>,
     auth_interactions: Arc<dyn AuthInteractionService>,
     admin_users: Arc<dyn AdminUserService>,
+    admin_user_login_tokens: Arc<dyn AdminUserLoginTokenIssuer>,
     admin_managed_resources: Arc<dyn AdminManagedResourceService>,
     extension_credentials: Option<Arc<dyn ExtensionCredentialSetupService>>,
     skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
@@ -2906,6 +2908,7 @@ where
             approval_interactions: Arc::new(RejectingApprovalInteractionService),
             auth_interactions: Arc::new(RejectingAuthInteractionService),
             admin_users: Arc::new(RejectingAdminUserService),
+            admin_user_login_tokens: Arc::new(RejectingAdminUserLoginTokenIssuer),
             admin_managed_resources: Arc::new(RejectingAdminManagedResourceService),
             extension_credentials: None,
             skill_activation_recorder: None,
@@ -3112,6 +3115,14 @@ where
     /// unavailable via the fail-closed [`RejectingAdminUserService`] default.
     pub fn with_admin_user_service(mut self, admin_users: Arc<dyn AdminUserService>) -> Self {
         self.admin_users = admin_users;
+        self
+    }
+
+    pub fn with_admin_user_login_token_issuer(
+        mut self,
+        issuer: Arc<dyn AdminUserLoginTokenIssuer>,
+    ) -> Self {
+        self.admin_user_login_tokens = issuer;
         self
     }
 
@@ -3358,9 +3369,11 @@ where
         request: AdminUserCreationRequest,
     ) -> Result<RebornAdminUserCreatedResponse, RebornServicesError> {
         self.authorize_admin(&caller).await?;
-        let created = match request {
+        let (created, issue_login_token) = match request {
             AdminUserCreationRequest::Private(request) => {
-                self.admin_users
+                let issue_login_token = request.issue_login_token;
+                let created = self
+                    .admin_users
                     .create_private_user(
                         &caller.tenant_id,
                         &caller.user_id,
@@ -3370,10 +3383,12 @@ where
                             role: request.role,
                         },
                     )
-                    .await
+                    .await;
+                (created, issue_login_token)
             }
             AdminUserCreationRequest::Managed(request) => {
-                self.admin_users
+                let created = self
+                    .admin_users
                     .create_managed_user(
                         &caller.tenant_id,
                         &caller.user_id,
@@ -3381,12 +3396,43 @@ where
                             display_name: request.display_name,
                         },
                     )
-                    .await
+                    .await;
+                (created, false)
             }
-        }
-        .map_err(map_admin_user_error)?;
+        };
+        let created = created.map_err(map_admin_user_error)?;
+        let login_token = if issue_login_token {
+            match self
+                .admin_user_login_tokens
+                .issue_login_token(&caller.tenant_id, &caller.user_id, &created.record.user_id)
+                .await
+            {
+                Ok(issued) => Some(issued.token.expose_secret().to_string()),
+                Err(issue_error) => {
+                    if let Err(rollback_error) = self
+                        .admin_users
+                        .delete_user(&caller.tenant_id, &created.record.user_id)
+                        .await
+                    {
+                        tracing::error!(
+                            tenant_id = %caller.tenant_id,
+                            actor_user_id = %caller.user_id,
+                            subject_user_id = %created.record.user_id,
+                            ?issue_error,
+                            ?rollback_error,
+                            "login-token issuance failed and private-user creation could not be rolled back"
+                        );
+                        return Err(RebornServicesError::internal());
+                    }
+                    return Err(map_admin_user_error(issue_error));
+                }
+            }
+        } else {
+            None
+        };
         Ok(RebornAdminUserCreatedResponse {
             user: created.record,
+            login_token,
         })
     }
 

@@ -520,6 +520,9 @@ pub struct RebornRuntimeInput {
     /// run, so a downstream caller can reconstruct the full step-by-step
     /// trajectory (the sealed runtime otherwise exposes only the final reply).
     pub trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
+    /// Optional host signer for explicitly requested private-user login tokens.
+    // arch-exempt: optional_arc, host credential signing is optional and an explicit request fails closed when unwired, plan #6527
+    pub admin_login_token_minter: Option<Arc<dyn crate::AdminLoginTokenMinter>>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
     /// Cost table to pair with the model-gateway override. Without this,
@@ -563,6 +566,7 @@ impl RebornRuntimeInput {
             budget_defaults: None,
             budget_event_observer: None,
             trajectory_observer: None,
+            admin_login_token_minter: None,
             #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -621,6 +625,14 @@ impl RebornRuntimeInput {
                 observer,
             ),
         );
+        self
+    }
+
+    pub fn with_admin_login_token_minter(
+        mut self,
+        minter: Arc<dyn crate::AdminLoginTokenMinter>,
+    ) -> Self {
+        self.admin_login_token_minter = Some(minter);
         self
     }
 

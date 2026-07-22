@@ -31,6 +31,26 @@ pub(crate) const DEFAULT_SERVE_PORT: u16 = 3000;
 // pub(crate): reused by onboard/status for `env_token_is_active` (webui_token.rs).
 pub(crate) const DEFAULT_ENV_TOKEN_VAR: &str = "IRONCLAW_REBORN_WEBUI_TOKEN";
 const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
+const ADMIN_LOGIN_TOKEN_LIFETIME_DAYS: i64 = 365;
+
+struct SignedSessionLoginTokenMinter {
+    session_store: Arc<ironclaw_webui::SignedTokenSessionStore>,
+}
+
+#[async_trait::async_trait]
+impl ironclaw_reborn_composition::AdminLoginTokenMinter for SignedSessionLoginTokenMinter {
+    async fn mint(&self, tenant: &TenantId, user_id: &UserId) -> Result<SecretString, String> {
+        self.session_store
+            .create_session(
+                tenant.clone(),
+                user_id.clone(),
+                chrono::Duration::days(ADMIN_LOGIN_TOKEN_LIFETIME_DAYS),
+                false,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 /// Read an env var, distinguishing "unset" from "set but not valid UTF-8".
 ///
@@ -199,6 +219,10 @@ impl ServeCommand {
         }
         let cli_login_session_store =
             ironclaw_webui::signed_session_store(&session_signing_secret, &tenant_id);
+        runtime_input =
+            runtime_input.with_admin_login_token_minter(Arc::new(SignedSessionLoginTokenMinter {
+                session_store: Arc::clone(&cli_login_session_store),
+            }));
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
         // Both `host` and `port` are `Option<>` in the clap struct so
@@ -454,7 +478,7 @@ impl ServeCommand {
                 sso_startup,
                 identity_resolver,
                 tenant_id.clone(),
-                session_signing_secret,
+                Arc::clone(&cli_login_session_store),
                 env_authenticator,
             )
             .await?;

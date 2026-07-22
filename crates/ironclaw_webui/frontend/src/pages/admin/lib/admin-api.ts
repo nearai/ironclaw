@@ -45,9 +45,13 @@ export async function createAdminUser(payload) {
       email: payload?.email,
       display_name: payload?.display_name,
       role: payload?.role || "member",
+      issue_login_token: payload?.issue_login_token === true,
     }),
   });
-  return normalizeUser(response?.user);
+  return {
+    ...normalizeUser(response?.user),
+    login_token: response?.login_token ?? null,
+  };
 }
 
 export async function createManagedAgent(payload) {
