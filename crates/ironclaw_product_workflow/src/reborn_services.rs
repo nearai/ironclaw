@@ -2417,20 +2417,12 @@ pub trait RebornServicesApi: Send + Sync {
         request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
 
-    /// LLM provider configuration: merged catalog + active selection.
-    ///
-    /// The six LLM-config methods default to "service unavailable" so facade
-    /// impls (and test fakes) that don't wire an [`LlmConfigService`] inherit a
-    /// safe surface; the default `RebornServices` overrides them all.
-    async fn get_llm_config(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let _ = caller;
-        Err(llm_config::llm_config_unavailable())
-    }
-
     /// Add or update a custom LLM provider (and optionally its key / active state).
+    ///
+    /// LLM-config mutations, probes, and login starts default to "service
+    /// unavailable" so facade impls (and test fakes) that don't wire an
+    /// [`LlmConfigService`] inherit a safe surface; the read snapshot is now a
+    /// descriptor-backed ProductSurface query.
     async fn upsert_llm_provider(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -5178,23 +5170,6 @@ where
             service_lifecycle: Some(service_lifecycle),
             diagnostics: Vec::new(),
         })
-    }
-
-    async fn get_llm_config(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let page = self
-            .query(
-                caller,
-                RebornViewQuery {
-                    view_id: LLM_CONFIG_VIEW.id.to_string(),
-                    params: serde_json::json!({}),
-                    cursor: None,
-                },
-            )
-            .await?;
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
     }
 
     async fn upsert_llm_provider(

@@ -126,7 +126,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "remove_extension",
     "setup_extension",
     // --- LLM admin config ---
-    "get_llm_config",
     "upsert_llm_provider",
     "delete_llm_provider",
     "set_active_llm",

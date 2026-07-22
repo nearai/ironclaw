@@ -1511,14 +1511,6 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn get_llm_config(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        *self.get_llm_config_calls.lock().expect("lock") += 1;
-        Ok(llm_snapshot("openai"))
-    }
-
     async fn upsert_llm_provider(
         &self,
         _caller: WebUiAuthenticatedCaller,
