@@ -44,7 +44,6 @@ pub(crate) mod gsuite;
 pub(crate) mod host_api_contracts;
 #[cfg(test)]
 mod host_remediation_contract_tests;
-pub(crate) mod legacy_ingress_aliases;
 pub(crate) mod lifecycle;
 pub(crate) mod mcp;
 pub(crate) mod mcp_discovery;

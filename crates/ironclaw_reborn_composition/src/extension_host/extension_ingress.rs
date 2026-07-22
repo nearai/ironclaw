@@ -634,9 +634,9 @@ pub(crate) fn build_extension_ingress(
     }
 }
 
-pub(crate) use serve_mount::extension_ingress_alias_route_mount;
 pub use serve_mount::{
-    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount, forward_alias_request,
+    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_alias_route_mount,
+    extension_ingress_route_mount, forward_alias_request,
 };
 
 mod serve_mount {
@@ -741,7 +741,7 @@ mod serve_mount {
 
     /// Build a fixed-path compatibility alias over the same generic router and
     /// public-webhook policy as the canonical manifest route.
-    pub(crate) fn extension_ingress_alias_route_mount(
+    pub fn extension_ingress_alias_route_mount(
         parts: &ExtensionIngressParts,
         route_id: &'static str,
         legacy_path: &'static str,
