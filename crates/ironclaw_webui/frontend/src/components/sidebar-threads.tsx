@@ -346,6 +346,10 @@ export function SidebarThreads({
           (<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
             {t("chat.noConversations")}
           </div>)}
+          {threads.length === 0 && hasMore && emptySearchKey === null &&
+          (<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
+            {t("chat.moreConversationsAvailable")}
+          </div>)}
           {emptySearchKey === "common.noChatsMatch" &&
           (<div className="px-3 py-2 text-[12px] text-[var(--v2-text-faint)]">
             {t("common.noChatsMatch").replace("{query}", query)}

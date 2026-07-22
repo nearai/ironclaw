@@ -259,6 +259,25 @@ test("SidebarThreads offers pagination when older conversations are available", 
   assert.match(html, />common\.loadMore</);
 });
 
+test("SidebarThreads explains an empty loaded page when older pages remain", async () => {
+  const { SidebarThreads } = await import("./sidebar-threads");
+  const html = renderToStaticMarkup(
+    <SidebarThreads
+      threads={[]}
+      activeThreadId={null}
+      hasMore
+      onSelect={() => {}}
+      onDelete={() => {}}
+      onLoadMore={() => {}}
+      onNavigate={() => {}}
+    />,
+  );
+
+  assert.match(html, />chat\.moreConversationsAvailable</);
+  assert.match(html, /data-testid="thread-load-more"/);
+  assert.doesNotMatch(html, />chat\.noConversations</);
+});
+
 test("incomplete sidebar search invites loading older conversations", async () => {
   const { emptySearchMessageKey } = await import("./sidebar-threads");
 

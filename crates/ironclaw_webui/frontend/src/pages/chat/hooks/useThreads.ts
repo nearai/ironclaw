@@ -21,7 +21,7 @@ export function useThreads() {
   // context that doesn't apply here.
   const query = useQuery({
     queryKey: ["threads"],
-    queryFn: () => listThreads({}),
+    queryFn: ({ signal }) => listThreads({ signal }),
   });
 
   const [activeThreadId, setActiveThreadId] = React.useState(null);
@@ -34,6 +34,12 @@ export function useThreads() {
   // project so only true double-submits within one scope collapse.
   const createInFlightRef = React.useRef(new Map());
   const loadMoreInFlightRef = React.useRef(null);
+  const loadMoreAbortRef = React.useRef(null);
+
+  React.useEffect(() => () => {
+    loadMoreAbortRef.current?.abort();
+    loadMoreAbortRef.current = null;
+  }, []);
 
   const handleCreateThread = React.useCallback(async (projectId) => {
     const scopeKey = projectId || "__global__";
@@ -80,19 +86,27 @@ export function useThreads() {
     setIsLoadingMore(true);
     setLoadMoreError(null);
     const requestedCursor = nextCursor;
-    const request = listThreads({ cursor: requestedCursor })
+    const controller = new AbortController();
+    loadMoreAbortRef.current = controller;
+    const request = listThreads({
+      cursor: requestedCursor,
+      signal: controller.signal,
+    })
       .then((page) => {
+        if (controller.signal.aborted) return;
         queryClient.setQueryData(["threads"], (data) =>
           appendThreadListPage(data, page, requestedCursor)
         );
+        setLoadMoreError(null);
       })
       .catch((error) => {
-        setLoadMoreError(error);
+        if (!controller.signal.aborted) setLoadMoreError(error);
       })
       .finally(() => {
         if (loadMoreInFlightRef.current === request) {
           loadMoreInFlightRef.current = null;
-          setIsLoadingMore(false);
+          loadMoreAbortRef.current = null;
+          if (!controller.signal.aborted) setIsLoadingMore(false);
         }
       });
     loadMoreInFlightRef.current = request;

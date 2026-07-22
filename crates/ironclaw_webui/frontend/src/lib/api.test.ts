@@ -101,6 +101,7 @@ test("listAutomations propagates api errors from the automations route", async (
 
 test("listThreads can request approval-only threads", async () => {
   const calls = [];
+  const controller = new AbortController();
   globalThis.sessionStorage = {
     getItem: () => "token-1",
     setItem: () => {},
@@ -118,6 +119,7 @@ test("listThreads can request approval-only threads", async () => {
     limit: 100,
     needsApproval: true,
     candidateThreadId: "thread-active",
+    signal: controller.signal,
   });
 
   assert.deepEqual(response, { threads: [] });
@@ -126,6 +128,7 @@ test("listThreads can request approval-only threads", async () => {
     calls[0].path,
     "/api/webchat/v2/threads?limit=100&needs_approval=true&candidate_thread_id=thread-active",
   );
+  assert.equal(calls[0].options.signal, controller.signal);
 });
 
 test("automation mutations use encoded v2 automation routes", async () => {
