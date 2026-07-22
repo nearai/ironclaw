@@ -4594,6 +4594,7 @@ fn nearai_allowed_effects() -> Vec<EffectKind> {
         EffectKind::DispatchCapability,
         EffectKind::Network,
         EffectKind::UseSecret,
+        EffectKind::ModifyApproval,
     ]
 }
 

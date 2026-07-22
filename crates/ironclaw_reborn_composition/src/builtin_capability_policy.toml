@@ -10,6 +10,7 @@ authority_effects = [
     "execute_code",
     "network",
     "use_secret",
+    "modify_approval",
     "external_write",
 ]
 
