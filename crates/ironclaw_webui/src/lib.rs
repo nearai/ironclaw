@@ -59,7 +59,7 @@ pub use auth::{
     GitHubOAuthConfig, GitHubProvider, GoogleOAuthConfig, GoogleProvider, OAuthError,
     OAuthProvider, OAuthProviderName, OAuthProviderNameError, OAuthRouterConfig, OAuthUserProfile,
     ProviderInitError, PublicRouteMount, UserDirectory, UserDirectoryError,
-    empty_webui_v2_auth_providers_mount, webui_v2_auth_router,
+    empty_webui_v2_auth_providers_mount, signed_session_webui_v2_auth_mount, webui_v2_auth_router,
 };
 // Host-owned CLI-token bootstrap login (`GET /login?token=`); shares the
 // OAuth surface's bearer/ticket-exchange contract (`POST

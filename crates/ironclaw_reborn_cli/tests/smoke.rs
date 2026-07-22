@@ -2239,8 +2239,8 @@ fn serve_with_env_auth_seeds_reborn_config_before_binding() {
         "no-SSO serve must still expose empty provider discovery, got status line: {providers_status}"
     );
     assert!(
-        logout_status.contains(" 404 "),
-        "no-SSO env-bearer serve must not mount logout, got status line: {logout_status}"
+        logout_status.contains(" 204 "),
+        "no-SSO serve with signed-session support must mount logout, got status line: {logout_status}"
     );
     let config = std::fs::read_to_string(reborn_home.join("config.toml"))
         .expect("successful serve startup should seed config");

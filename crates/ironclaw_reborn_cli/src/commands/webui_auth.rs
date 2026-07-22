@@ -18,7 +18,7 @@ use ironclaw_reborn_composition::{PublicRouteMount, RebornIdentityResolver};
 use ironclaw_webui::{
     CompositeAuthenticator, SessionAuthenticator, SignedSessionLoginConfig,
     SignedTokenSessionStore, WebuiAuthenticator, build_signed_session_login,
-    empty_webui_v2_auth_providers_mount,
+    signed_session_webui_v2_auth_mount,
 };
 
 use crate::commands::serve_sso::SsoStartupConfig;
@@ -67,12 +67,12 @@ pub(crate) async fn build_webui_auth_surface(
         // session bearer stays non-operator. The same store is shared with the
         // explicit private-user token issuer so revocation state is coherent.
         let session_authenticator: Arc<dyn WebuiAuthenticator> =
-            Arc::new(SessionAuthenticator::new(session_store));
+            Arc::new(SessionAuthenticator::new(Arc::clone(&session_store)));
         let authenticator: Arc<dyn WebuiAuthenticator> = Arc::new(CompositeAuthenticator::new(
             session_authenticator,
             env_authenticator,
         ));
-        let public_mount = empty_webui_v2_auth_providers_mount();
+        let public_mount = signed_session_webui_v2_auth_mount(session_store);
         return Ok(WebuiAuthSurface {
             authenticator,
             public_mount: Some(public_mount),
@@ -217,8 +217,9 @@ mod tests {
         match result {
             Ok(surface) => assert!(
                 surface.public_mount.as_ref().is_some_and(|mount| {
-                    mount.descriptors.len() == 1
+                    mount.descriptors.len() == 2
                         && mount.descriptors[0].route_pattern().as_str() == "/auth/providers"
+                        && mount.descriptors[1].route_pattern().as_str() == "/auth/logout"
                 }),
                 "no SSO must mount only /auth/providers with an empty list"
             ),
