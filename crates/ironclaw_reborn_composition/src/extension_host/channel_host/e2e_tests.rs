@@ -2043,12 +2043,16 @@ async fn slack_dm_for_personally_bound_user_routes_through_reborn_identity() {
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0]["channel"], CHANNEL);
     assert_eq!(messages[0]["text"], "hello personal Slack binding");
-    // The generic assembly resolved the verified actor through the
-    // channel-identity binding store with the installation-scoped key.
+    // The generic assembly resolves the verified actor through the
+    // channel-identity binding store with the installation-scoped key, then
+    // performs an uncached freshness read before submitting the turn. The
+    // second read keeps a revoked positive cache entry from authorizing one
+    // more inbound message.
+    let expected_lookup = ("slack".to_string(), format!("{INSTALLATION}:{SLACK_USER}"));
     assert_eq!(
         harness.identity_lookup.calls(),
-        vec![("slack".to_string(), format!("{INSTALLATION}:{SLACK_USER}"))],
-        "inbound actor resolution must consult the identity lookup"
+        vec![expected_lookup.clone(), expected_lookup],
+        "inbound actor resolution and freshness validation must consult the identity lookup"
     );
 }
 
