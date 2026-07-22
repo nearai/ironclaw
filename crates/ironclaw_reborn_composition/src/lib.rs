@@ -44,14 +44,15 @@ mod production_runtime_policy;
 mod profile_approval_authorization;
 mod projection;
 mod provider_identity;
-mod sandbox_boot;
-mod sandbox_quota;
-mod sandbox_reaper_task;
 mod readiness;
 mod root;
 mod runtime;
 mod runtime_input;
 mod runtime_profile_approval_policy;
+mod sandbox_boot;
+mod sandbox_composition;
+mod sandbox_quota;
+mod sandbox_reaper_task;
 mod support;
 #[cfg(feature = "test-support")]
 pub mod test_support;

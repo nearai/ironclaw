@@ -479,7 +479,7 @@ pub struct RebornServices {
     /// so `RebornRuntime::shutdown` can cancel it alongside every other owned
     /// background worker. `None` on every non-sandboxed profile and when the
     /// reaper's own Docker connect could not be established.
-    pub(crate) sandbox_reaper_handle: Option<crate::sandbox_reaper_task::SandboxReaperRuntimeHandle>,
+    pub(crate) sandbox_runtime_bindings: crate::sandbox_composition::SandboxRuntimeBindings,
 }
 
 struct ChannelHostWiring {
@@ -1612,7 +1612,7 @@ impl RebornServices {
             channel_delivery_resolver: None,
             #[cfg(feature = "test-support")]
             channel_egress_credential_bridges: None,
-            sandbox_reaper_handle: None,
+            sandbox_runtime_bindings: crate::sandbox_composition::SandboxRuntimeBindings::none(),
         }
     }
 }
@@ -1978,30 +1978,17 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     // sandboxed profile only — every other profile leaves the tenant account
     // unlimited. Turns the D3-1 `ReserveResources` obligation from a no-op
     // into an actual gate.
-    let sandbox_reaper_handle = if is_sandboxed_profile {
-        let sandbox_tenant_id = crate::sandbox_quota::resolve_local_runtime_tenant_id(
-            local_runtime_identity_for_nearai_mcp.as_ref(),
-        )?;
-        let governor: Arc<dyn ironclaw_resources::ResourceGovernor> =
-            Arc::clone(&store_graph.resource_governor) as Arc<dyn ironclaw_resources::ResourceGovernor>;
-        crate::sandbox_quota::apply_sandbox_tenant_ceiling(
-            &governor,
-            sandbox_tenant_id,
-            crate::sandbox_quota::sandbox_max_concurrent_from_env(),
-        )
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("sandbox tenant concurrency ceiling could not be set: {error}"),
-        })?;
-
-        // D4-1: spawn the orphan-container reaper. Guarded internally —
-        // returns `None` rather than failing this build if Docker is not
-        // reachable at this (independent, best-effort) connect attempt.
-        crate::sandbox_reaper_task::maybe_spawn_sandbox_reaper(Arc::clone(&store_graph.run_state)
-            as Arc<dyn ironclaw_run_state::RunStateStore>)
-        .await
-    } else {
-        None
-    };
+    let sandbox_runtime_bindings = crate::sandbox_composition::SandboxRuntimeBindings::build(
+        crate::sandbox_composition::SandboxProfileBindingInputs {
+            is_sandboxed_profile,
+            local_runtime_identity: local_runtime_identity_for_nearai_mcp.as_ref(),
+            resource_governor: Arc::clone(&store_graph.resource_governor)
+                as Arc<dyn ironclaw_resources::ResourceGovernor>,
+            run_state: Arc::clone(&store_graph.run_state)
+                as Arc<dyn ironclaw_run_state::RunStateStore>,
+        },
+    )
+    .await?;
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
@@ -2772,7 +2759,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         channel_delivery_resolver: channel_host_wiring.channel_delivery_resolver,
         #[cfg(feature = "test-support")]
         channel_egress_credential_bridges: channel_host_wiring.channel_egress_credential_bridges,
-        sandbox_reaper_handle,
+        sandbox_runtime_bindings,
     })
 }
 
@@ -5663,7 +5650,7 @@ where
         // D4-1's reaper is wired only on the tenant-sandboxed local-runtime
         // build path (`build_local_runtime`); this production/postgres path
         // never sets `runtime_process_binding` to `TenantSandbox` today.
-        sandbox_reaper_handle: None,
+        sandbox_runtime_bindings: crate::sandbox_composition::SandboxRuntimeBindings::none(),
     })
 }
 
