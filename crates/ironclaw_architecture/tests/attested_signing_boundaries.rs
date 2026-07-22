@@ -137,6 +137,61 @@ fn attestation_crate_has_no_chain_secrets_or_webauthn_dependency() {
     );
 }
 
+/// `ironclaw_chain_signing` (PR6) is the ONE crate in the substrate that is
+/// *allowed* to carry chain SDKs and secrets — it is the custodial signing
+/// layer. This test is the inverse of the purity tests above: it asserts the
+/// chain crate actually depends on at least one chain SDK and on
+/// `ironclaw_secrets`, so a regression that accidentally moved chain/secret
+/// code OUT of this crate (e.g. up into the pure attestation core) would be
+/// caught from both directions.
+#[test]
+fn chain_signing_crate_carries_chain_sdk_and_secrets() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == "ironclaw_chain_signing")
+        .expect(
+            "ironclaw_chain_signing must be a workspace member; add it to the root \
+             Cargo.toml `workspace.members` (see attested-signing PR6)",
+        );
+
+    let dependencies = package["dependencies"]
+        .as_array()
+        .expect("package dependencies must be an array");
+    let dep_names: Vec<&str> = dependencies
+        .iter()
+        .filter_map(|d| d["name"].as_str())
+        .collect();
+
+    // It must depend on ironclaw_secrets (custodial keys are secrets).
+    assert!(
+        dep_names.contains(&"ironclaw_secrets"),
+        "ironclaw_chain_signing must depend on ironclaw_secrets (custodial keys are secrets); \
+         deps: {dep_names:?}"
+    );
+
+    // It must depend on at least one chain SDK (the whole point of the crate).
+    let chain_sdk_prefixes = ["alloy", "k256", "solana", "near-", "ed25519-dalek"];
+    assert!(
+        dep_names.iter().any(|name| chain_sdk_prefixes
+            .iter()
+            .any(|p| *name == *p || name.starts_with(p))),
+        "ironclaw_chain_signing must carry a chain SDK / signing primitive; deps: {dep_names:?}"
+    );
+
+    // And it must build on the lower substrate crates.
+    for required in ["ironclaw_signing_provider", "ironclaw_attestation"] {
+        assert!(
+            dep_names.contains(&required),
+            "ironclaw_chain_signing must depend on {required}; deps: {dep_names:?}"
+        );
+    }
+}
+
 fn cargo_metadata() -> Value {
     let manifest_path = workspace_root().join("Cargo.toml");
     let output = Command::new("cargo")
