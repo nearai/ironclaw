@@ -135,6 +135,27 @@ impl RebornServicesApi for RecordingServices {
         unreachable!("not exercised by this test")
     }
 
+    async fn query(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        if query.view_id != OPERATOR_CONFIG_KEY_VIEW.id {
+            unreachable!("not exercised by this test");
+        }
+        let key = query
+            .params
+            .get("key")
+            .and_then(serde_json::Value::as_str)
+            .expect("operator config key param")
+            .to_string();
+        self.calls
+            .lock()
+            .expect("lock")
+            .push(OperatorConfigCall::Get { key });
+        Err(service_unavailable_error())
+    }
+
     async fn set_outbound_preferences(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -237,18 +258,6 @@ impl RebornServicesApi for RecordingServices {
         _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         unreachable!("not exercised by this test")
-    }
-
-    async fn get_operator_config_key(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        key: String,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        self.calls
-            .lock()
-            .expect("lock")
-            .push(OperatorConfigCall::Get { key });
-        Err(service_unavailable_error())
     }
 
     async fn set_operator_config_key(

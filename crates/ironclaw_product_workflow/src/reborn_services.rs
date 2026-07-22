@@ -2484,33 +2484,6 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// Return the effective operator config projection.
-    ///
-    /// Until the effective config backend is wired, read-only operator config/status/diagnostic
-    /// surfaces intentionally return typed diagnostic payloads so the browser can explain
-    /// what is unsupported. Mutating or side-effecting operator routes remain fail-closed
-    /// with sanitized service-unavailable errors until their owning service is wired.
-    async fn list_operator_config(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
-        let _ = caller;
-        Ok(RebornOperatorConfigListResponse {
-            entries: Vec::new(),
-            precedence: Vec::new(),
-            diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
-        })
-    }
-
-    async fn get_operator_config_key(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        key: String,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        let _ = (caller, key);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     async fn set_operator_config_key(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3586,41 +3559,6 @@ where
         ))
     }
 
-    async fn list_operator_config(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
-        let page = self
-            .query(
-                caller,
-                RebornViewQuery {
-                    view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
-                    params: serde_json::json!({}),
-                    cursor: None,
-                },
-            )
-            .await?;
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
-    }
-
-    async fn get_operator_config_key(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        key: String,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        let page = self
-            .query(
-                caller,
-                RebornViewQuery {
-                    view_id: OPERATOR_CONFIG_KEY_VIEW.id.to_string(),
-                    params: serde_json::json!({ "key": key }),
-                    cursor: None,
-                },
-            )
-            .await?;
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
-    }
-
     async fn set_operator_config_key(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3646,7 +3584,9 @@ where
                 )
                 .await?;
             operator_config_mutation_succeeded(resolution)?;
-            return self.get_operator_config_key(caller, key).await;
+            return self
+                .build_operator_config_key_view(caller, serde_json::json!({ "key": key }))
+                .await;
         }
 
         let actor = caller.actor();

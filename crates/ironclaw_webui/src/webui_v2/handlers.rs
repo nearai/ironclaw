@@ -2095,7 +2095,19 @@ pub async fn list_settings_tools(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(_capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<RebornOperatorConfigListResponse>, WebUiV2HttpError> {
-    let mut response = state.services().list_operator_config(caller).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let mut response: RebornOperatorConfigListResponse =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     response.entries.retain(|entry| {
         entry.key == SETTINGS_TOOLS_AUTO_APPROVE_KEY
             || entry.key.starts_with(SETTINGS_TOOL_CONFIG_PREFIX)

@@ -9496,6 +9496,42 @@ fn operator_config_entry_value<'a>(
         .value
 }
 
+async fn query_operator_config_list<S: RebornServicesApi + ?Sized>(
+    services: &S,
+    caller: WebUiAuthenticatedCaller,
+) -> RebornOperatorConfigListResponse {
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_CONFIG_LIST_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("operator config list view");
+    serde_json::from_value(page.payload).expect("operator config list payload")
+}
+
+async fn query_operator_config_key<S: RebornServicesApi + ?Sized>(
+    services: &S,
+    caller: WebUiAuthenticatedCaller,
+    key: &str,
+) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_CONFIG_KEY_VIEW.id.to_string(),
+                params: json!({ "key": key }),
+                cursor: None,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
 fn operator_policy_scope_for_test(tenant_id: &str, user_id: &str) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new(tenant_id).expect("tenant id"),
@@ -9540,10 +9576,7 @@ async fn operator_config_reads_provider_grantee_policies_as_always_allow() {
             .expect("seed provider-grantee always-allow policy");
     }
 
-    let config = services
-        .list_operator_config(caller())
-        .await
-        .expect("operator config");
+    let config = query_operator_config_list(&services, caller()).await;
     for capability_id in [
         "nearai.web_search",
         "github.get_repo",
@@ -9590,10 +9623,7 @@ async fn global_auto_approve_enabled_scopes_read_by_caller_tenant_and_user() {
 async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
     let (services, persistent_policies) = services_with_operator_approval_config_parts();
 
-    let initial = services
-        .list_operator_config(caller())
-        .await
-        .expect("operator config");
+    let initial = query_operator_config_list(&services, caller()).await;
     assert_eq!(
         operator_config_entry_value(&initial, "agent.auto_approve_tools"),
         &json!(true)
@@ -9661,17 +9691,16 @@ async fn operator_config_reads_and_writes_auto_approve_and_tool_permissions() {
         .await
         .expect("enable global auto approve");
 
-    let globally_allowed = services
-        .get_operator_config_key(caller(), "tool.tool.alpha".to_string())
+    let globally_allowed = query_operator_config_key(&services, caller(), "tool.tool.alpha")
         .await
         .expect("tool config");
     assert_eq!(globally_allowed.entry.value["state"], "always_allow");
     assert_eq!(globally_allowed.entry.value["effective_source"], "global");
 
-    let default_allow_global = services
-        .get_operator_config_key(caller(), "tool.tool.default_allow".to_string())
-        .await
-        .expect("default-allow tool config");
+    let default_allow_global =
+        query_operator_config_key(&services, caller(), "tool.tool.default_allow")
+            .await
+            .expect("default-allow tool config");
     assert_eq!(default_allow_global.entry.value["state"], "always_allow");
     assert_eq!(
         default_allow_global.entry.value["effective_source"],
@@ -9876,17 +9905,14 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
         .await
         .expect("alice disables tool in tenant alpha");
 
-    let alice_alpha = services
-        .get_operator_config_key(alice_tenant_a, "tool.tool.alpha".to_string())
+    let alice_alpha = query_operator_config_key(&services, alice_tenant_a, "tool.tool.alpha")
         .await
         .expect("alice alpha tool config");
     assert_eq!(alice_alpha.entry.value["state"], "disabled");
     assert_eq!(alice_alpha.entry.value["effective_source"], "override");
 
-    let alice_alpha_other_project = services
-        .list_operator_config(alice_tenant_a_other_project)
-        .await
-        .expect("same tenant/user operator config");
+    let alice_alpha_other_project =
+        query_operator_config_list(&services, alice_tenant_a_other_project).await;
     assert_eq!(
         operator_config_entry_value(&alice_alpha_other_project, "agent.auto_approve_tools"),
         &json!(false),
@@ -9903,10 +9929,7 @@ async fn operator_config_is_scoped_by_tenant_and_user() {
     );
 
     for caller in [bob_tenant_a, alice_tenant_b] {
-        let config = services
-            .list_operator_config(caller)
-            .await
-            .expect("isolated operator config");
+        let config = query_operator_config_list(&services, caller).await;
         assert_eq!(
             operator_config_entry_value(&config, "agent.auto_approve_tools"),
             &json!(true),
@@ -9955,8 +9978,7 @@ async fn operator_config_preserves_override_when_always_allow_policy_write_fails
         .expect_err("persistent policy write failure");
     assert_eq!(error.code, RebornServicesErrorCode::Internal);
 
-    let preserved = services
-        .get_operator_config_key(caller(), "tool.tool.alpha".to_string())
+    let preserved = query_operator_config_key(&services, caller(), "tool.tool.alpha")
         .await
         .expect("tool config after failed always_allow");
     assert_eq!(preserved.entry.value["state"], "ask_each_time");
@@ -9970,8 +9992,7 @@ async fn operator_config_preserves_override_when_always_allow_policy_write_fails
 async fn operator_config_reports_unknown_keys_distinct_from_invalid_values() {
     let services = services_with_operator_approval_config();
 
-    let unknown_key = services
-        .get_operator_config_key(caller(), "tool.tool.missing".to_string())
+    let unknown_key = query_operator_config_key(&services, caller(), "tool.tool.missing")
         .await
         .expect_err("unknown tool key");
     assert_eq!(

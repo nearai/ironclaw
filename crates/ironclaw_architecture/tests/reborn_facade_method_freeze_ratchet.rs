@@ -135,8 +135,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     // --- operator setup / config / diagnostics ---
     "get_operator_setup",
     "run_operator_setup",
-    "list_operator_config",
-    "get_operator_config_key",
     "set_operator_config_key",
     "validate_operator_config",
     "run_operator_service_lifecycle",

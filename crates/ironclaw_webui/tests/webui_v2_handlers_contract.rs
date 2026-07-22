@@ -1275,42 +1275,6 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn list_operator_config(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorConfigListResponse, RebornServicesError> {
-        *self.list_operator_config_calls.lock().expect("lock") += 1;
-        Ok(RebornOperatorConfigListResponse {
-            entries: self.operator_config_entries.lock().expect("lock").clone(),
-            precedence: Vec::new(),
-            diagnostics: Vec::new(),
-        })
-    }
-
-    async fn get_operator_config_key(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        key: String,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        self.get_operator_config_key_calls
-            .lock()
-            .expect("lock")
-            .push(key.clone());
-        if let Some(entry) = self
-            .operator_config_entries
-            .lock()
-            .expect("lock")
-            .iter()
-            .find(|entry| entry.key == key)
-            .cloned()
-        {
-            return Ok(RebornOperatorConfigGetResponse { entry });
-        }
-        Ok(RebornOperatorConfigGetResponse {
-            entry: operator_config_entry(key, serde_json::json!("configured")),
-        })
-    }
-
     async fn set_operator_config_key(
         &self,
         _caller: WebUiAuthenticatedCaller,
