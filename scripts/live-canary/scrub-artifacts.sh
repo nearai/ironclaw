@@ -9,6 +9,8 @@ ARTIFACT_DIR="${1:-${RUN_DIR:-artifacts/live-canary}}"
 STRICT_ARTIFACT_SCRUB="${STRICT_ARTIFACT_SCRUB:-false}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BUNDLED_SKILLS_ROOT="${LIVE_CANARY_BUNDLED_SKILLS_ROOT:-${REPO_ROOT}/skills}"
+FIRST_PARTY_EXTENSIONS_ROOT="${LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT:-${REPO_ROOT}/crates/ironclaw_first_party_extensions/assets}"
+NEARAI_MANIFEST_TEMPLATE="${REPO_ROOT}/scripts/live-canary/fixtures/nearai-runtime-manifest.toml"
 BUNDLED_SKILL_MARKER=".ironclaw-reborn-bundled.json"
 BUNDLED_SKILL_OWNER="ironclaw_reborn_composition_bundled_skill"
 
@@ -127,6 +129,26 @@ except (OSError, UnicodeError, ValueError):
 PY
 }
 
+is_verified_first_party_extension_manifest() {
+  local manifest="$1"
+  local extension_dir
+  local extension_id
+  local trusted_manifest
+  extension_dir="$(dirname "${manifest}")"
+  extension_id="$(basename "${extension_dir}")"
+  trusted_manifest="${FIRST_PARTY_EXTENSIONS_ROOT}/${extension_id}/manifest.toml"
+
+  if [[ -f "${trusted_manifest}" ]] && cmp -s -- "${trusted_manifest}" "${manifest}"; then
+    return 0
+  fi
+  if [[ "${extension_id}" != "nearai" || ! -f "${NEARAI_MANIFEST_TEMPLATE}" ]]; then
+    return 1
+  fi
+  sed -E \
+    's#^server = "https://(cloud-api|private)\.near\.ai/mcp"$#server = "__LIVE_CANARY_NEARAI_MCP_SERVER__"#' \
+    "${manifest}" | cmp -s -- "${NEARAI_MANIFEST_TEMPLATE}" -
+}
+
 # Reborn live QA copies each case's full home into the artifact staging tree.
 # In strict mode, remove only managed system-skill installations whose marker,
 # stable content hash, file set, and bytes all match the source-controlled
@@ -145,6 +167,23 @@ if [[ "${STRICT_ARTIFACT_SCRUB}" == "true" || "${STRICT_ARTIFACT_SCRUB}" == "1" 
   done < <(
     find "${ARTIFACT_DIR}" -type f \
       -path '*/reborn-home/*/local-dev/system/skills/*/.ironclaw-reborn-bundled.json' \
+      -print0
+  )
+
+  # Installed first-party extension manifests are also source-controlled
+  # package metadata. Their credential declarations contain secret-shaped
+  # field names and OAuth response paths, but no credential values. Remove a
+  # manifest only when every byte matches its trusted source. NEAR AI's
+  # bootstrap rewrites and deterministically re-serializes the configured MCP
+  # endpoint, so compare it to the pinned runtime template after normalizing
+  # only the two repository-owned endpoints.
+  while IFS= read -r -d '' manifest; do
+    if is_verified_first_party_extension_manifest "${manifest}"; then
+      rm -f -- "${manifest}"
+    fi
+  done < <(
+    find "${ARTIFACT_DIR}" -type f \
+      -path '*/reborn-home/*/local-dev/system/extensions/*/manifest.toml' \
       -print0
   )
 fi

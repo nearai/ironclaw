@@ -13,6 +13,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "live-canary" / "scrub-artifacts.sh"
+NEARAI_MANIFEST_TEMPLATE = (
+    ROOT / "scripts" / "live-canary" / "fixtures" / "nearai-runtime-manifest.toml"
+)
 
 
 class ScrubArtifactsTests(unittest.TestCase):
@@ -22,11 +25,16 @@ class ScrubArtifactsTests(unittest.TestCase):
         *,
         strict: bool,
         bundled_skills_root: Path | None = None,
+        first_party_extensions_root: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["STRICT_ARTIFACT_SCRUB"] = "true" if strict else "false"
         if bundled_skills_root is not None:
             env["LIVE_CANARY_BUNDLED_SKILLS_ROOT"] = str(bundled_skills_root)
+        if first_party_extensions_root is not None:
+            env["LIVE_CANARY_FIRST_PARTY_EXTENSIONS_ROOT"] = str(
+                first_party_extensions_root
+            )
         runner_temp = artifact_dir.parent / f"{artifact_dir.name}-runner-temp"
         runner_temp.mkdir(parents=True, exist_ok=True)
         env["RUNNER_TEMP"] = str(runner_temp)
@@ -102,6 +110,37 @@ class ScrubArtifactsTests(unittest.TestCase):
             encoding="utf-8",
         )
         return trusted_root, staged_skill
+
+    @staticmethod
+    def write_extension_manifest_fixture(
+        artifact_dir: Path,
+        *,
+        source_body: str,
+        staged_body: str | None = None,
+        extension_id: str = "gmail",
+    ) -> tuple[Path, Path]:
+        trusted_root = artifact_dir.parent / "trusted-extensions"
+        trusted_extension = trusted_root / extension_id
+        trusted_extension.mkdir(parents=True)
+        (trusted_extension / "manifest.toml").write_text(source_body, encoding="utf-8")
+
+        staged_manifest = (
+            artifact_dir
+            / "lane"
+            / "reborn-home"
+            / "case-a"
+            / "local-dev"
+            / "system"
+            / "extensions"
+            / extension_id
+            / "manifest.toml"
+        )
+        staged_manifest.parent.mkdir(parents=True)
+        staged_manifest.write_text(
+            source_body if staged_body is None else staged_body,
+            encoding="utf-8",
+        )
+        return trusted_root, staged_manifest
 
     def test_strict_scrub_redacts_diagnostics_and_preserves_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -286,6 +325,69 @@ class ScrubArtifactsTests(unittest.TestCase):
             self.assertFalse(bundled.exists())
             self.assertFalse(unsafe.exists())
 
+    def test_strict_scrub_prunes_verified_first_party_extension_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "artifacts"
+            root.mkdir()
+            trusted_root, manifest = self.write_extension_manifest_fixture(
+                root,
+                source_body=(
+                    'secret = true\naccess_token = "/access_token"\n'
+                    'refresh_token = "/refresh_token"\n'
+                ),
+            )
+
+            result = self.run_scrub(
+                root,
+                strict=True,
+                first_party_extensions_root=trusted_root,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertFalse(manifest.exists())
+
+    def test_strict_scrub_rejects_modified_first_party_extension_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "artifacts"
+            root.mkdir()
+            trusted_root, manifest = self.write_extension_manifest_fixture(
+                root,
+                source_body='secret = true\naccess_token = "/access_token"\n',
+                staged_body=(
+                    'secret = true\naccess_token = "/access_token"\n'
+                    "api_key: live-secret-value\n"
+                ),
+            )
+
+            result = self.run_scrub(
+                root,
+                strict=True,
+                first_party_extensions_root=trusted_root,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertFalse(manifest.exists())
+
+    def test_strict_scrub_prunes_verified_nearai_runtime_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "artifacts"
+            root.mkdir()
+            runtime_manifest = NEARAI_MANIFEST_TEMPLATE.read_text(encoding="utf-8").replace(
+                "__LIVE_CANARY_NEARAI_MCP_SERVER__",
+                "https://cloud-api.near.ai/mcp",
+            )
+            _, manifest = self.write_extension_manifest_fixture(
+                root,
+                extension_id="nearai",
+                source_body="not used for the dynamic nearai manifest\n",
+                staged_body=runtime_manifest,
+            )
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertFalse(manifest.exists())
+
     def test_non_strict_scrub_is_report_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "artifacts"
@@ -294,6 +396,10 @@ class ScrubArtifactsTests(unittest.TestCase):
                 root,
                 source_body="docker run -e NEARAI_API_KEY=dummy ironclaw-test\n",
             )
+            extensions_root, extension_manifest = self.write_extension_manifest_fixture(
+                root,
+                source_body='secret = true\naccess_token = "/access_token"\n',
+            )
             artifact = root / "raw.html"
             artifact.write_text("api_key: secret-value\n", encoding="utf-8")
 
@@ -301,10 +407,12 @@ class ScrubArtifactsTests(unittest.TestCase):
                 root,
                 strict=False,
                 bundled_skills_root=trusted_root,
+                first_party_extensions_root=extensions_root,
             )
 
             self.assertEqual(result.returncode, 0, result.stdout)
             self.assertTrue((bundled / "SKILL.md").exists())
+            self.assertTrue(extension_manifest.exists())
             self.assertTrue(artifact.exists())
             matches = (root / "scrub-matches.txt").read_text(encoding="utf-8")
             self.assertIn("<REDACTED>", matches)
