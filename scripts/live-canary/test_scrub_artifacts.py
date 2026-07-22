@@ -395,27 +395,29 @@ class ScrubArtifactsTests(unittest.TestCase):
             "https://cloud-api.near.ai/mcp",
             "https://private.near.ai/mcp",
         ):
-            with self.subTest(endpoint=endpoint):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    root = Path(tmpdir) / "artifacts"
-                    root.mkdir()
-                    runtime_manifest = NEARAI_MANIFEST_TEMPLATE.read_text(
-                        encoding="utf-8"
-                    ).replace(
-                        "__LIVE_CANARY_NEARAI_MCP_SERVER__",
-                        endpoint,
-                    )
-                    _, manifest = self.write_extension_manifest_fixture(
-                        root,
-                        extension_id="nearai",
-                        source_body="not used for the dynamic nearai manifest\n",
-                        staged_body=runtime_manifest,
-                    )
+            with (
+                self.subTest(endpoint=endpoint),
+                tempfile.TemporaryDirectory() as tmpdir,
+            ):
+                root = Path(tmpdir) / "artifacts"
+                root.mkdir()
+                runtime_manifest = NEARAI_MANIFEST_TEMPLATE.read_text(
+                    encoding="utf-8"
+                ).replace(
+                    "__LIVE_CANARY_NEARAI_MCP_SERVER__",
+                    endpoint,
+                )
+                _, manifest = self.write_extension_manifest_fixture(
+                    root,
+                    extension_id="nearai",
+                    source_body="not used for the dynamic nearai manifest\n",
+                    staged_body=runtime_manifest,
+                )
 
-                    result = self.run_scrub(root, strict=True)
+                result = self.run_scrub(root, strict=True)
 
-                    self.assertEqual(result.returncode, 0, result.stdout)
-                    self.assertFalse(manifest.exists())
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertFalse(manifest.exists())
 
     def test_non_strict_scrub_is_report_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
