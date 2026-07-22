@@ -419,7 +419,13 @@ async def test_admin_configuration_renders_uninstalled_manifest_groups_and_keeps
 async def test_admin_configuration_repeated_paste_keeps_form_mounted(
     reborn_v2_page, reborn_v2_server
 ):
-    """Rapid pastes must not retain a React event past its handler lifetime."""
+    """Rapid pastes must not retain a React event past its handler lifetime.
+
+    This stays separate from the save/reload configuration test because it needs
+    clipboard permission, three real paste events, and page-error capture while
+    intentionally avoiding persistence; combining those concerns would obscure
+    whether a failure came from event lifetime or save/reload behavior.
+    """
     page = reborn_v2_page
     await page.context.grant_permissions(
         ["clipboard-read", "clipboard-write"], origin=reborn_v2_server
@@ -430,12 +436,18 @@ async def test_admin_configuration_repeated_paste_keeps_form_mounted(
     await page.goto(
         f"{reborn_v2_server}/admin/configuration?token={REBORN_V2_AUTH_TOKEN}"
     )
-    slack_group = page.get_by_test_id("admin-configuration-group").filter(
+    slack_group = page.get_by_test_id(
+        SEL_V2["admin_configuration_group_test_id"]
+    ).filter(
         has=page.get_by_role(
-            "heading", name="Slack deployment configuration", exact=True
+            "heading",
+            name=SEL_V2["admin_slack_configuration_heading_name"],
+            exact=True,
         )
     )
-    bot_token_input = slack_group.get_by_label(re.compile(r"^Bot token"))
+    bot_token_input = slack_group.get_by_label(
+        re.compile(SEL_V2["admin_bot_token_label_pattern"])
+    )
     await expect(bot_token_input).to_be_visible(timeout=15000)
 
     pasted = "xoxb-regression-paste"
@@ -444,7 +456,11 @@ async def test_admin_configuration_repeated_paste_keeps_form_mounted(
         await bot_token_input.press("ControlOrMeta+V")
 
     await expect(
-        page.get_by_role("heading", name="Extension configuration", exact=True)
+        page.get_by_role(
+            "heading",
+            name=SEL_V2["admin_extension_configuration_heading_name"],
+            exact=True,
+        )
     ).to_be_visible()
     await expect(bot_token_input).to_have_value(pasted * 3)
     assert page_errors == []
