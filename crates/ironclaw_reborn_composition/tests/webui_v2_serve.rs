@@ -17,18 +17,28 @@ use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
-use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    ActivityId, AgentId, CapabilityId, InstallationState, NetworkMethod, Outcome, OutcomeRefs,
+    ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, TenantId,
+    TerminateHint, ThreadId, ToolVerdict, UserId,
+};
 use ironclaw_product_workflow::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
+    LifecyclePackageRef, ProductCapabilityInput, RebornCancelRunResponse,
+    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListThreadsResponse,
     RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse, RebornViewPage,
+    RebornViewQuery, THREADS_VIEW, TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
     WebUiSendMessageRequest,
 };
-use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
+use ironclaw_reborn_composition::{
+    PublicRouteMount, RebornCompositionProfile, RebornFacadeReadiness, RebornReadiness,
+    RebornReadinessState, RebornWebuiBundle, RebornWorkerReadiness,
+};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
 use ironclaw_webui::{
@@ -737,6 +747,17 @@ struct StubServices {
     resolve_gate_refs: Mutex<Vec<Option<String>>>,
 }
 
+fn stub_service_unavailable() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
 #[async_trait]
 impl RebornServicesApi for StubServices {
     async fn create_thread(
@@ -822,6 +843,105 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn invoke(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        _input: ProductCapabilityInput,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        if capability.as_str() != EXTENSION_SETUP_SUBMIT_CAPABILITY_ID {
+            return Err(stub_service_unavailable());
+        }
+        Ok(Resolution::Done(Outcome {
+            refs: OutcomeRefs {
+                result: ResultRef::from_uuid(activity_id.as_uuid()),
+                byte_len: 0,
+                preview: None,
+                preview_meta: ResultPreviewMeta::default(),
+                origin: None,
+                output_digest: None,
+            },
+            verdict: ToolVerdict::Success,
+            summary: SafeSummary::new("extension setup updated")
+                .map_err(RebornServicesError::internal_from)?,
+            progress: ResultProgress::MadeProgress,
+            terminate_hint: TerminateHint::Continue,
+        }))
+    }
+
+    async fn query(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        let payload = match query.view_id.as_str() {
+            view_id if view_id == THREADS_VIEW.id => {
+                serde_json::to_value(RebornListThreadsResponse {
+                    threads: Vec::new(),
+                    next_cursor: None,
+                })
+            }
+            view_id if view_id == TRACE_CREDITS_VIEW.id => {
+                let actor = caller.actor();
+                let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+                    caller.tenant_id.as_str(),
+                    actor.user_id.as_str(),
+                );
+                let enrolled = ironclaw_reborn_traces::contribution::read_trace_policy_for_scope(
+                    Some(scope.as_str()),
+                )
+                .map_err(RebornServicesError::internal_from)?
+                .enabled;
+                serde_json::to_value(RebornTraceCreditsResponse {
+                    enrolled,
+                    pending_credit: 0.0,
+                    final_credit: 0.0,
+                    delayed_credit_delta: 0.0,
+                    submissions_total: 0,
+                    submissions_submitted: 0,
+                    submissions_accepted: 0,
+                    submissions_revoked: 0,
+                    submissions_expired: 0,
+                    credit_events_total: 0,
+                    last_submission_at: None,
+                    last_credit_sync_at: None,
+                    recent_explanations: Vec::new(),
+                    manual_review_hold_count: 0,
+                    holds: Vec::new(),
+                    note: "Local view as of last sync; the authoritative ledger is server-side."
+                        .to_string(),
+                })
+            }
+            view_id if view_id == EXTENSION_SETUP_VIEW.id => {
+                let package_id = query
+                    .params
+                    .get("package_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| RebornServicesError::internal_from("missing package_id"))?;
+                serde_json::to_value(RebornSetupExtensionResponse {
+                    package_ref: LifecyclePackageRef::new(
+                        LifecyclePackageKind::Extension,
+                        package_id,
+                    )
+                    .map_err(RebornServicesError::internal_from)?,
+                    phase: InstallationState::Unsupported,
+                    blockers: Vec::new(),
+                    payload: None,
+                    secrets: Vec::new(),
+                    fields: Vec::new(),
+                    onboarding: None,
+                })
+            }
+            _ => return Err(stub_service_unavailable()),
+        }
+        .map_err(RebornServicesError::internal_from)?;
+        Ok(RebornViewPage {
+            payload,
+            next_cursor: None,
+        })
+    }
+
     async fn stream_events(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -899,12 +1019,29 @@ impl RebornServicesApi for StubServices {
 const AGENT: &str = "agent-default";
 const PROJECT: &str = "project-default";
 
+fn ready_test_readiness() -> RebornReadiness {
+    RebornReadiness {
+        profile: RebornCompositionProfile::Production,
+        state: RebornReadinessState::ProductionValidated,
+        facades: RebornFacadeReadiness {
+            host_runtime: true,
+            turn_coordinator: true,
+            product_auth: true,
+        },
+        workers: RebornWorkerReadiness {
+            turn_runner: true,
+            trigger_poller: true,
+        },
+        diagnostics: Vec::new(),
+    }
+}
+
 fn build_app() -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services.clone(),
         product_auth: None,
-        readiness: RebornReadiness::disabled(),
+        readiness: ready_test_readiness(),
     };
     // Match the host-installation pattern the CLI's `serve` command
     // uses: stamp trusted default agent_id / project_id onto the auth
@@ -928,7 +1065,7 @@ fn build_app_with_authenticator(
     let bundle = RebornWebuiBundle {
         api: services.clone(),
         product_auth: None,
-        readiness: RebornReadiness::disabled(),
+        readiness: ready_test_readiness(),
     };
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
