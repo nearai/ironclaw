@@ -29,26 +29,26 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    FsMount, LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageRef, LlmActiveSelection,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
-    ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
-    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW,
+    LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductSurface,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
+    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -311,8 +311,6 @@ struct StubServices {
     query_logs_calls: Mutex<Vec<LogsCall>>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
     run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
-    list_extensions_calls: Mutex<usize>,
-    list_extension_registry_calls: Mutex<usize>,
     install_extension_calls: Mutex<Vec<String>>,
     /// Raw zip bytes each `import_extension` call forwards, so the route test
     /// can assert the uploaded body reaches the facade intact.
@@ -865,6 +863,20 @@ impl RebornServicesApi for StubServices {
                 .expect("operator status payload"),
                 next_cursor: None,
             }),
+            id if id == EXTENSIONS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornExtensionListResponse {
+                    extensions: Vec::new(),
+                })
+                .expect("extensions payload"),
+                next_cursor: None,
+            }),
+            id if id == EXTENSION_REGISTRY_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornExtensionRegistryResponse {
+                    entries: Vec::new(),
+                })
+                .expect("extension registry payload"),
+                next_cursor: None,
+            }),
             _ => Err(rejecting_reborn_services_error()),
         }
     }
@@ -1196,16 +1208,6 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        *self.list_extensions_calls.lock().expect("lock") += 1;
-        Ok(RebornExtensionListResponse {
-            extensions: Vec::new(),
-        })
-    }
-
     async fn list_skills(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1341,16 +1343,6 @@ impl RebornServicesApi for StubServices {
         Ok(operator_command_response(
             RebornOperatorArea::ServiceLifecycle,
         ))
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-        *self.list_extension_registry_calls.lock().expect("lock") += 1;
-        Ok(RebornExtensionRegistryResponse {
-            entries: Vec::new(),
-        })
     }
 
     async fn install_extension(
@@ -4384,7 +4376,7 @@ async fn operator_config_set_failure_does_not_echo_secret_value() {
 }
 
 #[tokio::test]
-async fn extension_list_and_registry_dispatch_through_facade() {
+async fn extension_list_and_registry_use_product_views() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -4407,10 +4399,19 @@ async fn extension_list_and_registry_dispatch_through_facade() {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    assert_eq!(*services.list_extensions_calls.lock().expect("lock"), 1);
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
     assert_eq!(
-        *services.list_extension_registry_calls.lock().expect("lock"),
-        1
+        view_ids,
+        vec![
+            EXTENSIONS_VIEW.id.to_string(),
+            EXTENSION_REGISTRY_VIEW.id.to_string()
+        ]
     );
 }
 
@@ -5273,12 +5274,6 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
         ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
-        async fn list_extensions(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
         async fn list_skills(
             &self,
             _caller: WebUiAuthenticatedCaller,
@@ -5320,12 +5315,6 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _name: String,
         ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_extension_registry(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn install_extension(

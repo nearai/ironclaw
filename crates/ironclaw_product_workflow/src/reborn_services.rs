@@ -113,6 +113,7 @@ pub use trace_credits::{
     TRACE_CREDITS_VIEW,
 };
 
+pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW};
 pub use fs_browse::{
     FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
@@ -2255,11 +2256,6 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    async fn list_extensions(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError>;
-
     async fn list_skills(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2323,11 +2319,6 @@ pub trait RebornServicesApi: Send + Sync {
         let _ = (caller, enabled);
         Err(RebornServicesError::service_unavailable(false))
     }
-
-    async fn list_extension_registry(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError>;
 
     async fn install_extension(
         &self,
@@ -3984,6 +3975,24 @@ where
                 let response = self.build_operator_setup_view(caller).await?;
                 views::view_page(response)
             }
+            id if id == EXTENSIONS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = extensions::list_extensions(
+                    Arc::clone(&self.lifecycle_facade),
+                    self.extension_credentials.clone(),
+                    Arc::clone(&self.channel_connection_facade),
+                    caller,
+                )
+                .await?;
+                views::view_page(response)
+            }
+            id if id == EXTENSION_REGISTRY_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response =
+                    extensions::list_extension_registry(self.lifecycle_facade.as_ref(), caller)
+                        .await?;
+                views::view_page(response)
+            }
             id if id == OPERATOR_DIAGNOSTICS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_operator_diagnostics_view(caller).await?;
@@ -4762,19 +4771,6 @@ where
             .await
     }
 
-    async fn list_extensions(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        extensions::list_extensions(
-            Arc::clone(&self.lifecycle_facade),
-            self.extension_credentials.clone(),
-            Arc::clone(&self.channel_connection_facade),
-            caller,
-        )
-        .await
-    }
-
     async fn list_skills(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4845,13 +4841,6 @@ where
         name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
         self.skills_facade.remove_skill(caller, name).await
-    }
-
-    async fn list_extension_registry(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
-        extensions::list_extension_registry(self.lifecycle_facade.as_ref(), caller).await
     }
 
     async fn install_extension(

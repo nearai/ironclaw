@@ -15,7 +15,7 @@ use crate::{
     RebornAuthAccount, RebornExtensionActionResponse, RebornExtensionInfo,
     RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
     RebornExtensionRegistryResponse, RebornExtensionSurface, RebornServicesError,
-    RebornVendorAuthAccounts, WebUiAuthenticatedCaller,
+    RebornVendorAuthAccounts, RebornViewDescriptor, WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -28,6 +28,16 @@ use super::{
 };
 
 const EXTENSION_READINESS_CONCURRENCY: usize = 8;
+
+pub const EXTENSIONS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "extensions",
+    paginated: false,
+};
+
+pub const EXTENSION_REGISTRY_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "extension_registry",
+    paginated: false,
+};
 
 pub(super) async fn list_extensions(
     facade: Arc<dyn LifecycleProductFacade>,

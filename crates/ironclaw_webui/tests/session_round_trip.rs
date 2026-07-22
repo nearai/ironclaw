@@ -36,16 +36,16 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
+    RebornServicesApi, RebornServicesError, RebornSetupExtensionResponse,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -194,13 +194,6 @@ impl RebornServicesApi for StubServices {
         Err(rejecting_reborn_services_error())
     }
 
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
     async fn list_skills(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -247,13 +240,6 @@ impl RebornServicesApi for StubServices {
         _caller: WebUiAuthenticatedCaller,
         _name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 

@@ -156,13 +156,6 @@ impl RebornServicesApi for RecordingServices {
         Err(service_unavailable_error())
     }
 
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
     async fn list_skills(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -209,13 +202,6 @@ impl RebornServicesApi for RecordingServices {
         _caller: WebUiAuthenticatedCaller,
         _name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
         unreachable!("not exercised by this test")
     }
 

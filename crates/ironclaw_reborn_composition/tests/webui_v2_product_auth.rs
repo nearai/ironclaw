@@ -26,16 +26,16 @@ use ironclaw_host_api::{
     UserId,
 };
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecyclePackageRef, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, RebornCancelRunResponse,
+    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
     RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
     RebornServicesApi, RebornServicesError, RebornSetupExtensionResponse,
     RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse, RebornViewPage,
+    RebornViewQuery, WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     rejecting_reborn_services_error,
@@ -287,6 +287,23 @@ impl UnusedServices {
 
 #[async_trait]
 impl RebornServicesApi for UnusedServices {
+    async fn query(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        match query.view_id.as_str() {
+            id if id == EXTENSIONS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornExtensionListResponse {
+                    extensions: self.installed_extensions.clone(),
+                })
+                .expect("extension list payload"),
+                next_cursor: None,
+            }),
+            _ => Err(rejecting_reborn_services_error()),
+        }
+    }
+
     async fn create_thread(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -375,15 +392,6 @@ impl RebornServicesApi for UnusedServices {
         Err(rejecting_reborn_services_error())
     }
 
-    async fn list_extensions(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionListResponse, RebornServicesError> {
-        Ok(RebornExtensionListResponse {
-            extensions: self.installed_extensions.clone(),
-        })
-    }
-
     async fn list_skills(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -430,13 +438,6 @@ impl RebornServicesApi for UnusedServices {
         _caller: WebUiAuthenticatedCaller,
         _name: String,
     ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_extension_registry(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornExtensionRegistryResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 

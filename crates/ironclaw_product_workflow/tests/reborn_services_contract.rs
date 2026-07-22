@@ -42,36 +42,37 @@ use ironclaw_product_workflow::{
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
-    ChannelConnectionRequirement, CodexLoginStart, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
-    FsMount, InboundAttachmentLander, InboundAttachmentReader, LLM_CONFIG_VIEW, LOGS_VIEW,
-    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, OperatorLogsService,
-    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
-    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
-    ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornExtensionSurface,
-    RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    ChannelConnectionRequirement, CodexLoginStart, EXTENSIONS_VIEW,
+    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ExtensionCredentialSubmitRequest, FilesystemBrowseReader, FsMount, InboundAttachmentLander,
+    InboundAttachmentReader, LLM_CONFIG_VIEW, LOGS_VIEW, LifecycleChannelDirections,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
+    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
+    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
+    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
+    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
+    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
+    RebornExtensionOnboardingState, RebornExtensionSurface, RebornFsListRequest,
+    RebornGetProjectRequest, RebornGetRunStateRequest, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
@@ -5228,8 +5229,7 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
         },
     }));
 
-    let response = services
-        .list_extensions(caller())
+    let response = query_extensions(&services, caller())
         .await
         .expect("extension list response");
     let extension = response.extensions.first().expect("one extension");
@@ -5346,8 +5346,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
         },
     }));
 
-    let response = services
-        .list_extensions(caller())
+    let response = query_extensions(&services, caller())
         .await
         .expect("extensions response");
 
@@ -5365,7 +5364,7 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
                 outbound,
                 connection,
                 ..
-            } => Some((*inbound, *outbound, connection.clone())),
+            } => Some((inbound, outbound, connection.clone())),
             _ => None,
         })
         .expect("channel surface projected");
@@ -5452,8 +5451,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
         connections: std::collections::HashMap::from([("acme".to_string(), true)]),
     }));
 
-    let response = services
-        .list_extensions(caller())
+    let response = query_extensions(&services, caller())
         .await
         .expect("extensions response");
     let info = response
@@ -5526,7 +5524,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
 /// A lifecycle facade that lists one installed extension in a caller-chosen
 /// installation state and reports a redacted per-extension activation error —
 /// drives the terminal `Failed` installation-state (§6.1) and `activation_error`
-/// projection through the real `RebornServicesApi::list_extensions` seam.
+/// projection through the real descriptor-backed `EXTENSIONS_VIEW` seam.
 struct FailedStateLifecycleFacade {
     extension: LifecycleInstalledExtensionSummary,
     activation_errors: std::collections::HashMap<String, String>,
@@ -5596,7 +5594,7 @@ impl ChannelConnectionFacade for AccountStatusConnectionFacade {
 }
 
 /// Un-collapse regression (G1/G2/G3) driven through the real
-/// `RebornServicesApi::list_extensions` facade seam. Before the projection fix
+/// descriptor-backed `EXTENSIONS_VIEW` seam. Before the projection fix
 /// this shape was unrepresentable/collapsed: a `Failed` extension read as
 /// `Installed`, a live-grant account read as `connected` with no error, and
 /// `activation_error` was hard-coded `None`. The facade must now project all
@@ -5660,8 +5658,7 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
         )]),
     }));
 
-    let response = services
-        .list_extensions(caller())
+    let response = query_extensions(&services, caller())
         .await
         .expect("extensions response");
     let info = response
@@ -9590,6 +9587,23 @@ async fn query_operator_setup<S: RebornServicesApi + ?Sized>(
             caller,
             RebornViewQuery {
                 view_id: OPERATOR_SETUP_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
+async fn query_extensions<S: RebornServicesApi + ?Sized>(
+    services: &S,
+    caller: WebUiAuthenticatedCaller,
+) -> Result<RebornExtensionListResponse, RebornServicesError> {
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: EXTENSIONS_VIEW.id.to_string(),
                 params: json!({}),
                 cursor: None,
             },
