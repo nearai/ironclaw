@@ -769,8 +769,36 @@ impl ProductInboundEnvelope {
             return Err(malformed("cannot rewrite non-user-message payload"));
         }
         payload.validate()?;
+        let channel_attachment_refs = if self.channel_attachment_refs.is_empty() {
+            Vec::new()
+        } else {
+            let mut used = vec![false; self.channel_attachment_refs.len()];
+            let mut reconciled = Vec::with_capacity(payload.attachments.len());
+            for descriptor in &payload.attachments {
+                let matching = self
+                    .channel_attachment_refs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, source)| source.descriptor == *descriptor)
+                    .collect::<Vec<_>>();
+                let [(index, source)] = matching.as_slice() else {
+                    return Err(malformed(
+                        "policy-rewritten attachment has no unique original channel source",
+                    ));
+                };
+                if used[*index] {
+                    return Err(malformed(
+                        "policy-rewritten attachment reuses an original channel source",
+                    ));
+                }
+                used[*index] = true;
+                reconciled.push((*source).clone());
+            }
+            reconciled
+        };
         let mut envelope = self.clone();
         envelope.payload = ProductInboundPayload::UserMessage(payload);
+        envelope.channel_attachment_refs = channel_attachment_refs;
         Ok(envelope)
     }
 

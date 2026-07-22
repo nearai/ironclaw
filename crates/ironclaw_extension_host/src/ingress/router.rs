@@ -13,13 +13,16 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use ironclaw_extensions::ResolvedExtensionManifest;
-use ironclaw_host_api::{ChannelIngressDescriptor, ChannelIngressMethod, SecretHandle};
+use ironclaw_host_api::{
+    ChannelIngressDescriptor, ChannelIngressMethod, RestrictedEgress, SecretHandle,
+};
 use ironclaw_product_adapters::{
     ChannelAdapter, InboundOutcome, NormalizedInboundMessage, VerifiedInbound,
 };
 
 use crate::active::ActiveExtension;
 use crate::deployment_channels::{DeploymentChannelBinding, DeploymentChannelRegistry};
+use crate::egress::{ChannelEgressTransport, DeclaredChannelEgress, PolicyEnforcedChannelEgress};
 use crate::lifecycle::SnapshotWatch;
 
 use super::verifier::{IngressHeaders, VerificationCandidate, verify_recipe};
@@ -58,6 +61,14 @@ pub struct InboundAdmission {
     pub extension_id: String,
     pub installation_id: String,
     pub message: NormalizedInboundMessage,
+    /// The exact adapter that parsed this request. Host-only and transient:
+    /// admission keeps this `Arc` across replay/policy so an activation swap
+    /// cannot fetch attachment bytes through a different generation.
+    pub channel_adapter: Arc<dyn ChannelAdapter>,
+    /// Manifest-restricted egress built from the same resolved ingress
+    /// binding as `channel_adapter`. `None` means the host has no channel
+    /// transport; attachment-bearing admission then fails closed.
+    pub channel_egress: Option<Arc<dyn RestrictedEgress>>,
 }
 
 /// The durable admission outcome. Both variants mean the event is durably
@@ -188,6 +199,9 @@ pub struct ExtensionIngressRouterDeps {
     pub secrets: Arc<dyn IngressSecretsPort>,
     pub sink: Arc<dyn InboundSink>,
     pub reply_context: Arc<dyn ReplyContextStore>,
+    /// Host transport used only to construct per-request manifest-restricted
+    /// egress from the already pinned ingress binding.
+    pub channel_egress_transport: Option<Arc<dyn ChannelEgressTransport>>,
 }
 
 /// The generic ingress router. One instance serves every active extension's
@@ -395,16 +409,51 @@ impl ExtensionIngressRouter {
                 }
             }
             InboundOutcome::Messages(messages) => {
-                self.admit_messages(binding.extension_id(), &verified.installation_id, messages)
-                    .await
+                let channel_egress = self.channel_egress(binding, &verified.installation_id);
+                self.admit_messages(
+                    binding.extension_id(),
+                    &verified.installation_id,
+                    channel,
+                    channel_egress,
+                    messages,
+                )
+                .await
             }
         }
+    }
+
+    fn channel_egress(
+        &self,
+        binding: &ResolvedIngressBinding,
+        installation_id: &str,
+    ) -> Option<Arc<dyn RestrictedEgress>> {
+        let transport = self.deps.channel_egress_transport.as_ref()?;
+        let declared = binding
+            .resolved()
+            .channel
+            .as_ref()
+            .map(|channel| {
+                channel
+                    .egress
+                    .iter()
+                    .map(DeclaredChannelEgress::from_descriptor)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Arc::new(PolicyEnforcedChannelEgress::new(
+            binding.extension_id(),
+            installation_id,
+            declared,
+            Arc::clone(transport),
+        )))
     }
 
     async fn admit_messages(
         &self,
         extension_id: &str,
         installation_id: &str,
+        channel_adapter: Arc<dyn ChannelAdapter>,
+        channel_egress: Option<Arc<dyn RestrictedEgress>>,
         messages: Vec<NormalizedInboundMessage>,
     ) -> IngressResponse {
         if messages.is_empty() {
@@ -445,6 +494,8 @@ impl ExtensionIngressRouter {
                     extension_id: extension_id.to_string(),
                     installation_id: installation_id.to_string(),
                     message,
+                    channel_adapter: Arc::clone(&channel_adapter),
+                    channel_egress: channel_egress.clone(),
                 })
                 .await
             {

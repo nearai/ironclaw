@@ -725,23 +725,18 @@ impl RebornServices {
         let workflow_state = Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::clone(
             &local_runtime.extension_filesystem,
         )));
-        let delivery = self
-            .delivery_coordinator
-            .clone()
-            .zip(self.channel_delivery_resolver.clone())
-            .map(|(coordinator, resolver)| {
-                crate::extension_host::channel_host::ChannelHostDeliveryDeps {
-                    coordinator,
-                    resolver,
-                    outbound_store: Arc::clone(&local_runtime.outbound_state),
-                    route_store: Arc::clone(&local_runtime.delivered_gate_routes),
-                    communication_preferences: Arc::clone(&local_runtime.outbound_preferences),
-                    approval_context,
-                    blocked_auth_prompts,
-                    auth_flow_cancel,
-                    settings: run_delivery_settings,
-                }
-            });
+        let delivery = self.delivery_coordinator.clone().map(|coordinator| {
+            crate::extension_host::channel_host::ChannelHostDeliveryDeps {
+                coordinator,
+                outbound_store: Arc::clone(&local_runtime.outbound_state),
+                route_store: Arc::clone(&local_runtime.delivered_gate_routes),
+                communication_preferences: Arc::clone(&local_runtime.outbound_preferences),
+                approval_context,
+                blocked_auth_prompts,
+                auth_flow_cancel,
+                settings: run_delivery_settings,
+            }
+        });
         let inbound_attachments = Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
             self.read_write_workspace_filesystem()?,
         ));
@@ -2500,6 +2495,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     channel_egress_scope.user_id.clone(),
                 ),
             ),
+            channel_egress_transport.clone(),
         );
         // Account-setup declarations + generic pairing services (§5.5): each
         // binary-assembled descriptor is declared into the activation gate

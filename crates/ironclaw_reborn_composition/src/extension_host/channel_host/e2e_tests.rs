@@ -403,6 +403,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
                 UserId::new(USER).expect("user"),       // safety: static test user id is valid.
             ),
         ),
+        Some(Arc::new(egress.clone())),
     );
     let delivery_resolver: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver> = Arc::new(
         SnapshotChannelDeliveryResolver::new(host.snapshot_watch(), Arc::new(egress.clone())),
@@ -448,7 +449,6 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>),
         delivery: Some(ChannelHostDeliveryDeps {
             coordinator: delivery_coordinator,
-            resolver: delivery_resolver,
             outbound_store,
             route_store: Arc::clone(&route_store),
             communication_preferences: preferences,

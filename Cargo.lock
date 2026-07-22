@@ -3591,6 +3591,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "hmac 0.13.0",
+ "ironclaw_attachments",
  "ironclaw_auth",
  "ironclaw_dispatcher",
  "ironclaw_extensions",

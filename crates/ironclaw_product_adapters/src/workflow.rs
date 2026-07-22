@@ -16,7 +16,9 @@
 //! call projection internals directly.
 
 use async_trait::async_trait;
+use ironclaw_host_api::RestrictedEgress;
 
+use crate::channel_adapter::ChannelAdapter;
 use crate::error::ProductAdapterError;
 use crate::inbound::{ProductInboundAck, ProductInboundEnvelope};
 use crate::projection::{
@@ -39,6 +41,23 @@ pub trait ProductWorkflow: Send + Sync {
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError>;
+
+    /// Submit a channel action while pinning the exact adapter and
+    /// manifest-restricted egress authority that parsed the request. The
+    /// authority is transient host state and never enters the serialized
+    /// envelope or durable action ledger.
+    async fn submit_inbound_with_channel_attachment_transfer(
+        &self,
+        _envelope: ProductInboundEnvelope,
+        _channel_adapter: std::sync::Arc<dyn ChannelAdapter>,
+        _channel_egress: std::sync::Arc<dyn RestrictedEgress>,
+    ) -> Result<ProductInboundAck, ProductAdapterError> {
+        Err(ProductAdapterError::Internal {
+            detail: RedactedString::new(
+                "channel attachment transfer is not supported by this ProductWorkflow implementation",
+            ),
+        })
+    }
 
     /// Resolve a ProductWorkflow-facing projection read/fetch request into the
     /// canonical actor/scope/cursor/window used by projection services.

@@ -440,6 +440,8 @@ impl InboundSink for GenericChannelInboundSink {
             extension_id: _,
             installation_id,
             message,
+            channel_adapter,
+            channel_egress,
         } = admission;
         let installation = AdapterInstallationId::new(&installation_id).map_err(Self::permanent)?;
         // Pairing pre-admission gate: a serviced pairing interaction is
@@ -512,10 +514,25 @@ impl InboundSink for GenericChannelInboundSink {
         // installation + external event fingerprint) plus identity/
         // conversation binding and turn submission — synchronous, so the
         // router's 2xx is ack-after-commit.
-        // Boxed: the workflow admission (ledger → identity/actor resolution →
-        // conversation binding → turn submission) is the deepest subtree in
-        // this future; boxing keeps instrumented builds off the stack limit.
-        match Box::pin(self.config.workflow.submit_inbound(envelope.clone())).await {
+        let submission = if envelope.channel_attachment_refs().is_empty() {
+            self.config.workflow.submit_inbound(envelope.clone()).await
+        } else {
+            let Some(channel_egress) = channel_egress else {
+                return Err(InboundSinkError {
+                    retryable: true,
+                    reason: "channel attachment egress is unavailable".to_string(),
+                });
+            };
+            self.config
+                .workflow
+                .submit_inbound_with_channel_attachment_transfer(
+                    envelope.clone(),
+                    channel_adapter,
+                    channel_egress,
+                )
+                .await
+        };
+        match submission {
             Ok(ack) => {
                 let duplicate = matches!(ack, ProductInboundAck::Duplicate { .. });
                 let durable = ack.is_durable_outcome();
@@ -615,6 +632,9 @@ pub(crate) fn build_extension_ingress(
     watch: ironclaw_extension_host::SnapshotWatch,
     deployment_channels: Arc<ironclaw_extension_host::DeploymentChannelRegistry>,
     reply_context: Arc<dyn ironclaw_extension_host::ingress::ReplyContextStore>,
+    channel_egress_transport: Option<
+        Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport>,
+    >,
 ) -> ExtensionIngressParts {
     let registry = Arc::new(ExtensionIngressRegistry::default());
     let router = Arc::new(
@@ -624,6 +644,7 @@ pub(crate) fn build_extension_ingress(
                 secrets: Arc::clone(&registry) as Arc<dyn IngressSecretsPort>,
                 sink: Arc::clone(&registry) as Arc<dyn InboundSink>,
                 reply_context: Arc::clone(&reply_context),
+                channel_egress_transport,
             },
             ironclaw_extension_host::ingress::IngressRouterConfig::default(),
         )
@@ -797,10 +818,17 @@ mod serve_mount {
 }
 
 #[cfg(test)]
+#[path = "extension_ingress/attachment_journey_tests.rs"]
+mod attachment_journey_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_host_api::UserId;
+    use ironclaw_host_api::{
+        RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
+        UserId,
+    };
     use ironclaw_product_adapters::{
         AttachmentRef, ExternalActorRef, ExternalConversationRef, ExternalEventId,
         ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
@@ -851,6 +879,27 @@ mod tests {
                 submitted_run_id: TurnRunId::new(),
             })
         }
+
+        async fn submit_inbound_with_channel_attachment_transfer(
+            &self,
+            envelope: ProductInboundEnvelope,
+            _channel_adapter: Arc<dyn ironclaw_product_adapters::ChannelAdapter>,
+            _channel_egress: Arc<dyn RestrictedEgress>,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            self.submit_inbound(envelope).await
+        }
+    }
+
+    struct TestRestrictedEgress;
+
+    #[async_trait]
+    impl RestrictedEgress for TestRestrictedEgress {
+        async fn send(
+            &self,
+            _request: RestrictedEgressRequest,
+        ) -> Result<RestrictedEgressResponse, RestrictedEgressError> {
+            Err(RestrictedEgressError::PolicyDenied)
+        }
     }
 
     struct ScriptedPairingInterceptor {
@@ -882,6 +931,10 @@ mod tests {
                 attachments: Vec::new(),
                 reply_context: None,
             },
+            channel_adapter: Arc::new(
+                ironclaw_extension_host::test_support::FakeChannelAdapter::default(),
+            ),
+            channel_egress: None,
         }
     }
 
@@ -899,6 +952,7 @@ mod tests {
             vendor_ref: "opaque-provider-file-reference".to_string(),
             mime_hint: Some("application/pdf".to_string()),
         });
+        admission.channel_egress = Some(Arc::new(TestRestrictedEgress));
         admission
     }
 

@@ -29,8 +29,9 @@ use ironclaw_extension_host::{
 };
 use ironclaw_host_api::SecretHandle;
 use ironclaw_product_adapters::{
-    ChannelAdapter, ChannelError, DeliveryReport, ExternalActorRef, ExternalConversationRef,
-    ExternalEventId, ImmediateResponse, InboundOutcome, NormalizedInboundMessage, OutboundEnvelope,
+    AttachmentRef, ChannelAdapter, ChannelError, DeliveryReport, ExternalActorRef,
+    ExternalConversationRef, ExternalEventId, ImmediateResponse, InboundOutcome,
+    NormalizedInboundMessage, OutboundEnvelope, ProductAttachmentDescriptor, ProductAttachmentKind,
     ProductTriggerReason, VerifiedInbound,
 };
 
@@ -380,6 +381,7 @@ async fn harness(options: HarnessOptions) -> Harness {
                 admitted: Arc::clone(&admitted),
             }),
             reply_context: Arc::clone(&reply_context) as Arc<dyn ReplyContextStore>,
+            channel_egress_transport: None,
         },
         options.config,
     );
@@ -871,4 +873,347 @@ async fn reply_context_is_stored_host_side_keyed_by_conversation() {
         .await
         .expect("reply context store readable");
     assert_eq!(stored.as_deref(), Some(b"opaque-reply-route".as_slice()));
+}
+
+struct GenerationChannelAdapter {
+    generation: &'static str,
+    vendor_host: &'static str,
+    entered: Option<std::sync::mpsc::Sender<()>>,
+    release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+#[async_trait]
+impl ChannelAdapter for GenerationChannelAdapter {
+    fn inbound(&self, _request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError> {
+        if let Some(entered) = &self.entered {
+            entered.send(()).map_err(|error| ChannelError::Parse {
+                reason: error.to_string(),
+            })?;
+        }
+        if let Some(release) = self.release.lock().expect("release lock").take() {
+            release.recv().map_err(|error| ChannelError::Parse {
+                reason: error.to_string(),
+            })?;
+        }
+        let descriptor = ProductAttachmentDescriptor::new(
+            format!("{}-attachment", self.generation),
+            "image/png",
+            Some(format!("{}.png", self.generation)),
+            Some(1),
+            ProductAttachmentKind::Image,
+        )
+        .expect("generation descriptor");
+        Ok(InboundOutcome::Messages(vec![NormalizedInboundMessage {
+            actor: ExternalActorRef::new("acme_user", "U-1", None::<&str>).expect("actor"),
+            conversation: ExternalConversationRef::new(None, "C-1", None, None)
+                .expect("conversation"),
+            event_id: ExternalEventId::new(format!("event-{}", self.generation)).expect("event"),
+            text: "attachment".to_string(),
+            trigger: ProductTriggerReason::DirectChat,
+            attachments: vec![AttachmentRef {
+                descriptor,
+                vendor_ref: self.generation.to_string(),
+                mime_hint: Some("image/png".to_string()),
+            }],
+            reply_context: None,
+        }]))
+    }
+
+    async fn fetch_attachment(
+        &self,
+        attachment: &AttachmentRef,
+        egress: &dyn ironclaw_host_api::RestrictedEgress,
+    ) -> Result<ironclaw_attachments::InboundAttachment, ChannelError> {
+        egress
+            .send(ironclaw_host_api::RestrictedEgressRequest {
+                method: ironclaw_host_api::NetworkMethod::Post,
+                url: format!("https://{}/files", self.vendor_host),
+                headers: Vec::new(),
+                body: None,
+                credential: None,
+                body_credentials: Vec::new(),
+            })
+            .await
+            .map_err(|error| ChannelError::AttachmentTransfer {
+                reason: error.to_string(),
+                retryable: true,
+            })?;
+        Ok(ironclaw_attachments::InboundAttachment {
+            id: attachment.descriptor.external_file_id.clone(),
+            mime_type: attachment.descriptor.mime_type.clone(),
+            filename: attachment.descriptor.filename.clone(),
+            bytes: vec![self.generation.as_bytes()[0]],
+        })
+    }
+
+    async fn deliver(
+        &self,
+        _envelope: OutboundEnvelope,
+        _egress: &dyn ironclaw_host_api::RestrictedEgress,
+    ) -> Result<DeliveryReport, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+}
+
+struct QueueLoader {
+    adapters: std::sync::Mutex<std::collections::VecDeque<Arc<dyn ChannelAdapter>>>,
+}
+
+#[async_trait]
+impl ExtensionLoader for QueueLoader {
+    async fn load(
+        &self,
+        _ctx: &LoadContext,
+    ) -> Result<LoadedExtension, ironclaw_extension_host::BindError> {
+        struct Entry(Arc<dyn ChannelAdapter>);
+        impl ExtensionEntrypoint for Entry {
+            fn bind(
+                &self,
+                _ctx: ironclaw_extension_host::BindContext,
+            ) -> Result<ExtensionBindings, ironclaw_extension_host::BindError> {
+                Ok(ExtensionBindings {
+                    tools: None,
+                    channel: Some(Arc::clone(&self.0)),
+                })
+            }
+        }
+        let adapter = self
+            .adapters
+            .lock()
+            .expect("adapter queue lock")
+            .pop_front()
+            .expect("scripted activation adapter");
+        Ok(LoadedExtension::new(Box::new(Entry(adapter))))
+    }
+}
+
+#[derive(Default)]
+struct GenerationTransport {
+    urls: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl ironclaw_extension_host::egress::ChannelEgressTransport for GenerationTransport {
+    async fn execute(
+        &self,
+        approved: ironclaw_extension_host::egress::ApprovedChannelEgress,
+    ) -> Result<ironclaw_host_api::RestrictedEgressResponse, ironclaw_host_api::RestrictedEgressError>
+    {
+        self.urls
+            .lock()
+            .expect("transport urls lock")
+            .push(approved.url);
+        Ok(ironclaw_host_api::RestrictedEgressResponse {
+            status: 200,
+            body: Vec::new(),
+        })
+    }
+}
+
+struct FetchingAdmissionSink {
+    fetched_ids: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl InboundSink for FetchingAdmissionSink {
+    async fn admit(
+        &self,
+        admission: InboundAdmission,
+    ) -> Result<InboundAdmissionAck, InboundSinkError> {
+        let attachment = admission
+            .message
+            .attachments
+            .first()
+            .ok_or_else(|| InboundSinkError {
+                retryable: false,
+                reason: "missing attachment".to_string(),
+            })?;
+        let egress = admission.channel_egress.ok_or_else(|| InboundSinkError {
+            retryable: true,
+            reason: "missing pinned egress".to_string(),
+        })?;
+        let fetched = admission
+            .channel_adapter
+            .fetch_attachment(attachment, egress.as_ref())
+            .await
+            .map_err(|error| InboundSinkError {
+                retryable: true,
+                reason: error.to_string(),
+            })?;
+        self.fetched_ids
+            .lock()
+            .expect("fetched ids lock")
+            .push(fetched.id);
+        Ok(InboundAdmissionAck::Accepted)
+    }
+}
+
+fn manifest_for_vendor(vendor_host: &str) -> ironclaw_extensions::ResolvedExtensionManifest {
+    let rendered = format!(
+        r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "acme-chat"
+name = "Acme Chat"
+version = "0.1.0"
+description = "generation race fixture"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/acme_chat.wasm"
+
+[channel]
+id = "messages"
+display_name = "Acme chat"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+
+[channel.ingress]
+route_suffix = "events"
+method = "post"
+body_limit_bytes = 512
+
+[channel.ingress.verification]
+kind = "hmac_sha256"
+secret_handle = "acme_chat_signing_secret"
+signature_header = "X-Acme-Signature"
+signature_prefix = "v0="
+signature_encoding = "hex"
+timestamp_header = "X-Acme-Request-Timestamp"
+max_age_seconds = 300
+signed_payload = [
+  {{ literal = "v0:" }},
+  {{ header = "X-Acme-Request-Timestamp" }},
+  {{ literal = ":" }},
+  {{ body = true }},
+]
+
+[channel.config]
+fields = [ {{ handle = "acme_chat_signing_secret", label = "Signing secret", secret = true }} ]
+
+[[channel.egress]]
+scheme = "https"
+host = "{vendor_host}"
+methods = ["post"]
+"#,
+    );
+    resolve_manifest_toml(&rendered)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attachment_authority_stays_on_the_parsed_generation_during_snapshot_upgrade() {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let old_adapter: Arc<dyn ChannelAdapter> = Arc::new(GenerationChannelAdapter {
+        generation: "old",
+        vendor_host: "old.api.acme.example",
+        entered: Some(entered_tx),
+        release: std::sync::Mutex::new(Some(release_rx)),
+    });
+    let new_adapter: Arc<dyn ChannelAdapter> = Arc::new(GenerationChannelAdapter {
+        generation: "new",
+        vendor_host: "new.api.acme.example",
+        entered: None,
+        release: std::sync::Mutex::new(None),
+    });
+    let store = Arc::new(RehydratedInstallationRecordStore::default());
+    let transport = Arc::new(GenerationTransport::default());
+    let transport_port: Arc<dyn ironclaw_extension_host::egress::ChannelEgressTransport> =
+        transport.clone();
+    let host = Arc::new(
+        ExtensionHost::new(ExtensionHostDeps {
+            store: Arc::clone(&store) as Arc<dyn InstallationRecordStore>,
+            loader: Arc::new(QueueLoader {
+                adapters: std::sync::Mutex::new([old_adapter, new_adapter].into_iter().collect()),
+            }),
+            drain: Arc::new(ironclaw_extension_host::test_support::RecordingDrain::default()),
+            egress: Arc::new(
+                ironclaw_extension_host::egress::TransportBackedEgressFactory::new(Arc::clone(
+                    &transport_port,
+                )),
+            ),
+            reserved_capability_ids: Default::default(),
+            reserved_ingress_routes: Default::default(),
+            hook_deadline: Duration::from_secs(5),
+        })
+        .await,
+    );
+    host.install(InstallationRecord {
+        extension_id: EXTENSION_ID.to_string(),
+        installation_id: format!("{EXTENSION_ID}-install"),
+        state: InstallationState::Installed,
+        resolved: Arc::new(manifest_for_vendor("old.api.acme.example")),
+        config: Vec::new(),
+        last_error: None,
+    })
+    .await
+    .expect("install old generation");
+    host.activate(EXTENSION_ID)
+        .await
+        .expect("activate old generation");
+
+    let sink = Arc::new(FetchingAdmissionSink {
+        fetched_ids: std::sync::Mutex::new(Vec::new()),
+    });
+    let router = Arc::new(ExtensionIngressRouter::new(
+        host.snapshot_watch(),
+        ExtensionIngressRouterDeps {
+            secrets: Arc::new(ScriptedSecrets {
+                candidates: vec![VerificationCandidate {
+                    installation_id: format!("{EXTENSION_ID}-install"),
+                    secret: SECRET.to_vec(),
+                }],
+                calls: Arc::new(AtomicUsize::new(0)),
+                fail: false,
+            }),
+            sink: sink.clone(),
+            reply_context: Arc::new(TestReplyContextStore::default()),
+            channel_egress_transport: Some(Arc::clone(&transport_port)),
+        },
+        IngressRouterConfig::default(),
+    ));
+    let request = signed_request(br#"{"ignored":true}"#);
+    let in_flight = tokio::spawn({
+        let router = Arc::clone(&router);
+        async move { router.handle(request).await }
+    });
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("old parser entered");
+
+    host.deactivate(EXTENSION_ID)
+        .await
+        .expect("deactivate old generation");
+    host.install(InstallationRecord {
+        extension_id: EXTENSION_ID.to_string(),
+        installation_id: format!("{EXTENSION_ID}-install"),
+        state: InstallationState::Installed,
+        resolved: Arc::new(manifest_for_vendor("new.api.acme.example")),
+        config: Vec::new(),
+        last_error: None,
+    })
+    .await
+    .expect("install new generation");
+    host.activate(EXTENSION_ID)
+        .await
+        .expect("activate new generation");
+    release_tx.send(()).expect("release old parser");
+
+    assert_eq!(in_flight.await.expect("request task").status, 200);
+    assert_eq!(
+        sink.fetched_ids
+            .lock()
+            .expect("fetched ids lock")
+            .as_slice(),
+        ["old-attachment"]
+    );
+    assert_eq!(
+        transport
+            .urls
+            .lock()
+            .expect("transport urls lock")
+            .as_slice(),
+        ["https://old.api.acme.example/files"]
+    );
 }

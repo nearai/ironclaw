@@ -10,10 +10,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{AuthFlowId, CredentialAccountId};
-use ironclaw_host_api::{ThreadId, UserId};
+use ironclaw_host_api::{RestrictedEgress, ThreadId, UserId};
 use ironclaw_product_adapters::{
-    ApprovalDecision, ExternalConversationRef, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
+    ApprovalDecision, ChannelAdapter, ExternalConversationRef, ProductAdapterError,
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductProjectionReadInput,
     ProductProjectionSubject, ProductProjectionSubscribeInput, ProductRejection,
     ProductRejectionKind, ProductWorkflow, ProductWorkflowRejectionKind, ProjectionReadRequest,
     ProjectionSubscriptionRequest, RedactedString,
@@ -142,7 +142,21 @@ impl ProductWorkflow for DefaultProductWorkflow {
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound_inner(envelope, Vec::new()).await
+        self.submit_inbound_inner(envelope, Vec::new(), None).await
+    }
+
+    async fn submit_inbound_with_channel_attachment_transfer(
+        &self,
+        envelope: ProductInboundEnvelope,
+        channel_adapter: Arc<dyn ChannelAdapter>,
+        channel_egress: Arc<dyn RestrictedEgress>,
+    ) -> Result<ProductInboundAck, ProductAdapterError> {
+        self.submit_inbound_inner(
+            envelope,
+            Vec::new(),
+            Some((channel_adapter, channel_egress)),
+        )
+        .await
     }
 
     async fn read_projection(
@@ -197,6 +211,7 @@ impl DefaultProductWorkflow {
         &self,
         envelope: ProductInboundEnvelope,
         attachments: Vec<InboundAttachment>,
+        pinned_channel_transfer: Option<(Arc<dyn ChannelAdapter>, Arc<dyn RestrictedEgress>)>,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
         if matches!(
             envelope.payload(),
@@ -280,6 +295,7 @@ impl DefaultProductWorkflow {
                         delivered_gate_routes: &*self.delivered_gate_routes,
                     },
                     attachments,
+                    pinned_channel_transfer,
                 )
                 .await;
 
@@ -352,7 +368,7 @@ impl DefaultProductWorkflow {
         envelope: ProductInboundEnvelope,
         attachments: Vec<InboundAttachment>,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound_inner(envelope, attachments).await
+        self.submit_inbound_inner(envelope, attachments, None).await
     }
 }
 
@@ -1005,18 +1021,40 @@ async fn dispatch_payload(
     action_fingerprint: ActionFingerprintKey,
     ports: DispatchPorts<'_>,
     attachments: Vec<InboundAttachment>,
+    pinned_channel_transfer: Option<(Arc<dyn ChannelAdapter>, Arc<dyn RestrictedEgress>)>,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
     match envelope.payload() {
         ProductInboundPayload::UserMessage(_) => {
-            match ports
-                .inbound_turn_service
-                .accept_user_message_with_before_policy_and_attachments(
-                    envelope,
-                    ports.before_inbound_policy,
-                    attachments,
-                )
-                .await?
-            {
+            let dispatch = match pinned_channel_transfer {
+                Some((adapter, egress)) => {
+                    if !attachments.is_empty() {
+                        return Err(ProductWorkflowError::TurnSubmissionRejected {
+                            reason: "mixed inline and channel attachment sources are not allowed"
+                                .into(),
+                        });
+                    }
+                    ports
+                        .inbound_turn_service
+                        .accept_user_message_with_before_policy_and_channel_transfer(
+                            envelope,
+                            ports.before_inbound_policy,
+                            adapter,
+                            egress,
+                        )
+                        .await?
+                }
+                None => {
+                    ports
+                        .inbound_turn_service
+                        .accept_user_message_with_before_policy_and_attachments(
+                            envelope,
+                            ports.before_inbound_policy,
+                            attachments,
+                        )
+                        .await?
+                }
+            };
+            match dispatch {
                 InboundUserMessageDispatch::Accepted(outcome) => {
                     let ack = outcome.to_ack();
                     let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;

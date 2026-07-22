@@ -46,9 +46,9 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ApprovalInteractionService, ApprovalPromptContextSource, AuthInteractionService,
     BlockedAuthFlowCanceller, BlockedAuthPromptSource, ChannelConnectionNoticePolicy,
-    ChannelDeliveryResolver, ConversationBindingService, DefaultInboundTurnService,
-    DefaultProductWorkflow, DeliveryCoordinator, IdempotencyLedger, InboundAttachmentLander,
-    PreferenceTargetCodec, ProductActorUserResolutionRequest, ProductActorUserResolver,
+    ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
+    DeliveryCoordinator, IdempotencyLedger, InboundAttachmentLander, PreferenceTargetCodec,
+    ProductActorUserResolutionRequest, ProductActorUserResolver,
     ProductConversationSubjectRouteResolver, ProductInstallationKey, ProductInstallationScope,
     ProductWorkflowError, RebornFilesystemIdempotencyLedger, ResolvedProductActorUser,
     RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
@@ -243,10 +243,6 @@ pub struct ChannelHostIdentity {
 /// then ingress-only (turns run; nothing watches them for channel replies).
 pub(crate) struct ChannelHostDeliveryDeps {
     pub(crate) coordinator: Arc<DeliveryCoordinator>,
-    /// The same generation-pinned adapter + manifest-restricted egress
-    /// resolution used for outbound delivery also supplies deferred inbound
-    /// attachment transfer; provider mechanics remain on `ChannelAdapter`.
-    pub(crate) resolver: Arc<dyn ChannelDeliveryResolver>,
     pub(crate) outbound_store: Arc<dyn OutboundStateStore>,
     pub(crate) route_store: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
@@ -654,22 +650,12 @@ impl GenericChannelHostAssembly {
 
         let (binding, workflow_state) = self.build_binding(source, extras).await?;
 
-        let mut inbound = DefaultInboundTurnService::new(
+        let inbound = DefaultInboundTurnService::new(
             Arc::clone(&binding),
             Arc::clone(&self.deps.thread_service),
             Arc::clone(&self.deps.turn_coordinator),
         )
         .with_inbound_attachments(Arc::clone(&self.deps.inbound_attachments));
-        if let Some(delivery) = &self.deps.delivery
-            && let Some(resolved) = delivery
-                .resolver
-                .resolve_channel_delivery(source.extension_id())
-        {
-            if resolved.installation_id != source.installation_id() {
-                return Err("channel attachment egress resolved a different installation".into());
-            }
-            inbound = inbound.with_channel_attachment_transfer(resolved.adapter, resolved.egress);
-        }
         let inbound = Arc::new(inbound);
         let mut workflow = DefaultProductWorkflow::new(
             inbound,
