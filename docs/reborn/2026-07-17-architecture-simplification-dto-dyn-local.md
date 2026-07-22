@@ -63,6 +63,40 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   No design changes to §1–§13 other than the §5.3.4 addition and the §11.7
   extension noted above; §14 and the status log are mutable, the contract
   above them is frozen.
+- **r9** 2026-07-22 — status-only update for the ProductSurface facade collapse:
+  descriptor-backed reads are underway and the outbound preference mutation now
+  follows the API-only first-party capability + query read-back approach. Skill
+  management now follows the same split: content reads are a view, document
+  install/update/remove and per-skill auto-activation are first-party capability
+  invocations, and the learned auto-activation master toggle is an API-only
+  product capability. Extension install/remove/activate now use lifecycle
+  capability invocations from the WebUI ProductSurface path; activation keeps a
+  query read-back for active state and maps auth-blocked outcomes onto the
+  existing extension onboarding response shape. Extension setup read now uses
+  the descriptor-backed `extension_setup` ProductSurface view, and setup submit
+  uses `builtin.extension_setup_submit` with the same query read-back. Zip
+  import now uses the API-only `builtin.extension_import` ProductSurface
+  capability with upload bytes carried as a base64 JSON field. LLM provider
+  upsert/delete and active-provider selection now use API-only ProductSurface
+  capabilities with `llm_config` view read-back. Automation listing now uses
+  the descriptor-backed `automations` ProductSurface query while retaining the
+  existing product automation facade behind the view builder. Thread listing
+  now uses the descriptor-backed paginated `threads` ProductSurface query while
+  retaining hidden-automation-thread filtering and notification approval
+  shaping behind the view builder; probe and login starts remain explicit
+  follow-ups because they need typed command result payloads.
+- **r10** 2026-07-22 — implementation approach recorded for declaring
+  ProductSurface APIs without adding macro machinery: keep the raw
+  `ProductSurface::invoke`/`query` conduits JSON-shaped, but declare product
+  APIs as typed `ProductView<Params, Output>` and `ProductCapabilityDescriptor`
+  constants. The descriptor helpers own view query construction, payload decode,
+  serializable command input conversion, and capability-id parsing. This keeps
+  capability mappings lightweight for simple API-only commands, avoids one
+  bespoke struct or macro arm per route, and still leaves every product action
+  auditable as an explicit descriptor declaration. Duplicate skill write
+  methods were removed from the composition WebUI skill facade after those
+  writes moved to first-party capabilities; the facade now serves only skill
+  reads used by ProductSurface views.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -830,6 +864,15 @@ adds a **capability descriptor** (+ handler on the `FirstParty` lane) and/or a
 stream. Never a method. This generalizes §13.3's synthetic-capability
 promotion: the four synthetic product tools are simply the *first four* facade
 operations to make the migration every mutation makes.
+
+Implementation approach during migration: do not introduce macros for each
+capability or view. Keep descriptor IDs and typed builders explicit, and use
+small helper functions for repeated boundary mechanics: empty-parameter
+validation, JSON serialization into `RebornViewPage`, capability-id parsing,
+and serializable input conversion before `ProductSurface::invoke`. Add input
+structs only when they own real validation, versioned contract shape, secret
+handling, or meaningful `deny_unknown_fields` behavior; trivial adapter
+mappings should pass plain serializable values through the helper.
 
 ### 5.2.1 Origin is part of the `Invocation`; policy is an origin→gate matrix
 
@@ -2191,7 +2234,7 @@ knobs to calibrate against measured latency, not open architectural questions.
 
 ---
 
-## 14. Implementation status (as of 2026-07-20)
+## 14. Implementation status (as of 2026-07-22)
 
 This section tracks what has landed against the slices (§9) and axes (§10). It is
 the **mutable status log** — the design in §1–§13 is the frozen contract; this
@@ -2339,11 +2382,40 @@ loop-facing capability result and every result mirror is deleted.
   §11.9), the model-error observation channel, `read_diagnostic(diag_ref)`, and
   the per-kind remediation generalization. Gated on the flip stack landing
   #6273's `Resolution` vocabulary.
-- **§5.2 `ProductSurface`** facade collapse — the 88-method `RebornServicesApi`
-  freeze has landed (§10 ratchet, above), so the surface can only shrink; the
-  actual migration of mutations to capability descriptors and reads to view
-  descriptors (Slice 1 = the synthetic-capability promotion, §13.3) has not
-  started, nor has the products-in-composition ratchet (§5.8).
+- **§5.2 `ProductSurface`** facade collapse — the `RebornServicesApi` freeze has
+  landed (§10 ratchet, above), so the surface can only shrink. Initial reads now
+  flow through view descriptors (`query`) rather than per-feature methods:
+  LLM config, operator status/diagnostics/setup/config validation, extension
+  inventory/registry, skill list/search/content, outbound preferences/targets,
+  trace credits/account traces, and run artifacts. Outbound preference writes
+  now flow through `builtin.outbound_preferences_set`, an API-only first-party
+  capability invoked directly by the WebUI product adapter and verified by
+  reading back `OUTBOUND_PREFERENCES_VIEW`; skill document writes now flow
+  through `builtin.skill_install`, `builtin.skill_update`,
+  `builtin.skill_auto_activate_set`, and `builtin.skill_remove`, with the
+  ProductSurface invoker carrying the scoped skill-management mounts and the
+  install capability's declared network policy. The learned auto-activation
+  master switch uses `builtin.skill_auto_activate_learned_set`, an API-only
+  product capability over the runtime selector flag. Extension install/remove
+  routes now invoke `builtin.extension_install` and `builtin.extension_remove`
+  directly from the WebUI ProductSurface path; activation now invokes
+  `builtin.extension_activate`, reads back `EXTENSIONS_VIEW` for active state
+  after success, and maps auth-blocked outcomes onto the existing extension
+  onboarding response shape. Extension setup read now flows through the
+  descriptor-backed `extension_setup` view, and setup submit now invokes
+  `builtin.extension_setup_submit` before reading back that view. Zip import now
+  invokes `builtin.extension_import` with upload bytes encoded into an
+  API-only base64 JSON payload. LLM config writes now invoke
+  `builtin.llm_provider_upsert`, `builtin.llm_provider_delete`, and
+  `builtin.llm_active_set`, then read back `LLM_CONFIG_VIEW`; LLM probes and
+  login starts stay as result-shape follow-ups. The migrated legacy
+  `RebornServicesApi` methods were removed from the ratchet allowlist. This is
+  the migration pattern for product mutations: authenticated product gesture ->
+  `ProductSurface::invoke` -> descriptor-declared first-party handler or
+  product-workflow-owned API capability -> authoritative `query` read-back where
+  an authoritative read model exists.
+  Remaining facade methods still need migration or explicit turn-lifecycle
+  classification before the trait can collapse to the §5.2 end state.
 
 ---
 

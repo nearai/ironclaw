@@ -24,6 +24,8 @@ use super::{
 
 pub const SKILL_LIST_CAPABILITY_ID: &str = "builtin.skill_list";
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
+pub const SKILL_UPDATE_CAPABILITY_ID: &str = "builtin.skill_update";
+pub const SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID: &str = "builtin.skill_auto_activate_set";
 pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
 
 pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
@@ -44,6 +46,20 @@ pub(super) fn manifests() -> Result<Vec<CapabilityManifest>, ExtensionError> {
                 EffectKind::DeleteFilesystem,
                 EffectKind::Network,
             ],
+            PermissionMode::Ask,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            SKILL_UPDATE_CAPABILITY_ID,
+            "Update a user-installed Reborn filesystem skill",
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            PermissionMode::Ask,
+            resource_profile(),
+        )?,
+        first_party_capability_manifest(
+            SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+            "Enable or disable criteria-based activation for a user-installed Reborn filesystem skill",
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             PermissionMode::Ask,
             resource_profile(),
         )?,
@@ -73,6 +89,14 @@ pub(super) fn insert_handlers(
         CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)?,
         handler.clone(),
     );
+    registry.insert_handler(
+        CapabilityId::new(SKILL_UPDATE_CAPABILITY_ID)?,
+        handler.clone(),
+    );
+    registry.insert_handler(
+        CapabilityId::new(SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID)?,
+        handler.clone(),
+    );
     registry.insert_handler(CapabilityId::new(SKILL_REMOVE_CAPABILITY_ID)?, handler);
     Ok(())
 }
@@ -89,6 +113,8 @@ impl FirstPartyCapabilityHandler for SkillManagementToolHandler {
         let kind = match request.capability_id.as_str() {
             SKILL_LIST_CAPABILITY_ID => SkillManagementCapabilityKind::List,
             SKILL_INSTALL_CAPABILITY_ID => SkillManagementCapabilityKind::Install,
+            SKILL_UPDATE_CAPABILITY_ID => SkillManagementCapabilityKind::Update,
+            SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID => SkillManagementCapabilityKind::SetAutoActivate,
             SKILL_REMOVE_CAPABILITY_ID => SkillManagementCapabilityKind::Remove,
             _ => {
                 return Err(FirstPartyCapabilityError::new(

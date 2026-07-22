@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Method, Request, StatusCode};
-use ironclaw_product_workflow::{RebornServicesApi, ResolvedBinding, WebUiAuthenticatedCaller};
+use ironclaw_product_workflow::{ProductSurface, ResolvedBinding, WebUiAuthenticatedCaller};
 use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2State, webui_v2_router,
 };
@@ -37,7 +37,7 @@ pub(crate) fn webui_caller_for(binding: &ResolvedBinding) -> WebUiAuthenticatedC
 /// middleware output — bypassed here since this tier tests the
 /// facade/router contract, not HTTP auth).
 pub(crate) fn mount_webui_v2_router(
-    services: Arc<dyn RebornServicesApi>,
+    services: Arc<dyn ProductSurface>,
     caller: WebUiAuthenticatedCaller,
 ) -> Router {
     webui_v2_router(WebUiV2State::new(

@@ -52,6 +52,7 @@ use ratchet_support::{strip_comments_and_strings, workspace_root};
 /// trait — the §-referenced contract owner (`type-placement.md` rule 3).
 const FACADE_SOURCE: &str = "crates/ironclaw_product_workflow/src/reborn_services.rs";
 const FACADE_TRAIT: &str = "RebornServicesApi";
+const PRODUCT_SURFACE_TRAIT: &str = "ProductSurface";
 
 /// The frozen inventory of `RebornServicesApi` methods, as of the §5.2.5 freeze.
 /// Grouped by the product domain each method serves, so a reviewer can see which
@@ -94,57 +95,23 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "add_project_member",
     "update_project_member_role",
     "remove_project_member",
-    "list_threads",
     // --- automations (→ Automation-origin descriptors, §5.2.1) ---
-    "list_automations",
     "pause_automation",
     "resume_automation",
     "rename_automation",
     "delete_automation",
     // --- trace / credits ---
-    "trace_credits",
-    "trace_account_traces",
     "trace_account_login_link",
     "authorize_trace_hold",
-    // --- outbound channels ---
-    "get_outbound_preferences",
-    "set_outbound_preferences",
-    "list_outbound_delivery_targets",
-    // --- extensions + skills ---
-    "list_extensions",
-    "list_skills",
-    "search_skills",
-    "install_skill",
-    "read_skill_content",
-    "update_skill",
-    "remove_skill",
-    "set_skill_auto_activate",
-    "set_auto_activate_learned",
-    "list_extension_registry",
-    "install_extension",
-    "import_extension",
-    "activate_extension",
-    "remove_extension",
-    "setup_extension",
     // --- LLM admin config ---
-    "get_llm_config",
-    "upsert_llm_provider",
-    "delete_llm_provider",
-    "set_active_llm",
     "test_llm_connection",
     "list_llm_models",
     "start_nearai_login",
     "complete_nearai_wallet_login",
     "start_codex_login",
     // --- operator setup / config / diagnostics ---
-    "get_operator_setup",
     "run_operator_setup",
-    "list_operator_config",
-    "get_operator_config_key",
     "set_operator_config_key",
-    "validate_operator_config",
-    "get_operator_diagnostics",
-    "get_operator_status",
     "run_operator_service_lifecycle",
     // --- admin users + per-user secrets ---
     "list_admin_users",
@@ -300,6 +267,21 @@ fn reborn_facade_method_allowlist_is_frozen_and_only_shrinks() {
          {removed:?}. A facade method was removed (good — §5.2 migration progress!) — trim it from \
          the allowlist in the same PR so the ratchet keeps shrinking toward the turn-lifecycle + \
          `invoke`/`query` end-state (§10)."
+    );
+}
+
+#[test]
+fn product_surface_names_the_transitional_product_boundary() {
+    let source_path = workspace_root().join(FACADE_SOURCE);
+    let source = std::fs::read_to_string(&source_path)
+        .unwrap_or_else(|e| panic!("failed to read facade source {source_path:?}: {e}"));
+    let stripped = strip_comments_and_strings(&source);
+    let needle = format!("pub trait {PRODUCT_SURFACE_TRAIT}: {FACADE_TRAIT}");
+
+    assert!(
+        stripped.contains(&needle),
+        "`{PRODUCT_SURFACE_TRAIT}` must remain the named §5.2 product boundary over the frozen \
+         proto-facade while the method-set migration is in progress."
     );
 }
 

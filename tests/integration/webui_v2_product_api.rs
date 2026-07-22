@@ -32,8 +32,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_adapters::ProductOutboundPayload;
 use ironclaw_product_workflow::{
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices, RebornServicesApi,
-    RebornStreamEventsRequest, WebUiAuthenticatedCaller,
+    ProductSurface, RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices,
+    RebornServicesApi, RebornStreamEventsRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
@@ -1881,7 +1881,7 @@ async fn approval_gate_rediscovered_and_resolved_after_refresh() {
         h.coordinator.clone(),
         reply_target_binding_ref,
     );
-    let services: Arc<dyn RebornServicesApi> = Arc::new(
+    let services: Arc<dyn ProductSurface> = Arc::new(
         RebornServices::new(h.thread_harness.service.clone(), h.coordinator.clone())
             .with_event_stream(event_stream)
             .with_approval_interactions(approval_interactions),
