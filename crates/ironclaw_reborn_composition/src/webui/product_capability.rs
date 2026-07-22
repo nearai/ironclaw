@@ -19,9 +19,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
 use ironclaw_product_workflow::{
-    ProductCapabilityInvoker, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, WebUiAuthenticatedCaller,
+    EXTENSION_ACTIVATE_CAPABILITY_ID, ProductCapabilityInvoker, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID,
+    WebUiAuthenticatedCaller,
 };
 
 use crate::factory::{
@@ -205,23 +206,24 @@ fn product_gesture_grant(
             network_targets.push(credential.audience.clone());
         }
     }
-    let network =
-        if descriptor.id.as_str() == SKILL_INSTALL_CAPABILITY_ID && network_targets.is_empty() {
-            crate::builtin_capability_policy::dev_wildcard_network_policy()
-        } else {
-            let has_network_targets = !network_targets.is_empty();
-            NetworkPolicy {
-                allowed_targets: network_targets,
-                // An empty policy must remain unconstrained. Marking it as
-                // private-range constrained would synthesize an `ApplyNetworkPolicy`
-                // obligation for a capability that has no network surface, and fail
-                // before dispatch when no network-policy store is composed.
-                // Networked capabilities retain the private-IP guard on their
-                // manifest allowlist.
-                deny_private_ip_ranges: has_network_targets,
-                max_egress_bytes: None,
-            }
-        };
+    let network = if product_gesture_requires_dev_wildcard_egress(&descriptor.id)
+        && network_targets.is_empty()
+    {
+        crate::builtin_capability_policy::dev_wildcard_network_policy()
+    } else {
+        let has_network_targets = !network_targets.is_empty();
+        NetworkPolicy {
+            allowed_targets: network_targets,
+            // An empty policy must remain unconstrained. Marking it as
+            // private-range constrained would synthesize an `ApplyNetworkPolicy`
+            // obligation for a capability that has no network surface, and fail
+            // before dispatch when no network-policy store is composed.
+            // Networked capabilities retain the private-IP guard on their
+            // manifest allowlist.
+            deny_private_ip_ranges: has_network_targets,
+            max_egress_bytes: None,
+        }
+    };
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: descriptor.id.clone(),
@@ -237,6 +239,13 @@ fn product_gesture_grant(
             max_invocations: Some(1),
         },
     }
+}
+
+fn product_gesture_requires_dev_wildcard_egress(capability_id: &CapabilityId) -> bool {
+    matches!(
+        capability_id.as_str(),
+        SKILL_INSTALL_CAPABILITY_ID | EXTENSION_ACTIVATE_CAPABILITY_ID
+    )
 }
 
 fn product_invocation_mounts(
@@ -510,6 +519,26 @@ mod tests {
     }
 
     #[test]
+    fn product_gesture_grant_allows_extension_activation_discovery_egress() {
+        let descriptor = descriptor_with_id_and_network(
+            EXTENSION_ACTIVATE_CAPABILITY_ID,
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let grant = product_gesture_grant(
+            &descriptor,
+            &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+            MountView::default(),
+        );
+
+        assert_eq!(
+            grant.constraints.network,
+            crate::builtin_capability_policy::dev_wildcard_network_policy()
+        );
+    }
+
+    #[test]
     fn product_gesture_grant_constrains_manifest_declared_egress() {
         let target = NetworkTargetPattern {
             scheme: Some(NetworkScheme::Https),
@@ -567,8 +596,20 @@ mod tests {
         network_targets: Vec<NetworkTargetPattern>,
         runtime_credentials: Vec<RuntimeCredentialRequirement>,
     ) -> CapabilityDescriptor {
+        descriptor_with_id_and_network(
+            "builtin.product-gesture-test",
+            network_targets,
+            runtime_credentials,
+        )
+    }
+
+    fn descriptor_with_id_and_network(
+        id: &str,
+        network_targets: Vec<NetworkTargetPattern>,
+        runtime_credentials: Vec<RuntimeCredentialRequirement>,
+    ) -> CapabilityDescriptor {
         CapabilityDescriptor {
-            id: CapabilityId::new("builtin.product-gesture-test").unwrap(),
+            id: CapabilityId::new(id).unwrap(),
             provider: ExtensionId::new("builtin").unwrap(),
             runtime: RuntimeKind::FirstParty,
             trust_ceiling: TrustClass::UserTrusted,
