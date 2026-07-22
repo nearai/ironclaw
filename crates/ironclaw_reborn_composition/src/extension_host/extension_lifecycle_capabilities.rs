@@ -117,6 +117,7 @@ fn lifecycle_manifest(
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile: Some(ResourceProfile {
             default_estimate: ResourceEstimate::default()
                 .set_wall_clock_ms(100)
@@ -425,7 +426,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
-    use crate::factory::{RebornRuntimeSubstrate, build_runtime_substrate};
+    use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
     use crate::{OAuthClientConfig, RebornBuildInput};
     use ironclaw_host_api::InstallationState;
     use ironclaw_product_workflow::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
@@ -696,8 +697,6 @@ mod tests {
             .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
         let search = invoke_json(
             &services,
@@ -929,8 +928,6 @@ mod tests {
             .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
 
         invoke_json(
@@ -1157,8 +1154,6 @@ mod tests {
             .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
 
         invoke_json(
@@ -1226,8 +1221,6 @@ mod tests {
             .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
 
         invoke_json(
@@ -1289,8 +1282,6 @@ mod tests {
             .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
 
         invoke_json(
@@ -1352,8 +1343,6 @@ mod tests {
             .local_runtime_for_test()
             .expect("local runtime substrate")
             .extension_management
-            .as_ref()
-            .expect("extension management")
             .clone();
 
         invoke_json(
@@ -1470,7 +1459,7 @@ mod tests {
     }
 
     async fn invoke_json(
-        services: &RebornRuntimeSubstrate,
+        services: &RebornRuntimeStores,
         capability_id: &str,
         input: serde_json::Value,
     ) -> Result<serde_json::Value, RuntimeFailureKind> {
@@ -1484,7 +1473,7 @@ mod tests {
     }
 
     async fn invoke_outcome(
-        services: &RebornRuntimeSubstrate,
+        services: &RebornRuntimeStores,
         capability_id: &str,
         input: serde_json::Value,
     ) -> RuntimeCapabilityOutcome {
@@ -1498,7 +1487,7 @@ mod tests {
     }
 
     async fn seed_configured_account(
-        services: &RebornRuntimeSubstrate,
+        services: &RebornRuntimeStores,
         scope: &ResourceScope,
         provider: &str,
     ) {
@@ -1506,7 +1495,7 @@ mod tests {
     }
 
     async fn seed_configured_account_with_scopes(
-        services: &RebornRuntimeSubstrate,
+        services: &RebornRuntimeStores,
         scope: &ResourceScope,
         provider: &str,
         scopes: &[&str],

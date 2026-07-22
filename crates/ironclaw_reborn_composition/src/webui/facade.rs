@@ -215,26 +215,17 @@ pub(crate) fn build_webui_services_with_channel_connection(
     channel_connection: Option<Arc<dyn ChannelConnectionFacade>>,
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    if runtime.outbound_preferences.is_some()
+    if true
         && let Some(provider) = runtime.outbound_delivery_target_provider()
     {
         outbound_delivery_target_providers.push(provider);
     }
 
-    let admin_configuration_view = runtime
-        .admin_configuration
-        .as_ref()
-        .and_then(|admin_configuration| {
-            Some(AdminConfigurationViewProvider::new(
-                admin_configuration.clone(),
-                runtime.admin_configuration_uses.as_ref()?.as_ref().clone(),
-                runtime
-                    .extension_management
-                    .as_ref()?
-                    .installation_store_handle(),
-            ))
-        })
-        .unwrap_or_default();
+    let admin_configuration_view = AdminConfigurationViewProvider::new(
+        runtime.admin_configuration.clone(),
+        runtime.admin_configuration_uses.as_ref().clone(),
+        runtime.extension_management.installation_store_handle(),
+    );
     let mut api = ProductRebornServices::new_with_product_ports(
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
@@ -308,17 +299,10 @@ pub(crate) fn build_webui_services_with_channel_connection(
             },
         );
     }
-    if let (
-        Some(tool_permission_overrides),
-        Some(auto_approve_settings),
-        Some(persistent_approval_policies),
-        Some(extension_registry),
-    ) = (
-        runtime.tool_permission_overrides.as_ref(),
-        runtime.auto_approve_settings.as_ref(),
-        runtime.persistent_approval_policies.as_ref(),
-        runtime.extension_registry.as_ref(),
-    ) {
+    {
+        let tool_permission_overrides = &runtime.tool_permission_overrides;
+        let auto_approve_settings = &runtime.auto_approve_settings;
+        let persistent_approval_policies = &runtime.persistent_approval_policies;
         let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
             tool_permission_overrides.clone();
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
@@ -326,14 +310,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
         let persistent_approval_policies: Arc<
             dyn ironclaw_approvals::PersistentApprovalPolicyStore,
         > = persistent_approval_policies.clone();
-        let tool_registry = runtime
-            .shared_extension_registry
-            .clone()
-            .unwrap_or_else(|| {
-                Arc::new(SharedExtensionRegistry::new(
-                    extension_registry.as_ref().clone(),
-                ))
-            });
+        let tool_registry = runtime.shared_extension_registry.clone();
         let synthetic_operator_tools = if outbound_delivery_target_providers.is_empty() {
             Vec::new()
         } else {
@@ -357,18 +334,14 @@ pub(crate) fn build_webui_services_with_channel_connection(
             Arc::new(ActiveRegistryOperatorToolCatalog::new(
                 tool_registry,
                 synthetic_operator_tools,
-                runtime.extension_management.clone(),
+                Some(runtime.extension_management.clone()),
             )),
         );
         let mut lifecycle_facade =
             RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
-        if let Some(extension_management) = &runtime.extension_management {
-            lifecycle_facade =
-                lifecycle_facade.with_extension_management(extension_management.clone());
-        }
-        if let Some(channel_config) = &runtime.channel_config {
-            lifecycle_facade = lifecycle_facade.with_channel_config(channel_config.clone());
-        }
+        lifecycle_facade =
+            lifecycle_facade.with_extension_management(runtime.extension_management.clone());
+        lifecycle_facade = lifecycle_facade.with_channel_config(runtime.channel_config.clone());
         if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
             lifecycle_facade =
                 lifecycle_facade.with_runtime_http_egress(runtime_http_egress.clone());
@@ -383,17 +356,15 @@ pub(crate) fn build_webui_services_with_channel_connection(
     // The generic channel-config configure port: the setup facade renders
     // manifest-declared channel-config fields and routes submitted values
     // through it (extension-runtime §6.4).
-    if let Some(channel_config) = runtime.channel_config.as_ref() {
-        api = api.with_channel_config_facade(Arc::new(
-            crate::extension_host::channel_config::RebornChannelConfigFacade::new(
-                channel_config.clone(),
-            ),
-        ));
-    }
+    api = api.with_channel_config_facade(Arc::new(
+        crate::extension_host::channel_config::RebornChannelConfigFacade::new(
+            runtime.channel_config.clone(),
+        ),
+    ));
     // Share the activation selector's live master switch when the selected skill
     // context reads it. Deployments without that selector pass `None`, so the
     // toggle reports unavailable rather than writing to an orphan flag.
-    let auto_activate_flag = runtime.skill_auto_activate_learned.clone();
+    let auto_activate_flag = Some(runtime.skill_auto_activate_learned.clone());
     api = api.with_skills_product_facade(Arc::new(LocalSkillsProductFacade::new(
         Arc::clone(&runtime.skill_management),
         auto_activate_flag,
@@ -412,18 +383,12 @@ pub(crate) fn build_webui_services_with_channel_connection(
     // First-class projects + membership (ACL). Built once per runtime over the
     // scoped substrate and shared by every deployment path.
     api = api.with_project_service(runtime.reborn_project_service());
-    if let Some(outbound_preferences) = &runtime.outbound_preferences {
-        api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
-            Arc::clone(outbound_preferences),
-            Arc::new(OutboundDeliveryTargetRegistry::new(
-                outbound_delivery_target_providers,
-            )),
-        )));
-    } else if !outbound_delivery_target_providers.is_empty() {
-        return Err(RebornBuildError::InvalidConfig {
-            reason: "outbound delivery target providers require local runtime services".to_string(),
-        });
-    }
+    api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
+        Arc::clone(&runtime.outbound_preferences),
+        Arc::new(OutboundDeliveryTargetRegistry::new(
+            outbound_delivery_target_providers,
+        )),
+    )));
     if let Some(channel_connection) = channel_connection {
         api = api.with_channel_connection_facade(channel_connection);
     }
@@ -432,12 +397,12 @@ pub(crate) fn build_webui_services_with_channel_connection(
         runtime.readiness.clone(),
     )));
     api = api.with_operator_logs_service(crate::operator_log_buffer());
-    if let Some(owner_user_id) = &runtime.owner_user_id {
+    {
         let webui_boot_config = runtime.webui_boot_config();
         api = api.with_operator_service_lifecycle_service(Arc::new(
             RebornLocalServiceLifecycle::new_for_operator_with_boot_config(
                 runtime.webui_tenant_id().clone(),
-                owner_user_id.clone(),
+                runtime.owner_user_id.clone(),
                 webui_boot_config,
             ),
         ));
@@ -511,7 +476,7 @@ impl OperatorStatusService for ReadinessOperatorStatusService {
 struct LocalSkillsProductFacade {
     skill_management: Arc<RebornLocalSkillManagementPort>,
     // The skill activation selector's live master switch (see
-    // `RebornRuntimeSubstrate::skill_auto_activate_learned`); writing it here
+    // `RebornRuntimeStores::skill_auto_activate_learned`); writing it here
     // changes the next turn's selection without a runtime rebuild. `None` when no
     // flag-reading selector is wired (the production assembly) — the toggle then
     // reports unavailable instead of writing to a flag nothing reads.

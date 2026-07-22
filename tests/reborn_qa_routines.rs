@@ -278,7 +278,7 @@ async fn build_qa_fire_runtime(
     )
     .expect("local-yolo runtime input")
     .with_local_dev_confirmed_host_home_root(host_home_root);
-    let input = RebornRuntimeInput::from_services(input)
+    let input = RebornRuntimeInput::from_build_input(input)
         .with_identity(RebornRuntimeIdentity {
             tenant_id: QA_TENANT.to_string(),
             agent_id: QA_AGENT.to_string(),
@@ -300,7 +300,6 @@ async fn build_qa_fire_runtime(
 
 async fn seed_qa_fire_auto_approve(runtime: &RebornRuntime) {
     let auto_approve = runtime
-        .services()
         .local_dev_auto_approve_settings_for_test()
         .expect("QA fire runtime exposes local-dev auto-approve settings");
     auto_approve
@@ -601,9 +600,7 @@ async fn reborn_qa_fired_routine_executes_action_and_finalizes_reply() {
 
 async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
     let host_runtime = runtime
-        .services()
-        .host_runtime
-        .as_deref()
+        .host_runtime_for_test()
         .expect("runtime exposes host runtime");
     let outcome = host_runtime
         .invoke_capability(RuntimeCapabilityRequest::new(

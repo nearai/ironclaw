@@ -41,7 +41,7 @@ use ironclaw_turns::{
 };
 
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
-use crate::factory::RebornRuntimeSubstrate;
+use crate::factory::RebornRuntimeStores;
 use crate::local_dev_authorization::{
     StoreApprovalSettingsProvider, local_dev_effects_require_approval,
 };
@@ -96,7 +96,7 @@ pub(super) struct CapabilityPortWiring {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn capability_wiring(
-    services: &RebornRuntimeSubstrate,
+    services: &RebornRuntimeStores,
     thread_service: Arc<dyn SessionThreadService>,
     fallback_user_id: UserId,
     policy: Arc<BuiltinCapabilityPolicy>,
@@ -107,22 +107,22 @@ pub(super) fn capability_wiring(
     trajectory_observer: Option<Arc<dyn crate::RebornTrajectoryObserver>>,
 ) -> Option<CapabilityPortWiring> {
     let runtime = services.host_runtime.clone();
-    let workspace_mounts = services.workspace_mounts.clone()?;
-    let memory_mounts = services.memory_mounts.clone()?;
-    let system_extensions_lifecycle_mounts = services.system_extensions_lifecycle_mounts.clone()?;
+    let workspace_mounts = services.workspace_mounts.clone();
+    let memory_mounts = services.memory_mounts.clone();
+    let system_extensions_lifecycle_mounts = services.system_extensions_lifecycle_mounts.clone();
     let approval_requests: Arc<dyn ApprovalRequestStore> =
-        services.approval_requests.as_ref()?.clone();
+        services.approval_requests.clone();
     let capability_leases: Arc<dyn CapabilityLeaseStore> =
-        services.capability_leases.as_ref()?.clone();
+        services.capability_leases.clone();
     let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-        services.tool_permission_overrides.as_ref()?.clone();
+        services.tool_permission_overrides.clone();
     let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-        services.auto_approve_settings.as_ref()?.clone();
+        services.auto_approve_settings.clone();
     let approval_settings: Arc<dyn ApprovalSettingsProvider> =
         Arc::new(StoreApprovalSettingsProvider::new(
             tool_permission_overrides,
             auto_approve_settings,
-            services.persistent_approval_policies.as_ref()?.clone(),
+            services.persistent_approval_policies.clone(),
         ));
     let outbound_delivery_target_set_requires_approval = local_dev_effects_require_approval(
         services.runtime_policy.as_ref(),
@@ -130,7 +130,7 @@ pub(super) fn capability_wiring(
         &[EffectKind::ExternalWrite],
     );
     let extension_surface_source = ExtensionCapabilitySurfaceSource::new(Some(
-        services.extension_management.as_ref()?.clone(),
+        services.extension_management.clone(),
     ));
     // First-class project creation reuses the same access-controlled
     // `ProjectService` facade the WebUI v2 surface wires (composition owns the
@@ -152,7 +152,7 @@ pub(super) fn capability_wiring(
     // OpenAI-compatible Responses surface and this loop host see the same
     // run-scoped external-tool state.
     let external_tool_catalog: Arc<dyn ExternalToolCatalog> =
-        services.external_tool_catalog.as_ref()?.clone();
+        services.external_tool_catalog.clone();
     // Wire the durable gate-record and host-private replay-payload stores over
     // the composition-owned scoped filesystem (same backend + per-user mount view
     // as every other durable store; `extension_filesystem` is the shared composite
@@ -161,7 +161,7 @@ pub(super) fn capability_wiring(
     // and a gate/auth resume had no host-side replay payload to reconstitute
     // {input, estimate} from (arch-simplification §5.3 Stage 2a-i).
     let capability_store_filesystem =
-        crate::wrap_scoped(Arc::clone(services.extension_filesystem.as_ref()?));
+        crate::wrap_scoped(Arc::clone(&services.extension_filesystem));
     let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
         Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
             Arc::clone(&capability_store_filesystem),

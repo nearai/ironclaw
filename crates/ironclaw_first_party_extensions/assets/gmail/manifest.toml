@@ -28,6 +28,15 @@ visibility = "model"
 input_schema_ref = "schemas/gmail/list_messages.input.v1.json"
 prompt_doc_ref = "prompts/gmail/list_messages.md"
 
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
 [[tools.credentials]]
 handle = "gmail_account"
 vendor = "google"
@@ -44,6 +53,15 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/gmail/get_message.input.v1.json"
 prompt_doc_ref = "prompts/gmail/get_message.md"
+
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
 
 [[tools.credentials]]
 handle = "gmail_account"
@@ -62,6 +80,15 @@ visibility = "model"
 input_schema_ref = "schemas/gmail/send_message.input.v1.json"
 prompt_doc_ref = "prompts/gmail/send_message.md"
 
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
 [[tools.credentials]]
 handle = "gmail_account"
 vendor = "google"
@@ -78,6 +105,15 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/gmail/create_draft.input.v1.json"
 prompt_doc_ref = "prompts/gmail/create_draft.md"
+
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
 
 [[tools.credentials]]
 handle = "gmail_account"
@@ -96,6 +132,15 @@ visibility = "model"
 input_schema_ref = "schemas/gmail/reply_to_message.input.v1.json"
 prompt_doc_ref = "prompts/gmail/reply_to_message.md"
 
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
 [[tools.credentials]]
 handle = "gmail_account"
 vendor = "google"
@@ -112,6 +157,15 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/gmail/trash_message.input.v1.json"
 prompt_doc_ref = "prompts/gmail/trash_message.md"
+
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
 
 [[tools.credentials]]
 handle = "gmail_account"

@@ -422,13 +422,10 @@ async fn local_dev_services_include_repl_runtime_substrate() {
     assert!(services.local_runtime_for_test().is_some());
     let _ = &services.scoped_filesystem;
     let _ = &services.turn_state;
-    assert!(
-        services
-            .local_runtime_for_test()
-            .expect("local runtime")
-            .extension_management
-            .is_some()
-    );
+    let _ = &services
+        .local_runtime_for_test()
+        .expect("local runtime")
+        .extension_management;
     assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
 }
 
@@ -994,10 +991,7 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
-    let extension_management = runtime_surfaces
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let extension_management = &runtime_surfaces.extension_management;
     let gmail_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail").expect("valid ref");
     let calendar_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
@@ -1040,10 +1034,10 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
                 BuiltinApprovalPolicyAction::Dispatch {
                     capability: &gmail_capability,
                 },
-                &runtime_surfaces.workspace_mounts_for_test(),
-                &runtime_surfaces.skill_mounts_for_test(),
-                &runtime_surfaces.memory_mounts_for_test(),
-                &runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
+                runtime_surfaces.workspace_mounts_for_test(),
+                runtime_surfaces.skill_mounts_for_test(),
+                runtime_surfaces.memory_mounts_for_test(),
+                runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
             ),
         Err(BuiltinCapabilityPolicyError::MissingGrant { .. })
     ));
@@ -1122,10 +1116,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
-    let extension_management = runtime_surfaces
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let extension_management = &runtime_surfaces.extension_management;
     let notion_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
     let catalog =
@@ -1207,10 +1198,7 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
-    let extension_management = runtime_surfaces
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let extension_management = &runtime_surfaces.extension_management;
     let web_access_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access").expect("valid ref");
 
@@ -1637,10 +1625,7 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     .await
     .expect("local-dev services build");
     let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
-    let extension_management = runtime_surfaces
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let extension_management = &runtime_surfaces.extension_management;
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
@@ -1810,12 +1795,10 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
         .into_iter()
         .find(|account| account.provider.as_str() == "nearai")
         .expect("NEAR AI product-auth account");
-    let extension_management = first
+    let extension_management = &first
         .local_runtime_for_test()
         .expect("local runtime")
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+        .extension_management;
     let outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         Some(
             crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig::new(
@@ -1872,12 +1855,10 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
     ))
     .await
     .expect("local-dev services build");
-    let extension_management = services
+    let extension_management = &services
         .local_runtime_for_test()
         .expect("local runtime")
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+        .extension_management;
     let removal_scope = ironclaw_host_api::ResourceScope::local_default(
         ironclaw_host_api::UserId::new(owner).expect("valid user"),
         ironclaw_host_api::InvocationId::new(),
@@ -2376,7 +2357,7 @@ fn readiness_for_profile_diagnostics_cover_cutover_states() {
 }
 
 async fn invoke_json(
-    services: &RebornRuntimeSubstrate,
+    services: &RebornRuntimeStores,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
@@ -2445,7 +2426,7 @@ fn gsuite_context(capability_id: &str) -> ExecutionContext {
 /// first-party tool dispatch; enabling it here mirrors the operator
 /// having flipped it on before letting the agent run tools.
 async fn enable_global_auto_approve_for_context(
-    runtime_surfaces: &RebornRuntimeSubstrate,
+    runtime_surfaces: &RebornRuntimeStores,
     context: &ExecutionContext,
 ) {
     runtime_surfaces
@@ -2650,7 +2631,7 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 /// trait-object roles.
 ///
 /// The assertion reads the four trait-object pointers from the built
-/// `RebornRuntimeSubstrate` and compares their data halves via
+/// `RebornRuntimeStores` and compares their data halves via
 /// `std::ptr::addr_eq` (trait objects of different traits cannot be compared
 /// with `Arc::ptr_eq` directly).
 #[tokio::test]
@@ -2666,11 +2647,11 @@ async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles
     let runtime_surfaces = services.local_runtime_for_test().expect("local runtime");
 
     // Cast each fat-pointer's data half to *const () for cross-trait comparison.
-    let pref_ptr = Arc::as_ptr(&runtime_surfaces.outbound_preferences_for_test()) as *const ();
-    let state_ptr = Arc::as_ptr(&runtime_surfaces.outbound_state_for_test()) as *const ();
-    let gate_ptr = Arc::as_ptr(&runtime_surfaces.delivered_gate_routes_for_test()) as *const ();
+    let pref_ptr = Arc::as_ptr(runtime_surfaces.outbound_preferences_for_test()) as *const ();
+    let state_ptr = Arc::as_ptr(runtime_surfaces.outbound_state_for_test()) as *const ();
+    let gate_ptr = Arc::as_ptr(runtime_surfaces.delivered_gate_routes_for_test()) as *const ();
     let delivery_ptr =
-        Arc::as_ptr(&runtime_surfaces.triggered_run_delivery_for_test()) as *const ();
+        Arc::as_ptr(runtime_surfaces.triggered_run_delivery_for_test()) as *const ();
 
     assert!(
         std::ptr::addr_eq(pref_ptr, state_ptr),

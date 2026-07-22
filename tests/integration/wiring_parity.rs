@@ -221,7 +221,7 @@ async fn local_dev_profile_still_builds() {
     )
     .with_runtime_policy(policy);
     let runtime = ironclaw_reborn_composition::build_reborn_runtime(
-        ironclaw_reborn_composition::RebornRuntimeInput::from_services(input),
+        ironclaw_reborn_composition::RebornRuntimeInput::from_build_input(input),
     )
     .await
     .expect(

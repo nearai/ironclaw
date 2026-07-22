@@ -451,6 +451,11 @@ const PER_USER_ALIASES: &[&str] = &[
     "/workspace",
 ];
 
+/// The canonical global `/system` subroots, each exposed as its own read-only
+/// alias resolving to the same tenant-independent `VirtualPath`. Single source
+/// for the mount-grant wiring and its resolution test so the two cannot drift.
+const SYSTEM_SUBROOTS: [&str; 3] = ["/system/settings", "/system/extensions", "/system/skills"];
+
 /// Per-invocation [`MountView`] used as the production resolver.
 ///
 /// Every call rebuilds the alias→VirtualPath table for the caller's
@@ -524,7 +529,7 @@ fn invocation_mount_view_for_segments(
         ))?,
         MountPermissions::read_write_list_delete(),
     ));
-    for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+    for system_subroot in SYSTEM_SUBROOTS {
         grants.push(MountGrant::new(
             MountAlias::new(system_subroot)?,
             VirtualPath::new(system_subroot)?,
@@ -787,7 +792,7 @@ mod mount_view_tests {
         // read-only alias and resolves to the same VirtualPath
         // regardless of tenant — system data is global, not
         // per-tenant.
-        for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+        for system_subroot in SYSTEM_SUBROOTS {
             let resolved = view
                 .resolve(&ScopedPath::new(format!("{system_subroot}/foo")).unwrap())
                 .unwrap();

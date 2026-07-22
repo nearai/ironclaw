@@ -16,7 +16,7 @@ impl RebornRuntime {
         &self,
         _turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError> {
-        if self.approval_requests.is_none() {
+        if false {
             return Ok(None);
         }
         Ok(Some(Arc::clone(&self.approval_interaction_service)))
@@ -30,7 +30,6 @@ impl RebornRuntime {
         &self,
         _turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Option<Arc<dyn AuthInteractionService>> {
-        self.approval_requests.as_ref()?;
         Some(Arc::clone(&self.auth_interaction_service))
     }
 
@@ -58,7 +57,7 @@ impl RebornRuntime {
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
     {
-        if self.approval_requests.is_none() {
+        if false {
             return Ok(None);
         }
         Ok(Some(Arc::clone(&self.approval_interaction_service)))
@@ -81,7 +80,6 @@ impl RebornRuntime {
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
     {
-        self.approval_requests.as_ref()?;
         Some(Arc::clone(&self.auth_interaction_service))
     }
 }

@@ -13,7 +13,7 @@ use crate::builtin_capability_policy::{
 };
 use crate::factory::{
     ComposedApprovalRequestStore, ComposedAutoApproveSettingStore, ComposedCapabilityLeaseStore,
-    RebornRuntimeSubstrate,
+    RebornRuntimeStores,
 };
 
 pub(crate) trait LocalDevApprovalHarness {
@@ -30,43 +30,43 @@ pub(crate) trait LocalDevApprovalHarness {
     fn auto_approve_settings(&self) -> Option<&Arc<ComposedAutoApproveSettingStore>>;
 }
 
-impl LocalDevApprovalHarness for RebornRuntimeSubstrate {
+impl LocalDevApprovalHarness for RebornRuntimeStores {
     fn host_runtime(&self) -> Option<&Arc<dyn HostRuntime>> {
         Some(&self.host_runtime)
     }
 
     fn approval_requests(&self) -> Option<&Arc<ComposedApprovalRequestStore>> {
-        self.approval_requests.as_ref()
+        Some(&self.approval_requests)
     }
 
     fn capability_leases(&self) -> Option<&Arc<ComposedCapabilityLeaseStore>> {
-        self.capability_leases.as_ref()
+        Some(&self.capability_leases)
     }
 
     fn capability_policy(
         &self,
     ) -> Option<&Arc<crate::builtin_capability_policy::BuiltinCapabilityPolicy>> {
-        self.capability_policy.as_ref()
+        Some(&self.capability_policy)
     }
 
     fn workspace_mounts(&self) -> Option<&MountView> {
-        self.workspace_mounts.as_ref()
+        Some(&self.workspace_mounts)
     }
 
     fn skill_mounts(&self) -> Option<&MountView> {
-        self.skill_mounts.as_ref()
+        Some(&self.skill_mounts)
     }
 
     fn memory_mounts(&self) -> Option<&MountView> {
-        self.memory_mounts.as_ref()
+        Some(&self.memory_mounts)
     }
 
     fn system_extensions_lifecycle_mounts(&self) -> Option<&MountView> {
-        self.system_extensions_lifecycle_mounts.as_ref()
+        Some(&self.system_extensions_lifecycle_mounts)
     }
 
     fn auto_approve_settings(&self) -> Option<&Arc<ComposedAutoApproveSettingStore>> {
-        self.auto_approve_settings.as_ref()
+        Some(&self.auto_approve_settings)
     }
 }
 

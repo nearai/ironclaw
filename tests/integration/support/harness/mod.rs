@@ -47,7 +47,7 @@ use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
     OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornBuildInput,
-    RebornProductAuthServices, build_reborn_services,
+    RebornProductAuthServices, RebornRuntimeInput, build_runtime,
 };
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
@@ -321,7 +321,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// piecewise test-support accessors. `Some` only for `new_with_options`-built
     /// harnesses; `None` for the lower-level constructors and the Echo backend.
     /// Read via `reborn_services_for_test`.
-    reborn_services: Option<ironclaw_reborn_composition::RebornServices>,
+    reborn_services: Option<ironclaw_reborn_composition::RebornRuntime>,
     /// Set from `HostRuntimeHarnessOptions::with_trigger_active_run_lookup_for_test()`
     /// (#5886) at construction; read by `HarnessCapabilityMode::into_parts` to
     /// decide whether to call `install_trigger_active_run_lookup_for_test` once
@@ -695,7 +695,7 @@ impl HostRuntimeCapabilityHarness {
             input =
                 input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
         }
-        let services = build_reborn_services(input).await?;
+        let services = build_runtime(RebornRuntimeInput::from_build_input(input)).await?;
         if seed_extension_credentials {
             profiles::extension::seed_extension_lifecycle_credentials(&services, &user_id).await?;
         }
@@ -733,7 +733,7 @@ impl HostRuntimeCapabilityHarness {
         // C-JOURNEY: capture product-auth before `services.host_runtime` is
         // moved out below, so `seed_github_credential_account` can create a
         // real credential account later (auth-gate happy-path resume).
-        let product_auth = services.product_auth.clone();
+        let product_auth = Some(services.product_auth_for_test());
         // E-SKILL: build the local-dev skill context source only when this
         // harness surfaces the synthetic `skill_activate` capability (i.e.
         // `skill_activation_tools`). Built with the caller-supplied tenant
@@ -804,8 +804,7 @@ impl HostRuntimeCapabilityHarness {
         // `reborn_services_for_test` needs the WHOLE `RebornServices` value,
         // not just the pieces already extracted above.
         let runtime = services
-            .host_runtime
-            .clone()
+            .host_runtime_for_test()
             .ok_or("local-dev Reborn services missing host runtime")?;
         let runtime = Arc::new(RecordingHostRuntime::new(
             runtime,
@@ -886,7 +885,7 @@ impl HostRuntimeCapabilityHarness {
     /// gate dispatch instead of the harness's direct-resume test shortcut.
     pub(crate) fn reborn_services_for_test(
         &self,
-    ) -> Option<&ironclaw_reborn_composition::RebornServices> {
+    ) -> Option<&ironclaw_reborn_composition::RebornRuntime> {
         self.reborn_services.as_ref()
     }
 

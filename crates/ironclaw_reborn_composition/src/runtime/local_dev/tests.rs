@@ -141,7 +141,7 @@ mod tests {
     /// it here mirrors the operator having flipped it on before letting the
     /// agent run tools.
     async fn enable_global_auto_approve_for_run(
-        services: &crate::factory::RebornRuntimeSubstrate,
+        services: &crate::factory::RebornRuntimeStores,
         run_context: &LoopRunContext,
         user_id: &UserId,
     ) {
@@ -681,16 +681,13 @@ mod tests {
     }
 
     async fn install_gsuite_extensions(
-        services: &crate::factory::RebornRuntimeSubstrate,
+        services: &crate::factory::RebornRuntimeStores,
         extension_state: GsuiteExtensionState,
     ) {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate");
-        let extension_management = runtime_surfaces
-            .extension_management
-            .as_ref()
-            .expect("extension management")
+        let extension_management = runtime_surfaces.extension_management
             .clone();
         // #5459 P1: install AS the runtime's tenant operator so the extensions
         // are tenant-shared (what these surface tests always meant) — a
@@ -3954,10 +3951,10 @@ mod tests {
                 crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
-                &runtime_surfaces.workspace_mounts_for_test(),
-                &runtime_surfaces.skill_mounts_for_test(),
-                &runtime_surfaces.memory_mounts_for_test(),
-                &runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
+                runtime_surfaces.workspace_mounts_for_test(),
+                runtime_surfaces.skill_mounts_for_test(),
+                runtime_surfaces.memory_mounts_for_test(),
+                runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
             )
             .expect("missing-target outbound delivery approval lease terms");
         ApprovalResolver::new(
@@ -4162,10 +4159,10 @@ mod tests {
                 crate::builtin_capability_policy::BuiltinApprovalPolicyAction::Dispatch {
                     capability: &set_capability_id,
                 },
-                &runtime_surfaces.workspace_mounts_for_test(),
-                &runtime_surfaces.skill_mounts_for_test(),
-                &runtime_surfaces.memory_mounts_for_test(),
-                &runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
+                runtime_surfaces.workspace_mounts_for_test(),
+                runtime_surfaces.skill_mounts_for_test(),
+                runtime_surfaces.memory_mounts_for_test(),
+                runtime_surfaces.system_extensions_lifecycle_mounts_for_test(),
             )
             .expect("outbound delivery approval lease terms");
         let persistent_terms = approval.clone();
@@ -5172,10 +5169,7 @@ mod tests {
             let runtime_surfaces = services
                 .local_runtime_for_test()
                 .expect("local runtime substrate");
-            let extension_management = runtime_surfaces
-                .extension_management
-                .as_ref()
-                .expect("extension management")
+            let extension_management = runtime_surfaces.extension_management
                 .clone();
             let operator = extension_management
                 .tenant_operator_user_id_for_test()
@@ -5278,10 +5272,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate");
-        let extension_management = runtime_surfaces
-            .extension_management
-            .as_ref()
-            .expect("extension management")
+        let extension_management = runtime_surfaces.extension_management
             .clone();
         let operator = extension_management
             .tenant_operator_user_id_for_test()
@@ -5492,10 +5483,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate");
-        let extension_management = runtime_surfaces
-            .extension_management
-            .as_ref()
-            .expect("extension management")
+        let extension_management = runtime_surfaces.extension_management
             .clone();
         let operator = extension_management
             .tenant_operator_user_id_for_test()

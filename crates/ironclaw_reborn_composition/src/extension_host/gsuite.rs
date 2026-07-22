@@ -224,9 +224,12 @@ fn capability_manifest(
         ))?),
         required_host_ports: Vec::new(),
         runtime_credentials: runtime_credentials(capability, spec)?,
-        // gsuite egress is applied via the dedicated Google-API network policy
-        // special-case, not a manifest-declared allowlist.
-        network_targets: Vec::new(),
+        // gsuite egress is manifest-declared: the Google API hosts plus the
+        // per-capability egress cap the generic grant-minting path applies.
+        network_targets: ironclaw_first_party_extensions::google_api_network_policy()
+            .allowed_targets,
+        max_egress_bytes: ironclaw_first_party_extensions::google_api_network_policy()
+            .max_egress_bytes,
         resource_profile: Some(gsuite_resource_profile()),
         origin_gate_matrix: None,
     })

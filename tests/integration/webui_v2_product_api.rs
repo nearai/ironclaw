@@ -304,7 +304,7 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -412,7 +412,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -527,7 +527,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
     let rebuilt_runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(rebuilt_input)
+        RebornRuntimeInput::from_build_input(rebuilt_input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -647,7 +647,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -773,7 +773,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
     let rebuilt_runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(rebuilt_input)
+        RebornRuntimeInput::from_build_input(rebuilt_input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -866,7 +866,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -1079,7 +1079,7 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -1153,7 +1153,7 @@ async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision
             reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
         ));
     let runtime = build_reborn_runtime(
-        RebornRuntimeInput::from_services(input)
+        RebornRuntimeInput::from_build_input(input)
             .with_identity(RebornRuntimeIdentity {
                 tenant_id: tenant_id.as_str().to_string(),
                 agent_id: agent_id.as_str().to_string(),
@@ -1514,7 +1514,7 @@ impl AdminConfigurationFixture {
                 reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
             ));
         let runtime = build_reborn_runtime(
-            RebornRuntimeInput::from_services(input)
+            RebornRuntimeInput::from_build_input(input)
                 .with_identity(RebornRuntimeIdentity {
                     tenant_id: tenant_id.as_str().to_string(),
                     agent_id: agent_id.as_str().to_string(),

@@ -21,8 +21,7 @@ use ironclaw_host_runtime::{
     HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
 };
 use ironclaw_product_workflow::{
-    ProductCapabilityInvoker, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, WebUiAuthenticatedCaller,
+    ProductCapabilityInvoker, RebornServicesError, WebUiAuthenticatedCaller,
 };
 
 use crate::RebornRuntime;
@@ -32,13 +31,10 @@ const PRODUCT_RESULT_ROOT: &str = "/product-results";
 const PRODUCT_INGRESS_EXTENSION_ID: &str = "ironclaw_webui";
 
 #[derive(Clone)]
-pub(crate) enum RuntimeProductCapabilityInvoker {
-    Available {
-        host_runtime: Arc<dyn HostRuntime>,
-        registry: Arc<ExtensionRegistry>,
-        results: ProductResultFilesystem,
-    },
-    Unavailable,
+pub(crate) struct RuntimeProductCapabilityInvoker {
+    host_runtime: Arc<dyn HostRuntime>,
+    registry: Arc<ExtensionRegistry>,
+    results: ProductResultFilesystem,
 }
 
 #[derive(Clone)]
@@ -48,13 +44,9 @@ pub(crate) enum ProductResultFilesystem {
 
 impl RuntimeProductCapabilityInvoker {
     pub(crate) fn from_runtime(runtime: &RebornRuntime) -> Self {
-        let Some(extension_filesystem) = runtime.extension_filesystem.as_ref() else {
-            return Self::Unavailable;
-        };
-        let Some(registry) = runtime.extension_registry.as_ref().map(Arc::clone) else {
-            return Self::Unavailable;
-        };
-        Self::Available {
+        let extension_filesystem = &runtime.extension_filesystem;
+        let registry = Arc::clone(&runtime.extension_registry);
+        Self {
             host_runtime: Arc::clone(&runtime.host_runtime),
             registry,
             results: ProductResultFilesystem::Composite(crate::wrap_scoped(Arc::clone(
@@ -73,14 +65,11 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
-        let Self::Available {
+        let Self {
             host_runtime,
             registry,
             results,
-        } = self
-        else {
-            return Err(product_runtime_unavailable());
-        };
+        } = self;
         // The origin-to-gate matrix is still provisional in today's kernel.
         // Encode the direct user gesture as one exact, host-issued grant. The
         // runtime independently re-resolves the descriptor and authorizes it,
@@ -399,17 +388,6 @@ where
     .map_err(RebornServicesError::internal_from)
 }
 
-fn product_runtime_unavailable() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: false,
-        field: None,
-        validation_code: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{
@@ -499,6 +477,7 @@ mod tests {
             default_permission: PermissionMode::Allow,
             runtime_credentials,
             network_targets,
+            max_egress_bytes: None,
             resource_profile: None,
             origin_gate_matrix: None,
         }

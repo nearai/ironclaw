@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::RebornRuntime;
 
 #[cfg(feature = "test-support")]
 use ironclaw_first_party_extensions::{
@@ -7,14 +8,14 @@ use ironclaw_first_party_extensions::{
 };
 #[cfg(feature = "test-support")]
 use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, EffectKind, GrantConstraints, NetworkPolicy,
+    CapabilityGrant, CapabilityGrantId, EffectKind, ExtensionId, GrantConstraints, NetworkPolicy,
     NetworkTargetPattern, Principal,
 };
 #[cfg(feature = "test-support")]
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
 /// Harness-facing wiring for
-/// [`RebornRuntimeSubstrate::start_channel_host_assembly_for_test`]: the test group
+/// [`RebornRuntimeStores::start_channel_host_assembly_for_test`]: the test group
 /// supplies its own run-world services; everything else is production.
 #[cfg(any(test, feature = "test-support"))]
 pub struct ChannelHostAssemblyTestWiring {
@@ -25,128 +26,97 @@ pub struct ChannelHostAssemblyTestWiring {
 }
 
 #[allow(dead_code)]
-impl RebornRuntimeSubstrate {
+impl RebornRuntimeStores {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn local_runtime_for_test(&self) -> Option<&Self> {
-        self.extension_lifecycle_surface_context.as_ref()?;
         Some(self)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn approval_requests_for_test(&self) -> &Arc<ComposedApprovalRequestStore> {
-        self.approval_requests
-            .as_ref()
-            .expect("local runtime approval request store")
+        &self.approval_requests
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn capability_leases_for_test(&self) -> &Arc<ComposedCapabilityLeaseStore> {
-        self.capability_leases
-            .as_ref()
-            .expect("local runtime capability lease store")
+        &self.capability_leases
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn capability_policy_for_test(&self) -> &Arc<BuiltinCapabilityPolicy> {
-        self.capability_policy
-            .as_ref()
-            .expect("local runtime capability policy")
+        &self.capability_policy
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn persistent_approval_policies_for_test(
         &self,
     ) -> &Arc<ComposedPersistentApprovalPolicyStore> {
-        self.persistent_approval_policies
-            .as_ref()
-            .expect("local runtime persistent approval policy store")
+        &self.persistent_approval_policies
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn tool_permission_overrides_for_test(
         &self,
     ) -> &Arc<ComposedToolPermissionOverrideStore> {
-        self.tool_permission_overrides
-            .as_ref()
-            .expect("local runtime tool permission override store")
+        &self.tool_permission_overrides
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn auto_approve_settings_for_test(&self) -> &Arc<ComposedAutoApproveSettingStore> {
-        self.auto_approve_settings
-            .as_ref()
-            .expect("local runtime auto-approve setting store")
+        &self.auto_approve_settings
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn external_tool_catalog_for_test(&self) -> &Arc<dyn ExternalToolCatalog> {
-        self.external_tool_catalog
-            .as_ref()
-            .expect("local runtime external tool catalog")
+        &self.external_tool_catalog
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn outbound_delivery_targets_for_test(
         &self,
     ) -> &Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry> {
-        self.outbound_delivery_targets
-            .as_ref()
-            .expect("local runtime outbound delivery target registry")
+        &self.outbound_delivery_targets
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn outbound_preferences_for_test(
         &self,
     ) -> &Arc<dyn CommunicationPreferenceRepository> {
-        self.outbound_preferences
-            .as_ref()
-            .expect("local runtime outbound preferences")
+        &self.outbound_preferences
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn skill_auto_activate_learned_for_test(&self) -> &Arc<AtomicBool> {
-        self.skill_auto_activate_learned
-            .as_ref()
-            .expect("local runtime skill auto-activation switch")
+        &self.skill_auto_activate_learned
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn outbound_state_for_test(&self) -> &Arc<dyn OutboundStateStore> {
-        self.outbound_state
-            .as_ref()
-            .expect("local runtime outbound state store")
+        &self.outbound_state
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn delivered_gate_routes_for_test(&self) -> &Arc<dyn DeliveredGateRouteStore> {
-        self.delivered_gate_routes
-            .as_ref()
-            .expect("local runtime delivered gate route store")
+        &self.delivered_gate_routes
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn triggered_run_delivery_for_test(&self) -> &Arc<dyn TriggeredRunDeliveryStore> {
-        self.triggered_run_delivery
-            .as_ref()
-            .expect("local runtime triggered-run delivery store")
+        &self.triggered_run_delivery
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn in_memory_budget_event_sink_for_test(
         &self,
     ) -> &Arc<ironclaw_resources::InMemoryBudgetEventSink> {
-        self.in_memory_budget_event_sink
-            .as_ref()
-            .expect("local runtime in-memory budget event sink")
+        &self.in_memory_budget_event_sink
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn admin_configuration_uses_for_test(
         &self,
     ) -> &Arc<Vec<AdminConfigurationCatalogUse>> {
-        self.admin_configuration_uses
-            .as_ref()
-            .expect("local runtime admin configuration catalog uses")
+        &self.admin_configuration_uses
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -154,62 +124,46 @@ impl RebornRuntimeSubstrate {
         &self,
     ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>
     {
-        self.channel_disconnect_slot
-            .as_ref()
-            .expect("local runtime channel disconnect slot")
+        &self.channel_disconnect_slot
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn skill_mounts_for_test(&self) -> &MountView {
-        self.skill_mounts
-            .as_ref()
-            .expect("local runtime skill mounts")
+        &self.skill_mounts
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn memory_mounts_for_test(&self) -> &MountView {
-        self.memory_mounts
-            .as_ref()
-            .expect("local runtime memory mounts")
+        &self.memory_mounts
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn system_extensions_lifecycle_mounts_for_test(&self) -> &MountView {
-        self.system_extensions_lifecycle_mounts
-            .as_ref()
-            .expect("local runtime system extension lifecycle mounts")
+        &self.system_extensions_lifecycle_mounts
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn skill_filesystem_for_test(
         &self,
     ) -> &Arc<ScopedFilesystem<CompositeRootFilesystem>> {
-        self.skill_filesystem
-            .as_ref()
-            .expect("local runtime skill filesystem")
+        &self.skill_filesystem
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn workspace_filesystem_for_test(
         &self,
     ) -> &Arc<ScopedFilesystem<CompositeRootFilesystem>> {
-        self.workspace_filesystem
-            .as_ref()
-            .expect("local runtime workspace filesystem")
+        &self.workspace_filesystem
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn extension_filesystem_for_test(&self) -> &Arc<CompositeRootFilesystem> {
-        self.extension_filesystem
-            .as_ref()
-            .expect("local runtime extension filesystem")
+        &self.extension_filesystem
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn workspace_mounts_for_test(&self) -> &MountView {
-        self.workspace_mounts
-            .as_ref()
-            .expect("local runtime workspace mounts")
+        &self.workspace_mounts
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -228,9 +182,7 @@ impl RebornRuntimeSubstrate {
 
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn extension_registry_for_test(&self) -> &Arc<ExtensionRegistry> {
-        self.extension_registry
-            .as_ref()
-            .expect("local runtime extension registry")
+        &self.extension_registry
     }
 
     /// The shared scoped secret store backing this composition.
@@ -383,84 +335,10 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn channel_config_facade(
         &self,
     ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelConfigFacade>> {
-        let service = self.channel_config.clone()?;
+        let service = self.channel_config.clone();
         Some(Arc::new(
             crate::extension_host::channel_config::RebornChannelConfigFacade::new(service),
         ))
-    }
-
-    /// Start the generic channel host assembly (extension-runtime P6 S2):
-    /// the per-extension inbound-channel reconcile loop over deployment
-    /// bindings and the generic host's active compatibility snapshot. `None`
-    /// when this composition path has no
-    /// generic host, no ingress registry, or no `[channel.config]` service
-    /// — there is nothing to reconcile against. The run-delivery observer
-    /// half follows the delivery coordinator's availability: without a
-    /// coordinator, registrations are ingress-only.
-    pub(crate) fn start_channel_host_assembly(
-        &self,
-        wiring: ChannelHostAssemblyWiring,
-    ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
-        use crate::extension_host::channel_host::{
-            FilesystemChannelWorkflowStateFactory, GenericChannelHostDeps,
-        };
-
-        let ChannelHostAssemblyWiring {
-            thread_service,
-            turn_coordinator,
-            approval_interaction,
-            auth_interaction,
-            identity,
-            approval_context,
-            blocked_auth_prompts,
-            auth_flow_cancel,
-            run_delivery_settings,
-        } = wiring;
-        let generic_host = self.extension_management.as_ref()?.generic_host()?;
-        let ingress = self.extension_ingress.as_ref()?;
-        let channel_config = self.channel_config.clone()?;
-        let workflow_state = Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::clone(
-            self.extension_filesystem.as_ref()?,
-        )));
-        let outbound_state = Arc::clone(self.outbound_state.as_ref()?);
-        let delivered_gate_routes = Arc::clone(self.delivered_gate_routes.as_ref()?);
-        let outbound_preferences = Arc::clone(self.outbound_preferences.as_ref()?);
-        let delivery = self.delivery_coordinator.clone().map(|coordinator| {
-            crate::extension_host::channel_host::ChannelHostDeliveryDeps {
-                coordinator,
-                outbound_store: Arc::clone(&outbound_state),
-                route_store: Arc::clone(&delivered_gate_routes),
-                communication_preferences: Arc::clone(&outbound_preferences),
-                approval_context,
-                blocked_auth_prompts,
-                auth_flow_cancel,
-                settings: run_delivery_settings,
-            }
-        });
-
-        let identity_lookup = self
-            .channel_identity_store
-            .clone()
-            .map(|store| store as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>);
-        Some(
-            crate::extension_host::channel_host::GenericChannelHostAssembly::start(
-                GenericChannelHostDeps {
-                    watch: generic_host.snapshot_watch(),
-                    deployment_channels: Arc::clone(&self.deployment_channels),
-                    registry: Arc::clone(&ingress.registry),
-                    channel_config,
-                    workflow_state,
-                    thread_service,
-                    turn_coordinator,
-                    approval_interaction,
-                    auth_interaction,
-                    identity,
-                    identity_lookup,
-                    delivery,
-                    channel_pairing: self.channel_pairing.clone(),
-                },
-            ),
-        )
     }
 
     /// Test-support flavor of [`Self::start_channel_host_assembly`]: the
@@ -520,22 +398,22 @@ impl RebornRuntimeSubstrate {
         &self,
     ) -> Option<Arc<ScopedFilesystem<CompositeRootFilesystem>>> {
         Some(Arc::new(ScopedFilesystem::with_fixed_view(
-            Arc::clone(self.extension_filesystem.as_ref()?),
-            self.workspace_mounts.clone()?,
+            Arc::clone(&self.extension_filesystem),
+            self.workspace_mounts.clone(),
         )))
     }
 
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_approval_test_parts(&self) -> Option<RebornApprovalTestParts> {
         let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
-            self.approval_requests.as_ref()?.clone();
+            self.approval_requests.clone();
         let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
-            self.capability_leases.as_ref()?.clone();
+            self.capability_leases.clone();
         // Build over the same shared composite root production `capability_wiring`
         // uses, so these test-support stores persist across the group's
         // threads/turns and round-trip identically to production.
         let capability_store_filesystem =
-            crate::wrap_scoped(Arc::clone(self.extension_filesystem.as_ref()?));
+            crate::wrap_scoped(Arc::clone(&self.extension_filesystem));
         let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
             Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
                 Arc::clone(&capability_store_filesystem),
@@ -556,7 +434,7 @@ impl RebornRuntimeSubstrate {
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>> {
         let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
-            self.auto_approve_settings.as_ref()?.clone();
+            self.auto_approve_settings.clone();
         Some(auto_approve_settings)
     }
 
@@ -571,9 +449,7 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn extension_installation_store_for_test(
         &self,
     ) -> Option<Arc<dyn ExtensionInstallationStore>> {
-        self.extension_management
-            .as_ref()
-            .map(|em| em.installation_store_for_test())
+        Some(self.extension_management.installation_store_for_test())
     }
 
     /// Test-support access to the local-dev memory filesystem that backs the
@@ -586,7 +462,7 @@ impl RebornRuntimeSubstrate {
     pub(crate) fn local_dev_profile_filesystem_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_filesystem::RootFilesystem>> {
-        Some(Arc::clone(self.extension_filesystem.as_ref()?)
+        Some(Arc::clone(&self.extension_filesystem)
             as Arc<dyn ironclaw_filesystem::RootFilesystem>)
     }
 
@@ -615,14 +491,14 @@ impl RebornRuntimeSubstrate {
 
     /// Test-support access to the local-dev communication-preference repository
     /// (W6-COLD-SPOTS seam). This is the SAME `Arc` that `build_local_runtime_runtime_stores`
-    /// wires into `RebornRuntimeSubstrate::outbound_preferences` via
+    /// wires into `RebornRuntimeStores::outbound_preferences` via
     /// `local_dev_outbound_store`, for tests only. Returns `None` for
     /// production-profile compositions without a local-dev runtime.
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_outbound_preferences_for_test(
         &self,
     ) -> Option<Arc<dyn CommunicationPreferenceRepository>> {
-        self.outbound_preferences.as_ref().map(Arc::clone)
+        Some(Arc::clone(&self.outbound_preferences))
     }
 
     /// Test-support access to the on-disk local-dev storage root (W6-COLD-SPOTS
@@ -650,7 +526,7 @@ impl RebornRuntimeSubstrate {
     {
         Some(Arc::new(
             crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
-                self.workspace_filesystem.as_ref()?,
+                &self.workspace_filesystem,
             )),
         ))
     }
@@ -693,7 +569,7 @@ impl RebornRuntimeSubstrate {
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>> {
         let overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
-            self.tool_permission_overrides.as_ref()?.clone();
+            self.tool_permission_overrides.clone();
         Some(overrides)
     }
 
@@ -706,7 +582,7 @@ impl RebornRuntimeSubstrate {
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>> {
         let policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
-            self.persistent_approval_policies.as_ref()?.clone();
+            self.persistent_approval_policies.clone();
         Some(policies)
     }
 
@@ -757,7 +633,7 @@ impl RebornRuntimeSubstrate {
         package: &ironclaw_extensions::ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
     ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
-        let extension_management = self.extension_management.as_ref()?;
+        let extension_management = &self.extension_management;
         Some(
             extension_management
                 .publish_bundled_package_for_test(package, resolved)
@@ -801,9 +677,9 @@ impl RebornRuntimeSubstrate {
         Arc<dyn ironclaw_outbound::CommunicationPreferenceRepository>,
     )> {
         Some((
-            Arc::clone(self.outbound_state.as_ref()?),
-            Arc::clone(self.delivered_gate_routes.as_ref()?),
-            Arc::clone(self.outbound_preferences.as_ref()?),
+            Arc::clone(&self.outbound_state),
+            Arc::clone(&self.delivered_gate_routes),
+            Arc::clone(&self.outbound_preferences),
         ))
     }
 
@@ -820,10 +696,11 @@ impl RebornRuntimeSubstrate {
     ) -> Option<
         Result<ActiveExtensionAuthorityForTest, ironclaw_product_workflow::ProductWorkflowError>,
     > {
-        let extension_management = self.extension_management.as_ref()?;
+        let extension_management = &self.extension_management;
         Some(active_extension_authority_for_test(extension_management, grantee).await)
     }
 }
+
 
 #[cfg(feature = "test-support")]
 pub struct ActiveExtensionAuthorityForTest {
@@ -944,7 +821,7 @@ fn active_extension_network_policy_for_test(
     }
 }
 
-/// Bundle returned by [`RebornRuntimeSubstrate::local_dev_attachment_test_support_for_test`]
+/// Bundle returned by [`RebornRuntimeStores::local_dev_attachment_test_support_for_test`]
 /// (C-ATTACH seam). Test-support only — zero bytes shipped in production builds.
 #[cfg(feature = "test-support")]
 #[derive(Clone)]

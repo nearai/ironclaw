@@ -78,7 +78,7 @@ use ironclaw_product_workflow::{
 use ironclaw_reborn_composition::{
     ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
     ChannelIngressRegistration, ExtensionIngressParts, GenericChannelHostAssembly,
-    GenericChannelInboundSink, PostAdmissionObserver, RebornServices, StaticIngressSecrets,
+    GenericChannelInboundSink, PostAdmissionObserver, RebornRuntime, StaticIngressSecrets,
     VerifiedEvidenceMint, extension_ingress_route_mount,
 };
 use ironclaw_turns::TurnScope;
@@ -237,7 +237,7 @@ impl PostAdmissionObserver for RecordingForwardObserver {
 /// delivery ledger).
 fn delivery_run_services(
     harness: &RebornIntegrationHarness,
-    services: &RebornServices,
+    services: &RebornRuntime,
     extension_id: &str,
 ) -> RunDeliveryServices {
     let (outbound_store, route_store, communication_preferences) = services
@@ -501,7 +501,7 @@ async fn activate_slack(group: &RebornIntegrationGroup) {
 /// Assert the coordinator's ledger for `scope`: at least one attempt reached
 /// terminal `Delivered`, and none is stranded mid-lifecycle
 /// (`Prepared`/`Sending` — persist-before-egress must settle terminally).
-async fn assert_delivered_attempt(services: &RebornServices, scope: &TurnScope) {
+async fn assert_delivered_attempt(services: &RebornRuntime, scope: &TurnScope) {
     let (outbound_store, _, _) = services
         .outbound_delivery_stores_for_test()
         .expect("outbound stores");
@@ -540,7 +540,7 @@ async fn assert_delivered_attempt(services: &RebornServices, scope: &TurnScope) 
 /// registration is a test failure, never a hang.
 async fn wait_for_production_registration(
     assembly: &Arc<GenericChannelHostAssembly>,
-    services: &RebornServices,
+    services: &RebornRuntime,
     extension_id: &str,
 ) -> Arc<dyn ConversationBindingService> {
     let registry = services
@@ -562,7 +562,7 @@ async fn wait_for_production_registration(
     }
 }
 
-fn reborn_services(group: &RebornIntegrationGroup) -> &RebornServices {
+fn reborn_services(group: &RebornIntegrationGroup) -> &RebornRuntime {
     group
         .capability_harness()
         .expect("host-runtime capability harness")
@@ -651,8 +651,7 @@ async fn configure_admin_group(
         .validate()
         .expect("admin capability context validates");
     let outcome = services
-        .host_runtime
-        .as_ref()
+        .host_runtime_for_test()
         .expect("host runtime")
         .invoke_capability(RuntimeCapabilityRequest::new(
             context,
@@ -672,7 +671,7 @@ async fn configure_admin_group(
     );
 }
 
-async fn assert_extension_has_no_user_installation(services: &RebornServices, extension_id: &str) {
+async fn assert_extension_has_no_user_installation(services: &RebornRuntime, extension_id: &str) {
     let installations = services
         .extension_installation_store_for_test()
         .expect("local extension installation store")
@@ -688,7 +687,7 @@ async fn assert_extension_has_no_user_installation(services: &RebornServices, ex
 }
 
 fn start_channel_host_assembly(
-    services: &RebornServices,
+    services: &RebornRuntime,
     inbound: &RebornIntegrationHarness,
 ) -> Arc<GenericChannelHostAssembly> {
     services

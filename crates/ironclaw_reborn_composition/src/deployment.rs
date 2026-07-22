@@ -218,6 +218,18 @@ pub struct DeploymentConfig {
     /// Whether this deployment reads hosted extension installation state.
     hosted_extension_installation_state: bool,
     storage_shape: StorageShape,
+    /// Runtime backends the build must provision (extension-runtime): a
+    /// declarative requirement carried on the deployment rather than injected
+    /// as a separate build-input field. Defaulted empty by every profile
+    /// preset; populated by the assembling caller via
+    /// [`DeploymentConfig::with_required_runtime_backends`].
+    pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
+    /// Whether the build must provision runtime HTTP egress. Declarative
+    /// deployment requirement; defaulted `false` by every preset.
+    pub(crate) require_runtime_http_egress: bool,
+    /// Whether the build must provision WASM credential injection. Declarative
+    /// deployment requirement; defaulted `false` by every preset.
+    pub(crate) require_wasm_credentials: bool,
 }
 
 impl DeploymentConfig {
@@ -235,6 +247,9 @@ impl DeploymentConfig {
             event_store_profile: RebornProfile::LocalDev,
             hosted_extension_installation_state: false,
             storage_shape: StorageShape::None,
+            required_runtime_backends: Vec::new(),
+            require_runtime_http_egress: false,
+            require_wasm_credentials: false,
         }
     }
 
@@ -260,6 +275,9 @@ impl DeploymentConfig {
             event_store_profile: RebornProfile::LocalDev,
             hosted_extension_installation_state: false,
             storage_shape: StorageShape::LocalDevRoot,
+            required_runtime_backends: Vec::new(),
+            require_runtime_http_egress: false,
+            require_wasm_credentials: false,
         }
     }
 
@@ -306,6 +324,9 @@ impl DeploymentConfig {
             event_store_profile: RebornProfile::LocalDev,
             hosted_extension_installation_state: true,
             storage_shape: StorageShape::HostedSingleTenantPool,
+            required_runtime_backends: Vec::new(),
+            require_runtime_http_egress: false,
+            require_wasm_credentials: false,
         }
     }
 
@@ -354,6 +375,9 @@ impl DeploymentConfig {
             event_store_profile: RebornProfile::Production,
             hosted_extension_installation_state: false,
             storage_shape: StorageShape::OperatorSupplied,
+            required_runtime_backends: Vec::new(),
+            require_runtime_http_egress: false,
+            require_wasm_credentials: false,
         }
     }
 

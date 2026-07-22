@@ -151,10 +151,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
             reply_target_binding_id: "runtime-channel-bind-race-reply".to_string(),
         });
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let extension_management = runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let extension_management = &runtime.extension_management;
     let operator = extension_management
         .tenant_operator_user_id_for_test()
         .clone();
@@ -166,10 +163,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         .expect("install Slack before OAuth callback");
 
     let slack_id = ironclaw_host_api::ExtensionId::new("slack").expect("Slack extension id");
-    runtime
-        .channel_config
-        .as_ref()
-        .expect("channel config service")
+    runtime.channel_config
         .save(
             &slack_id,
             vec![
@@ -211,10 +205,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .expect("Slack callback maps to the installed channel extension");
     drop(rollback);
 
-    let dm_targets = runtime
-        .channel_dm_target_store
-        .as_ref()
-        .expect("channel DM-target store");
+    let dm_targets = &runtime.channel_dm_target_store;
 
     let record = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
@@ -1840,10 +1831,7 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     });
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let extension_management = runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let extension_management = &runtime.extension_management;
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
     let projection = extension_management
@@ -1942,10 +1930,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     });
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let extension_management = runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let extension_management = &runtime.extension_management;
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
     let projection = extension_management
@@ -3433,10 +3418,7 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
     .with_model_gateway_override(gateway_for_runtime);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let extension_management = runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
+    let extension_management = &runtime.extension_management;
     let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
         .expect("valid notion ref");
     extension_management
@@ -4955,7 +4937,7 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
 /// a real `ProjectScopedAttachmentLander`, then reads the landed bytes back
 /// through the same `ProjectScopedAttachmentReader` production wires
 /// `attachment_read_port` with. The C-ATTACH integration tests exercise the
-/// shared `RebornRuntimeSubstrate::read_write_workspace_filesystem` recipe via the
+/// shared `RebornRuntimeStores::read_write_workspace_filesystem` recipe via the
 /// `local_dev_attachment_test_support_for_test` seam, but never call through
 /// this `RebornRuntime` wrapper itself; this closes that gap so a future
 /// regression in the wrapper (not just the shared recipe) fails a test
@@ -4995,10 +4977,7 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     // `workspace_filesystem`), so the read side is the same authority a
     // vision-capable model's multimodal part would resolve through.
     let read_port = crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
-        runtime
-            .workspace_filesystem
-            .as_ref()
-            .expect("local-dev runtime workspace filesystem"),
+        &runtime.workspace_filesystem,
     ));
     let lander = crate::support::fs::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
@@ -5387,8 +5366,7 @@ async fn build_webui_services_without_local_runtime_still_lists_automations_from
     })
     .with_model_gateway_override(gateway);
 
-    let mut runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    runtime.clear_local_runtime_for_test();
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui bundle");
     let caller = WebUiAuthenticatedCaller::new(
         TenantId::new("runtime-webui-no-host-tenant").unwrap(),
@@ -5950,10 +5928,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
 
     // Seed the lifecycle facade before the model gateway runs.
-    let extension_management = runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management")
+    let extension_management = runtime.extension_management
         .clone();
     let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
         &runtime.skill_management,

@@ -476,6 +476,7 @@ fn first_party_capability_manifest(
         required_host_ports: Vec::new(),
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
+        max_egress_bytes: None,
         resource_profile,
         // §5.3 S3 (behavior-neutral): the per-origin gate matrix mirrors today's
         // effect gate for `LoopRun` (Ungated iff id is in the reviewed

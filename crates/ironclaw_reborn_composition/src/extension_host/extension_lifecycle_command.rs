@@ -30,9 +30,7 @@ pub async fn execute_reborn_extension_lifecycle_command(
     command: RebornExtensionLifecycleCommand,
 ) -> Result<LifecycleProductResponse, RebornExtensionLifecycleCommandError> {
     let mut facade = RebornLocalLifecycleFacade::new(Arc::clone(&runtime.skill_management));
-    if let Some(extension_management) = &runtime.extension_management {
-        facade = facade.with_extension_management(extension_management.clone());
-    }
+    facade = facade.with_extension_management(runtime.extension_management.clone());
     if let Some(runtime_http_egress) = &runtime.runtime_http_egress {
         facade = facade.with_runtime_http_egress(runtime_http_egress.clone());
     }
@@ -41,12 +39,8 @@ pub async fn execute_reborn_extension_lifecycle_command(
             .product_auth
             .runtime_credential_account_selection_service(),
     );
-    let context = LifecycleProductContext::Surface(
-        runtime
-            .extension_lifecycle_surface_context
-            .clone()
-            .ok_or(RebornExtensionLifecycleCommandError::LocalRuntimeUnavailable)?,
-    );
+    let context =
+        LifecycleProductContext::Surface(runtime.extension_lifecycle_surface_context.clone());
     Ok(facade.execute(context, command.into_action()?).await?)
 }
 

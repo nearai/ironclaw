@@ -869,7 +869,7 @@ fn shell_network_policy() -> NetworkPolicy {
 }
 
 async fn approve_shell_dispatch(
-    runtime_surfaces: &RebornRuntimeSubstrate,
+    runtime_surfaces: &RebornRuntimeStores,
     context: &ExecutionContext,
     gate: &RuntimeApprovalGate,
 ) {
@@ -887,7 +887,7 @@ async fn approve_shell_dispatch(
 }
 
 async fn pending_approval_count(
-    runtime_surfaces: &RebornRuntimeSubstrate,
+    runtime_surfaces: &RebornRuntimeStores,
     context: &ExecutionContext,
 ) -> usize {
     runtime_surfaces

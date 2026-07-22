@@ -87,21 +87,8 @@ pub async fn build_openai_compat_route_mount(
     default_agent_id: AgentId,
     default_project_id: Option<ProjectId>,
 ) -> Result<ProtectedRouteMount, RebornBuildError> {
-    let extension_filesystem =
-        runtime
-            .extension_filesystem
-            .as_ref()
-            .ok_or_else(|| RebornBuildError::InvalidConfig {
-                reason: "OpenAI-compatible routes require runtime filesystem services".to_string(),
-            })?;
-    let external_tool_catalog =
-        runtime
-            .external_tool_catalog
-            .as_ref()
-            .ok_or_else(|| RebornBuildError::InvalidConfig {
-                reason: "OpenAI-compatible routes require runtime external-tool catalog"
-                    .to_string(),
-            })?;
+    let extension_filesystem = &runtime.extension_filesystem;
+    let external_tool_catalog = &runtime.external_tool_catalog;
     let conversations = Arc::new(
         runtime
             .durable_trigger_conversation_services()

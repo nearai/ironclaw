@@ -204,6 +204,9 @@ pub(crate) struct ActiveExtensionCapability {
     pub(crate) runtime_credentials: Vec<RuntimeCredentialRequirement>,
     /// Manifest-declared network egress allowlist, independent of credentials.
     pub(crate) network_targets: Vec<NetworkTargetPattern>,
+    /// Manifest-declared per-capability egress cap (bytes), applied to the
+    /// minted `NetworkPolicy.max_egress_bytes`. `None` = no cap.
+    pub(crate) max_egress_bytes: Option<u64>,
     /// Who the providing extension's installation belongs to (#5459 P1).
     /// Tenant-owned capabilities are grant-minted for every user; user-owned
     /// ones only for their owner (filtered in `ExtensionCapabilitySurface`).
@@ -228,6 +231,7 @@ impl ActiveExtensionCapability {
             default_permission: descriptor.default_permission,
             runtime_credentials: descriptor.runtime_credentials.clone(),
             network_targets: descriptor.network_targets.clone(),
+            max_egress_bytes: descriptor.max_egress_bytes,
             owner,
         }
     }

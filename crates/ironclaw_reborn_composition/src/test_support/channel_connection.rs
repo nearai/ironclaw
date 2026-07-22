@@ -93,15 +93,8 @@ pub fn build_channel_connection_for_test(
 ) -> Result<ChannelConnectionTestBundle, String> {
     let tenant_id = TenantId::new(config.tenant_id).map_err(|error| error.to_string())?;
     let agent_id = AgentId::new(config.agent_id).map_err(|error| error.to_string())?;
-    let identity_store = runtime
-        .channel_identity_store
-        .clone()
-        .ok_or("channel-connection test support requires the channel identity store")?;
-    let installation_store = runtime
-        .extension_management
-        .as_ref()
-        .map(|management| management.installation_store_handle())
-        .ok_or("channel-connection test support requires extension management")?;
+    let identity_store = runtime.channel_identity_store.clone();
+    let installation_store = runtime.extension_management.installation_store_handle();
 
     // Same construction as `RebornRuntime::generic_channel_connection_facade`:
     // generic discovery over the durable installation store, connected =
@@ -120,13 +113,10 @@ pub fn build_channel_connection_for_test(
             as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
         credential_cleanup,
         account_status_reader,
-        runtime.channel_dm_target_store.clone(),
+        Some(runtime.channel_dm_target_store.clone()),
         runtime.channel_pairing.clone(),
     ));
-    let disconnect_slot = runtime
-        .channel_connection_facade_slot
-        .as_ref()
-        .ok_or("channel-connection test support requires a disconnect slot")?;
+    let disconnect_slot = &runtime.channel_connection_facade_slot;
     if disconnect_slot.set(Arc::clone(&facade)).is_err() {
         return Err(
             "channel connection facade slot is already occupied; extension-removal cleanup \
@@ -140,12 +130,11 @@ pub fn build_channel_connection_for_test(
     // stores, with DM-target provisioning when the composition can deliver.
     let snapshot_updates = runtime
         .extension_management
-        .as_ref()
-        .and_then(|management| management.generic_host())
+        .generic_host()
         .map(|host| host.snapshot_watch().subscribe());
     let post_bind_factory = match (
         runtime.channel_delivery_resolver.clone(),
-        runtime.channel_dm_target_store.clone(),
+        Some(runtime.channel_dm_target_store.clone()),
         snapshot_updates,
     ) {
         (Some(delivery), Some(store), Some(snapshot_updates)) => Some(Arc::new(
@@ -157,7 +146,7 @@ pub fn build_channel_connection_for_test(
     let identity_binding = ChannelIdentityBindingConfig {
         tenant_id: tenant_id.clone(),
         installation_store: Some(installation_store),
-        channel_config: runtime.channel_config.clone(),
+        channel_config: Some(runtime.channel_config.clone()),
         binding_store: Arc::clone(&identity_store)
             as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
         rollback_store: Arc::clone(&identity_store)
@@ -291,7 +280,7 @@ impl ChannelConnectionTestBundle {
     /// independent of the live runtime's in-memory handles. This is the
     /// integration-tier approximation of a process restart: it proves the
     /// durable binding is reconstructible the way production reconstructs it
-    /// on boot (`build_reborn_services` →
+    /// on boot (`build_runtime` →
     /// `FilesystemChannelIdentityStore::new` over the composed local-dev
     /// root). Results come back in `user_ids` order; the single reopen means
     /// a positive probe and its non-vacuity control read the same

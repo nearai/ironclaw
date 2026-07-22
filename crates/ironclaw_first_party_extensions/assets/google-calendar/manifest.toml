@@ -28,6 +28,15 @@ visibility = "model"
 input_schema_ref = "schemas/google-calendar/list_calendars.input.v1.json"
 prompt_doc_ref = "prompts/google-calendar/list_calendars.md"
 
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
 [[tools.credentials]]
 handle = "google_calendar_account"
 vendor = "google"
@@ -44,6 +53,15 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/google-calendar/list_events.input.v1.json"
 prompt_doc_ref = "prompts/google-calendar/list_events.md"
+
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
 
 [[tools.credentials]]
 handle = "google_calendar_account"
@@ -62,6 +80,15 @@ visibility = "model"
 input_schema_ref = "schemas/google-calendar/get_event.input.v1.json"
 prompt_doc_ref = "prompts/google-calendar/get_event.md"
 
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
 [[tools.credentials]]
 handle = "google_calendar_account"
 vendor = "google"
@@ -78,6 +105,15 @@ default_permission = "allow"
 visibility = "model"
 input_schema_ref = "schemas/google-calendar/find_free_slots.input.v1.json"
 prompt_doc_ref = "prompts/google-calendar/find_free_slots.md"
+
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
 
 [[tools.credentials]]
 handle = "google_calendar_account"
@@ -96,6 +132,15 @@ visibility = "model"
 input_schema_ref = "schemas/google-calendar/create_event.input.v1.json"
 prompt_doc_ref = "prompts/google-calendar/create_event.md"
 
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
 [[tools.credentials]]
 handle = "google_calendar_account"
 vendor = "google"
@@ -112,6 +157,15 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-calendar/update_event.input.v1.json"
 prompt_doc_ref = "prompts/google-calendar/update_event.md"
+
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
 
 [[tools.credentials]]
 handle = "google_calendar_account"
@@ -130,6 +184,15 @@ visibility = "model"
 input_schema_ref = "schemas/google-calendar/delete_event.input.v1.json"
 prompt_doc_ref = "prompts/google-calendar/delete_event.md"
 
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
 [[tools.credentials]]
 handle = "google_calendar_account"
 vendor = "google"
@@ -147,6 +210,15 @@ visibility = "model"
 input_schema_ref = "schemas/google-calendar/add_attendees.input.v1.json"
 prompt_doc_ref = "prompts/google-calendar/add_attendees.md"
 
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
+
 [[tools.credentials]]
 handle = "google_calendar_account"
 vendor = "google"
@@ -163,6 +235,15 @@ default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/google-calendar/set_reminder.input.v1.json"
 prompt_doc_ref = "prompts/google-calendar/set_reminder.md"
+
+network_targets = [
+  { scheme = "https", host_pattern = "www.googleapis.com" },
+  { scheme = "https", host_pattern = "gmail.googleapis.com" },
+  { scheme = "https", host_pattern = "calendar.googleapis.com" },
+  { scheme = "https", host_pattern = "oauth2.googleapis.com" },
+  { scheme = "https", host_pattern = "accounts.google.com" },
+]
+max_egress_bytes = 10485760
 
 [[tools.credentials]]
 handle = "google_calendar_account"

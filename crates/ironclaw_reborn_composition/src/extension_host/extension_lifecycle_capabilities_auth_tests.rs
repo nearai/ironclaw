@@ -14,7 +14,7 @@ use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPo
 use crate::extension_host::extension_lifecycle_capabilities::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
 };
-use crate::factory::{RebornRuntimeSubstrate, build_runtime_substrate};
+use crate::factory::{RebornRuntimeStores, build_runtime_substrate};
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest;
 use crate::{RebornBuildInput, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest};
 
@@ -31,8 +31,6 @@ async fn local_dev_extension_activate_accepts_manual_token_from_webui_gate_scope
         .local_runtime_for_test()
         .expect("local runtime substrate")
         .extension_management
-        .as_ref()
-        .expect("extension management")
         .clone();
     let install_scope = webui_gate_resource_scope();
     let auth_scope_resource = webui_gate_resource_scope();
@@ -255,7 +253,7 @@ async fn local_dev_nearai_runtime_selection_falls_back_to_host_managed_account_f
 }
 
 async fn invoke_json_with_context(
-    services: &RebornRuntimeSubstrate,
+    services: &RebornRuntimeStores,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,
@@ -270,7 +268,7 @@ async fn invoke_json_with_context(
 }
 
 async fn invoke_outcome_with_context(
-    services: &RebornRuntimeSubstrate,
+    services: &RebornRuntimeStores,
     capability_id: &str,
     context: ExecutionContext,
     input: serde_json::Value,

@@ -178,9 +178,6 @@ pub struct RebornBuildInput {
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
-    pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
-    pub(crate) require_runtime_http_egress: bool,
-    pub(crate) require_wasm_credentials: bool,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) network_http_egress_for_test: Option<Arc<dyn NetworkHttpEgress>>,
     /// Test-support only: stamp filesystem-discovered extension packages as
@@ -246,6 +243,40 @@ pub(crate) struct RebornLocalRuntimeIdentity {
     pub(crate) agent_id: AgentId,
 }
 
+/// Declarative PostgreSQL connection config (Phase B): the pure-data inputs
+/// needed to open a pool at *build* time. Deliberately carries no live
+/// `deadpool_postgres::Pool` handle — production resolves these values at
+/// `RebornBuildInput` construction (reading env), but the pool is opened later
+/// inside `build_production_shaped`.
+#[derive(Clone)]
+pub(crate) struct PostgresConnectionConfig {
+    pub(crate) url: ironclaw_secrets::SecretMaterial,
+    pub(crate) pool_max_size: usize,
+    pub(crate) tls_options: PostgresPoolTlsOptions,
+}
+
+/// How the PostgreSQL pool is obtained at build time.
+pub(crate) enum PostgresPoolSource {
+    /// Production path: open the pool at build time from declarative config.
+    Config(PostgresConnectionConfig),
+    /// Test escape hatch: a caller-supplied, already-opened pool the build
+    /// prefers over opening from config. Only the caller-supplied-handle
+    /// constructors (`postgres`, `postgres_with_resolved_secret_master_key`,
+    /// `hosted_single_tenant_postgres`) produce this; the
+    /// `*_from_config_and_env` production constructors always use `Config`.
+    Prebuilt(deadpool_postgres::Pool),
+}
+
+/// Declarative libSQL connection config (Phase B). `path_or_url` / `auth_token`
+/// flow to the durable event-store config regardless of whether the database
+/// handle is opened at build time or supplied pre-opened, so they live here
+/// rather than inside [`RebornStorageInput::Libsql`]'s handle.
+#[derive(Clone)]
+pub(crate) struct LibsqlConnectionConfig {
+    pub(crate) path_or_url: String,
+    pub(crate) auth_token: Option<ironclaw_secrets::SecretMaterial>,
+}
+
 pub(crate) enum RebornStorageInput {
     Disabled,
     LocalDev {
@@ -257,21 +288,21 @@ pub(crate) enum RebornStorageInput {
         root: PathBuf,
         workspace_root: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
-        pool: deadpool_postgres::Pool,
+        pool_source: PostgresPoolSource,
         secret_master_key: ironclaw_secrets::SecretMaterial,
         process_local_resource_governor_singleton: bool,
     },
     Libsql {
-        db: Arc<libsql::Database>,
-        path_or_url: String,
-        auth_token: Option<ironclaw_secrets::SecretMaterial>,
+        connection: LibsqlConnectionConfig,
+        /// Test escape hatch: a caller-supplied, already-opened database the
+        /// build prefers over opening from `connection`. When `None` the build
+        /// opens the handle from `connection` at build time.
+        prebuilt_db: Option<Arc<libsql::Database>>,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
         process_local_resource_governor_singleton: bool,
     },
     Postgres {
-        pool: deadpool_postgres::Pool,
-        url: ironclaw_secrets::SecretMaterial,
-        tls_options: PostgresPoolTlsOptions,
+        pool_source: PostgresPoolSource,
         secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
         process_local_resource_governor_singleton: bool,
     },
@@ -407,7 +438,7 @@ impl RebornBuildInput {
                 root,
                 workspace_root: None,
                 host_home_root: None,
-                pool,
+                pool_source: PostgresPoolSource::Prebuilt(pool),
                 secret_master_key,
                 process_local_resource_governor_singleton: true,
             },
@@ -434,10 +465,9 @@ impl RebornBuildInput {
             });
         }
         let ResolvedPostgresStorage {
-            pool,
+            connection,
             secret_master_key,
             process_local_resource_governor_singleton,
-            ..
         } = resolve_postgres_storage_from_config_and_env(profile, config_file)?;
         Ok(Self::new(
             DeploymentConfig::for_profile(profile, false),
@@ -446,7 +476,7 @@ impl RebornBuildInput {
                 root,
                 workspace_root: None,
                 host_home_root: None,
-                pool,
+                pool_source: PostgresPoolSource::Config(connection),
                 secret_master_key,
                 process_local_resource_governor_singleton,
             },
@@ -529,9 +559,11 @@ impl RebornBuildInput {
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Libsql {
-                db,
-                path_or_url: path_or_url.into(),
-                auth_token,
+                connection: LibsqlConnectionConfig {
+                    path_or_url: path_or_url.into(),
+                    auth_token,
+                },
+                prebuilt_db: Some(db),
                 secret_master_key: Some(secret_master_key),
                 process_local_resource_governor_singleton: true,
             },
@@ -549,9 +581,11 @@ impl RebornBuildInput {
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Libsql {
-                db,
-                path_or_url: path_or_url.into(),
-                auth_token,
+                connection: LibsqlConnectionConfig {
+                    path_or_url: path_or_url.into(),
+                    auth_token,
+                },
+                prebuilt_db: Some(db),
                 secret_master_key: None,
                 process_local_resource_governor_singleton: true,
             },
@@ -562,16 +596,16 @@ impl RebornBuildInput {
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
         pool: deadpool_postgres::Pool,
-        url: ironclaw_secrets::SecretMaterial,
+        // Retained for API stability with the caller-supplied-handle test
+        // escape hatch. The prebuilt pool is used verbatim, so no URL is opened.
+        _url: ironclaw_secrets::SecretMaterial,
         secret_master_key: ironclaw_secrets::SecretMaterial,
     ) -> Self {
         Self::new(
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Postgres {
-                pool,
-                url,
-                tls_options: PostgresPoolTlsOptions::default(),
+                pool_source: PostgresPoolSource::Prebuilt(pool),
                 secret_master_key: Some(secret_master_key),
                 process_local_resource_governor_singleton: true,
             },
@@ -582,15 +616,15 @@ impl RebornBuildInput {
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
         pool: deadpool_postgres::Pool,
-        url: ironclaw_secrets::SecretMaterial,
+        // Retained for API stability with the caller-supplied-handle test
+        // escape hatch. The prebuilt pool is used verbatim, so no URL is opened.
+        _url: ironclaw_secrets::SecretMaterial,
     ) -> Self {
         Self::new(
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Postgres {
-                pool,
-                url,
-                tls_options: PostgresPoolTlsOptions::default(),
+                pool_source: PostgresPoolSource::Prebuilt(pool),
                 secret_master_key: None,
                 process_local_resource_governor_singleton: true,
             },
@@ -603,9 +637,7 @@ impl RebornBuildInput {
         config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
     ) -> Result<Self, RebornBuildError> {
         let ResolvedPostgresStorage {
-            pool,
-            url,
-            tls_options,
+            connection,
             secret_master_key,
             process_local_resource_governor_singleton,
         } = resolve_postgres_storage_from_config_and_env(profile, config_file)?;
@@ -616,9 +648,7 @@ impl RebornBuildInput {
             DeploymentConfig::for_profile(profile, false),
             owner_id,
             RebornStorageInput::Postgres {
-                pool,
-                url,
-                tls_options,
+                pool_source: PostgresPoolSource::Config(connection),
                 secret_master_key: Some(secret_master_key),
                 process_local_resource_governor_singleton,
             },
@@ -632,7 +662,7 @@ impl RebornBuildInput {
         mut self,
         backends: impl IntoIterator<Item = ironclaw_host_api::RuntimeKind>,
     ) -> Self {
-        self.required_runtime_backends = backends.into_iter().collect();
+        self.deployment.required_runtime_backends = backends.into_iter().collect();
         self
     }
 
@@ -672,12 +702,12 @@ impl RebornBuildInput {
     }
 
     pub fn require_runtime_http_egress(mut self) -> Self {
-        self.require_runtime_http_egress = true;
+        self.deployment.require_runtime_http_egress = true;
         self
     }
 
     pub fn require_wasm_credentials(mut self) -> Self {
-        self.require_wasm_credentials = true;
+        self.deployment.require_wasm_credentials = true;
         self
     }
 
@@ -823,9 +853,6 @@ impl RebornBuildInput {
             runtime_policy: None,
             turn_run_wake_notifier: None,
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
-            required_runtime_backends: Vec::new(),
-            require_runtime_http_egress: false,
-            require_wasm_credentials: false,
             #[cfg(any(test, feature = "test-support"))]
             network_http_egress_for_test: None,
             #[cfg(any(test, feature = "test-support"))]
@@ -843,9 +870,7 @@ impl RebornBuildInput {
 }
 
 struct ResolvedPostgresStorage {
-    pool: deadpool_postgres::Pool,
-    url: ironclaw_secrets::SecretMaterial,
-    tls_options: PostgresPoolTlsOptions,
+    connection: PostgresConnectionConfig,
     secret_master_key: ironclaw_secrets::SecretMaterial,
     process_local_resource_governor_singleton: bool,
 }
@@ -903,16 +928,16 @@ fn resolve_postgres_storage_from_config_and_env(
         "resolved Reborn PostgreSQL pool size"
     );
     let tls_options = postgres_pool_tls_options_from_env()?;
-    let pool = ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
-        database_url.clone(),
-        pool_max_size,
-        tls_options,
-    )?;
 
+    // Phase B: resolve the declarative connection config only. The live pool is
+    // opened later, at build time, inside `build_production_shaped` — construction
+    // no longer performs I/O against the database.
     Ok(ResolvedPostgresStorage {
-        pool,
-        url: database_url,
-        tls_options,
+        connection: PostgresConnectionConfig {
+            url: database_url,
+            pool_max_size,
+            tls_options,
+        },
         secret_master_key,
         process_local_resource_governor_singleton,
     })

@@ -169,6 +169,13 @@ pub struct CapabilityDescriptor {
     /// `audience`s are folded in on top of these at grant issuance.
     #[serde(default)]
     pub network_targets: Vec<NetworkTargetPattern>,
+    /// Optional per-capability egress cap (bytes) applied to the minted
+    /// `NetworkPolicy.max_egress_bytes`. Manifest-declared (v3 tool
+    /// `max_egress_bytes`); `#[serde(default)]` so existing manifests/records
+    /// parse to `None` (no cap). This lets a networked capability bound its
+    /// egress from the manifest instead of a composition special-case.
+    #[serde(default)]
+    pub max_egress_bytes: Option<u64>,
     pub resource_profile: Option<ResourceProfile>,
     /// Per-origin gate matrix (§5.2.1). `None` = undeclared: treated as
     /// all-`Forbidden` (fail-closed) at authorization, and flagged by the

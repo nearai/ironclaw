@@ -181,7 +181,7 @@ fn reborn_binary_main_is_thin_bootstrap() {
     );
     for forbidden in [
         "build_reborn_runtime",
-        "build_reborn_services",
+        "build_runtime",
         "axum::serve",
         "TcpListener::bind",
         "src/channels/web",
