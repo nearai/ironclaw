@@ -264,6 +264,28 @@ class ScrubArtifactsTests(unittest.TestCase):
             self.assertFalse(bundled.exists())
             self.assertTrue((unmanaged / "SKILL.md").exists())
 
+    def test_strict_scrub_still_scans_unmanaged_system_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "artifacts"
+            unmanaged = (
+                root
+                / "lane"
+                / "reborn-home"
+                / "case-a"
+                / "local-dev"
+                / "system"
+                / "skills"
+                / "operator-skill"
+                / "SKILL.md"
+            )
+            unmanaged.parent.mkdir(parents=True)
+            unmanaged.write_text("api_key: live-secret-value\n", encoding="utf-8")
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertFalse(unmanaged.exists())
+
     def test_strict_scrub_rejects_malformed_bundled_marker_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "artifacts"
@@ -369,24 +391,31 @@ class ScrubArtifactsTests(unittest.TestCase):
             self.assertFalse(manifest.exists())
 
     def test_strict_scrub_prunes_verified_nearai_runtime_manifest(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir) / "artifacts"
-            root.mkdir()
-            runtime_manifest = NEARAI_MANIFEST_TEMPLATE.read_text(encoding="utf-8").replace(
-                "__LIVE_CANARY_NEARAI_MCP_SERVER__",
-                "https://cloud-api.near.ai/mcp",
-            )
-            _, manifest = self.write_extension_manifest_fixture(
-                root,
-                extension_id="nearai",
-                source_body="not used for the dynamic nearai manifest\n",
-                staged_body=runtime_manifest,
-            )
+        for endpoint in (
+            "https://cloud-api.near.ai/mcp",
+            "https://private.near.ai/mcp",
+        ):
+            with self.subTest(endpoint=endpoint):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir) / "artifacts"
+                    root.mkdir()
+                    runtime_manifest = NEARAI_MANIFEST_TEMPLATE.read_text(
+                        encoding="utf-8"
+                    ).replace(
+                        "__LIVE_CANARY_NEARAI_MCP_SERVER__",
+                        endpoint,
+                    )
+                    _, manifest = self.write_extension_manifest_fixture(
+                        root,
+                        extension_id="nearai",
+                        source_body="not used for the dynamic nearai manifest\n",
+                        staged_body=runtime_manifest,
+                    )
 
-            result = self.run_scrub(root, strict=True)
+                    result = self.run_scrub(root, strict=True)
 
-            self.assertEqual(result.returncode, 0, result.stdout)
-            self.assertFalse(manifest.exists())
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertFalse(manifest.exists())
 
     def test_non_strict_scrub_is_report_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
