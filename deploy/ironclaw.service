@@ -16,6 +16,8 @@ ExecStartPre=/bin/bash -c 'docker pull us-central1-docker.pkg.dev/ironclaw-prod/
 # the published port is reachable, and IRONCLAW_REBORN_PROFILE=production to
 # select Postgres-backed hosted storage. Do NOT pass legacy v1 flags such as
 # `--no-onboard` here — they are not accepted by the Reborn `ironclaw` binary.
+# Before enabling or restarting this unit, follow
+# docs/reborn/deployment-profile-operator-checklist.md without recording secrets.
 ExecStart=/bin/bash -c 'docker run --rm \
   --name ironclaw \
   --env-file /opt/ironclaw/.env \

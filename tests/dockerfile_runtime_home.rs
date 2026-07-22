@@ -287,6 +287,77 @@ fn reborn_deployment_docs_keep_webui_sso_separate_from_product_auth() {
 }
 
 #[test]
+fn checked_in_deployments_require_explicit_reborn_profiles() {
+    let railway = read_repo_file("railway.toml");
+    assert!(
+        railway.contains("dockerfilePath = \"Dockerfile\"")
+            && railway.contains("IRONCLAW_REBORN_PROFILE must be set explicitly")
+            && railway.contains("docs/reborn/deployment-profile-operator-checklist.md"),
+        "Railway must use the canonical image and document its external profile requirement"
+    );
+
+    let systemd = read_repo_file("deploy/ironclaw.service");
+    let gcp_env = read_repo_file("deploy/env.example");
+    assert!(
+        systemd.contains("EnvironmentFile=/opt/ironclaw/.env")
+            && systemd.contains("IRONCLAW_REBORN_PROFILE=production")
+            && systemd.contains("docs/reborn/deployment-profile-operator-checklist.md"),
+        "the GCP systemd unit must document its external production profile contract"
+    );
+    assert_eq!(
+        gcp_env
+            .lines()
+            .filter(|line| line.trim() == "IRONCLAW_REBORN_PROFILE=production")
+            .count(),
+        1,
+        "the GCP environment example must contain exactly one active production profile assignment"
+    );
+
+    for (path, profile) in [
+        ("docker/reborn/config.toml", "local-dev"),
+        (
+            "docker/reborn/config.hosted-single-tenant.toml",
+            "hosted-single-tenant",
+        ),
+        (
+            "docker/reborn/config.hosted-single-tenant-volume.toml",
+            "hosted-single-tenant-volume",
+        ),
+        ("docker/reborn/config.production.toml", "production"),
+    ] {
+        let config = read_repo_file(path);
+        let assignment = format!("profile = \"{profile}\"");
+        assert_eq!(
+            config
+                .lines()
+                .filter(|line| line.trim() == assignment)
+                .count(),
+            1,
+            "{path} must contain exactly one explicit {profile} profile assignment"
+        );
+    }
+
+    let checklist = read_repo_file("docs/reborn/deployment-profile-operator-checklist.md");
+    for required in [
+        "## Railway checklist",
+        "## GCP Compute Engine checklist",
+        "## Local Docker checklist",
+        "IRONCLAW_REBORN_PROFILE",
+        "Do not attach complete environment dumps or unredacted logs.",
+    ] {
+        assert!(
+            checklist.contains(required),
+            "deployment profile checklist must retain `{required}`"
+        );
+    }
+    assert!(
+        read_repo_file("docs/reborn/README.md")
+            .contains("docs/reborn/deployment-profile-operator-checklist.md"),
+        "the Reborn documentation map must keep the operator checklist discoverable"
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn reborn_entrypoint_copies_config_and_builds_default_serve_args() {
     let fake = setup_fake_entrypoint();

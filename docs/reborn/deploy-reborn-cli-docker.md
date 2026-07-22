@@ -1,7 +1,7 @@
 # Reborn CLI Docker Deployment
 
-`Dockerfile.reborn` builds the standalone `ironclaw` binary with the
-WebUI v2 and Slack host-beta features enabled. The image defaults to:
+The root `Dockerfile` builds the standalone `ironclaw` binary with the WebUI v2
+and Slack host-beta features enabled. The image defaults to:
 
 ```text
 ironclaw serve --host ${IRONCLAW_REBORN_SERVE_HOST:-127.0.0.1} --port ${PORT:-3000}
@@ -11,10 +11,15 @@ Railway supplies `PORT`; set `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0` for
 Railway/public deployments. Local Docker runs can keep the loopback default and
 set `IRONCLAW_REBORN_SERVE_PORT=3000`.
 
+Before changing an external environment, follow the
+[deployment profile operator checklist](deployment-profile-operator-checklist.md).
+The profile must be explicit for public Railway and GCP deployments; do not
+infer it from the image's local-development seed.
+
 ## Build
 
 ```bash
-docker build -f Dockerfile.reborn -t ironclaw-reborn:local .
+docker build -t ironclaw:local .
 ```
 
 ## Local Run
@@ -25,7 +30,7 @@ Create an env file outside git, then run:
 docker run --rm \
   --env-file .env.reborn \
   -p 127.0.0.1:3000:3000 \
-  ironclaw-reborn:local
+  ironclaw:local
 ```
 
 Minimum local env shape:
@@ -74,9 +79,11 @@ https://<public-host>/auth/callback/google
 
 ## Railway
 
-Set the service Dockerfile path to `Dockerfile.reborn`. Railway sets `PORT`;
-keep `IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`. The Reborn WebUI service serves
-`/api/health` for Railway's healthcheck.
+Use the repository root `Dockerfile` (the checked-in `railway.toml` already
+selects it). Railway sets `PORT`; keep
+`IRONCLAW_REBORN_SERVE_HOST=0.0.0.0`. The Reborn WebUI service serves
+`/api/health` for Railway's healthcheck. Set `IRONCLAW_REBORN_PROFILE`
+explicitly in Railway service variables.
 
 Leave Railway's Start Command empty for the Docker image. The image entrypoint
 builds the `ironclaw serve` arguments from `PORT` and
@@ -188,6 +195,22 @@ the agent connect a Google credential:
 ```bash
 IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI=https://<railway-domain>/api/reborn/product-auth/oauth/google/callback
 ```
+
+## GCP Compute Engine with systemd
+
+The checked-in GCP unit reads `/opt/ironclaw/.env` through
+`deploy/ironclaw.service`. Start from `deploy/env.example` and keep this active
+assignment:
+
+```bash
+IRONCLAW_REBORN_PROFILE=production
+```
+
+The production profile requires `IRONCLAW_REBORN_POSTGRES_URL` and
+`IRONCLAW_REBORN_SECRET_MASTER_KEY`; the example routes PostgreSQL through the
+Cloud SQL Auth Proxy. Keep the secret values only in the root-readable external
+environment file. Before enabling or restarting the unit, complete the GCP
+section of the [operator checklist](deployment-profile-operator-checklist.md).
 
 ## Slack
 

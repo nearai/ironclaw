@@ -1,16 +1,16 @@
 # Multi-stage Dockerfile for the standalone Reborn CLI HTTP service.
 #
 # Build:
-#   docker build -f Dockerfile.reborn -t ironclaw-reborn:latest .
+#   docker build -t ironclaw:latest .
 #
 # Run locally:
-#   docker run --rm --env-file .env.reborn -p 127.0.0.1:3000:3000 ironclaw-reborn:latest
+#   docker run --rm --env-file .env.reborn -p 127.0.0.1:3000:3000 ironclaw:latest
 #
 # Railway:
-#   Set Dockerfile path to Dockerfile.reborn and IRONCLAW_REBORN_SERVE_HOST=0.0.0.0.
-#   Railway supplies PORT. Set IRONCLAW_REBORN_PROFILE=hosted-single-tenant for
-#   Postgres-backed hosted storage, or hosted-single-tenant-volume for a
-#   Railway volume-backed single-tenant preview.
+#   Use this root Dockerfile and set IRONCLAW_REBORN_SERVE_HOST=0.0.0.0.
+#   Railway supplies PORT. IRONCLAW_REBORN_PROFILE must be set explicitly;
+#   see docs/reborn/deployment-profile-operator-checklist.md for the profile
+#   matching the service's storage and tenancy topology.
 
 FROM node:22.23.1-bookworm-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4 AS node_toolchain
 
