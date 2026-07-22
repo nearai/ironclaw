@@ -570,10 +570,10 @@ async fn caller_dispatcher_failure_retries_with_the_same_persisted_key() {
         .await
         .expect("mint");
 
-    let caller_service =
-        fixture.service.with_resolution_dispatcher_for_test(
-            Arc::clone(&caller_dispatcher) as Arc<dyn RebornAuthResolutionDispatcher>
-        );
+    let caller_service = fixture.service.with_resolution_context_for_test(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        Arc::clone(&caller_dispatcher) as Arc<dyn RebornAuthResolutionDispatcher>,
+    );
     let error = caller_service
         .consume(
             &install(),

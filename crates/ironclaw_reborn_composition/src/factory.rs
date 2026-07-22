@@ -615,12 +615,12 @@ impl RebornServices {
         let installation_id =
             ironclaw_product_adapters::AdapterInstallationId::new(authenticated_installation_id)
                 .map_err(|error| error.to_string())?;
-        let (turn_coordinator, turn_state, _tenant_id) = turn_world;
+        let (turn_coordinator, turn_state, tenant_id) = turn_world;
         let resolution_dispatcher = auth_resolution_dispatcher(
             turn_coordinator,
             Some(turn_state as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
         );
-        let service = service.with_resolution_dispatcher_for_test(resolution_dispatcher);
+        let service = service.with_resolution_context_for_test(tenant_id, resolution_dispatcher);
         let outcome = service
             .consume(
                 &installation_id,

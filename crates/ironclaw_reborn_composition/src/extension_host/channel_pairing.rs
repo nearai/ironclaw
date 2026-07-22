@@ -1020,16 +1020,18 @@ impl ChannelPairingService {
             })
     }
 
-    /// Clone this service with the caller's real turn-world dispatcher.
-    /// Integration groups execute runs in a shared turn store created after
-    /// this composed service, unlike production where both use one store.
+    /// Clone this service with the caller's turn-world tenant and resolution
+    /// dispatcher. Integration groups create that shared turn world after
+    /// this composed service, unlike production where both use one context.
     /// Test-only: zero production bytes.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_resolution_dispatcher_for_test(
+    pub(crate) fn with_resolution_context_for_test(
         &self,
+        tenant_id: TenantId,
         resolution_dispatcher: Arc<dyn RebornAuthResolutionDispatcher>,
     ) -> Self {
         let mut service = self.clone();
+        service.tenant_id = tenant_id;
         service.resolution_dispatcher = resolution_dispatcher;
         service
     }
