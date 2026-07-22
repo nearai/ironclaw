@@ -1698,12 +1698,9 @@ async def test_reborn_v2_thread_list_and_delete(reborn_v2_server):
         assert keep_id in remaining, "untouched thread must remain in the list"
 
 
-async def test_reborn_v2_sidebar_loads_older_thread_pages(
-    reborn_v2_server, reborn_v2_browser
-):
+async def test_reborn_v2_sidebar_loads_older_thread_pages(reborn_v2_page):
     """The sidebar consumes next_cursor and keeps incomplete search honest."""
-    context = await reborn_v2_browser.new_context(viewport={"width": 1280, "height": 720})
-    page = await context.new_page()
+    page = reborn_v2_page
     requested_cursors: list[str | None] = []
 
     async def handle_threads(route) -> None:
@@ -1749,33 +1746,30 @@ async def test_reborn_v2_sidebar_loads_older_thread_pages(
         )
 
     await page.route("**/api/webchat/v2/threads**", handle_threads)
+    await page.reload()
 
-    try:
-        await page.goto(f"{reborn_v2_server}/chat?token={REBORN_V2_AUTH_TOKEN}")
-        sidebar = page.locator(SEL_V2["sidebar"])
-        load_more = sidebar.locator(SEL_V2["thread_load_more"])
-        await expect(sidebar.get_by_text("Recent topic", exact=True)).to_be_visible(
-            timeout=15000
+    sidebar = page.locator(SEL_V2["sidebar"])
+    load_more = sidebar.locator(SEL_V2["thread_load_more"])
+    await expect(sidebar.get_by_text("Recent topic", exact=True)).to_be_visible(
+        timeout=15000
+    )
+    await expect(load_more).to_be_visible()
+
+    await sidebar.locator(SEL_V2["thread_search"]).fill("Older searchable")
+    await expect(
+        sidebar.get_by_text(
+            "More conversations are available. Load older conversations to continue searching.",
+            exact=True,
         )
-        await expect(load_more).to_be_visible()
+    ).to_be_visible()
+    await expect(sidebar.get_by_text('No chats match "Older searchable"')).to_have_count(0)
 
-        await sidebar.get_by_placeholder("Search chats...").fill("Older searchable")
-        await expect(
-            sidebar.get_by_text(
-                "More conversations are available. Load older conversations to continue searching.",
-                exact=True,
-            )
-        ).to_be_visible()
-        await expect(sidebar.get_by_text('No chats match "Older searchable"')).to_have_count(0)
-
-        await load_more.click()
-        await expect(
-            sidebar.get_by_text("Older searchable topic", exact=True)
-        ).to_be_visible(timeout=5000)
-        await expect(load_more).to_have_count(0)
-        assert requested_cursors == [None, "cursor-page-2"], requested_cursors
-    finally:
-        await context.close()
+    await load_more.click()
+    await expect(
+        sidebar.get_by_text("Older searchable topic", exact=True)
+    ).to_be_visible(timeout=5000)
+    await expect(load_more).to_have_count(0)
+    assert requested_cursors == [None, "cursor-page-2"], requested_cursors
 
 
 async def test_reborn_v2_thread_delete_uses_shared_confirmation_dialog(
