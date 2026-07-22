@@ -2441,6 +2441,14 @@ impl RebornRuntime {
                 .shutdown(ironclaw_auth::KEEPALIVE_SWEEP_SHUTDOWN_TIMEOUT)
                 .await;
         }
+        // D4-1: cancel the sandboxed profile's orphan-container reaper, if
+        // one was spawned (tenant-sandboxed profile with Docker reachable at
+        // boot). `None` on every other profile.
+        if let Some(sandbox_reaper) = self.services.sandbox_reaper_handle {
+            sandbox_reaper
+                .shutdown(crate::sandbox_reaper_task::SANDBOX_REAPER_SHUTDOWN_TIMEOUT)
+                .await;
+        }
         self.trace_flush_worker.shutdown().await;
         if let Some(skill_learning_extraction_tasks) = self.skill_learning_extraction_tasks {
             skill_learning_extraction_tasks.shutdown().await;

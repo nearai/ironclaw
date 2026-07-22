@@ -368,7 +368,14 @@ impl LocalInvocationServicesResolver {
             {
                 Ok(Arc::clone(&self.filesystem))
             }
-            FilesystemBackendKind::ScopedVirtual => {
+            // `TenantWorkspace` (hosted, per-tenant sandboxed process
+            // backends) uses the identical mount-scoped-view mechanism as
+            // `ScopedVirtual`: both hand the invocation a filesystem view
+            // narrowed to the resolved mount set, never the raw root. The
+            // backends differ in which process backend they pair with
+            // (`None` vs `TenantSandbox`), not in how the filesystem is
+            // scoped.
+            FilesystemBackendKind::ScopedVirtual | FilesystemBackendKind::TenantWorkspace => {
                 let mounts =
                     mounts.ok_or(InvocationServicesError::UnsupportedFilesystemBackend {
                         backend: plan.filesystem_backend,

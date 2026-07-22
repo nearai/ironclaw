@@ -44,6 +44,9 @@ mod production_runtime_policy;
 mod profile_approval_authorization;
 mod projection;
 mod provider_identity;
+mod sandbox_boot;
+mod sandbox_quota;
+mod sandbox_reaper_task;
 mod readiness;
 mod root;
 mod runtime;
@@ -113,6 +116,12 @@ pub use ironclaw_host_api::{
 /// binary's [`ChannelExtensionBinding`] construction.
 pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
 pub use ironclaw_product_workflow::PreferenceTargetCodec;
+// Re-exported so `ironclaw_reborn_cli` (`runtime/mod.rs`'s
+// `hosted-single-tenant-volume-sandboxed` boot-input assembly) can obtain a
+// real `TenantSandbox` process binding without depending on
+// `ironclaw_host_runtime` directly — the CLI boundary test
+// (`reborn_cli_binary_crate_stays_separate_from_v1_root`) pins its workspace
+// dependencies to exactly the composition-facade set.
 pub use ironclaw_product_workflow::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     RebornChannelConnectStrategy,
@@ -123,6 +132,7 @@ pub use ironclaw_product_workflow::{
 };
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
+pub use sandbox_boot::tenant_sandbox_process_binding;
 // Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
 // the CLI consumes composition as its facade and must not grow a direct
 // `ironclaw_runner` edge for one summary helper. All other run-failure
@@ -156,7 +166,8 @@ pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 // it reaches this helper through composition's facade.
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy,
+    hosted_single_tenant_volume_sandboxed_runtime_policy, local_dev_runtime_policy,
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };

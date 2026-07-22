@@ -565,16 +565,25 @@ fn expires_at_unix_secs() -> u64 {
 }
 
 pub(crate) fn truncate_output(s: &str) -> String {
-    if s.len() <= COMMAND_MAX_OUTPUT_SIZE {
+    truncate_output_to(s, COMMAND_MAX_OUTPUT_SIZE)
+}
+
+/// Truncate `s` to at most `limit` bytes, keeping a head/tail window (like
+/// [`truncate_output`]) rather than a fixed [`COMMAND_MAX_OUTPUT_SIZE`]. Used
+/// where the caller supplies a model-adjustable output cap (e.g. the
+/// sandboxed shell's `output_limit`, clamped by
+/// `sandbox_process::shell_limits`).
+pub(crate) fn truncate_output_to(s: &str, limit: usize) -> String {
+    if s.len() <= limit {
         s.to_string()
     } else {
-        let half = COMMAND_MAX_OUTPUT_SIZE / 2;
+        let half = limit / 2;
         let head_end = floor_char_boundary(s, half);
         let tail_start = floor_char_boundary(s, s.len() - half);
         format!(
             "{}\n\n... [truncated {} bytes] ...\n\n{}",
             &s[..head_end],
-            s.len() - COMMAND_MAX_OUTPUT_SIZE,
+            s.len() - limit,
             &s[tail_start..]
         )
     }
@@ -619,6 +628,20 @@ mod tests {
         let output = "x".repeat(COMMAND_MAX_OUTPUT_SIZE);
 
         assert_eq!(truncate_output(&output), output);
+    }
+
+    #[test]
+    fn truncate_output_to_honors_a_caller_supplied_limit_distinct_from_the_default() {
+        let limit = 4096;
+        let output = "x".repeat(limit + 10);
+
+        let truncated = truncate_output_to(&output, limit);
+
+        assert!(truncated.len() < output.len());
+        assert!(truncated.contains(&format!("truncated {} bytes", output.len() - limit)));
+
+        let within_limit = "y".repeat(limit);
+        assert_eq!(truncate_output_to(&within_limit, limit), within_limit);
     }
 
     #[test]

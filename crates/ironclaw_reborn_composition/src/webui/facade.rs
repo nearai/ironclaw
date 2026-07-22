@@ -762,6 +762,11 @@ fn status_response_from_readiness(readiness: &RebornReadiness) -> RebornOperator
             RebornOperatorStatusSeverity::Warning,
             Some("mounted-volume hosted preview is ready for single-tenant validation but is not production storage".to_string()),
         ),
+        crate::RebornReadinessState::HostedSingleTenantVolumeSandboxedValidated => (
+            RebornOperatorStatusState::Degraded,
+            RebornOperatorStatusSeverity::Warning,
+            Some("sandboxed-shell hosted preview is ready for single-tenant validation but process execution is not yet wired to the sandbox transport".to_string()),
+        ),
         crate::RebornReadinessState::ProductionValidated => (
             RebornOperatorStatusState::Ready,
             RebornOperatorStatusSeverity::Info,

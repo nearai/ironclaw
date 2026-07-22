@@ -642,6 +642,9 @@ pub(crate) fn build_services_input_with_options(
         | RebornProfile::HostedSingleTenantVolume => {
             build_standalone_local_runtime_services_input(profile, owner_id, config, options)?
         }
+        RebornProfile::HostedSingleTenantVolumeSandboxed => {
+            build_sandboxed_local_runtime_services_input(profile, owner_id, config, options)?
+        }
         RebornProfile::HostedSingleTenant => build_hosted_single_tenant_services_input(
             profile,
             owner_id,
@@ -701,6 +704,67 @@ fn build_standalone_local_runtime_services_input(
         nearai_mcp_bootstrap_config_from_env().context("NEAR AI MCP bootstrap config")?,
     );
     Ok(services_input)
+}
+
+/// Subdirectory (under the profile's local-runtime storage root, the same
+/// root `ironclaw_reborn_composition::local_dev_db_path` resolves the libsql
+/// db file against) where the sandbox transport bind-mounts per-scope tenant
+/// workspaces.
+const SANDBOX_WORKSPACES_SUBDIR: &str = "sandbox-workspaces";
+
+/// Boot-time failure for the `hosted-single-tenant-volume-sandboxed`
+/// profile's tenant-sandbox process backend. Deliberately fail-closed: a
+/// profile that requests `TenantSandbox` never silently falls back to
+/// `RebornRuntimeProcessBinding::None` (which would mean running shell
+/// commands unsandboxed on the host) — see `docs/safety-and-sandbox.md`.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SandboxProcessBootError {
+    #[error(
+        "profile={profile} requires a reachable Docker daemon for its tenant-sandbox process \
+         backend; refusing to boot with an unsandboxed fallback: {reason}"
+    )]
+    DockerUnreachable {
+        profile: RebornProfile,
+        reason: String,
+    },
+}
+
+/// Build the `hosted-single-tenant-volume-sandboxed` profile's services
+/// input: the same local-runtime storage assembly every standalone profile
+/// uses, plus a real `TenantSandbox` process-port binding backed by a live
+/// Docker connection.
+///
+/// The Docker connect and sandbox-transport construction themselves live in
+/// [`ironclaw_reborn_composition::tenant_sandbox_process_binding`], not
+/// here: this crate's workspace dependencies are pinned to the
+/// composition/config/traces/webui facade set
+/// (`reborn_cli_binary_crate_stays_separate_from_v1_root` in
+/// `ironclaw_architecture`), so `runtime/` must never depend on
+/// `ironclaw_host_runtime` directly. Bridges that async composition call
+/// through [`block_on_cli`] rather than threading `async fn` through
+/// `build_services_input_with_options`/`build_runtime_input_with_options` —
+/// those are called from dozens of synchronous unit tests via the
+/// `#[cfg(test)]` `build_runtime_input` wrapper, and `block_on_cli` is this
+/// crate's existing bridge for exactly this shape of problem (see its other
+/// call sites in `commands/`).
+fn build_sandboxed_local_runtime_services_input(
+    profile: RebornProfile,
+    owner_id: &str,
+    config: &RebornBootConfig,
+    options: RuntimeInputOptions,
+) -> anyhow::Result<RebornBuildInput> {
+    let sandbox_workspaces_root =
+        local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
+    let connect = ironclaw_reborn_composition::tenant_sandbox_process_binding(
+        sandbox_workspaces_root,
+    );
+    let binding = block_on_cli(connect).map_err(|error| SandboxProcessBootError::DockerUnreachable {
+        profile,
+        reason: error.to_string(),
+    })?;
+    let services_input =
+        build_standalone_local_runtime_services_input(profile, owner_id, config, options)?;
+    Ok(services_input.with_runtime_process_binding(binding))
 }
 
 fn build_hosted_single_tenant_services_input(
@@ -1088,6 +1152,9 @@ fn composition_profile(profile: RebornProfile) -> RebornCompositionProfile {
         RebornProfile::HostedSingleTenant => RebornCompositionProfile::HostedSingleTenant,
         RebornProfile::HostedSingleTenantVolume => {
             RebornCompositionProfile::HostedSingleTenantVolume
+        }
+        RebornProfile::HostedSingleTenantVolumeSandboxed => {
+            RebornCompositionProfile::HostedSingleTenantVolumeSandboxed
         }
         RebornProfile::Production => RebornCompositionProfile::Production,
         RebornProfile::MigrationDryRun => RebornCompositionProfile::MigrationDryRun,
@@ -2198,6 +2265,65 @@ regex_activation_enabled = false
                 ironclaw_reborn_config::RebornProfile::HostedSingleTenantVolume,
             ),
             reborn_home.join("hosted-single-tenant-volume")
+        );
+    }
+
+    /// Crate-tier fast local regression for A2's boot-fail-closed matrix row
+    /// (the `(deployment, backend)` row named in
+    /// `docs/plans/2026-07-20-reborn-sandbox-plan.md` Workstream A2):
+    /// building the runtime input for the sandboxed profile now performs a
+    /// real Docker connect attempt and must fail closed — never silently
+    /// fall back to `RebornRuntimeProcessBinding::None` (unsandboxed host
+    /// execution) — when the daemon is unreachable. Forces unreachability
+    /// deterministically via `IRONCLAW_REBORN_DOCKER_HOST` rather than
+    /// relying on this machine happening to have no Docker daemon. This is
+    /// the fast in-process complement to the CLI-subprocess-level
+    /// `build_runtime_input_hosted_single_tenant_volume_sandboxed_fails_closed_without_docker`
+    /// smoke test in `tests/smoke.rs` — not a duplicate: this one proves the
+    /// `build_runtime_input` seam directly, the smoke test proves the real
+    /// `ironclaw run` binary surfaces the same failure.
+    #[test]
+    fn build_runtime_input_rejects_hosted_single_tenant_volume_sandboxed_profile_without_docker() {
+        let _lock = lock_runtime_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _docker_host = EnvGuard::set(
+            "IRONCLAW_REBORN_DOCKER_HOST",
+            "/nonexistent/ironclaw-a2-crate-test-docker.sock",
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.clone().into_os_string()),
+            None,
+            None,
+            Some("hosted-single-tenant-volume-sandboxed".into()),
+        )
+        .expect("boot config");
+
+        // The storage root computation itself needs no Docker — pin it
+        // independently of the (expected-failing) full build below.
+        assert_eq!(
+            local_runtime_storage_root(
+                &config,
+                ironclaw_reborn_config::RebornProfile::HostedSingleTenantVolumeSandboxed,
+            ),
+            reborn_home.join("hosted-single-tenant-volume-sandboxed")
+        );
+
+        let error = match build_runtime_input(&config, RuntimeInputCaller::Run) {
+            Ok(_) => panic!("sandboxed profile must fail closed without a reachable Docker daemon"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("hosted-single-tenant-volume-sandboxed"),
+            "error should name the profile: {message}"
+        );
+        assert!(
+            message.contains("Docker"),
+            "error should name Docker unreachability, not a silent host fallback: {message}"
         );
     }
 

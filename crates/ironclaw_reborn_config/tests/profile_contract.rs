@@ -16,6 +16,10 @@ fn profile_wire_values_are_stable() {
         RebornProfile::HostedSingleTenantVolume.as_str(),
         "hosted-single-tenant-volume"
     );
+    assert_eq!(
+        RebornProfile::HostedSingleTenantVolumeSandboxed.as_str(),
+        "hosted-single-tenant-volume-sandboxed"
+    );
     assert_eq!(RebornProfile::Production.as_str(), "production");
     assert_eq!(RebornProfile::MigrationDryRun.as_str(), "migration-dry-run");
 }
@@ -29,6 +33,7 @@ fn all_profiles_are_exposed_in_display_order() {
             RebornProfile::LocalDevYolo,
             RebornProfile::HostedSingleTenant,
             RebornProfile::HostedSingleTenantVolume,
+            RebornProfile::HostedSingleTenantVolumeSandboxed,
             RebornProfile::Production,
             RebornProfile::MigrationDryRun,
         ]
@@ -54,6 +59,10 @@ fn profile_parsing_accepts_expected_values() {
         Ok(RebornProfile::HostedSingleTenantVolume)
     );
     assert_eq!(
+        RebornProfile::from_str("hosted-single-tenant-volume-sandboxed"),
+        Ok(RebornProfile::HostedSingleTenantVolumeSandboxed)
+    );
+    assert_eq!(
         RebornProfile::from_str("production"),
         Ok(RebornProfile::Production)
     );
@@ -69,6 +78,9 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
     assert!(!RebornProfile::LocalDevYolo.starts_hosted_single_tenant_listener());
     assert!(RebornProfile::HostedSingleTenant.starts_hosted_single_tenant_listener());
     assert!(RebornProfile::HostedSingleTenantVolume.starts_hosted_single_tenant_listener());
+    assert!(
+        RebornProfile::HostedSingleTenantVolumeSandboxed.starts_hosted_single_tenant_listener()
+    );
     assert!(!RebornProfile::Production.starts_hosted_single_tenant_listener());
     assert!(!RebornProfile::MigrationDryRun.starts_hosted_single_tenant_listener());
 
@@ -76,6 +88,9 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
     assert!(RebornProfile::LocalDevYolo.uses_standalone_local_runtime_volume());
     assert!(!RebornProfile::HostedSingleTenant.uses_standalone_local_runtime_volume());
     assert!(RebornProfile::HostedSingleTenantVolume.uses_standalone_local_runtime_volume());
+    assert!(
+        RebornProfile::HostedSingleTenantVolumeSandboxed.uses_standalone_local_runtime_volume()
+    );
     assert!(!RebornProfile::Production.uses_standalone_local_runtime_volume());
     assert!(!RebornProfile::MigrationDryRun.uses_standalone_local_runtime_volume());
 
@@ -96,6 +111,10 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
         "hosted-single-tenant-volume"
     );
     assert_eq!(
+        RebornProfile::HostedSingleTenantVolumeSandboxed.local_runtime_storage_subdir(),
+        "hosted-single-tenant-volume-sandboxed"
+    );
+    assert_eq!(
         RebornProfile::Production.local_runtime_storage_subdir(),
         "local-dev"
     );
@@ -108,6 +127,9 @@ fn profile_predicates_capture_hosted_volume_local_runtime_contract() {
     assert!(RebornProfile::LocalDevYolo.supports_local_runtime_skill_management());
     assert!(RebornProfile::HostedSingleTenant.supports_local_runtime_skill_management());
     assert!(RebornProfile::HostedSingleTenantVolume.supports_local_runtime_skill_management());
+    assert!(
+        RebornProfile::HostedSingleTenantVolumeSandboxed.supports_local_runtime_skill_management()
+    );
     assert!(!RebornProfile::Production.supports_local_runtime_skill_management());
     assert!(!RebornProfile::MigrationDryRun.supports_local_runtime_skill_management());
 }

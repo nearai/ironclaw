@@ -28,8 +28,8 @@ use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
     EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, MissionId, NetworkPolicy,
     Obligation, Obligations, Principal, ProjectId, ResourceCeiling, ResourceEstimate,
-    ResourceScope, RuntimeCredentialRequirementSource, RuntimeKind, SandboxQuota, ScopedPath,
-    TenantId, ThreadId, UserId,
+    ResourceReservationId, ResourceScope, RuntimeCredentialRequirementSource, RuntimeKind,
+    SandboxQuota, ScopedPath, TenantId, ThreadId, UserId,
 };
 use ironclaw_trust::{AuthorityCeiling, TrustDecision};
 use serde::{Deserialize, Serialize};
@@ -1071,6 +1071,22 @@ fn obligations_for_grant(
     {
         obligations.push(Obligation::ApplyNetworkPolicy {
             policy: grant.constraints.network.clone(),
+        });
+    }
+
+    // Process-spawning capabilities must reserve resources before dispatch so a
+    // configured governor can enforce a ceiling on concurrent/aggregate spawns.
+    // NOTE: this is currently a no-op behaviorally — `reserve_resource_obligation`
+    // (ironclaw_host_runtime::obligations::BuiltinObligationHandler) only fails
+    // closed when no resource governor is configured, and production always
+    // constructs a governor with an unlimited default ceiling. Emitting the
+    // obligation here just wires the dispatch-time hook; an actual limit is set
+    // by a later slice. This applies to both TenantSandboxProcessPort and the
+    // unsandboxed local-dev HostProcessPort, since both share
+    // `EffectKind::SpawnProcess`.
+    if descriptor.effects.contains(&EffectKind::SpawnProcess) {
+        obligations.push(Obligation::ReserveResources {
+            reservation_id: ResourceReservationId::new(),
         });
     }
 

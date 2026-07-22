@@ -21,10 +21,9 @@ use crate::process_aliases::{
 };
 use crate::process_output::{
     CapturedCommandOutput, SavedCommandOutput, StreamCapture, capture_command_output,
-    read_stream_capped, truncate_output,
+    read_stream_capped, truncate_output_to,
 };
-
-const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+use crate::sandbox_process::shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
 
 /// Environment variables safe to forward to local child processes.
 const SAFE_ENV_VARS: &[&str] = &[
@@ -72,6 +71,10 @@ pub struct CommandExecutionRequest {
     pub command: String,
     pub workdir: Option<String>,
     pub timeout_secs: Option<u64>,
+    /// Optional model-requested cap on captured output (stdout+stderr)
+    /// bytes. Ports clamp this to their own floor/ceiling — see
+    /// `sandbox_process::shell_limits` for the sandbox transport's clamp.
+    pub output_limit_bytes: Option<u64>,
     pub extra_env: HashMap<String, String>,
 }
 
@@ -147,14 +150,16 @@ impl RuntimeProcessPort for TenantSandboxProcessPort {
         &self,
         request: CommandExecutionRequest,
     ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
-        let timeout = request
-            .timeout_secs
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+        // Clamp the model-adjustable `timeout`/`output_limit` to the
+        // operator ceilings before the transport (e.g. the Docker sandbox
+        // transport) ever sees them — see `sandbox_process::shell_limits`.
+        let timeout = clamp_shell_timeout_secs(request.timeout_secs);
+        let output_limit = clamp_shell_output_limit_bytes(request.output_limit_bytes);
         let mut request = request;
         request.timeout_secs = Some(timeout.as_secs());
+        request.output_limit_bytes = Some(output_limit as u64);
         let mut output = self.transport.run_command(request).await?;
-        output.output = truncate_output(&output.output);
+        output.output = truncate_output_to(&output.output, output_limit);
         output.sandboxed = true;
         Ok(output)
     }
@@ -227,10 +232,13 @@ impl RuntimeProcessPort for HostProcessPort {
                     "cannot determine working directory: {e}"
                 ))
             })?;
-        let timeout = request
-            .timeout_secs
-            .map(Duration::from_secs)
-            .unwrap_or(DEFAULT_COMMAND_TIMEOUT);
+        // Same operator ceiling as the sandboxed transport (see
+        // `sandbox_process::shell_limits`), applied here so the unsandboxed
+        // host path can't be used to bypass the model-adjustable `timeout`
+        // clamp. `output_limit` is not honored on this path: it captures via
+        // a fixed preview/save-to-file split (`process_output`) independent
+        // of the sandbox's inline-capture cap.
+        let timeout = clamp_shell_timeout_secs(request.timeout_secs);
         if self.env_mode == HostProcessEnvMode::Inherited {
             tracing::warn!(
                 host_access = "full-local",
@@ -450,6 +458,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: None,
                 extra_env: HashMap::new(),
+                output_limit_bytes: None,
             })
             .await
             .unwrap();
@@ -470,6 +479,7 @@ mod tests {
             workdir: None,
             timeout_secs: None,
             extra_env: HashMap::new(),
+            output_limit_bytes: None,
         })
         .await
         .unwrap();
@@ -477,7 +487,117 @@ mod tests {
         let requests = transport.requests.lock().unwrap();
         assert_eq!(
             requests[0].timeout_secs,
-            Some(DEFAULT_COMMAND_TIMEOUT.as_secs())
+            Some(clamp_shell_timeout_secs(None).as_secs())
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_clamps_timeout_over_cap_to_600() {
+        let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
+        let port = TenantSandboxProcessPort::new(transport.clone());
+
+        port.run_command(CommandExecutionRequest {
+            scope: ResourceScope::system(),
+            mounts: None,
+            command: "echo sandbox".to_string(),
+            workdir: None,
+            timeout_secs: Some(6_000),
+            extra_env: HashMap::new(),
+            output_limit_bytes: None,
+        })
+        .await
+        .unwrap();
+
+        // An over-cap timeout is clamped, not rejected.
+        assert_eq!(transport.requests.lock().unwrap()[0].timeout_secs, Some(600));
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_honors_timeout_within_range() {
+        let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
+        let port = TenantSandboxProcessPort::new(transport.clone());
+
+        port.run_command(CommandExecutionRequest {
+            scope: ResourceScope::system(),
+            mounts: None,
+            command: "echo sandbox".to_string(),
+            workdir: None,
+            timeout_secs: Some(45),
+            extra_env: HashMap::new(),
+            output_limit_bytes: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(transport.requests.lock().unwrap()[0].timeout_secs, Some(45));
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_output_limit_unset_defaults_to_64kib() {
+        let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
+        let port = TenantSandboxProcessPort::new(transport.clone());
+
+        port.run_command(CommandExecutionRequest {
+            scope: ResourceScope::system(),
+            mounts: None,
+            command: "echo sandbox".to_string(),
+            workdir: None,
+            timeout_secs: None,
+            extra_env: HashMap::new(),
+            output_limit_bytes: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            transport.requests.lock().unwrap()[0].output_limit_bytes,
+            Some(65_536)
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_output_limit_over_cap_is_clamped_to_1mib() {
+        let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
+        let port = TenantSandboxProcessPort::new(transport.clone());
+
+        port.run_command(CommandExecutionRequest {
+            scope: ResourceScope::system(),
+            mounts: None,
+            command: "echo sandbox".to_string(),
+            workdir: None,
+            timeout_secs: None,
+            extra_env: HashMap::new(),
+            output_limit_bytes: Some(10 * 1024 * 1024),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            transport.requests.lock().unwrap()[0].output_limit_bytes,
+            Some(1_048_576)
+        );
+    }
+
+    #[tokio::test]
+    async fn tenant_sandbox_process_port_output_limit_below_floor_is_clamped_up() {
+        let transport = std::sync::Arc::new(RecordingSandboxTransport::default());
+        let port = TenantSandboxProcessPort::new(transport.clone());
+
+        port.run_command(CommandExecutionRequest {
+            scope: ResourceScope::system(),
+            mounts: None,
+            command: "echo sandbox".to_string(),
+            workdir: None,
+            timeout_secs: None,
+            extra_env: HashMap::new(),
+            output_limit_bytes: Some(10),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            transport.requests.lock().unwrap()[0].output_limit_bytes,
+            Some(1024)
         );
     }
 
@@ -493,6 +613,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: None,
                 extra_env: HashMap::new(),
+                output_limit_bytes: None,
             })
             .await
             .unwrap_err();
@@ -515,6 +636,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: Some(1),
                 extra_env: HashMap::new(),
+                output_limit_bytes: None,
             })
             .await
             .unwrap_err();
@@ -538,6 +660,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: None,
                 extra_env: HashMap::new(),
+                output_limit_bytes: None,
             })
             .await
             .unwrap();
@@ -646,6 +769,7 @@ mod tests {
                 workdir: Some("/workspace/qa-coding-smoke".to_string()),
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
+                output_limit_bytes: None,
             })
             .await
             .expect("command succeeds");
@@ -676,6 +800,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
+                output_limit_bytes: None,
             })
             .await
             .expect("command succeeds");
@@ -699,6 +824,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: Some(5),
                 extra_env: HashMap::new(),
+                output_limit_bytes: None,
             })
             .await
             .expect("command succeeds");

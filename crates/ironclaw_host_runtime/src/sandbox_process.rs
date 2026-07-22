@@ -30,21 +30,45 @@ use crate::{
 };
 
 mod broker;
+mod connect;
 mod container_identity;
 mod mounts;
+mod network_allowlist;
+mod reaper;
 mod scope_key;
+pub mod shell_limits;
 
 use mounts::RebornSandboxMountSources;
 
 pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
+pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
+pub use network_allowlist::{
+    DEFAULT_SANDBOX_ALLOWED_DOMAINS, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
+    sandbox_allowed_domains, sandbox_extra_allowed_domains, sandbox_network_policy,
+};
+pub use reaper::{ReapSummary, SandboxReaper, SandboxReaperConfig};
+pub use shell_limits::{
+    SHELL_OUTPUT_LIMIT_DEFAULT_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES, SHELL_TIMEOUT_DEFAULT_SECS,
+    SHELL_TIMEOUT_MAX_SECS, clamp_shell_output_limit_bytes, clamp_shell_timeout_secs,
+};
 pub use scope_key::RebornSandboxScopeKey;
 
+/// Docker label prefix for container metadata attached by
+/// [`RebornScopedSandboxCommandTransport`] — shared with [`reaper`] so the
+/// reaper's container-listing filter and this transport's container-creation
+/// labels never drift apart.
+const LABEL_PREFIX: &str = "ironclaw";
+
 const DEFAULT_IMAGE: &str = "ironclaw-worker:latest";
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+// Sourced from `shell_limits` so the config-level default and the per-call
+// clamp default (used when the model omits `timeout`/`output_limit`) can
+// never drift apart. The per-call ceilings (`SHELL_TIMEOUT_MAX_SECS`,
+// `SHELL_OUTPUT_LIMIT_MAX_BYTES`) are applied in `execute_in_container`.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(shell_limits::SHELL_TIMEOUT_DEFAULT_SECS);
 const DEFAULT_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_CPU_SHARES: u32 = 1024;
-const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const DEFAULT_MAX_OUTPUT_BYTES: usize = shell_limits::SHELL_OUTPUT_LIMIT_DEFAULT_BYTES as usize;
 const CONTAINER_WORKSPACE_ROOT: &str = "/workspace";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,7 +263,7 @@ impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
 
 impl RebornScopedSandboxCommandTransport {
     pub async fn connect(config: RebornSandboxConfig) -> Result<Self, RuntimeProcessError> {
-        let docker = connect_docker().await?;
+        let docker = connect_docker_with_retry().await?;
         Ok(Self::new(docker, config))
     }
 
@@ -325,6 +349,15 @@ impl RebornScopedSandboxCommandTransport {
             scope_key.container_name_prefix(),
             uuid::Uuid::new_v4()
         );
+        // Clamp to `[SHELL_OUTPUT_LIMIT_MIN_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES]`
+        // before the request is consumed by `container_launch_config`; falls
+        // back to the configured default (itself `SHELL_OUTPUT_LIMIT_DEFAULT_BYTES`
+        // unless overridden) when the model omits `output_limit`.
+        let output_limit_bytes = clamp_shell_output_limit_bytes(Some(
+            request
+                .output_limit_bytes
+                .unwrap_or(self.config.max_output_bytes as u64),
+        ));
         let launch = self
             .container_launch_config(request, workspace, workdir)
             .await?;
@@ -357,8 +390,7 @@ impl RebornScopedSandboxCommandTransport {
                     ))
                 })?;
             let exit_code = wait_for_container(&self.docker, &container_id).await?;
-            let output =
-                collect_logs(&self.docker, &container_id, self.config.max_output_bytes).await?;
+            let output = collect_logs(&self.docker, &container_id, output_limit_bytes).await?;
             Ok(CommandExecutionOutput {
                 output,
                 // Sandbox logs are pre-capped by `collect_logs`; saved-output
@@ -396,6 +428,7 @@ impl RebornScopedSandboxCommandTransport {
         workspace: &Path,
         workdir: ContainerWorkdir,
     ) -> Result<Config<String>, RuntimeProcessError> {
+        let labels = reaper::build_container_labels(&request.scope)?;
         let env = self.config.command_env(request.extra_env)?;
         let container_user = self.config.container_identity.container_user()?;
         let mut binds = self
@@ -428,6 +461,7 @@ impl RebornScopedSandboxCommandTransport {
             cmd: Some(vec!["sh".to_string(), "-c".to_string(), request.command]),
             working_dir: Some(workdir.into_string()),
             env: Some(env),
+            labels: Some(labels),
             host_config: Some(host_config),
             user: container_user,
             attach_stdout: Some(false),
@@ -447,52 +481,16 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
 
         let workspace = self.prepare_workspace(&request.scope).await?;
         let workdir = Self::resolve_container_workdir(request.workdir.as_deref())?;
-        let timeout = request
+        // Clamp to `[SHELL_TIMEOUT_MIN_SECS, SHELL_TIMEOUT_MAX_SECS]` — the
+        // model-adjustable `timeout` field is bounded by the operator
+        // ceiling here rather than rejected when it overshoots.
+        let requested_secs = request
             .timeout_secs
-            .map(Duration::from_secs)
-            .unwrap_or(self.config.default_timeout);
+            .unwrap_or_else(|| self.config.default_timeout.as_secs());
+        let timeout = clamp_shell_timeout_secs(Some(requested_secs));
         self.execute_in_container(request, &workspace, workdir, timeout)
             .await
     }
-}
-
-async fn connect_docker() -> Result<Docker, RuntimeProcessError> {
-    if let Ok(docker) = Docker::connect_with_local_defaults()
-        && docker.ping().await.is_ok()
-    {
-        return Ok(docker);
-    }
-    #[cfg(unix)]
-    {
-        for socket in unix_socket_candidates() {
-            if socket.exists() {
-                let socket = socket.to_string_lossy();
-                if let Ok(docker) =
-                    Docker::connect_with_socket(&socket, 120, bollard::API_DEFAULT_VERSION)
-                    && docker.ping().await.is_ok()
-                {
-                    return Ok(docker);
-                }
-            }
-        }
-    }
-    Err(RuntimeProcessError::ExecutionFailed(
-        "could not connect to Docker daemon for Reborn sandbox".to_string(),
-    ))
-}
-
-#[cfg(unix)]
-fn unix_socket_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        candidates.push(home.join(".docker/run/docker.sock"));
-        candidates.push(home.join(".colima/default/docker.sock"));
-        candidates.push(home.join(".rd/docker.sock"));
-    }
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
-        candidates.push(runtime_dir.join("docker.sock"));
-    }
-    candidates
 }
 
 async fn wait_for_container(
@@ -838,6 +836,7 @@ mod tests {
                     workdir: None,
                     timeout_secs: Some(1),
                     extra_env: HashMap::new(),
+                    output_limit_bytes: None,
                 },
                 &workspace,
                 ContainerWorkdir::workspace_root(),
@@ -887,6 +886,7 @@ mod tests {
                     workdir: None,
                     timeout_secs: Some(1),
                     extra_env: HashMap::new(),
+                    output_limit_bytes: None,
                 },
                 &workspace,
                 ContainerWorkdir::workspace_root(),
@@ -932,6 +932,7 @@ mod tests {
                 workdir: None,
                 timeout_secs: Some(1),
                 extra_env: HashMap::new(),
+                output_limit_bytes: None,
             })
             .await
             .unwrap_err();

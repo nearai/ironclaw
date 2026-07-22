@@ -159,6 +159,7 @@ async fn local_resolver_routes_post_edit_check_to_the_deployment_isolated_proces
                 workdir: None,
                 timeout_secs: Some(30),
                 extra_env: std::collections::HashMap::new(),
+                output_limit_bytes: None,
             })
             .await
             .expect("named test port runs");
@@ -266,6 +267,7 @@ async fn local_resolver_uses_configured_sandbox_process_backend() {
             workdir: None,
             timeout_secs: None,
             extra_env: Default::default(),
+            output_limit_bytes: None,
         })
         .await
         .unwrap();
@@ -433,6 +435,39 @@ fn local_resolver_accepts_hosted_scoped_virtual_filesystem_with_mounts() {
             mounts: Some(&mounts),
         })
         .expect("hosted scoped virtual filesystem should resolve with explicit mounts");
+
+    assert!(services.runtime_http_egress.is_none());
+}
+
+/// `TenantWorkspace` (the sandboxed-shell profile's filesystem backend) must
+/// resolve through the identical mount-scoped-view mechanism as
+/// `ScopedVirtual` once mounts are supplied — merged arm in
+/// `filesystem_for_plan`. Red on base: `TenantWorkspace` fell into the
+/// catch-all `_ => Err(UnsupportedFilesystemBackend)` arm even with mounts
+/// present.
+#[test]
+fn local_resolver_accepts_hosted_tenant_workspace_filesystem_with_mounts() {
+    let resolver = resolver_without_http();
+    let mut plan = plan(
+        ProcessBackendKind::None,
+        false,
+        false,
+        NetworkMode::Deny,
+        false,
+    );
+    plan.deployment = DeploymentMode::HostedMultiTenant;
+    plan.resolved_profile = RuntimeProfile::HostedSafe;
+    plan.requires_filesystem = true;
+    plan.filesystem_backend = FilesystemBackendKind::TenantWorkspace;
+    let mounts = scoped_mount_view();
+
+    let services = resolver
+        .resolve(InvocationServicesResolutionRequest {
+            plan: &plan,
+            scope: &ResourceScope::system(),
+            mounts: Some(&mounts),
+        })
+        .expect("hosted tenant workspace filesystem should resolve with explicit mounts");
 
     assert!(services.runtime_http_egress.is_none());
 }

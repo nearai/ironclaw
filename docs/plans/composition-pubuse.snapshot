@@ -76,7 +76,8 @@ pub use llm_admin::nearai_mcp::{
 pub use llm_admin::openai_compat_serve::build_openai_compat_route_mount;
 pub use deployment::{
     RebornRuntimeProfileError, RebornRuntimeProfileOptions, hosted_single_tenant_runtime_policy,
-    hosted_single_tenant_volume_runtime_policy, local_dev_runtime_policy,
+    hosted_single_tenant_volume_runtime_policy,
+    hosted_single_tenant_volume_sandboxed_runtime_policy, local_dev_runtime_policy,
     local_dev_yolo_runtime_policy, local_runtime_build_input,
     local_runtime_build_input_with_options,
 };

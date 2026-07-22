@@ -24,7 +24,12 @@ use crate::deployment::DeploymentConfig;
 use crate::{RebornCompositionProfile, RebornProductAuthServicePorts};
 
 const DEFAULT_REBORN_POSTGRES_URL_ENV: &str = "IRONCLAW_REBORN_POSTGRES_URL";
-const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
+/// Backend-agnostic: the env var naming convention for an operator-supplied
+/// secrets master key is shared by the Postgres production path
+/// (`resolve_postgres_storage_from_config_and_env`) and the volume-shaped
+/// hosted profiles (`deployment::hosted_single_tenant_volume*_build_input`),
+/// so this stays `pub(crate)` rather than private to this module.
+pub(crate) const DEFAULT_REBORN_SECRET_MASTER_KEY_ENV: &str = "IRONCLAW_REBORN_SECRET_MASTER_KEY";
 const REBORN_POSTGRES_POOL_MAX_SIZE_ENV: &str = "IRONCLAW_REBORN_POSTGRES_POOL_MAX_SIZE";
 const REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON_ENV: &str =
     "IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON";
@@ -252,6 +257,14 @@ pub(crate) enum RebornStorageInput {
         root: PathBuf,
         workspace_root: Option<PathBuf>,
         host_home_root: Option<PathBuf>,
+        /// Externally-supplied secrets master key. `None` for plain
+        /// `local-dev`/`local-dev-yolo` (correct: single-user local dev keeps
+        /// the dotfile/keychain fallback chain). `Some` for the
+        /// libsql-volume-shaped hosted profiles
+        /// (`hosted-single-tenant-volume`, `-sandboxed`), which must never
+        /// fall back to that single-user chain — see
+        /// `deployment::hosted_single_tenant_volume_build_input`.
+        secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
     },
     HostedSingleTenantPostgres {
         root: PathBuf,
@@ -376,6 +389,7 @@ impl RebornBuildInput {
                 root,
                 workspace_root: None,
                 host_home_root: None,
+                secret_master_key: None,
             },
         )
     }
@@ -497,6 +511,32 @@ impl RebornBuildInput {
 
     pub fn with_local_dev_confirmed_host_home_root(self, host_home_root: PathBuf) -> Self {
         self.with_local_runtime_confirmed_host_home_root(host_home_root)
+    }
+
+    /// Carry an externally-resolved secrets master key on a `LocalDev`-shaped
+    /// storage input so `build_local_runtime` never falls back to the
+    /// single-user dotfile/keychain chain (`resolve_local_dev_secret_master_key`)
+    /// for it. No-op on non-`LocalDev` storage shapes, mirroring
+    /// `with_local_runtime_workspace_root`'s match-and-ignore shape.
+    ///
+    /// Used only by the libsql-volume-shaped hosted profiles
+    /// (`hosted-single-tenant-volume`, `-sandboxed`); plain
+    /// `local-dev`/`local-dev-yolo` never call this, so they keep the
+    /// dotfile/keychain fallback the single-user local-dev shape correctly
+    /// relies on.
+    ///
+    pub(crate) fn with_local_dev_secret_master_key(
+        mut self,
+        secret_master_key: ironclaw_secrets::SecretMaterial,
+    ) -> Self {
+        if let RebornStorageInput::LocalDev {
+            secret_master_key: key,
+            ..
+        } = &mut self.storage
+        {
+            *key = Some(secret_master_key);
+        }
+        self
     }
 
     pub fn requires_local_runtime_confirmed_host_home_root(&self) -> bool {

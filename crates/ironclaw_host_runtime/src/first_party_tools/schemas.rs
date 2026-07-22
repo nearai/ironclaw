@@ -153,7 +153,8 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {
                 "command": { "type": "string", "description": "Shell command to execute. Prefer ONE command that does the whole job: combine steps with '&&' or pipes, or write and run a single script (awk/python) — do NOT issue one command per metric/day/line, and don't re-read files you already have." },
                 "workdir": { "type": "string", "description": "Optional scoped working directory" },
-                "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in seconds" }
+                "timeout": { "type": "integer", "minimum": 1, "description": "Timeout in seconds. Default 120, maximum 600 (values above are clamped)." },
+                "output_limit": { "type": "integer", "minimum": 1024, "description": "Maximum captured output (stdout+stderr) in bytes. Default 65536, maximum 1048576 (values above are clamped)." }
             },
             "required": ["command"],
             "additionalProperties": false
@@ -934,5 +935,37 @@ mod tests {
                 "{reference} should be registered"
             );
         }
+    }
+
+    #[test]
+    fn shell_schema_timeout_and_output_limit_descriptions_state_default_and_max() {
+        // The schema is the model's contract: it must see the same
+        // default/ceiling numbers the process ports actually clamp to
+        // (`sandbox_process::shell_limits`), so a call that overshoots isn't
+        // a surprise.
+        let schema = resolve_builtin_input_schema_ref("schemas/builtin/shell.input.v1.json")
+            .expect("shell schema is registered");
+
+        let timeout_description = schema["properties"]["timeout"]["description"]
+            .as_str()
+            .expect("timeout description is a string");
+        assert!(
+            timeout_description.contains("120") && timeout_description.contains("600"),
+            "timeout description must state its default (120) and max (600): {timeout_description}"
+        );
+
+        let output_limit_description = schema["properties"]["output_limit"]["description"]
+            .as_str()
+            .expect("output_limit description is a string");
+        assert!(
+            output_limit_description.contains("65536")
+                && output_limit_description.contains("1048576"),
+            "output_limit description must state its default (65536) and max (1048576): {output_limit_description}"
+        );
+        assert_eq!(
+            schema["properties"]["output_limit"]["minimum"].as_u64(),
+            Some(1024),
+            "output_limit schema floor must match SHELL_OUTPUT_LIMIT_MIN_BYTES"
+        );
     }
 }

@@ -67,6 +67,7 @@ pub(super) struct ShellExecutionRequest {
     pub command: String,
     pub workdir: Option<String>,
     pub timeout_secs: Option<u64>,
+    pub output_limit_bytes: Option<u64>,
     pub extra_env: HashMap<String, String>,
 }
 
@@ -76,6 +77,7 @@ impl ShellExecutionRequest {
             command: command.into(),
             workdir: None,
             timeout_secs: None,
+            output_limit_bytes: None,
             extra_env: HashMap::new(),
         }
     }
@@ -93,6 +95,7 @@ pub(super) fn parse_shell_request(
     let mut request = ShellExecutionRequest::new(command.to_string());
     request.workdir = parse_workdir(params)?;
     request.timeout_secs = parse_timeout(params)?;
+    request.output_limit_bytes = parse_output_limit(params)?;
     Ok(request)
 }
 
@@ -125,6 +128,29 @@ fn parse_timeout(params: &Value) -> Result<Option<u64>, ShellExecutionError> {
             if value == 0 {
                 return Err(ShellExecutionError::InvalidParameters(
                     "timeout must be greater than 0".to_string(),
+                ));
+            }
+            Ok(Some(value))
+        }
+    }
+}
+
+/// Parse the optional `output_limit` (bytes). Range clamping to the operator
+/// floor/ceiling happens downstream in `sandbox_process::shell_limits`
+/// (over-cap and under-floor values are clamped, never rejected here) — this
+/// only rejects a malformed value.
+fn parse_output_limit(params: &Value) -> Result<Option<u64>, ShellExecutionError> {
+    match params.get("output_limit") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => {
+            let value = value.as_u64().ok_or_else(|| {
+                ShellExecutionError::InvalidParameters(
+                    "output_limit must be a positive integer number of bytes".to_string(),
+                )
+            })?;
+            if value == 0 {
+                return Err(ShellExecutionError::InvalidParameters(
+                    "output_limit must be greater than 0".to_string(),
                 ));
             }
             Ok(Some(value))
@@ -528,13 +554,15 @@ mod tests {
         let parsed = parse_shell_request(&json!({
             "command": "echo hi",
             "workdir": "  /workspace  ",
-            "timeout": 7
+            "timeout": 7,
+            "output_limit": 4096
         }))
         .expect("valid shell request");
 
         assert_eq!(parsed.command, "echo hi");
         assert_eq!(parsed.workdir.as_deref(), Some("/workspace"));
         assert_eq!(parsed.timeout_secs, Some(7));
+        assert_eq!(parsed.output_limit_bytes, Some(4096));
 
         for input in [
             json!({}),
@@ -542,6 +570,8 @@ mod tests {
             json!({"command": "echo hi", "workdir": 123}),
             json!({"command": "echo hi", "timeout": 0}),
             json!({"command": "echo hi", "timeout": "1"}),
+            json!({"command": "echo hi", "output_limit": 0}),
+            json!({"command": "echo hi", "output_limit": "1"}),
         ] {
             assert!(
                 matches!(
@@ -551,6 +581,28 @@ mod tests {
                 "expected invalid parameters for {input:?}"
             );
         }
+    }
+
+    #[test]
+    fn parse_shell_request_leaves_output_limit_unset_when_omitted() {
+        let parsed = parse_shell_request(&json!({"command": "echo hi"}))
+            .expect("valid shell request without output_limit");
+
+        assert_eq!(parsed.output_limit_bytes, None);
+    }
+
+    #[test]
+    fn parse_shell_request_accepts_output_limit_above_the_operator_cap() {
+        // parse_shell_request only rejects malformed values; clamping an
+        // over-cap request to SHELL_OUTPUT_LIMIT_MAX_BYTES is the sandbox
+        // transport's job (see sandbox_process::shell_limits).
+        let parsed = parse_shell_request(&json!({
+            "command": "echo hi",
+            "output_limit": 10 * 1024 * 1024
+        }))
+        .expect("valid shell request");
+
+        assert_eq!(parsed.output_limit_bytes, Some(10 * 1024 * 1024));
     }
 
     #[test]

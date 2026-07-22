@@ -12,6 +12,10 @@ use crate::{
     CommandExecutionRequest, FirstPartyCapabilityError, FirstPartyCapabilityRequest,
     RuntimeProcessError, SavedCommandOutput, SavedCommandOutputSanitization,
     process_output::saved_output_filename,
+    sandbox_process::shell_limits::{
+        SHELL_OUTPUT_LIMIT_DEFAULT_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES, SHELL_TIMEOUT_DEFAULT_SECS,
+        SHELL_TIMEOUT_MAX_SECS,
+    },
 };
 
 use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest};
@@ -21,16 +25,22 @@ mod shell_core;
 
 pub const SHELL_CAPABILITY_ID: &str = "builtin.shell";
 
-const DEFAULT_SHELL_WALL_CLOCK_MS: u64 = 120_000;
-const MAX_SHELL_WALL_CLOCK_MS: u64 = 120_000;
-const MAX_SHELL_TIMEOUT_SECS: u64 = MAX_SHELL_WALL_CLOCK_MS / 1000;
-const DEFAULT_SHELL_OUTPUT_BYTES: u64 = crate::process_output::COMMAND_MAX_OUTPUT_SIZE as u64;
+const DEFAULT_SHELL_WALL_CLOCK_MS: u64 = SHELL_TIMEOUT_DEFAULT_SECS * 1_000;
+// The manifest's hard ceiling mirrors the model-adjustable `timeout`/
+// `output_limit` ceilings enforced by the process ports (HostProcessPort,
+// TenantSandboxProcessPort) — see `sandbox_process::shell_limits`. A
+// caller-requested value above these is clamped there, never rejected here.
+const MAX_SHELL_WALL_CLOCK_MS: u64 = SHELL_TIMEOUT_MAX_SECS * 1_000;
+const DEFAULT_SHELL_OUTPUT_BYTES: u64 = SHELL_OUTPUT_LIMIT_DEFAULT_BYTES;
 const SAVED_OUTPUT_SCOPED_DIR: &str = "command-outputs";
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
         SHELL_CAPABILITY_ID,
-        "Execute shell commands with copied v1 validation and saved-file references for large local output",
+        "Execute shell commands with copied v1 validation and saved-file references for large local output. \
+         `timeout` (seconds) and `output_limit` (bytes) are model-adjustable per call: timeout defaults to \
+         120s and is clamped to a 600s ceiling, output_limit defaults to 64 KiB and is clamped to a 1 MiB \
+         ceiling — values outside these ranges are clamped, not rejected.",
         vec![
             EffectKind::DispatchCapability,
             EffectKind::SpawnProcess,
@@ -50,7 +60,7 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
                 max_input_tokens: None,
                 max_output_tokens: None,
                 max_wall_clock_ms: Some(MAX_SHELL_WALL_CLOCK_MS),
-                max_output_bytes: Some(FIRST_PARTY_MAX_OUTPUT_BYTES),
+                max_output_bytes: Some(FIRST_PARTY_MAX_OUTPUT_BYTES.max(SHELL_OUTPUT_LIMIT_MAX_BYTES)),
                 sandbox: Some(SandboxQuota {
                     process_count: Some(1),
                     ..SandboxQuota::default()
@@ -65,15 +75,12 @@ pub(super) async fn dispatch(
 ) -> Result<(Value, Duration), FirstPartyCapabilityError> {
     let parsed = shell_core::parse_shell_request(&request.input).map_err(shell_error)?;
     reject_unbacked_scoped_workdir(request, parsed.workdir.as_deref())?;
-    if parsed
-        .timeout_secs
-        .is_some_and(|timeout_secs| timeout_secs > MAX_SHELL_TIMEOUT_SECS)
-    {
-        return Err(FirstPartyCapabilityError::new(
-            RuntimeDispatchErrorKind::Resource,
-        ));
-    }
     shell_core::validate_command(&parsed.command, false).map_err(shell_error)?;
+    // `timeout_secs`/`output_limit_bytes` are forwarded as the model
+    // requested them; the process port (HostProcessPort or
+    // TenantSandboxProcessPort) clamps each to its operator ceiling — see
+    // `sandbox_process::shell_limits`. Values above the ceiling are clamped
+    // there, never rejected here.
     let output = request
         .services
         .process
@@ -83,6 +90,7 @@ pub(super) async fn dispatch(
             command: parsed.command,
             workdir: parsed.workdir,
             timeout_secs: parsed.timeout_secs,
+            output_limit_bytes: parsed.output_limit_bytes,
             extra_env: parsed.extra_env,
         })
         .await

@@ -128,6 +128,69 @@ async fn capability_access_returns_grant_constraints_as_runtime_obligations() {
 }
 
 #[tokio::test]
+async fn obligations_include_reserve_resources_for_spawn_process_capability() {
+    let descriptor = CapabilityDescriptor {
+        effects: vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+        ..wasm_descriptor()
+    };
+    let grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability, EffectKind::SpawnProcess],
+    );
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    let Decision::Allow { obligations } = decision else {
+        panic!("expected allow decision with obligations, got {decision:?}");
+    };
+    assert!(
+        obligations
+            .as_slice()
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::ReserveResources { .. }))
+    );
+}
+
+#[tokio::test]
+async fn obligations_omit_reserve_resources_for_non_spawn_process_capability() {
+    let descriptor = wasm_descriptor();
+    let grant = grant_for(
+        descriptor.id.clone(),
+        Principal::Extension(ExtensionId::new("caller").unwrap()),
+        vec![EffectKind::DispatchCapability],
+    );
+
+    let decision = GrantAuthorizer::new()
+        .authorize_dispatch(
+            &execution_context(CapabilitySet {
+                grants: vec![grant],
+            }),
+            &descriptor,
+            &ResourceEstimate::default(),
+        )
+        .await;
+
+    let Decision::Allow { obligations } = decision else {
+        panic!("expected allow decision with obligations, got {decision:?}");
+    };
+    assert!(
+        !obligations
+            .as_slice()
+            .iter()
+            .any(|obligation| matches!(obligation, Obligation::ReserveResources { .. }))
+    );
+}
+
+#[tokio::test]
 async fn capability_access_allows_first_party_dynamic_secret_consumers_without_static_secret_grant()
 {
     let descriptor = CapabilityDescriptor {

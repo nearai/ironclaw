@@ -3559,6 +3559,16 @@ async fn builtin_shell_tenant_sandbox_process_uses_callers_scope_for_two_user_is
 
 #[tokio::test]
 async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
+    // `hosted_dev_policy()` resolves `process_backend: TenantSandbox`, but this
+    // runtime is only wired with a local `RecordingProcessPort` (no
+    // `with_tenant_sandbox_process_port`). `TenantWorkspace` filesystem access
+    // itself now resolves fine (it's a mount-scoped view, same mechanism as
+    // `ScopedVirtual`), so the rejection no longer happens as an authorization
+    // denial — it happens one step later, at process-backend resolution in
+    // `LocalInvocationServicesResolver::resolve`: there is no tenant-sandbox
+    // process port configured to satisfy the `TenantSandbox` plan, so
+    // `InvocationServicesError::UnsupportedProcessBackend` fires and maps to
+    // `RuntimeFailureKind::Backend`. The handler still never runs.
     let process_port = Arc::new(RecordingProcessPort::default());
     let runtime =
         runtime_with_process_port_and_policy(Arc::clone(&process_port), hosted_dev_policy());
@@ -3572,7 +3582,7 @@ async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
     .await
     .unwrap_err();
 
-    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert_eq!(error, RuntimeFailureKind::Backend);
     assert!(
         process_port.requests.lock().unwrap().is_empty(),
         "hosted shell must fail at invocation-service resolution before the handler can run"
@@ -3600,6 +3610,8 @@ async fn builtin_shell_rejects_invalid_inputs_before_spawn() {
         json!({"command": "echo hi", "workdir": 123}),
         json!({"command": "echo hi", "timeout": 0}),
         json!({"command": "echo hi", "timeout": "1"}),
+        json!({"command": "echo hi", "output_limit": 0}),
+        json!({"command": "echo hi", "output_limit": "1"}),
     ] {
         let err = invoke_shell(input).await.unwrap_err();
 
@@ -3632,12 +3644,27 @@ async fn builtin_shell_invalid_input_failure_carries_the_reason_through_the_runt
 }
 
 #[tokio::test]
-async fn builtin_shell_rejects_timeout_above_manifest_ceiling() {
-    let err = invoke_shell(json!({"command": "echo hi", "timeout": 121}))
+async fn builtin_shell_honors_timeout_above_the_old_120s_default() {
+    // `timeout` is model-adjustable up to a 600s operator ceiling
+    // (`sandbox_process::shell_limits::SHELL_TIMEOUT_MAX_SECS`); a value
+    // above the 120s default is honored, not rejected.
+    let output = invoke_shell(json!({"command": "echo hi", "timeout": 121}))
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(err, RuntimeFailureKind::Resource);
+    assert_eq!(output["exit_code"], json!(0));
+}
+
+#[tokio::test]
+async fn builtin_shell_clamps_rather_than_rejects_timeout_above_the_600s_ceiling() {
+    // A command that completes immediately still succeeds when `timeout`
+    // overshoots the ceiling: the value is clamped to 600s downstream in the
+    // process port, never rejected at dispatch.
+    let output = invoke_shell(json!({"command": "echo hi", "timeout": 6_000}))
+        .await
+        .unwrap();
+
+    assert_eq!(output["exit_code"], json!(0));
 }
 
 #[tokio::test]
@@ -6772,17 +6799,39 @@ async fn builtin_read_file_reads_scoped_virtual_filesystem_through_mount_service
 }
 
 #[tokio::test]
-async fn builtin_read_file_rejects_tenant_workspace_before_filesystem_access() {
+async fn builtin_read_file_under_tenant_workspace_is_mount_gated() {
+    // `TenantWorkspace` now resolves to the same mount-scoped filesystem view
+    // as `ScopedVirtual` (see `LocalInvocationServicesResolver::filesystem_for_plan`),
+    // so it is no longer an unsupported backend that hosted read_file always
+    // fails against. The real security invariant is that access is gated by
+    // the resolved `MountView`: a grant that covers the path allows the read,
+    // and the absence of a covering grant still denies it before the file is
+    // touched.
     let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    std::fs::write(temp.path().join("README.md"), "tenant workspace read\n").unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem_and_policy(filesystem, hosted_dev_policy());
 
-    let error = invoke_with_context(
+    // (a) With a read-only /workspace mount granting access, the read succeeds.
+    let output = invoke_with_context(
         &runtime,
         READ_FILE_CAPABILITY_ID,
         json!({"path": "/workspace/README.md"}),
         execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["content"], json!("     1│ tenant workspace read"));
+    assert_eq!(output["path"], json!("/workspace/README.md"));
+
+    // (b) Without any mount covering the path, the same tenant-workspace
+    // resolution still denies the read before touching the filesystem.
+    let error = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/README.md"}),
+        execution_context_with_mounts([READ_FILE_CAPABILITY_ID], MountView::default()),
     )
     .await
     .unwrap_err();

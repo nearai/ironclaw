@@ -14,6 +14,7 @@ pub enum RebornReadinessState {
     DevOnly,
     HostedSingleTenantValidated,
     HostedSingleTenantVolumePreviewValidated,
+    HostedSingleTenantVolumeSandboxedValidated,
     ProductionValidated,
     MigrationDryRunValidated,
 }
@@ -79,6 +80,7 @@ pub enum RebornReadinessDiagnosticReason {
     Disabled,
     DevOnlyProfile,
     HostedSingleTenantVolumePreview,
+    HostedSingleTenantVolumeSandboxedPreview,
     Missing,
     LocalOnly,
     Unverified,
@@ -92,6 +94,9 @@ impl RebornReadinessDiagnosticReason {
             Self::Disabled => "disabled",
             Self::DevOnlyProfile => "dev-only-profile",
             Self::HostedSingleTenantVolumePreview => "hosted-single-tenant-volume-preview",
+            Self::HostedSingleTenantVolumeSandboxedPreview => {
+                "hosted-single-tenant-volume-sandboxed-preview"
+            }
             Self::Missing => "missing",
             Self::LocalOnly => "local-only",
             Self::Unverified => "unverified",
@@ -120,6 +125,9 @@ impl<'de> Deserialize<'de> for RebornReadinessDiagnosticReason {
             "disabled" => Self::Disabled,
             "dev-only-profile" => Self::DevOnlyProfile,
             "hosted-single-tenant-volume-preview" => Self::HostedSingleTenantVolumePreview,
+            "hosted-single-tenant-volume-sandboxed-preview" => {
+                Self::HostedSingleTenantVolumeSandboxedPreview
+            }
             "missing" => Self::Missing,
             "local-only" => Self::LocalOnly,
             "unverified" => Self::Unverified,
@@ -300,6 +308,21 @@ impl RebornReadinessDiagnostic {
             profile: RebornCompositionProfile::HostedSingleTenantVolume,
             component: RebornReadinessDiagnosticComponent::CompositionProfile,
             reason: RebornReadinessDiagnosticReason::HostedSingleTenantVolumePreview,
+            status: RebornReadinessDiagnosticStatus::Warning,
+            blocks_production: true,
+        }
+    }
+
+    /// The sandboxed-shell variant of the hosted volume preview: process
+    /// execution routes to a per-tenant Docker sandbox (`TenantSandbox`)
+    /// instead of staying disabled, so it carries its own preview reason
+    /// rather than reusing [`RebornReadinessDiagnostic::hosted_single_tenant_volume`].
+    /// Boots fail-closed until the sandbox transport is wired (A2).
+    pub fn hosted_single_tenant_volume_sandboxed() -> Self {
+        Self {
+            profile: RebornCompositionProfile::HostedSingleTenantVolumeSandboxed,
+            component: RebornReadinessDiagnosticComponent::CompositionProfile,
+            reason: RebornReadinessDiagnosticReason::HostedSingleTenantVolumeSandboxedPreview,
             status: RebornReadinessDiagnosticStatus::Warning,
             blocks_production: true,
         }

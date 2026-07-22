@@ -33,6 +33,10 @@ on:
 
 env:
   IMAGE_NAME: nearaidev/ironclaw
+  # Sandbox worker image (Dockerfile.process-sandbox): the image the
+  # `ironclaw-dind` bake step pulls for scoped process-sandbox launches.
+  # Published from this same run so it always matches `ironclaw`'s tag/sha.
+  IMAGE_NAME_WORKER: nearaidev/ironclaw-worker
 
 jobs:
   build:
@@ -42,6 +46,9 @@ jobs:
       contents: read
       packages: read
       actions: write
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+      worker_sha_tag: ${{ steps.tags.outputs.sha_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -79,6 +86,7 @@ jobs:
           IS_RELEASE_BUILD: ${{ inputs.release && 'true' || 'false' }}
           INPUT_TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
+          IMAGE_NAME_WORKER: ${{ env.IMAGE_NAME_WORKER }}
         run: |
           if [[ -n "${INPUT_TAG}" && ! "${INPUT_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$ ]]; then
             echo "::error::Input tag '${INPUT_TAG}' does not match Docker tag grammar"
@@ -107,6 +115,11 @@ jobs:
             TAGS="${TAGS},${IMAGE_NAME}:${INPUT_TAG}"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+
+          # ironclaw-worker mirrors ironclaw's tag scheme exactly — derive it
+          # by swapping the image name so the two never drift apart.
+          WORKER_TAGS="${TAGS//${IMAGE_NAME}/${IMAGE_NAME_WORKER}}"
+          echo "worker_tags=${WORKER_TAGS}" >> "$GITHUB_OUTPUT"
 
           # The Reborn Dockerfile has a single `runtime` stage — WASM
           # extensions are compiled into the binary via
@@ -161,6 +174,24 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build and push (ironclaw-worker)
+        if: steps.check.outputs.skip != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.process-sandbox
+          push: true
+          tags: ${{ steps.tags.outputs.worker_tags }}
+          labels: |
+            ironclaw.git.sha=${{ steps.source_sha.outputs.sha }}
+          platforms: linux/amd64
+          # Separate cache scope: process-sandbox has a completely different
+          # layer graph (debian:bookworm-slim + apt packages) than the
+          # ironclaw runtime image — a shared scope would evict useful layers
+          # from both builds on every run.
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+
       - name: Create releases-manager app token
         id: app-token
         if: steps.check.outputs.skip != 'true'
@@ -197,6 +228,7 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         env:
           TAGS: ${{ steps.tags.outputs.tags }}
+          WORKER_TAGS: ${{ steps.tags.outputs.worker_tags }}
           VERSION: ${{ steps.version.outputs.version }}
           SOURCE_SHA: ${{ steps.source_sha.outputs.sha }}
         run: |
@@ -206,6 +238,11 @@ jobs:
             echo "**ironclaw:**"
             echo '```'
             echo "${TAGS}" | tr ',' '\n'
+            echo '```'
+            echo ""
+            echo "**ironclaw-worker:**"
+            echo '```'
+            echo "${WORKER_TAGS}" | tr ',' '\n'
             echo '```'
             echo ""
             echo "- version: \`${VERSION}\`"
@@ -220,6 +257,35 @@ jobs:
           {
             echo "## Docker Images — skipped"
             echo ""
-            echo "Current commit already built for \`${IMAGE_NAME}:staging\`."
+            echo "Current commit already built for \`${IMAGE_NAME}:staging\` / \`${IMAGE_NAME_WORKER}:staging\`."
             echo "- sha: \`${SOURCE_SHA}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke-worker-image:
+    name: Smoke test (ironclaw-worker)
+    needs: build
+    if: needs.build.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    env:
+      IMAGE_NAME_WORKER: nearaidev/ironclaw-worker
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          username: ${{ vars.DOCKER_REGISTRY_USER }}
+          password: ${{ secrets.DOCKER_REGISTRY_TOKEN }}
+
+      - name: Pull and run ironclaw-worker
+        env:
+          WORKER_SHA_TAG: ${{ needs.build.outputs.worker_sha_tag }}
+        run: |
+          IMAGE="${IMAGE_NAME_WORKER}:${WORKER_SHA_TAG}"
+          echo "Smoke testing ${IMAGE}"
+          docker pull "${IMAGE}"
+          # Proves the tini -> process-sandbox-entrypoint -> capsh chain
+          # actually execs the given command instead of falling through to
+          # the image's "missing command" default CMD.
+          docker run --rm "${IMAGE}" sh -c "echo ok"

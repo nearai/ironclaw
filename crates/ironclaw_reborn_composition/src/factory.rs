@@ -473,6 +473,13 @@ pub struct RebornServices {
     #[cfg(feature = "test-support")]
     pub(crate) channel_egress_credential_bridges:
         Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
+    /// D4-1 orphan-sandbox-container reaper, already spawned (guarded on a
+    /// successful, independent Docker connect) for the tenant-sandboxed
+    /// profile only. `build_reborn_runtime` moves this onto `RebornRuntime`
+    /// so `RebornRuntime::shutdown` can cancel it alongside every other owned
+    /// background worker. `None` on every non-sandboxed profile and when the
+    /// reaper's own Docker connect could not be established.
+    pub(crate) sandbox_reaper_handle: Option<crate::sandbox_reaper_task::SandboxReaperRuntimeHandle>,
 }
 
 struct ChannelHostWiring {
@@ -1605,6 +1612,7 @@ impl RebornServices {
             channel_delivery_resolver: None,
             #[cfg(feature = "test-support")]
             channel_egress_credential_bridges: None,
+            sandbox_reaper_handle: None,
         }
     }
 }
@@ -1755,6 +1763,15 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         account_setup_descriptors,
         ..
     } = input;
+    // D3-2/D4-1: whether this build is the tenant-sandboxed shell profile
+    // (`hosted-single-tenant-volume-sandboxed`) — gates the tenant
+    // concurrency ceiling and the orphan-container reaper spawn below.
+    // Checked by reference so `runtime_process_binding` stays available for
+    // `apply_runtime_process_binding` further down.
+    let is_sandboxed_profile = matches!(
+        &runtime_process_binding,
+        RebornRuntimeProcessBinding::TenantSandbox { .. }
+    );
     // Label for logging/errors; behaviour reads `deployment`'s axes.
     let profile = deployment.profile();
     // Computed before `oauth_provider_configs` is consumed by
@@ -1793,12 +1810,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             root,
             workspace_root,
             host_home_root,
+            secret_master_key,
         } => (
             root,
             workspace_root,
             host_home_root,
             StorageBackendInput::LocalDefault,
-            None::<ironclaw_secrets::SecretMaterial>,
+            secret_master_key,
             None::<bool>,
         ),
         RebornStorageInput::HostedSingleTenantPostgres { .. }
@@ -1955,6 +1973,35 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         identity_substrate_db,
     })
     .await?;
+
+    // D3-2: bound this tenant's concurrent SpawnProcess reservations for the
+    // sandboxed profile only — every other profile leaves the tenant account
+    // unlimited. Turns the D3-1 `ReserveResources` obligation from a no-op
+    // into an actual gate.
+    let sandbox_reaper_handle = if is_sandboxed_profile {
+        let sandbox_tenant_id = crate::sandbox_quota::resolve_local_runtime_tenant_id(
+            local_runtime_identity_for_nearai_mcp.as_ref(),
+        )?;
+        let governor: Arc<dyn ironclaw_resources::ResourceGovernor> =
+            Arc::clone(&store_graph.resource_governor) as Arc<dyn ironclaw_resources::ResourceGovernor>;
+        crate::sandbox_quota::apply_sandbox_tenant_ceiling(
+            &governor,
+            sandbox_tenant_id,
+            crate::sandbox_quota::sandbox_max_concurrent_from_env(),
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("sandbox tenant concurrency ceiling could not be set: {error}"),
+        })?;
+
+        // D4-1: spawn the orphan-container reaper. Guarded internally —
+        // returns `None` rather than failing this build if Docker is not
+        // reachable at this (independent, best-effort) connect attempt.
+        crate::sandbox_reaper_task::maybe_spawn_sandbox_reaper(Arc::clone(&store_graph.run_state)
+            as Arc<dyn ironclaw_run_state::RunStateStore>)
+        .await
+    } else {
+        None
+    };
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
@@ -2725,6 +2772,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         channel_delivery_resolver: channel_host_wiring.channel_delivery_resolver,
         #[cfg(feature = "test-support")]
         channel_egress_credential_bridges: channel_host_wiring.channel_egress_credential_bridges,
+        sandbox_reaper_handle,
     })
 }
 
@@ -3760,9 +3808,13 @@ pub async fn open_local_dev_secret_store(
 
 /// Where a resolved local-dev master key came from, used to name the source in
 /// fail-loud error messages.
-enum MasterKeySource {
+pub(crate) enum MasterKeySource {
     File(PathBuf),
     Env,
+    /// A named env var other than the local-dev `SECRETS_MASTER_KEY` — e.g. the
+    /// hosted-volume profiles read `IRONCLAW_REBORN_SECRET_MASTER_KEY`, and a
+    /// malformed-key error must name the var the operator actually set.
+    EnvNamed(&'static str),
     Keychain,
 }
 
@@ -3775,7 +3827,7 @@ enum MasterKeySource {
 /// layers deep in `SecretsCrypto::new`, with no pointer to the file the
 /// operator must fix. See `.claude/rules/error-handling.md` (fail loud, name
 /// the operation).
-fn validate_resolved_master_key(
+pub(crate) fn validate_resolved_master_key(
     key: &str,
     source: &MasterKeySource,
 ) -> Result<(), RebornBuildError> {
@@ -3786,6 +3838,7 @@ fn validate_resolved_master_key(
                 "env var {}",
                 ironclaw_secrets::keychain::SECRETS_MASTER_KEY_ENV
             ),
+            MasterKeySource::EnvNamed(env_name) => format!("env var {env_name}"),
             MasterKeySource::Keychain => "the OS keychain".to_string(),
         };
         RebornBuildError::InvalidConfig {
@@ -5607,6 +5660,10 @@ where
         channel_delivery_resolver: None,
         #[cfg(feature = "test-support")]
         channel_egress_credential_bridges: None,
+        // D4-1's reaper is wired only on the tenant-sandboxed local-runtime
+        // build path (`build_local_runtime`); this production/postgres path
+        // never sets `runtime_process_binding` to `TenantSandbox` today.
+        sandbox_reaper_handle: None,
     })
 }
 

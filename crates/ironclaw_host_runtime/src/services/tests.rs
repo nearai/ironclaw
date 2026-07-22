@@ -544,6 +544,7 @@ async fn inherited_env_runtime_policy_selects_inherited_local_process_port() {
             workdir: Some(workdir.path().display().to_string()),
             timeout_secs: Some(5),
             extra_env: Default::default(),
+            output_limit_bytes: None,
         })
         .await
         .expect("command succeeds");
@@ -579,6 +580,7 @@ async fn scrubbed_runtime_policy_resets_managed_local_process_port_after_inherit
             workdir: Some(workdir.path().display().to_string()),
             timeout_secs: Some(5),
             extra_env: Default::default(),
+            output_limit_bytes: None,
         })
         .await
         .expect("command succeeds");

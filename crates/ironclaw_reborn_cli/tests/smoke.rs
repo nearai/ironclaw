@@ -1139,6 +1139,10 @@ fn profile_list_shows_supported_profiles_without_reborn_home() {
         stdout.contains("hosted-single-tenant-volume"),
         "stdout: {stdout}"
     );
+    assert!(
+        stdout.contains("hosted-single-tenant-volume-sandboxed"),
+        "stdout: {stdout}"
+    );
     assert!(stdout.contains("production"), "stdout: {stdout}");
     assert!(stdout.contains("migration-dry-run"), "stdout: {stdout}");
     assert!(
@@ -1165,7 +1169,7 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
     let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
     assert_eq!(json["selector"], "IRONCLAW_REBORN_PROFILE");
     let profiles = json["profiles"].as_array().expect("profiles array");
-    assert_eq!(profiles.len(), 6);
+    assert_eq!(profiles.len(), 7);
     assert!(
         profiles
             .iter()
@@ -1188,6 +1192,9 @@ fn profile_list_json_is_stable_and_does_not_resolve_reborn_home() {
             .any(|profile| profile["name"] == "hosted-single-tenant-volume"
                 && profile["default"] == false)
     );
+    assert!(profiles.iter().any(|profile| profile["name"]
+        == "hosted-single-tenant-volume-sandboxed"
+        && profile["default"] == false));
     assert!(
         profiles
             .iter()
@@ -3674,6 +3681,55 @@ fn run_rejects_invalid_profile() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(INVALID_PROFILE_MESSAGE), "stderr: {stderr}");
+}
+
+/// Boot-path fail-closed test for the A2 `(deployment, backend)` matrix row
+/// (`docs/plans/2026-07-20-reborn-sandbox-plan.md` Workstream A2): the
+/// `hosted-single-tenant-volume-sandboxed` profile's `TenantSandbox` process
+/// backend now performs a real Docker connect during `ironclaw run` boot.
+/// Forces the daemon unreachable deterministically via
+/// `IRONCLAW_REBORN_DOCKER_HOST` (rather than relying on this machine simply
+/// having no Docker installed) and asserts the real binary exits non-zero
+/// naming both the profile and Docker — never a silent fall back to an
+/// unsandboxed host process backend. This is the real-binary complement to
+/// the crate-tier
+/// `build_runtime_input_rejects_hosted_single_tenant_volume_sandboxed_profile_without_docker`
+/// unit test in `src/runtime/mod.rs`, which proves the same failure at the
+/// `build_runtime_input` seam without paying subprocess spawn cost.
+#[test]
+fn build_runtime_input_hosted_single_tenant_volume_sandboxed_fails_closed_without_docker() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "-m", "ping"])
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env(
+            "IRONCLAW_REBORN_PROFILE",
+            "hosted-single-tenant-volume-sandboxed",
+        )
+        .env(
+            "IRONCLAW_REBORN_DOCKER_HOST",
+            "/nonexistent/ironclaw-smoke-test-docker.sock",
+        )
+        .output()
+        .expect("ironclaw-reborn run should run");
+
+    assert!(
+        !output.status.success(),
+        "sandboxed profile should fail closed without a reachable Docker daemon; stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("hosted-single-tenant-volume-sandboxed"),
+        "stderr should name the profile: {stderr}"
+    );
+    assert!(
+        stderr.contains("Docker"),
+        "stderr should name Docker unreachability rather than silently falling back to an \
+         unsandboxed process backend: {stderr}"
+    );
 }
 
 #[test]
