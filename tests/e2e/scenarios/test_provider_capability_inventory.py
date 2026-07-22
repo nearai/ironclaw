@@ -8,7 +8,9 @@ from provider_capability_inventory import (
     ALL_CLASSIFIED_CAPABILITY_IDS,
     EMULATE_SUPPORTED_TOOLS,
     INVENTORY,
+    capability_id_to_wire_name,
 )
+from provider_operation_cases import PROVIDER_OPERATION_CASES
 
 ROOT = Path(__file__).resolve().parents[3]
 ASSET_ROOT = ROOT / "crates/ironclaw_first_party_extensions/assets"
@@ -67,5 +69,12 @@ def test_every_shipped_provider_capability_has_an_owned_classification():
 def test_tested_capabilities_have_recorded_full_path_evidence():
     """A tested label must point to an exercised hermetic journey."""
     evidence = _recorded_tool_evidence()
-    missing_tested = sorted(EMULATE_SUPPORTED_TOOLS - evidence.keys())
+    operation_case_tools = {
+        capability_id_to_wire_name(case.capability_id)
+        for case in PROVIDER_OPERATION_CASES
+    }
+    missing_tested = sorted(
+        EMULATE_SUPPORTED_TOOLS - evidence.keys() - operation_case_tools
+    )
     assert not missing_tested, f"tested capabilities lack journey evidence: {missing_tested}"
+    assert operation_case_tools <= EMULATE_SUPPORTED_TOOLS
