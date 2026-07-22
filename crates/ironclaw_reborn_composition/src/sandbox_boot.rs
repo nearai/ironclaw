@@ -108,20 +108,19 @@ fn with_sandbox_network_broker_from_values(
         return config
             .with_network_broker_proxy_url(proxy_url)
             .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "{SANDBOX_HTTP_PROXY_URL_ENV} is not a usable proxy URL: {error}"
-                ),
+                reason: format!("{SANDBOX_HTTP_PROXY_URL_ENV} is not a usable proxy URL: {error}"),
             });
     }
     if let Some(raw_port) = proxy_port {
-        let port = raw_port
-            .trim()
-            .parse::<u16>()
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "{SANDBOX_HTTP_PROXY_PORT_ENV} must be a valid port number: {error}"
-                ),
-            })?;
+        let port =
+            raw_port
+                .trim()
+                .parse::<u16>()
+                .map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!(
+                        "{SANDBOX_HTTP_PROXY_PORT_ENV} must be a valid port number: {error}"
+                    ),
+                })?;
         return Ok(config.with_network_broker_port(port));
     }
     Ok(config)

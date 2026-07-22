@@ -87,8 +87,10 @@ pub(crate) fn resolve_local_runtime_tenant_id(
         return Ok(identity.tenant_id.clone());
     }
     let default_identity = crate::runtime_input::RebornRuntimeIdentity::reborn_cli();
-    TenantId::new(default_identity.tenant_id).map_err(|error| crate::RebornBuildError::InvalidConfig {
-        reason: error.to_string(),
+    TenantId::new(default_identity.tenant_id).map_err(|error| {
+        crate::RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        }
     })
 }
 
@@ -156,7 +158,10 @@ mod tests {
 
         let first_scope = scope(&tenant_id);
         let first = governor
-            .reserve(first_scope, ResourceEstimate::default().set_concurrency_slots(1))
+            .reserve(
+                first_scope,
+                ResourceEstimate::default().set_concurrency_slots(1),
+            )
             .expect("first reservation is within the ceiling");
 
         let second_scope = scope(&tenant_id);
