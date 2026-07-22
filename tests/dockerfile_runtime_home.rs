@@ -330,7 +330,8 @@ fn checked_in_deployments_require_explicit_reborn_profiles() {
         "the GCP systemd unit must fail closed when IRONCLAW_VERSION is unset"
     );
     assert!(
-        cloud_sql_proxy.contains("--unix-socket=/run/cloud-sql-proxy")
+        cloud_sql_proxy.contains("RuntimeDirectory=cloud-sql-proxy")
+            && cloud_sql_proxy.contains("--unix-socket=/run/cloud-sql-proxy")
             && cloud_sql_proxy.contains("RuntimeDirectoryMode=0770")
             && cloud_sql_proxy.contains("RuntimeDirectoryPreserve=restart")
             && cloud_sql_proxy.contains("UMask=0007")

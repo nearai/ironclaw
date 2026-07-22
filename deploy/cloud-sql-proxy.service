@@ -6,8 +6,8 @@ After=network.target
 Type=simple
 DynamicUser=yes
 # Keep the database handoff off TCP entirely. The runtime directory is shared
-# only with the IronClaw container, whose supplementary group is derived from
-# this directory when docker run starts.
+# with the IronClaw container, whose supplementary group is derived from this
+# directory when docker run starts.
 RuntimeDirectory=cloud-sql-proxy
 RuntimeDirectoryMode=0770
 RuntimeDirectoryPreserve=restart
