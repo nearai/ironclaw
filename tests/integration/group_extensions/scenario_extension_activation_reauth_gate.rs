@@ -18,7 +18,7 @@
 //!   wedge the machine (#5878's "requires multiple retry attempts" arm).
 //!
 //! Complements the DISPATCH-TIME 401 → re-auth pin in
-//! `tests/integration/auth_gate.rs` (issue #5878 reported the
+//! `tests/integration/auth/auth_gate.rs` (issue #5878 reported the
 //! `extension_activate` surface specifically, which that test does not
 //! drive). Uses "notion" (installed+removed by scenario 2, so the install
 //! here is fresh; no other scenario touches its credential accounts).
@@ -71,8 +71,8 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
              credential_requirements; an empty list is the unsubmittable-gate shape"
             .into());
     }
-    let notion_provider = ironclaw_host_api::RuntimeCredentialAccountProviderId::new("notion")
-        .map_err(|error| error.to_string())?;
+    let notion_provider =
+        ironclaw_host_api::VendorId::new("notion").map_err(|error| error.to_string())?;
     if !state
         .credential_requirements
         .iter()
@@ -167,6 +167,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     restorer.submit_turn("activate notion again").await?;
     restorer
         .assert_tool_result_contains("\"activated\":true")
+        .await?;
+    restorer
+        .assert_tool_result_contains("\"notion.live-search\"")
+        .await?;
+    restorer
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
         .await?;
 
     Ok(())

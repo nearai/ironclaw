@@ -114,19 +114,19 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityInvocation, CommunicationContextProvider,
-        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
-        InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelGateway, LoopModelPolicyGuard, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        EphemeralInstructionMaterializationStore, FinalizeAssistantMessage, HookMilestoneSink,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort, InstructionBundleMaterializedMessage,
+        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
+        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
+        LoopRuntimeContext, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
+        ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
         RunScopedHookMilestoneSink, StageCheckpointPayloadRequest, SystemInferencePort,
         UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -1633,7 +1633,7 @@ where
             event_subscription_started_at,
         );
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
-            Arc::new(InMemoryInstructionMaterializationStore::default());
+            Arc::new(EphemeralInstructionMaterializationStore::default());
         let surface_state = Arc::new(CapabilitySurfaceState::default());
         let mut capabilities: Arc<dyn LoopCapabilityPort> = Arc::new(
             SurfaceTrackingLoopCapabilityPort::new(capabilities, Arc::clone(&surface_state)),
@@ -1985,8 +1985,8 @@ where
             };
             let slot = slot_for_model_profile(&run_context)?;
             let route = crate::model_routes::ModelRoute::new(
-                snapshot.provider_id.clone(),
-                snapshot.model_id.clone(),
+                snapshot.provider_id().to_string(),
+                snapshot.model_id().to_string(),
             )
             .map_err(model_route_error_to_host_error)?;
             resolver
@@ -2006,7 +2006,10 @@ where
         let snapshot = resolver
             .resolve_model_route(slot)
             .map_err(model_route_error_to_host_error)?;
-        Ok(run_context.with_resolved_model_route(snapshot.to_loop_model_route_snapshot()))
+        let route_snapshot = snapshot
+            .to_loop_model_route_snapshot()
+            .map_err(|reason| RebornLoopDriverHostError::InvalidRequest { reason })?;
+        Ok(run_context.with_resolved_model_route(route_snapshot))
     }
 }
 
@@ -2783,8 +2786,9 @@ mod tests {
     use ironclaw_filesystem::InMemoryBackend;
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_loop_host::FilesystemCheckpointStateStore;
+    use ironclaw_turns::test_support::in_memory_turn_state_store;
     use ironclaw_turns::{
-        InMemoryRunProfileResolver, InMemoryTurnStateStore, PutLoopCheckpointRequest,
+        FilesystemTurnStateRowStore, InMemoryRunProfileResolver, PutLoopCheckpointRequest,
         RunProfileResolver, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
         run_profile::{
             AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
@@ -2864,10 +2868,10 @@ mod tests {
     ) -> (
         HostManagedLoopCheckpointPort,
         Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
-        Arc<InMemoryTurnStateStore>,
+        Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     ) {
         let state_store = in_memory_checkpoint_state_store();
-        let checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
+        let checkpoint_store = Arc::new(in_memory_turn_state_store());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let port = HostManagedLoopCheckpointPort::new(
             context,
@@ -2889,7 +2893,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeSideEffect,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: payload.clone(),
             })
             .await
@@ -2927,7 +2931,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: b"{}".to_vec(),
             })
             .await
@@ -2963,7 +2967,7 @@ mod tests {
         let state_ref = port
             .stage_checkpoint_payload(StageCheckpointPayloadRequest {
                 kind: LoopCheckpointKind::BeforeModel,
-                schema_id: expected_schema_id.as_str().to_string(),
+                schema_id: expected_schema_id.clone(),
                 payload: b"{}".to_vec(),
             })
             .await

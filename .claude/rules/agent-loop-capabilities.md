@@ -19,8 +19,10 @@ WARN ironclaw_runner::turn_runner: driver invocation failed, recording terminal 
 ```
 
 **If you see `Capability: unavailable` killing a turn, a capability
-handler returned an `Err(AgentLoopHostError)` it should not have, or
-emitted an unsafe safe-summary.** Start here.
+handler returned an `Err(AgentLoopHostError)` it should not have.**
+(An unsafe safe-summary used to be a second cause; it now fails soft —
+the label degrades to a redaction marker instead of ending the run.)
+Start here.
 
 ## The two failure paths are not interchangeable
 
@@ -67,17 +69,23 @@ validated before the result ref is written —
 (`crates/ironclaw_threads/src/tool_result_reference.rs`). Validation
 **rejects** the delimiters ``{ } [ ] ` < > / \`` (see
 `RAW_PAYLOAD_OR_PATH_DELIMITERS`), control chars, and secret markers
-(`password`, `api key`, `bearer `, …). A rejection there is itself an
-`InvalidInvocation` `Err` → terminal `HostUnavailable` (Invariant 1).
+(`password`, `api key`, `bearer `, …). A rejection **fails soft**: the
+label degrades to the fixed redaction marker
+(`ToolResultSafeSummary::redacted_tool_result_summary()`) and the result
+ref is still written — the run continues (it used to be a terminal
+`InvalidInvocation` → `HostUnavailable`; that borked recoverable runs).
 
-So **never interpolate model/user-controlled text** (names, paths, tool
-args, file contents, provider strings) into a safe summary — any of
-those can legally contain a delimiter or a marker word and will kill the
-run. The actual data belongs in the result `output` (the model sees it
-there); the summary stays a fixed, host-authored string.
+Fail-soft is a safety net, not a license: **never interpolate
+model/user-controlled text** (names, paths, tool args, file contents,
+provider strings) into a safe summary — any of those can legally contain
+a delimiter or a marker word, and your summary will silently degrade to
+the redaction marker, hiding the label you meant to show. The actual
+data belongs in the result `output` (the model sees it there); the
+summary stays a fixed, host-authored string.
 
 ```rust
-// BAD — a project named "a/b <c>" or "passwords" ends the turn:
+// BAD — a project named "a/b <c>" or "passwords" degrades the label
+// to "the tool result summary was redacted":
 safe_summary: format!("created project \"{}\"", project.name),
 // GOOD — fixed text; name/id travel in `output`:
 safe_summary: "created project".to_string(),

@@ -212,7 +212,7 @@ fn summary() -> SafeSummary {
 
 fn credential_requirement() -> RuntimeCredentialAuthRequirement {
     RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: VendorId::new("github").unwrap(),
         setup: RuntimeCredentialAccountSetup::ManualToken,
         requester_extension: ExtensionId::new("github").unwrap(),
         provider_scopes: vec!["repo".to_string()],

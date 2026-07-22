@@ -64,6 +64,27 @@ profile_ref!(RunProfileFingerprint, "run_profile_fingerprint");
 profile_ref!(RunProfileSourceLayer, "run_profile_source_layer");
 profile_ref!(RunProfileSourceRef, "run_profile_source_ref");
 
+impl ResourceBudgetTier {
+    /// The privileged high-budget tier: runs requesting it are clamped to
+    /// [`mission_standard`](Self::mission_standard) unless the caller holds the
+    /// `HighBudget` authority. `ResourceBudgetTier` stays an open newtype
+    /// (deployments may define further tiers), so this is a named comparison
+    /// rather than an enum — one source of truth for the branching value.
+    pub(crate) const MISSION_HIGH: &'static str = "mission_high";
+    /// The non-privileged mission tier the high-budget tier is clamped down to.
+    pub(crate) const MISSION_STANDARD: &'static str = "mission_standard";
+
+    /// Whether this is the privileged high-budget tier.
+    pub(crate) fn is_mission_high(&self) -> bool {
+        self.as_str() == Self::MISSION_HIGH
+    }
+
+    /// The mission-standard tier value.
+    pub(crate) fn mission_standard() -> Self {
+        Self::from_trusted_static(Self::MISSION_STANDARD)
+    }
+}
+
 fn validate_profile_ref(kind: &'static str, value: &str) -> Result<(), String> {
     if value.is_empty() {
         return Err(format!("{kind} must not be empty"));

@@ -555,6 +555,49 @@ test("useHistory full refresh preserves SSE-only activity messages", async () =>
   assert.equal(setCalls.at(-1).messages[1].toolStatus, "error");
 });
 
+test("useHistory background refresh preserves a live partial assistant reply", async () => {
+  const threadId = "thread-streaming";
+  const runId = "run-streaming";
+  const setCalls = [];
+  const context = {
+    console,
+    fetchTimeline: async () => ({ messages: [], next_cursor: null }),
+    globalThis: {},
+    messagesFromTimeline: () => [
+      { id: "msg-user-1", role: "user", content: "compare them" },
+    ],
+    React: createReactStub({ setCalls }),
+    authScope: () => "test-user",
+  };
+
+  vm.runInNewContext(useHistorySourceForTest(), context);
+  context.globalThis.__testExports.clearHistoryCache();
+  const history = context.globalThis.__testExports.useHistory(threadId, {});
+  await flushMicrotasks();
+
+  history.setMessages((messages) => [
+    ...messages,
+    {
+      id: "text-text:run-streaming",
+      role: "assistant",
+      content: "The comparison starts with",
+      turnRunId: runId,
+      isFinalReply: false,
+    },
+  ]);
+  await history.loadHistory();
+  await flushMicrotasks();
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(setCalls.at(-1).messages.map((message) => message.id))),
+    ["msg-user-1", "text-text:run-streaming"],
+  );
+  assert.equal(
+    setCalls.at(-1).messages[1].content,
+    "The comparison starts with",
+  );
+});
+
 test("useHistory can seed a newly-created thread before navigation", async () => {
   const setCalls = [];
   const context = {

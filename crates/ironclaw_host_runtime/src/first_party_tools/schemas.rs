@@ -443,6 +443,58 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["extension_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/admin_configuration_replace.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "group_id": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "description": "Manifest-declared administrator configuration group id"
+                },
+                "expected_revision": { "type": "integer", "minimum": 0 },
+                "values": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "handle": { "type": "string", "maxLength": 128 },
+                            "value": { "type": "string", "maxLength": 16384 }
+                        },
+                        "required": ["handle", "value"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["group_id", "expected_revision", "values"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/admin_configuration_replace.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "group_id": { "type": "string", "maxLength": 128 },
+                "revision": { "type": "integer", "minimum": 0 },
+                "complete": { "type": "boolean" },
+                "fields": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "handle": { "type": "string", "maxLength": 128 },
+                            "secret": { "type": "boolean" },
+                            "required": { "type": "boolean" },
+                            "provided": { "type": "boolean" },
+                            "value": { "type": ["string", "null"], "maxLength": 16384 }
+                        },
+                        "required": ["handle", "secret", "required", "provided", "value"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["group_id", "revision", "complete", "fields"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},

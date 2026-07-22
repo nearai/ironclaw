@@ -47,6 +47,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .assert_tool_result_contains("\"activated\":true")
         .await?;
     lifecycle
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .await?;
+    lifecycle
         .assert_tool_result_contains(r#""github.get_repo""#)
         .await?;
 
@@ -97,6 +100,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     remover
         .assert_tool_result_contains("\"removed\":true")
         .await?;
+    remover
+        .assert_model_message_content_contains(r#"\"removed\":true"#)
+        .await?;
 
     // Lifecycle phase flips (fresh viewer thread so phase-1 results can't
     // satisfy the negative check)…
@@ -122,6 +128,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     }
     // Non-vacuity: the catalog entry itself must still be discoverable.
     viewer.assert_tool_result_contains("\"github\"").await?;
+    viewer
+        .assert_model_message_content_contains(r#"\"id\":\"github\""#)
+        .await?;
 
     // ── Phase 4: use after remove — dispatch is rejected fail-closed ────────
     caller.submit_turn("file an issue").await?;
@@ -165,6 +174,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await?;
     restorer
         .assert_tool_result_contains("\"activated\":true")
+        .await?;
+    restorer
+        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .await?;
+    restorer
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
         .await?;
 
     // ── Phase 6: the exact call that was rejected now dispatches ────────────

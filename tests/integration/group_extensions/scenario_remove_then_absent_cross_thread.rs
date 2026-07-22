@@ -33,6 +33,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     installer
         .assert_tool_result_contains("\"installed\":true")
         .await?;
+    installer
+        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .await?;
 
     // ── Phase 2: remove "notion" (DIFFERENT conversation, SAME shared store) ─
     let remover = g
@@ -53,6 +56,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     remover
         .assert_tool_result_contains("\"removed\":true")
         .await?;
+    remover
+        .assert_model_message_content_contains(r#"\"removed\":true"#)
+        .await?;
 
     // ── Phase 3: retry removal after it is absent (another conversation) ────
     let retry_remover = g
@@ -72,6 +78,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await?;
     retry_remover
         .assert_tool_result_contains("\"removed\":false")
+        .await?;
+    retry_remover
+        .assert_model_message_content_contains(r#"\"removed\":false"#)
         .await?;
 
     // ── Phase 4: cross-thread search — "notion" must NOT be installed ───────
@@ -115,6 +124,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
                 .into(),
         );
     }
+    viewer
+        .assert_model_message_content_contains(r#"\"id\":\"notion\""#)
+        .await?;
 
     Ok(())
 }

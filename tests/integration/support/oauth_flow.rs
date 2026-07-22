@@ -1,7 +1,6 @@
 //! Shared Google OAuth connect-flow helper for Reborn integration tests:
 //! [`connect_google_account`] drives `create_flow` → `handle_oauth_callback` →
-//! `get_account` to produce a connected `CredentialAccount`. Gated on
-//! `any(feature = "libsql", feature = "postgres")` to match `OAuthProductAuthTestBundle`.
+//! `get_account` to produce a connected `CredentialAccount`.
 
 // Shared support module: not every test binary that mounts the `reborn_support`
 // tree calls into this helper (e.g. `support_unit_tests` exercises none of it),
@@ -9,32 +8,26 @@
 // matches `builder.rs`/`assertions.rs`.
 #![allow(dead_code)]
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use chrono::{Duration, Utc};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthFlowKind, AuthProductScope, AuthProviderId,
     AuthorizationCodeHash, CredentialAccountLabel, CredentialAccountLookupRequest, NewAuthFlow,
     OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OpaqueStateHash,
     PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_composition::{
     RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
     test_support::OAuthProductAuthTestBundle,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use secrecy::SecretString;
 
 /// Build a 64-character hex string from a repeated byte value.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn hex64(fill: u8) -> String {
     format!("{fill:02x}").repeat(32)
 }
 
 /// Runs the connect flow on `bundle`, returning the persisted `CredentialAccount`.
 /// `fill` seeds deterministic hex hashes; use distinct values for multiple accounts in one test.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn connect_google_account(
     bundle: &OAuthProductAuthTestBundle,
     scope: &AuthProductScope,

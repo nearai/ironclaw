@@ -22,11 +22,19 @@
   handler must claim the scoped flow/state/provider through `AuthFlowManager`
   before exchanging provider material through `AuthProviderClient`, then
   complete the flow and emit typed continuations.
-- The first WebUI-mounted OAuth route keeps raw PKCE verifiers in a bounded,
-  expiring process-local cache because `ironclaw_auth` durable records may
-  store hashes only. Do not treat that route as multi-replica/restart-safe
-  until a host-owned encrypted verifier store or equivalent sticky callback
-  mechanism is wired.
+- Setup-lane OAuth PKCE verifiers are durable (#6169 port):
+  `start_setup_oauth_flow` writes the raw verifier to the injected
+  `SecretStore` under `product-auth-setup-pkce-{flow_id}` (TTL = the flow's
+  `expires_at`) BEFORE `create_flow`; the callback read is one-shot
+  (`lease_once`/`consume`, setup handle first, blocked-turn gate store as
+  fallback — mirroring `oauth_gate.rs`); terminal callback outcomes discard
+  the durable copy, and `cleanup_credentials_for_lifecycle` eagerly drops
+  verifiers for `SecretCleanupReport::canceled_flows`. The serve routes'
+  bounded process-local verifier cache is a same-process fast path only —
+  never treat it as the source of truth; restart/replica safety is pinned by
+  `vendor_oauth_callback_completes_after_route_state_restart`. Early
+  defensive cache evictions (unknown flow, cross-vendor path) must NOT
+  discard the durable copy — the legitimate callback may still need it.
 - Manual-token setup routes should call
   `RebornProductAuthServices::request_manual_token_setup` for the typed
   challenge and `RebornProductAuthServices::submit_manual_token` with a
@@ -195,9 +203,10 @@ which request belongs to which descriptor.
 
 Slack host-beta normal personal setup is extension-card driven: the user
 installs the Slack extension, clicks Configure, and the card starts the
-`slack_personal` product-auth OAuth flow. The successful callback binds the
-Slack `authed_user.id` to the authenticated Reborn user through the host-owned
-identity binding store. Slack personal setup is OAuth-only; the old browser
+provider-`slack` product-auth OAuth flow (the retired `slack_personal`
+provider id survives only in the one-time forward data migration). The
+successful callback binds the Slack `authed_user.id` to the authenticated
+Reborn user through the host-owned identity binding store. Slack personal setup is OAuth-only; the old browser
 manual-code redeem route and Slack command flow are not mounted.
 
 When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
@@ -273,7 +282,7 @@ Rationale:
   atomically by the exchange route. Composition also emits
   `Referrer-Policy: no-referrer` as defense in depth.
 - **Logout actually revokes.** `POST /auth/logout` calls
-  `SessionStore::revoke`; the regression in
+  `SignedTokenSessionStore::revoke`; the regression in
   `crates/ironclaw_webui/tests/session_round_trip.rs`
   locks that a post-revoke bearer fails on `/api/webchat/v2/threads`.
 

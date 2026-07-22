@@ -1,157 +1,116 @@
-# Multi-stage Dockerfile for the IronClaw agent (cloud deployment).
-#
-# Uses cargo-chef for dependency caching — only rebuilds deps when
-# Cargo.toml/Cargo.lock change, not on every source edit.
-#
-# Debian-based build + runtime. The bundled libSQL/SQLite C code has
-# threading issues when statically linked against musl (segfault on
-# database reopen), so we use glibc.
+# Multi-stage Dockerfile for the standalone Reborn CLI HTTP service.
 #
 # Build:
-#   docker build --platform linux/amd64 --target runtime -t ironclaw:latest .
+#   docker build -f Dockerfile.reborn -t ironclaw-reborn:latest .
 #
-# Run:
-#   docker run --env-file .env -p 3000:3000 ironclaw:latest
+# Run locally:
+#   docker run --rm --env-file .env.reborn -p 127.0.0.1:3000:3000 ironclaw-reborn:latest
+#
+# Railway:
+#   Set Dockerfile path to Dockerfile.reborn and IRONCLAW_REBORN_SERVE_HOST=0.0.0.0.
+#   Railway supplies PORT. Set IRONCLAW_REBORN_PROFILE=hosted-single-tenant for
+#   Postgres-backed hosted storage, or hosted-single-tenant-volume for a
+#   Railway volume-backed single-tenant preview.
 
-# Stage 1: Install cargo-chef
+FROM node:22.23.1-bookworm-slim@sha256:813a7480f28fdadac1f7f5c824bcdad435b5bc1322a5968bbbdef8d058f9dff4 AS node_toolchain
+
 FROM rust:1.96-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7cc8381ae83927f0cfc AS chef
 
-RUN rustup target add wasm32-wasip2 \
-    && cargo install --locked cargo-chef@0.1.77 wasm-tools@1.246.1
+COPY --from=node_toolchain /usr/local/bin/node /usr/local/bin/node
+COPY --from=node_toolchain /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
+
+RUN ln -sf ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -sf ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && ln -sf ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \
+    && node --version \
+    && npm --version \
+    && corepack --version \
+    && corepack enable pnpm \
+    && cargo install --locked cargo-chef@0.1.77
 
 WORKDIR /app
 
-# Stage 2: Generate the dependency recipe (changes only when Cargo.toml/lock change)
 FROM chef AS planner
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY tools/ironclaw_stress/ tools/ironclaw_stress/
-COPY build.rs build.rs
-COPY src/ src/
+COPY skills/ skills/
 COPY tests/ tests/
-COPY migrations/ migrations/
-COPY registry/ registry/
-COPY channels-src/ channels-src/
-COPY tools-src/ tools-src/
 COPY wit/ wit/
 COPY providers.json providers.json
+RUN mkdir -p src \
+    && printf 'fn main() {}\n' > src/main.rs \
+    && printf '\n' > src/lib.rs
 
 RUN cargo chef prepare --recipe-path recipe.json
 
-# Stage 3: Build dependencies (cached unless Cargo.toml/lock change)
 FROM chef AS deps
 
-# Docker-only overrides for the dist profile (not in Cargo.toml because
-# cargo-dist uses dist for release binaries that need unwinding).
 ENV CARGO_PROFILE_DIST_PANIC=abort \
     CARGO_PROFILE_DIST_CODEGEN_UNITS=1
 
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --profile dist --recipe-path recipe.json
-
-# Stage 4: Build the actual binary (only recompiles ironclaw source)
+COPY crates/ironclaw_webui/frontend/ crates/ironclaw_webui/frontend/
+WORKDIR /app/crates/ironclaw_webui/frontend
+RUN pnpm install --frozen-lockfile
+WORKDIR /app
+RUN cargo chef cook \
+    --profile dist \
+    --package ironclaw \
+    --recipe-path recipe.json
 FROM deps AS builder
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY tools/ironclaw_stress/ tools/ironclaw_stress/
-COPY build.rs build.rs
-COPY src/ src/
-COPY tests/ tests/
 COPY migrations/ migrations/
-COPY prompts/ prompts/
-COPY registry/ registry/
-COPY channels-src/ channels-src/
-COPY tools-src/ tools-src/
+COPY skills/ skills/
+COPY tests/ tests/
 COPY wit/ wit/
 COPY providers.json providers.json
-COPY profiles/ profiles/
+RUN mkdir -p src \
+    && printf 'fn main() {}\n' > src/main.rs \
+    && printf '\n' > src/lib.rs
 
-RUN cargo build --profile dist --bin ironclaw-legacy
+WORKDIR /app/crates/ironclaw_webui/frontend
+RUN pnpm install --frozen-lockfile
+WORKDIR /app
 
-# Stage 4b: Build all WASM extensions from source (only used by runtime-staging)
-#
-# Inherits from chef (not builder) so WASM extensions only rebuild when
-# tools-src/, channels-src/, registry/, or wit/ change — not on every
-# src/ edit. The extensions are standalone crates with their own lockfiles.
-FROM chef AS wasm-builder
+RUN cargo build \
+    --profile dist \
+    --package ironclaw \
+    --bin ironclaw
 
-RUN apt-get -o Acquire::Retries=3 update && apt-get -o Acquire::Retries=3 install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
-
-COPY tools-src/ tools-src/
-COPY channels-src/ channels-src/
-COPY registry/ registry/
-COPY wit/ wit/
-
-RUN set -eux; \
-    mkdir -p /app/wasm-bundles/tools /app/wasm-bundles/channels; \
-    for manifest in registry/tools/*.json registry/channels/*.json; do \
-      [ -f "$manifest" ] || continue; \
-      kind=$(jq -r '.kind' "$manifest"); \
-      ext_name=$(jq -r '.name' "$manifest"); \
-      source_dir=$(jq -r '.source.dir' "$manifest"); \
-      caps_file=$(jq -r '.source.capabilities' "$manifest"); \
-      crate_name=$(jq -r '.source.crate_name' "$manifest"); \
-      [ -d "$source_dir" ] || continue; \
-      # Telegram is embedded in the binary at build time; skip it
-      [ "$ext_name" = "telegram" ] && continue; \
-      echo "=== Building $ext_name from $source_dir ==="; \
-      if [ -f "$source_dir/Cargo.lock" ]; then \
-        CARGO_TARGET_DIR=/app/target cargo build --locked --release --target wasm32-wasip2 \
-          --manifest-path "$source_dir/Cargo.toml" || { echo "WARN: build failed for $ext_name"; continue; }; \
-      else \
-        CARGO_TARGET_DIR=/app/target cargo build --release --target wasm32-wasip2 \
-          --manifest-path "$source_dir/Cargo.toml" || { echo "WARN: build failed for $ext_name"; continue; }; \
-      fi; \
-      wasm_artifact=$(echo "${crate_name}" | tr '-' '_'); \
-      raw_wasm="/app/target/wasm32-wasip2/release/${wasm_artifact}.wasm"; \
-      [ -f "$raw_wasm" ] || continue; \
-      dest_dir="/app/wasm-bundles/tools"; \
-      [ "$kind" = "channel" ] && dest_dir="/app/wasm-bundles/channels"; \
-      wasm-tools component new "$raw_wasm" -o "$dest_dir/${ext_name}.wasm" 2>/dev/null \
-        || cp "$raw_wasm" "$dest_dir/${ext_name}.wasm"; \
-      wasm-tools strip "$dest_dir/${ext_name}.wasm" -o "$dest_dir/${ext_name}.wasm.tmp" 2>/dev/null \
-        && mv "$dest_dir/${ext_name}.wasm.tmp" "$dest_dir/${ext_name}.wasm" \
-        || true; \
-      [ -f "$source_dir/$caps_file" ] && cp "$source_dir/$caps_file" "$dest_dir/${ext_name}.capabilities.json"; \
-      echo "  -> $dest_dir/${ext_name}.wasm"; \
-    done; \
-    count=$(find /app/wasm-bundles -name '*.wasm' | wc -l); \
-    echo "Built $count WASM extensions"; \
-    [ "$count" -gt 0 ] || { echo "ERROR: No WASM extensions were built"; exit 1; }
-
-# Stage 5a: Shared runtime base
-FROM debian:bookworm-slim AS runtime-base
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 
 RUN apt-get -o Acquire::Retries=3 update \
-    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends ca-certificates \
+    && apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+        ca-certificates \
+        postgresql-client \
+        sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/dist/ironclaw-legacy /usr/local/bin/ironclaw-legacy
-COPY --from=builder /app/migrations /app/migrations
+COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
+COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
+COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml
+COPY docker/reborn/config.hosted-single-tenant-volume.toml /opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml
+COPY docker/reborn/config.production.toml /opt/ironclaw/reborn/config.production.toml
+COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
 
-# Non-root user
-ENV HOME=/home/ironclaw
+ENV HOME=/home/ironclaw \
+    IRONCLAW_REBORN_LOG=info \
+    IRONCLAW_REBORN_SERVE_HOST=127.0.0.1
+
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
-    && mkdir -p /home/ironclaw/.ironclaw \
-    && chown -R ironclaw:ironclaw /home/ironclaw
-WORKDIR /home/ironclaw
+    && mkdir -p /data/ironclaw-reborn /workspace \
+    && chown -R ironclaw:ironclaw /home/ironclaw /data/ironclaw-reborn /workspace \
+    && chmod +x /usr/local/bin/ironclaw-reborn-entrypoint
+
+WORKDIR /workspace
 
 EXPOSE 3000
 
-ENV RUST_LOG=ironclaw=info
-
-ENTRYPOINT ["ironclaw-legacy"]
-
-# Stage 5b: Production runtime (no pre-bundled extensions)
-FROM runtime-base AS runtime
 USER ironclaw
 
-# Stage 5c: Staging runtime (with pre-built WASM extensions)
-# Last stage = default target. Railway doesn't support --target, so this
-# must be last for Railway deploys. CI uses explicit --target flags.
-FROM runtime-base AS runtime-staging
-COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/tools/ /home/ironclaw/.ironclaw/tools/
-COPY --from=wasm-builder --chown=ironclaw:ironclaw /app/wasm-bundles/channels/ /home/ironclaw/.ironclaw/channels/
-USER ironclaw
+ENTRYPOINT ["ironclaw-reborn-entrypoint"]

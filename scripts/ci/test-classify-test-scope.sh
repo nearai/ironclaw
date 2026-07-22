@@ -74,23 +74,7 @@ has_reborn_tests=true"
 
 assert_scope \
   "reborn v2 adapter crate" \
-  "crates/ironclaw_telegram_v2_adapter/src/lib.rs" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
-
-assert_scope \
-  "reborn channel host support crate" \
-  "crates/ironclaw_channel_host/src/lib.rs" \
-  "docs_only=false
-has_core_code=true
-has_legacy_tests=false
-has_reborn_tests=true"
-
-assert_scope \
-  "reborn channel delivery support crate" \
-  "crates/ironclaw_channel_delivery/src/lib.rs" \
+  "crates/ironclaw_telegram_extension/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -98,7 +82,15 @@ has_reborn_tests=true"
 
 assert_scope \
   "reborn telegram extension crate" \
-  "crates/ironclaw_telegram_extension/src/telegram_pairing.rs" \
+  "crates/ironclaw_telegram_extension/src/channel.rs" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "reborn telegram v2 protocol adapter crate" \
+  "crates/ironclaw_telegram_v2_adapter/src/render.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=false
@@ -172,8 +164,8 @@ has_legacy_tests=true
 has_reborn_tests=true"
 
 assert_scope \
-  "legacy root runtime" \
-  "src/agent/session.rs" \
+  "non-reborn channel source" \
+  "channels-src/telegram/src/lib.rs" \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
@@ -209,6 +201,22 @@ assert_scope \
   "docs_only=false
 has_core_code=true
 has_legacy_tests=true
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn crate bucket script" \
+  "scripts/ci/reborn-crate-test-buckets.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
+has_reborn_tests=true"
+
+assert_scope \
+  "Reborn crate bucket regression suite" \
+  "scripts/ci/test-reborn-crate-test-buckets.sh" \
+  "docs_only=false
+has_core_code=true
+has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
@@ -282,8 +290,8 @@ has_legacy_tests=false
 has_reborn_tests=true"
 
 assert_scope \
-  "mixed legacy and reborn" \
-  "src/agent/session.rs
+  "mixed non-reborn and reborn" \
+  "channels-src/telegram/src/lib.rs
 crates/ironclaw_reborn_composition/src/lib.rs" \
   "docs_only=false
 has_core_code=true

@@ -21,7 +21,8 @@ use ironclaw_host_api::{
     Obligation, PermissionMode, ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
     RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
+    RuntimeHttpEgressRequest, RuntimeKind, RuntimeLane, SecretHandle, TenantId, TrustClass, UserId,
+    VirtualPath,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -42,16 +43,18 @@ use super::{
     HostRuntimeHttpEgressPort, HostRuntimeServices, LocalInvocationServicesResolver,
     McpRuntimeAdapter, NetworkMode, ProcessBackendKind, ProcessResultStore, ProcessStore,
     ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind, RootFilesystem,
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeProfile, SecretMode,
-    ServiceResolvedRuntimeAdapter,
+    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeLaneExecutor,
+    RuntimeProfile, SecretMode, ServiceResolvedRuntimeAdapter,
 };
 #[cfg(unix)]
 use crate::CommandExecutionRequest;
 use crate::obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 use crate::{HostRuntimeCredentialMaterial, HostRuntimeHttpEgressRequest};
 
+mod extension_tool_binder;
 mod first_party_runtime_adapter;
 mod mcp_runtime_adapter;
+mod registry_lane_tool_resolver;
 
 #[tokio::test]
 async fn shared_extension_registry_returns_same_instance() {
@@ -76,11 +79,9 @@ async fn production_wiring_reports_missing_persistent_approval_policies() {
 
 // The volatile, in-memory-backed persistent-approval store must never satisfy
 // production wiring. `in_memory_backed_persistent_approval_policy_store()` returns
-// `FilesystemPersistentApprovalPolicyStore<InMemoryBackend>` — the exact concrete
-// type the no-durable-features composition wires (factory.rs
-// `ComposedPersistentApprovalPolicyStore`), so this guards the real shape, not a
-// synthetic one. The durable libSQL/Postgres monomorphizations are distinct types
-// and fall through to `ProductionCandidate`.
+// `FilesystemPersistentApprovalPolicyStore<InMemoryBackend>`, so this guards the
+// concrete volatile shape. The durable libSQL/Postgres monomorphizations are
+// distinct types and fall through to `ProductionCandidate`.
 #[tokio::test]
 async fn production_wiring_reports_local_only_persistent_approval_policies() {
     let services = test_services().with_persistent_approval_policies(Arc::new(
@@ -606,6 +607,7 @@ async fn host_runtime_services_with_security_audit_sink_records_leak_block() {
     };
     let context = ExecutionContext {
         run_id: None,
+        origin: None,
         invocation_id,
         correlation_id: CorrelationId::new(),
         process_id: None,
@@ -722,7 +724,8 @@ async fn service_guard_releases_reservation_on_planner_denial() {
     assert!(matches!(
         result,
         Err(DispatchError::Script {
-            kind: RuntimeDispatchErrorKind::UnsupportedRunner
+            kind: RuntimeDispatchErrorKind::UnsupportedRunner,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -779,7 +782,7 @@ async fn service_guard_rejects_resolution_before_wasm_dispatch() {
         result,
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::NetworkDenied,
-            safe_summary: None,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -841,7 +844,7 @@ async fn service_guard_releases_reservation_on_invocation_service_resolution_den
         result,
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::NetworkDenied,
-            safe_summary: None,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -898,7 +901,7 @@ async fn service_guard_rejects_required_secret_without_secret_store_before_dispa
         result,
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::SecretDenied,
-            safe_summary: None,
+            ..
         })
     ));
     assert_eq!(inner.call_count(), 0);
@@ -1140,6 +1143,7 @@ fn test_package(manifest: &str, extension_id: &str) -> ExtensionPackage {
         manifest,
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .expect("test manifest should parse");
     ExtensionPackage::from_manifest(
@@ -1162,6 +1166,7 @@ fn test_descriptor(runtime: RuntimeKind, effects: Vec<EffectKind>) -> Capability
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
         resource_profile: None,
+        origin_gate_matrix: None,
     }
 }
 
@@ -1279,7 +1284,7 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunti
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         };
         let receipt: ResourceReceipt = request
@@ -1287,7 +1292,7 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunti
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
             output: Value::Null,
@@ -1402,7 +1407,13 @@ runner = "sandboxed_process"
 command = "sh"
 args = ["-c", "cat"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test-script.run"
 description = "Run script"
 effects = ["execute_code"]
@@ -1424,7 +1435,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "test.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "test-wasm.run"
 description = "Run WASM"
 effects = ["network"]
@@ -1595,4 +1612,15 @@ async fn registered_runtime_health_returns_empty_when_all_required_available() {
         missing.is_empty(),
         "expected no missing kinds; got {missing:?}"
     );
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

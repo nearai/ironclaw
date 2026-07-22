@@ -545,9 +545,9 @@ mod tests {
         ));
         let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&fs)));
         let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
-            Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+            Arc::new(crate::subagent::goal_store::in_memory_backed_subagent_goal_store());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
-            Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+            Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
         let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
             Arc::new(NoopResultWriter);
         let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -621,9 +621,9 @@ mod tests {
     ) -> Arc<AwaitEdgeResolver<InMemorySessionThreadService, InMemoryBackend>> {
         let store = Arc::new(FilesystemAwaitEdgeStore::new(fs));
         let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
-            Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+            Arc::new(crate::subagent::goal_store::in_memory_backed_subagent_goal_store());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> =
-            Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+            Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
         let result_writer: Arc<dyn ironclaw_loop_host::LoopCapabilityResultWriter> =
             Arc::new(NoopResultWriter);
         let thread_service = Arc::new(InMemorySessionThreadService::default());
@@ -707,7 +707,7 @@ mod tests {
 
         let fs = boot_sem_scoped_fs();
         let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&fs)));
-        let state_store = Arc::new(ironclaw_turns::InMemoryTurnStateStore::default());
+        let state_store = Arc::new(ironclaw_turns::test_support::in_memory_turn_state_store());
         let coordinator = DefaultTurnCoordinator::new(Arc::clone(&state_store));
         let thread_service = Arc::new(InMemorySessionThreadService::default());
 
@@ -933,7 +933,7 @@ mod tests {
         // 5. Build the resolver, bind the real coordinator, and re-drive
         // recovery over this exact scope.
         let goal_store: Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore> =
-            Arc::new(crate::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new());
+            Arc::new(crate::subagent::goal_store::in_memory_backed_subagent_goal_store());
         let turn_state_store: Arc<dyn TurnSpawnTreeStateStore> = state_store.clone();
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&store),

@@ -253,6 +253,27 @@ impl RebornIntegrationHarness {
         .into())
     }
 
+    /// Assert that the textual `content` of some message sent to the model
+    /// contains `needle`. Unlike [`assert_model_request_contains`], this does
+    /// not serialize the request a second time, so JSON embedded in a tool
+    /// result is matched exactly as the model receives it rather than through
+    /// an additional layer of escape characters.
+    pub async fn assert_model_message_content_contains(&self, needle: &str) -> HarnessResult<()> {
+        let requests = self.scripted_llm.captured_requests();
+        if requests
+            .iter()
+            .flatten()
+            .any(|message| message.content.contains(needle))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "no model message content contained {needle:?}; captured {} request(s)",
+            requests.len()
+        )
+        .into())
+    }
+
     /// Assert some SINGLE model request contains EVERY needle in `needles`
     /// (all in one request, not spread across several) — the multi-turn "sees
     /// prior context" proof: an earlier-turn needle plus a current-turn needle
@@ -436,12 +457,26 @@ impl RebornIntegrationHarness {
         &self,
         kind: ironclaw_turns::TurnEventKind,
     ) -> HarnessResult<()> {
-        let events = self.recorded_turn_events();
-        if events.iter().any(|event| event.kind == kind) {
-            return Ok(());
+        // Lifecycle events publish best-effort AFTER the status transition the
+        // caller waited on (`wait_for_status` reads the store's hot-cache
+        // status, which the transition sets synchronously; the sink publish
+        // runs just after that transition returns). So a just-completed turn's
+        // terminal event can land a moment after its status is observable —
+        // poll briefly rather than checking exactly once, which otherwise races
+        // the publish.
+        for _ in 0..100 {
+            if self
+                .recorded_turn_events()
+                .iter()
+                .any(|event| event.kind == kind)
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
+        let events = self.recorded_turn_events();
         let seen: Vec<_> = events.iter().map(|event| &event.kind).collect();
-        Err(format!("no recorded turn event of kind {kind:?}; saw {seen:?}").into())
+        Err(format!("no recorded turn event of kind {kind:?} after waiting; saw {seen:?}").into())
     }
 
     /// Assert the always-wired security-audit recorder captured an event with

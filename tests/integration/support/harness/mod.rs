@@ -64,13 +64,13 @@ pub(crate) use super::doubles::{
     RecordingCapabilityResultWriter, RecordingDelegatingCapabilityPort, RecordingHostRuntime,
     RecordingNetworkHttpEgress, RecordingNetworkHttpTransport, RecordingRuntimeHttpEgress,
     RecordingTestCapabilityPort, StaticCapabilitySurfaceProfileResolver,
-    TriggerActiveRunLookupHostRuntime,
 };
 pub(crate) use assembly::{
-    LocalDevRootMounts, bundled_extension_provider_trust, capability_ids_from_strs,
-    copy_dir_recursive, default_capability_io_pair, host_runtime_storage_roots, http_test_policy,
-    local_dev_all_effects, local_dev_host_runtime_with_http_egress,
-    local_dev_host_runtime_with_live_http_egress, local_dev_host_runtime_with_real_egress_pipeline,
+    LocalDevRootMounts, TriggerActiveRunLookupHostRuntime, bundled_extension_provider_trust,
+    capability_ids_from_strs, copy_dir_recursive, default_capability_io_pair,
+    host_runtime_storage_roots, http_test_policy, local_dev_all_effects,
+    local_dev_host_runtime_with_http_egress, local_dev_host_runtime_with_live_http_egress,
+    local_dev_host_runtime_with_real_egress_pipeline,
     local_dev_host_runtime_with_registry_and_egress, local_dev_mount_descriptor,
     local_dev_root_filesystem, memory_mounts, qa_smoke_mounts, skill_mounts, wildcard_test_policy,
     workspace_mounts,
@@ -118,7 +118,7 @@ impl HarnessCapabilityMode {
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
         turn_thread_service: Arc<dyn ironclaw_threads::SessionThreadService>,
-        turn_store: Arc<ironclaw_turns::FilesystemTurnStateStore<HarnessTurnBackend>>,
+        turn_store: Arc<ironclaw_turns::FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
@@ -623,12 +623,24 @@ impl HostRuntimeCapabilityHarness {
             project_service_fault_injection,
             durable_capability_io,
             trigger_active_run_lookup_requested,
+            fixture_extension_dirs,
+            native_extension_factories,
+            channel_extension_bindings,
+            account_setup_descriptors,
+            recording_network_egress,
             google_oauth_backend_for_test,
         } = options;
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
+        let has_fixture_extensions = !fixture_extension_dirs.is_empty();
+        for (source, extension_id) in fixture_extension_dirs {
+            copy_dir_recursive(
+                &source,
+                &storage_root.join("system/extensions").join(extension_id),
+            )?;
+        }
         let mut input = if runtime_policy.as_ref().is_some_and(|policy| {
             policy.resolved_profile == ironclaw_host_api::runtime_policy::RuntimeProfile::LocalYolo
         }) {
@@ -649,37 +661,27 @@ impl HostRuntimeCapabilityHarness {
         if let Some(runtime_policy) = runtime_policy {
             input = input.with_runtime_policy(runtime_policy);
         }
+        if !native_extension_factories.is_empty() {
+            input = input.with_native_extension_factories(native_extension_factories);
+        }
+        if !channel_extension_bindings.is_empty() {
+            input = input.with_channel_extension_bindings(channel_extension_bindings);
+        }
+        if has_fixture_extensions {
+            // Fixture packages model HOST-BUNDLED extensions (overview §8), so
+            // their `first_party_requested` trust must survive filesystem
+            // discovery; without this the catalog loader stamps them
+            // `InstalledLocal` and skips them (#5459 anti-laundering rule),
+            // and lifecycle installs fail with "available extension was not
+            // found".
+            input = input.with_trusted_fixture_extensions_for_test();
+        }
+        if !account_setup_descriptors.is_empty() {
+            input = input.with_account_setup_descriptors(account_setup_descriptors);
+        }
         if let Some(egress) = network_http_egress_for_test {
             input = input.with_network_http_egress_for_test(egress);
         }
-        // The Slack adapter is an unconditional path dependency of
-        // `ironclaw_reborn_composition` — #6296 deleted the
-        // `slack-v2-host-beta` feature that used to gate it, so the modules
-        // compile in every build — and every extension-lifecycle group wires
-        // a real Slack channel-connection bundle post-build
-        // (`group_constructors.rs::extension_lifecycle_with_profile`)
-        // unconditionally — this test tier never represents a genuinely
-        // Slack-unconfigured instance the way the default (no
-        // `with_google_oauth_backend_for_test`) build represents an
-        // unconfigured Google instance. Default `true` here so the
-        // provider-instance readiness map never gates `slack_personal`
-        // activation for the ~100 pre-existing harnesses that predate the
-        // readiness-map chokepoint; the map's own unit coverage
-        // (`provider_instance_readiness.rs`) pins the `false` arm directly.
-        input = input.with_slack_host_beta_enabled(true);
-        // Slack readiness has a SECOND axis: personal OAuth also needs
-        // `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`. Same rationale
-        // as the host-beta default directly above — this tier never represents
-        // a Slack-unconfigured instance — so satisfy both axes rather than let
-        // the readiness map gate `slack_personal` activation for every
-        // pre-existing harness. The map's own unit coverage pins the
-        // missing-redirect-URI arm directly.
-        //
-        // Declared as a fact rather than wired via
-        // `with_slack_personal_oauth_lazy`, which would also switch the
-        // provider client to lazy setup-service credentials this tier does not
-        // fill.
-        input = input.with_slack_personal_oauth_redirect_uri_configured(true);
         if google_oauth_backend_for_test {
             // Dummy but well-formed: only presence on `oauth_provider_configs`
             // feeds `google_oauth_configured` (factory.rs) — the readiness-map
@@ -690,7 +692,8 @@ impl HostRuntimeCapabilityHarness {
                 None,
             )
             .map_err(|error| format!("test google oauth client config: {error}"))?;
-            input = input.with_google_oauth_backend(google_client);
+            input =
+                input.with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_client);
         }
         let services = build_reborn_services(input).await?;
         if seed_extension_credentials {
@@ -700,9 +703,10 @@ impl HostRuntimeCapabilityHarness {
         // registry directly (see `HostRuntimeHarnessOptions::activate_bundled_extensions_for_test`
         // doc) so their capabilities are genuinely dispatchable, not merely
         // granted at the harness-authority layer.
-        for package in &activate_bundled_extensions_for_test {
+        for (package, resolved) in &activate_bundled_extensions_for_test {
             services
-                .publish_bundled_extension_for_test(package)
+                .publish_bundled_extension_for_test(package, resolved.as_ref())
+                .await
                 .ok_or(
                     "local-dev Reborn services missing extension management for test publish",
                 )??;
@@ -839,7 +843,7 @@ impl HostRuntimeCapabilityHarness {
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
             http_egress: None,
-            network_egress: None,
+            network_egress: recording_network_egress,
             real_egress_transport: None,
             process_port: None,
             profile_filesystem,
@@ -974,7 +978,7 @@ impl HostRuntimeCapabilityHarness {
     /// gated on `trigger_active_run_lookup_requested`.
     fn install_trigger_active_run_lookup_for_test(
         &self,
-        turn_store: Arc<ironclaw_turns::FilesystemTurnStateStore<HarnessTurnBackend>>,
+        turn_store: Arc<ironclaw_turns::FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     ) -> HarnessResult<()> {
         let repo = self
             .trigger_repository_for_test()
@@ -2191,3 +2195,4 @@ mod harness_trust_tests {
         );
     }
 }
+// arch-exempt: large_file, integration harness remains centralized during fixture migration, plan #6175

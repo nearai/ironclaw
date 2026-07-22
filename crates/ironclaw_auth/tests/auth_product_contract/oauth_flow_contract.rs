@@ -18,56 +18,6 @@ async fn oauth_flow_state_machine_conformance_holds_for_in_memory_fake() {
     .await;
 }
 
-async fn completed_oauth_flow_with_continuation(
-    services: &InMemoryAuthProductServices,
-    owner: &AuthProductScope,
-    continuation: AuthContinuationRef,
-) -> ironclaw_auth::AuthFlowRecord {
-    let flow = services
-        .create_flow(NewAuthFlow {
-            id: None,
-            scope: owner.clone(),
-            kind: AuthFlowKind::IntegrationCredential,
-            provider: provider(),
-            challenge: AuthChallenge::OAuthUrl {
-                authorization_url: authorization_url("https://provider.example/oauth"),
-                expires_at: Utc::now() + Duration::minutes(5),
-            },
-            continuation,
-            update_binding: None,
-            opaque_state_hash: Some(state_hash("state-hash")),
-            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
-            expires_at: Utc::now() + Duration::minutes(5),
-        })
-        .await
-        .expect("OAuth flow");
-
-    services
-        .complete_oauth_callback(
-            owner,
-            OAuthCallbackInput {
-                flow_id: flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: Box::new(OAuthProviderExchange {
-                        provider: provider(),
-                        account_label: label("work github"),
-                        authorization_code_hash: code_hash("code-hash"),
-                        pkce_verifier_hash: pkce_hash("pkce-hash"),
-                        access_secret: SecretHandle::new(format!("github-access-{}", flow.id))
-                            .expect("access handle"),
-                        refresh_secret: None,
-                        scopes: Vec::new(),
-                        account_id: None,
-                        provider_identity: None,
-                    }),
-                },
-            },
-        )
-        .await
-        .expect("OAuth completion")
-}
-
 #[tokio::test]
 async fn continuation_side_effect_failure_terminalizes_only_the_expected_completion() {
     let services = InMemoryAuthProductServices::new();
@@ -97,27 +47,13 @@ async fn continuation_side_effect_failure_terminalizes_only_the_expected_complet
         .await
         .expect("OAuth completion");
 
-    let claimed = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("continuation claim");
+    // Re-expressed from main's claim/settle continuation-dispatch shape onto
+    // this branch's equivalent hardening (`fail_completed_continuation` —
+    // PR body "Auth = ours"): one call terminalizes the completed flow whose
+    // continuation side effects failed, and a second call cannot overwrite
+    // the terminal state.
     let failed = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claimed.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
+        .fail_completed_continuation(&owner, completed.id, AuthErrorCode::BackendUnavailable)
         .await
         .expect("terminal continuation failure");
     assert_eq!(failed.status, AuthFlowStatus::Failed);
@@ -125,191 +61,10 @@ async fn continuation_side_effect_failure_terminalizes_only_the_expected_complet
     assert!(failed.continuation_emitted_at.is_none());
 
     let stale = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claimed.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
+        .fail_completed_continuation(&owner, completed.id, AuthErrorCode::BackendUnavailable)
         .await
         .expect_err("stale failure cannot overwrite terminal state");
     assert_eq!(stale, AuthProductError::FlowAlreadyTerminal);
-}
-
-#[tokio::test]
-async fn concurrent_continuation_dispatch_claims_have_exactly_one_active_owner() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let completed = completed_oauth_flow_with_continuation(
-        &services,
-        &owner,
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
-        },
-    )
-    .await;
-    let first_claimed_at = Utc::now();
-    let second_claimed_at = first_claimed_at + Duration::milliseconds(1);
-
-    let (first, second) = tokio::join!(
-        services.claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: first_claimed_at,
-            },
-        ),
-        services.claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: second_claimed_at,
-            },
-        )
-    );
-
-    let (winner, loser_claimed_at, loser_error) = match (first, second) {
-        (Ok(winner), Err(error)) => (winner, second_claimed_at, error),
-        (Err(error), Ok(winner)) => (winner, first_claimed_at, error),
-        (first, second) => panic!(
-            "exactly one concurrent claim must own dispatch; first={first:?}, second={second:?}"
-        ),
-    };
-    assert_eq!(loser_error, AuthProductError::BackendUnavailable);
-    assert_eq!(winner.status, AuthFlowStatus::Completing);
-
-    let stale_loser = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: loser_claimed_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
-                    emitted_at: winner.updated_at + Duration::milliseconds(1),
-                },
-            },
-        )
-        .await
-        .expect_err("a blocked claimant cannot settle another owner's claim");
-    assert_eq!(stale_loser, AuthProductError::FlowAlreadyTerminal);
-
-    let settled = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: winner.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
-                    emitted_at: winner.updated_at + Duration::milliseconds(1),
-                },
-            },
-        )
-        .await
-        .expect("the active claim owner settles dispatch");
-    assert_eq!(settled.status, AuthFlowStatus::Completed);
-    assert!(settled.continuation_emitted_at.is_some());
-}
-
-#[tokio::test]
-async fn stale_continuation_dispatch_claim_can_be_reclaimed_and_fences_old_owner() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let completed = completed_oauth_flow_with_continuation(
-        &services,
-        &owner,
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
-        },
-    )
-    .await;
-    let first = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("first continuation claim");
-    let reclaimed_at = first.updated_at
-        + Duration::seconds(ironclaw_auth::AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS);
-    let reclaimed = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: reclaimed_at,
-            },
-        )
-        .await
-        .expect("stale continuation claim is reclaimable");
-    assert_eq!(reclaimed.status, AuthFlowStatus::Completing);
-    assert_eq!(reclaimed.updated_at, reclaimed_at);
-
-    let stale_settlement = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: first.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
-                    emitted_at: reclaimed_at + Duration::milliseconds(1),
-                },
-            },
-        )
-        .await
-        .expect_err("the reclaimed lease fences the old owner");
-    assert_eq!(stale_settlement, AuthProductError::FlowAlreadyTerminal);
-
-    let settled = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: reclaimed.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
-                    emitted_at: reclaimed_at + Duration::milliseconds(1),
-                },
-            },
-        )
-        .await
-        .expect("reclaiming owner settles dispatch");
-    assert_eq!(settled.status, AuthFlowStatus::Completed);
-}
-
-#[tokio::test]
-async fn non_lifecycle_continuation_dispatch_claim_is_rejected_without_mutation() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let completed =
-        completed_oauth_flow_with_continuation(&services, &owner, AuthContinuationRef::SetupOnly)
-            .await;
-
-    let error = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect_err("only lifecycle activation may claim exclusive dispatch");
-    assert_eq!(error, AuthProductError::FlowAlreadyTerminal);
-
-    let persisted = services
-        .get_flow(&owner, completed.id)
-        .await
-        .expect("flow lookup")
-        .expect("completed flow remains");
-    assert_eq!(persisted.status, AuthFlowStatus::Completed);
-    assert_eq!(persisted.updated_at, completed.updated_at);
-    assert!(persisted.continuation_emitted_at.is_none());
 }
 
 #[tokio::test]
@@ -1143,4 +898,217 @@ async fn get_flow_returns_none_owner_record_and_cross_scope_denial() {
         .await
         .expect_err("cross scope");
     assert_eq!(cross_scope, AuthProductError::CrossScopeDenied);
+}
+
+/// Create a setup flow with an explicit continuation and provider — the shape
+/// the web "Connect" and extension-card connect buttons both mint.
+async fn setup_flow_with(
+    services: &InMemoryAuthProductServices,
+    owner: AuthProductScope,
+    flow_provider: AuthProviderId,
+    continuation: AuthContinuationRef,
+) -> ironclaw_auth::AuthFlowRecord {
+    services
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: owner,
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: flow_provider,
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: authorization_url("https://provider.example/oauth"),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("state-hash")),
+            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("setup flow")
+}
+
+fn turn_gate_continuation(gate: &str) -> AuthContinuationRef {
+    AuthContinuationRef::TurnGateResume {
+        turn_run_ref: TurnRunRef::new(uuid::Uuid::new_v4().to_string()).expect("turn run ref"),
+        gate_ref: AuthGateRef::new(gate).expect("gate ref"),
+    }
+}
+
+fn lifecycle_continuation() -> AuthContinuationRef {
+    AuthContinuationRef::LifecycleActivation {
+        package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
+    }
+}
+
+async fn flow_status(
+    services: &InMemoryAuthProductServices,
+    owner: &AuthProductScope,
+    flow_id: ironclaw_auth::AuthFlowId,
+) -> AuthFlowStatus {
+    services
+        .get_flow(owner, flow_id)
+        .await
+        .expect("lookup")
+        .expect("record")
+        .status
+}
+
+/// Supersede-on-start lives INSIDE `create_flow`: minting a setup-class flow
+/// is itself the seam that cancels the prior live setup-class flows for the
+/// same owner root + provider, so no start route can forget to supersede
+/// (the #6130 DCR/Notion gap class becomes unrepresentable). Gate flows, other
+/// providers, and other owners are bystanders the creation must not disturb.
+#[tokio::test]
+async fn create_flow_supersedes_prior_live_setup_class_flows() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let bob = scope("bob");
+    let other_provider = AuthProviderId::new("gmail").expect("valid provider");
+
+    let setup_only = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let lifecycle = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        lifecycle_continuation(),
+    )
+    .await;
+    let turn_gate = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        turn_gate_continuation("gate:parked-turn"),
+    )
+    .await;
+    let other_prov = setup_flow_with(
+        &services,
+        owner.clone(),
+        other_provider,
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let other_owner = setup_flow_with(
+        &services,
+        bob.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+
+    // The re-opened "Connect" popup mints its flow: creation supersedes.
+    let reopened = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+
+    assert_eq!(
+        flow_status(&services, &owner, reopened.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "the freshly created flow must not supersede itself"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, setup_only.id).await,
+        AuthFlowStatus::Canceled,
+        "creating a setup-class flow must cancel the prior SetupOnly flow"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, lifecycle.id).await,
+        AuthFlowStatus::Canceled,
+        "creating a setup-class flow must cancel the prior LifecycleActivation flow"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, turn_gate.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "a parked turn's auth gate is not a setup flow and must survive creation"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, other_prov.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+    assert_eq!(
+        flow_status(&services, &bob, other_owner.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+}
+
+/// The exclusion that keeps parked turns alive cuts both ways: creating a
+/// `TurnGateResume` flow is not a setup start, so it must not cancel a live
+/// setup-class flow for the same owner+provider (and vice versa is pinned
+/// above). Both classes stay live side by side.
+#[tokio::test]
+async fn create_flow_for_a_parked_turn_gate_does_not_supersede_setup_flows() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+
+    let setup_only = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+    let turn_gate = setup_flow_with(
+        &services,
+        owner.clone(),
+        provider(),
+        turn_gate_continuation("gate:parked-turn"),
+    )
+    .await;
+
+    assert_eq!(
+        flow_status(&services, &owner, setup_only.id).await,
+        AuthFlowStatus::AwaitingUser,
+        "a gate flow's creation must never cancel the setup surface's flow"
+    );
+    assert_eq!(
+        flow_status(&services, &owner, turn_gate.id).await,
+        AuthFlowStatus::AwaitingUser
+    );
+}
+
+/// The `create_flow` supersede contract must hold under CONCURRENCY, not just
+/// sequentially: two Connect clicks racing each other must still leave
+/// exactly one live setup-class flow. The cancel walk and the insert happen
+/// under one state lock, so no interleaving can let two creates each observe
+/// "no live predecessor" and both survive. Multi-threaded runtime + a start
+/// barrier + repeated rounds to actually exercise the interleavings.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_setup_creates_leave_exactly_one_live_flow() {
+    for round in 0..20 {
+        let services = std::sync::Arc::new(InMemoryAuthProductServices::new());
+        let owner = scope("alice");
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+        let mut racers = Vec::new();
+        for _ in 0..8 {
+            let services = std::sync::Arc::clone(&services);
+            let owner = owner.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            racers.push(tokio::spawn(async move {
+                barrier.wait().await;
+                setup_flow_with(&services, owner, provider(), AuthContinuationRef::SetupOnly).await
+            }));
+        }
+        for racer in racers {
+            racer.await.expect("racer task completes");
+        }
+        let live = services
+            .flow_records_snapshot()
+            .into_iter()
+            .filter(|flow| flow.status == AuthFlowStatus::AwaitingUser)
+            .count();
+        assert_eq!(
+            live, 1,
+            "round {round}: concurrent setup creates must leave exactly one live flow"
+        );
+    }
 }

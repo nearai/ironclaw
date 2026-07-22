@@ -70,6 +70,12 @@ impl RebornAuthContinuationDispatcher for NoopAuthDispatcher {
         self.events.lock().expect("auth events lock").push(event);
         Ok(())
     }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
 }
 
 struct UnusedServices;

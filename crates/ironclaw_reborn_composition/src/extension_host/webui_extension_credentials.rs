@@ -117,8 +117,7 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> RebornServicesError {
             error.retryable,
         ),
         AuthErrorCode::AccountSelectionRequired
-        | AuthErrorCode::ProviderIdentityAlreadyConnected
-        | AuthErrorCode::ConnectionConflict => services_error(
+        | AuthErrorCode::ProviderIdentityAlreadyConnected => services_error(
             RebornServicesErrorCode::Conflict,
             RebornServicesErrorKind::BlockedAuthentication,
             409,
@@ -206,6 +205,12 @@ mod tests {
     #[async_trait]
     impl RebornAuthContinuationDispatcher for NoopDispatcher {
         async fn dispatch_auth_continuation(
+            &self,
+            _event: AuthContinuationEvent,
+        ) -> Result<(), AuthProductError> {
+            Ok(())
+        }
+        async fn dispatch_canceled_auth_continuation(
             &self,
             _event: AuthContinuationEvent,
         ) -> Result<(), AuthProductError> {

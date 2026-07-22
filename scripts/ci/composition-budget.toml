@@ -51,8 +51,9 @@ observed_date = "2026-07-16"
 # --- Dispatch (Arc<dyn>) ratchet ------------------------------------------
 # A companion metric for the "reduce traits & dispatch" goal (issue #6168 / the
 # runtime-decomposition plan #4471). Counts Arc<dyn> sites in composition's
-# PRODUCTION code, EXCLUDING src/slack and src/extension_host (owned by the
-# separate channel/extension refactor — this gate must not govern their work).
+# PRODUCTION code. (The former exclusion of the v1 `src/slack` / `src/extension_host`
+# trees no longer applies — the v1 monolith was deleted under Tier B; the Reborn
+# channel/extension work lives in its own crates outside composition.)
 # One-directional like the mass ratchet: it only trips on GROWTH. Prefer concrete
 # types for single-impl seams; introduce a dyn boundary only at a real second impl
 # or genuine test-fake seam, and raise arc_dyn_ceiling with a PR rationale if so.
@@ -63,6 +64,15 @@ observed_date = "2026-07-16"
 # and the observer/driver internals), making previously-unGoverned Arc<dyn>
 # sites visible to this gate. The telegram host wiring itself is excluded by
 # subtree parity with slack/ (see DISPATCH_EXCLUDE_RE).
-arc_dyn_ceiling = 1156
+# Sixth fold (generic-runtime reconciliation): after the 2026-07-20 main sync,
+# the generic extension-ingress/delivery lane and deleted composition telegram
+# module leave 1096 governed sites. This locks a net 60-site reduction from
+# main's 1156-site baseline while accounting for the Reborn services added on
+# main after the branch's pre-sync 1060-site calibration.
+# 2026-07-21 PR #6116 moved-head cleanup: follow-up branch work removed stale
+# product-auth, capability-surface, and channel-state vocabulary while leaving
+# the branch at 1122 governed sites. This ratifies the current post-cleanup
+# baseline without lowering the mass ratchet; future work must shrink again.
+arc_dyn_ceiling = 1122
 arc_dyn_tolerance = 15
-arc_dyn_observed = 1156
+arc_dyn_observed = 1129

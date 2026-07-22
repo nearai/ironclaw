@@ -1,14 +1,10 @@
 name: Nightly Deep CI
 
-# The legacy v1 suite (.github/workflows/test.yml) is deliberately NOT
-# invoked here: v1 (src/) is frozen pending removal ("Clean up old
-# architecture" roadmap), so its deep suite is paused rather than spending
-# nightly compute on retired code. Note the consequence: test.yml is the
-# ONLY place the root `ironclaw` package's tests run, so until src/ is
-# deleted, a v1 bug fix that must land should temporarily restore the
-# `deterministic-deep-tests` call job (git log this file for the removed
-# block). This is an explicit freeze, not the silent-death failure mode
-# this workflow's history is infamous for.
+# The v1 legacy monolith (src/) and its deep suites (the former
+# .github/workflows/test.yml and .github/workflows/e2e.yml) were deleted
+# under Tier B ("Clean up old architecture" roadmap;
+# docs/plans/2026-07-02-reborn-internal-module-refactor.md §8). Only the
+# Reborn suites remain, reused below.
 #
 # Cross-cutting platform and compatibility coverage is reused from
 # .github/workflows/platform-and-compat.yml:
@@ -27,7 +23,8 @@ name: Nightly Deep CI
 #
 # Docker is intentionally excluded here because QA/release Docker images are
 # owned by the separate Docker pipeline and need release-team alignment.
-# Full browser E2E is scheduled separately by .github/workflows/e2e.yml.
+# Browser E2E runs against the Reborn WebChat surface via
+# .github/workflows/reborn-e2e.yml (reused below).
 
 on:
   schedule:

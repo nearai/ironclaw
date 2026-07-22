@@ -47,14 +47,14 @@ use ironclaw_runner::{
             store::FilesystemAwaitEdgeStore,
         },
         flavors::StaticSubagentDefinitionResolver,
-        goal_store::InMemoryBoundedSubagentGoalStore,
+        goal_store::{FilesystemSubagentGoalStore, in_memory_backed_subagent_goal_store},
     },
 };
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
-    CheckpointStateStore, InMemoryTurnStateStore, LoopCheckpointStore, LoopResultRef,
-    RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
+    CheckpointStateStore, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
+    RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
     run_profile::{
         AgentLoopHostError, CapabilityInputRef, CapabilityInvocation,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
@@ -65,6 +65,11 @@ use ironclaw_turns::{
 };
 
 use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
+use ironclaw_turns::test_support::in_memory_turn_state_store;
+
+fn in_memory_subagent_goal_store() -> Arc<FilesystemSubagentGoalStore<InMemoryBackend>> {
+    Arc::new(in_memory_backed_subagent_goal_store())
+}
 
 async fn write_capability_result_for_test(
     io: &ProductLiveCapabilityIo,
@@ -1368,7 +1373,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     .await
     .unwrap();
     let thread_service = Arc::new(InMemorySessionThreadService::default());
-    let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let turn_state = Arc::new(in_memory_turn_state_store());
     let checkpoint_state_store = in_memory_checkpoint_state_store();
     let loop_checkpoint_store = Arc::clone(&turn_state);
     let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
@@ -1387,7 +1392,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
         ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
     )));
-    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let subagent_goal_store = in_memory_subagent_goal_store();
     let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
         Arc::clone(&await_edge_store),
         subagent_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,

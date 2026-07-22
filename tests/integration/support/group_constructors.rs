@@ -59,6 +59,23 @@ impl RebornIntegrationGroup {
         Self::builder().extension_lifecycle().await
     }
 
+    /// Extension-lifecycle group extended with the invented-vendor fixture
+    /// (native factory + on-disk assets): drives the full generic runtime
+    /// path — install → activate → dispatch-from-snapshot → remove — with
+    /// no real product (extension-runtime P2).
+    pub async fn extension_runtime_acme() -> HarnessResult<Self> {
+        Self::builder().extension_runtime_acme().await
+    }
+
+    /// Acme runtime group extended for the §5.4 delivery proofs: the bundled
+    /// telegram package's native channel factory is assembled and the
+    /// recording network egress answers vendor-shaped Slack/Telegram bodies,
+    /// so outbound deliveries drive the REAL coordinator → adapter → wire
+    /// path (extension-runtime P5, DEL-10).
+    pub async fn extension_delivery() -> HarnessResult<Self> {
+        Self::builder().extension_delivery().await
+    }
+
     /// Same group as [`Self::extension_lifecycle`], with a Google OAuth
     /// backend configured at composition time. Proves the
     /// provider-instance readiness check does not false-positive once an
@@ -305,35 +322,72 @@ impl RebornIntegrationGroupBuilder {
         // harness with the group's canonical binding subject so install and
         // remove execute under the same user scope as the turn.
         let host_runtime = build_group_capability_with_base(profile, &base).await?;
-        // C-SLACK-LIFECYCLE (issue #6105): wire the REAL Slack channel-connection
-        // facade over this harness's own `RebornServices`, mirroring the
-        // production `build_webui_services_with_slack_host_beta_mounts` slot
-        // fill — so `builtin.extension_remove("slack")` runs the real
-        // personal-connection cleanup instead of failing closed on an unset
-        // facade slot. Identities come from the group's single-source dispatch
-        // scope so the facade's tenant check matches dispatch-time callers.
+        // C-SLACK-LIFECYCLE (issue #6105): wire the REAL generic
+        // channel-connection facade over this harness's own `RebornServices`,
+        // mirroring the production `build_reborn_runtime` slot fill — so
+        // `builtin.extension_remove` of a channel extension runs the real
+        // per-caller disconnect instead of skipping it on an empty facade
+        // slot. Identities come from the group's single-source dispatch scope
+        // so the facade's tenant check matches dispatch-time callers.
         let scope = &base.product_harness.scope;
-        let slack =
-            ironclaw_reborn_composition::test_support::build_slack_channel_connection_for_test(
+        let channel_connection =
+            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
                 host_runtime
                     .reborn_services_for_test()
                     .ok_or("extension_lifecycle harness is missing its RebornServices bundle")?,
-                ironclaw_reborn_composition::test_support::SlackChannelConnectionTestConfig {
+                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
                     tenant_id: scope.tenant_id.as_str().to_string(),
-                    host_user_id: scope.user_id.as_str().to_string(),
                     agent_id: scope
                         .agent_id
                         .as_ref()
                         .map(|agent| agent.as_str().to_string())
                         .ok_or("group product scope is missing an agent id")?,
-                    installation_id: "itest-slack-install".to_string(),
-                    team_id: "T-ITEST".to_string(),
-                    api_app_id: "A-ITEST".to_string(),
                 },
             )?;
-        self.slack_channel_connection = Some(Arc::new(slack));
+        self.channel_connection = Some(Arc::new(channel_connection));
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
+    }
+
+    /// Build the invented-vendor fixture group. See
+    /// [`RebornIntegrationGroup::extension_runtime_acme`].
+    pub async fn extension_runtime_acme(mut self) -> HarnessResult<RebornIntegrationGroup> {
+        let base = self.build_base().await?;
+        let host_runtime =
+            super::super::harness::profiles::extension::extension_runtime_acme_tools().await?;
+        // Same slot fill as `extension_lifecycle` above: acme-messenger
+        // declares a channel surface backed by an auth vendor, so
+        // `builtin.extension_remove` fail-closes on an empty channel
+        // disconnect slot once removal runs under an authenticated actor.
+        // Wire the real generic facade over this harness's own
+        // `RebornServices`, keyed to the group's dispatch scope.
+        let scope = &base.product_harness.scope;
+        let channel_connection =
+            ironclaw_reborn_composition::test_support::build_channel_connection_for_test(
+                host_runtime
+                    .reborn_services_for_test()
+                    .ok_or("extension_runtime_acme harness is missing its RebornServices bundle")?,
+                ironclaw_reborn_composition::test_support::ChannelConnectionTestConfig {
+                    tenant_id: scope.tenant_id.as_str().to_string(),
+                    agent_id: scope
+                        .agent_id
+                        .as_ref()
+                        .map(|agent| agent.as_str().to_string())
+                        .ok_or("group product scope is missing an agent id")?,
+                },
+            )?;
+        self.channel_connection = Some(Arc::new(channel_connection));
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.into_group(base, capability).await
+    }
+
+    /// Build a delivery-proof group. See
+    /// [`RebornIntegrationGroup::extension_delivery`].
+    pub async fn extension_delivery(self) -> HarnessResult<RebornIntegrationGroup> {
+        let host_runtime =
+            super::super::harness::profiles::extension::extension_delivery_tools().await?;
+        let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
+        self.build_with_capability(capability).await
     }
 
     /// Build a visibility-probe group. See

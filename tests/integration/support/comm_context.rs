@@ -50,6 +50,7 @@ impl RecordingCommunicationContextProvider {
                     name: channel_name.into(),
                     authenticated: true,
                     active: true,
+                    presentation: None,
                 }]),
                 delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
                     display_name: display_name.into(),

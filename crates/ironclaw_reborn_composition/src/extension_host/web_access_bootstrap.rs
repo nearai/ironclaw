@@ -20,8 +20,8 @@
 
 use std::sync::Arc;
 
-use ironclaw_host_api::UserId;
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase};
+use ironclaw_host_api::{InstallationState, UserId};
+use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
 
 use crate::RebornBuildError;
 use crate::extension_host::extension_lifecycle::{
@@ -85,39 +85,45 @@ pub(crate) async fn bootstrap_web_access(
         .phase;
 
     match phase {
-        LifecyclePhase::Discovered | LifecyclePhase::Installed => {}
-        LifecyclePhase::Active => return Ok(WebAccessBootstrapOutcome::AlreadyActive),
-        LifecyclePhase::Removed => {
+        // `Installed` also covers a never-installed package (`project()`
+        // reports the neutral `Installed` when there is no installation
+        // record at all — see its doc comment); `install()` below is
+        // idempotent for an already-installed package, so both cases take
+        // the same path unconditionally.
+        InstallationState::Installed | InstallationState::Configured => {}
+        InstallationState::Active => return Ok(WebAccessBootstrapOutcome::AlreadyActive),
+        InstallationState::Removed => {
             tracing::debug!(
                 "web-access was explicitly removed; preserving that state rather than \
                  re-installing it"
             );
             return Ok(WebAccessBootstrapOutcome::SkippedPreservedRemoved);
         }
-        LifecyclePhase::Disabled => {
+        InstallationState::Disabled => {
             tracing::debug!(
                 "web-access is explicitly disabled; preserving that state rather than \
                  re-activating it"
             );
             return Ok(WebAccessBootstrapOutcome::SkippedDisabled);
         }
-        other => {
+        InstallationState::Failed | InstallationState::Unsupported => {
             tracing::debug!(
-                phase = ?other,
+                phase = ?phase,
                 "web-access is not in an auto-activatable phase; skipping bootstrap"
             );
             return Ok(WebAccessBootstrapOutcome::SkippedNonActivatable);
         }
     }
 
-    if phase == LifecyclePhase::Discovered {
-        extension_management
-            .install(package_ref.clone(), &caller)
-            .await
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!("web-access extension install failed: {error}"),
-            })?;
-    }
+    // Idempotent for an already-installed package (see the match above), so
+    // this always runs rather than branching on whether `phase` distinguishes
+    // "never installed" from "installed" — it no longer does.
+    extension_management
+        .install(package_ref.clone(), &caller)
+        .await
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("web-access extension install failed: {error}"),
+        })?;
     extension_management
         .activate(package_ref, ExtensionActivationMode::Static, &caller)
         .await

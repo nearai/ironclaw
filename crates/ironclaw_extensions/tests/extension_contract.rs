@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
+// arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
 use ironclaw_host_api::*;
@@ -100,6 +100,7 @@ fn registry_rejects_host_bundled_package_with_mutated_parameters_schema() {
         WASM_MANIFEST,
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
+        &contracts(),
     )
     .unwrap();
     let mut package = package_from_manifest(manifest, "echo");
@@ -171,7 +172,7 @@ async fn discovery_reads_host_bundled_legacy_manifests_from_filesystem_virtual_r
         &VirtualPath::new("/system/extensions").unwrap(),
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
-        &HostApiContractRegistry::new(),
+        &contracts(),
     )
     .await
     .unwrap();
@@ -205,9 +206,15 @@ async fn discovery_rejects_installed_local_privileged_manifest() {
     )
     .unwrap();
 
-    let err = ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-        .await
-        .unwrap_err();
+    let err = ExtensionDiscovery::discover_with_manifest_contracts(
+        &fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &contracts(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(matches!(
         err,
@@ -219,44 +226,46 @@ async fn discovery_rejects_installed_local_privileged_manifest() {
 }
 
 #[test]
-fn production_parser_rejects_installed_legacy_top_level_capabilities() {
-    let err = ExtensionManifest::parse_with_optional_host_api_contracts(
-        WASM_MANIFEST,
-        ManifestSource::InstalledLocal,
-        &HostPortCatalog::empty(),
-        &HostApiContractRegistry::new(),
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        err,
-        ExtensionError::ManifestV2(
-            ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
-                manifest_source: ManifestSource::InstalledLocal,
-            }
+fn top_level_capabilities_are_rejected_for_every_source() {
+    // The legacy manifest form is gone for host-bundled manifests exactly as
+    // for installed ones: capabilities are declared under an
+    // ironclaw.capability_provider/v1 host_api section.
+    let legacy = WASM_MANIFEST
+        .replace(
+            "[[host_api]]\nid = \"ironclaw.capability_provider/v1\"\nsection = \"capability_provider.tools\"\n\n[capability_provider.tools]\n\n",
+            "",
         )
-    ));
-}
-
-#[test]
-fn production_parser_allows_host_bundled_legacy_top_level_capabilities() {
-    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
-        WASM_MANIFEST,
+        .replace("[[capability_provider.tools.capabilities]]", "[[capabilities]]");
+    for source in [
+        ManifestSource::InstalledLocal,
+        ManifestSource::RegistryInstalled,
         ManifestSource::HostBundled,
-        &HostPortCatalog::empty(),
-        &HostApiContractRegistry::new(),
-    )
-    .unwrap();
-
-    assert_eq!(manifest.id.as_str(), "echo");
-    assert_eq!(manifest.capabilities.len(), 1);
+    ] {
+        let err =
+            ExtensionManifest::parse(&legacy, source, &HostPortCatalog::empty(), &contracts())
+                .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ExtensionError::ManifestV2(ManifestV2Error::Invalid { reason })
+                    if reason.contains("top-level [[capabilities]] is not supported")
+            ),
+            "{source:?}: {err:?}"
+        );
+    }
 }
 
 #[tokio::test]
-async fn discovery_rejects_installed_legacy_top_level_capabilities() {
+async fn discovery_rejects_legacy_top_level_capability_manifests() {
+    let legacy = WASM_MANIFEST
+        .replace(
+            "[[host_api]]\nid = \"ironclaw.capability_provider/v1\"\nsection = \"capability_provider.tools\"\n\n[capability_provider.tools]\n\n",
+            "",
+        )
+        .replace("[[capability_provider.tools.capabilities]]", "[[capabilities]]");
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("echo")).unwrap();
-    std::fs::write(storage.path().join("echo/manifest.toml"), WASM_MANIFEST).unwrap();
+    std::fs::write(storage.path().join("echo/manifest.toml"), legacy).unwrap();
 
     let mut fs = DiskFilesystem::new();
     fs.mount_local(
@@ -265,17 +274,20 @@ async fn discovery_rejects_installed_legacy_top_level_capabilities() {
     )
     .unwrap();
 
-    let err = ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-        .await
-        .unwrap_err();
+    let err = ExtensionDiscovery::discover_with_manifest_contracts(
+        &fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &contracts(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(matches!(
-        err,
-        ExtensionError::ManifestV2(
-            ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
-                manifest_source: ManifestSource::InstalledLocal,
-            }
-        )
+        &err,
+        ExtensionError::ManifestV2(ManifestV2Error::Invalid { reason })
+            if reason.contains("top-level [[capabilities]] is not supported")
     ));
 }
 
@@ -360,7 +372,7 @@ async fn discovery_registers_capability_provider_projected_capabilities() {
 
 #[test]
 fn capability_provider_host_api_contract_accepts_valid_manifest() {
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         CAPABILITY_PROVIDER_MANIFEST,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -408,7 +420,7 @@ runtime_credentials = [
   { handle = "telegram_token", audience = { scheme = "https", host_pattern = "api.telegram.org" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
 ]"#,
     );
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -470,7 +482,7 @@ runtime_credentials = [
 ]"#
             ),
         );
-        let err = ExtensionManifest::parse_with_host_api_contracts(
+        let err = ExtensionManifest::parse(
             &manifest,
             ManifestSource::InstalledLocal,
             &HostPortCatalog::empty(),
@@ -478,20 +490,23 @@ runtime_credentials = [
         )
         .unwrap_err();
 
+        // Typed capability-validation errors pass through the contract
+        // channel unflattened; their diagnostic text is preserved on Display.
+        let rendered = err.to_string();
         assert!(
-            matches!(
-                err,
-                ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
-                    if reason.contains(expected)
-            ),
-            "expected reason containing {expected:?}, got {err:?}"
+            matches!(err, ExtensionError::ManifestV2(_)),
+            "expected a manifest error, got {err:?}"
+        );
+        assert!(
+            rendered.contains(expected),
+            "expected diagnostic containing {expected:?}, got {rendered}"
         );
     }
 }
 
 #[test]
 fn capability_provider_host_api_fails_without_registered_contract() {
-    let err = ExtensionManifest::parse_with_host_api_contracts(
+    let err = ExtensionManifest::parse(
         CAPABILITY_PROVIDER_MANIFEST,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -518,7 +533,7 @@ fn capability_provider_host_api_rejects_wrong_section_path() {
             "[[capability_provider.tools.capabilities]]",
             "[[capability_provider.other.capabilities]]",
         );
-    let err = ExtensionManifest::parse_with_host_api_contracts(
+    let err = ExtensionManifest::parse(
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -541,7 +556,7 @@ fn capability_provider_host_api_rejects_unknown_section_fields() {
         "[capability_provider.tools]",
         "[capability_provider.tools]\nraw_secret = \"not allowed\"",
     );
-    let err = ExtensionManifest::parse_with_host_api_contracts(
+    let err = ExtensionManifest::parse(
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -573,20 +588,23 @@ fn capability_provider_host_api_reuses_capability_validation() {
     ];
 
     for (manifest, expected) in cases {
-        let err = ExtensionManifest::parse_with_host_api_contracts(
+        let err = ExtensionManifest::parse(
             &manifest,
             ManifestSource::InstalledLocal,
             &HostPortCatalog::empty(),
             &capability_provider_contracts(),
         )
         .unwrap_err();
+        // Capability validation reports the same typed variants however the
+        // capability is declared; the diagnostic text survives on Display.
+        let rendered = err.to_string();
         assert!(
-            matches!(
-                err,
-                ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
-                    if reason.contains(expected)
-            ),
-            "expected reason containing {expected:?}, got {err:?}"
+            matches!(err, ExtensionError::ManifestV2(_)),
+            "expected a manifest error, got {err:?}"
+        );
+        assert!(
+            rendered.contains(expected),
+            "expected diagnostic containing {expected:?}, got {rendered}"
         );
     }
 }
@@ -598,7 +616,7 @@ fn capability_provider_host_api_allows_missing_prompt_doc_ref() {
         "",
     );
 
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -625,7 +643,7 @@ prompt_doc_ref = "prompts/telegram/send_message.md"
 
 [[capability_provider.tools.capabilities]]"#,
     );
-    let err = ExtensionManifest::parse_with_host_api_contracts(
+    let err = ExtensionManifest::parse(
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -635,8 +653,8 @@ prompt_doc_ref = "prompts/telegram/send_message.md"
 
     assert!(matches!(
         err,
-        ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { reason, .. })
-            if reason.contains("duplicate capability id")
+        ExtensionError::ManifestV2(ManifestV2Error::DuplicateCapability { id })
+            if id.as_str() == "telegram.send_message"
     ));
 }
 
@@ -651,7 +669,10 @@ fn capability_provider_host_api_rejects_contextless_validation() {
 
     let err = contract.validate_section(&host_api, &section).unwrap_err();
 
-    assert!(err.contains("requires manifest context"));
+    assert!(matches!(
+        &err,
+        HostApiSectionError::Contract(reason) if reason.contains("requires manifest context")
+    ));
 }
 
 #[test]
@@ -661,7 +682,7 @@ fn capability_provider_host_api_validates_required_host_ports() {
         "prompt_doc_ref = \"prompts/telegram/send_message.md\"\nrequired_host_ports = [\"host.runtime.http_egress\"]\n",
     );
 
-    let missing_port = ExtensionManifest::parse_with_host_api_contracts(
+    let missing_port = ExtensionManifest::parse(
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -670,15 +691,15 @@ fn capability_provider_host_api_validates_required_host_ports() {
     .unwrap_err();
     assert!(matches!(
         missing_port,
-        ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { reason, .. })
-            if reason.contains("unknown host port")
+        ExtensionError::ManifestV2(ManifestV2Error::UnknownHostPort { port, .. })
+            if port.as_str() == "host.runtime.http_egress"
     ));
 
     let catalog = HostPortCatalog::new(vec![HostPortCatalogEntry::new(
         HostPortId::new("host.runtime.http_egress").unwrap(),
     )])
     .unwrap();
-    ExtensionManifest::parse_with_host_api_contracts(
+    ExtensionManifest::parse(
         &manifest,
         ManifestSource::InstalledLocal,
         &catalog,
@@ -703,7 +724,7 @@ prompt_doc_ref = "prompts/telegram/send_message.md"
 "#,
         "",
     );
-    let err = ExtensionManifest::parse_with_host_api_contracts(
+    let err = ExtensionManifest::parse(
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -744,7 +765,7 @@ async fn discovery_validates_capability_manifest_with_supplied_host_port_catalog
         &VirtualPath::new("/system/extensions").unwrap(),
         ManifestSource::HostBundled,
         &catalog,
-        &HostApiContractRegistry::new(),
+        &contracts(),
     )
     .await
     .unwrap();
@@ -780,7 +801,7 @@ async fn discovery_rejects_manifest_id_mismatch_with_directory() {
         &VirtualPath::new("/system/extensions").unwrap(),
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
-        &HostApiContractRegistry::new(),
+        &contracts(),
     )
     .await
     .unwrap_err();
@@ -836,16 +857,14 @@ fn registry_rejects_duplicate_extension_ids() {
 }
 
 #[tokio::test]
-async fn lifecycle_service_records_update_disable_enable_and_remove_events() {
+async fn lifecycle_service_records_disable_enable_and_remove_events() {
     let events = std::sync::Arc::new(RecordingExtensionLifecycleEventSink::default());
     let installed = lifecycle_package("echo", "echo.say", "0.1.0");
-    let updated = lifecycle_package("echo", "echo.reply", "0.2.0");
     let extension_id = ExtensionId::new("echo").unwrap();
     let mut service = ExtensionLifecycleService::new(ExtensionRegistry::new())
         .with_event_sink(std::sync::Arc::clone(&events));
 
     service.install(installed).await.unwrap();
-    service.update(updated).await.unwrap();
     service.disable(&extension_id).await.unwrap();
     assert!(!service.is_enabled(&extension_id));
     service.enable(&extension_id).await.unwrap();
@@ -854,14 +873,11 @@ async fn lifecycle_service_records_update_disable_enable_and_remove_events() {
 
     assert!(service.registry().get_extension(&extension_id).is_none());
     let recorded = events.events();
-    assert_eq!(recorded.len(), 5);
+    assert_eq!(recorded.len(), 4);
     assert_eq!(recorded[0].operation, ExtensionLifecycleOperation::Install);
-    assert_eq!(recorded[1].operation, ExtensionLifecycleOperation::Update);
-    assert_eq!(recorded[1].version, "0.2.0");
-    assert!(recorded[1].capability_surface_changed);
-    assert_eq!(recorded[2].operation, ExtensionLifecycleOperation::Disable);
-    assert_eq!(recorded[3].operation, ExtensionLifecycleOperation::Enable);
-    assert_eq!(recorded[4].operation, ExtensionLifecycleOperation::Remove);
+    assert_eq!(recorded[1].operation, ExtensionLifecycleOperation::Disable);
+    assert_eq!(recorded[2].operation, ExtensionLifecycleOperation::Enable);
+    assert_eq!(recorded[3].operation, ExtensionLifecycleOperation::Remove);
 }
 
 #[tokio::test]
@@ -888,11 +904,22 @@ async fn lifecycle_service_does_not_install_when_required_event_sink_fails() {
     );
 }
 
+fn contracts() -> HostApiContractRegistry {
+    let mut registry = HostApiContractRegistry::new();
+    registry
+        .register(std::sync::Arc::new(
+            CapabilityProviderHostApiContract::new().unwrap(),
+        ))
+        .unwrap();
+    registry
+}
+
 fn parse_manifest(raw: &str) -> ExtensionManifest {
     ExtensionManifest::parse(
         raw,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &contracts(),
     )
     .unwrap()
 }
@@ -946,7 +973,13 @@ trust = "untrusted"
 kind = "{runtime_kind}"
 {runtime_fields}
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{capability}"
 description = "Run {capability}"
 effects = ["dispatch_capability"]
@@ -1013,7 +1046,7 @@ impl HostApiManifestContract for TestProductAdapterContract {
         &self,
         _host_api: &HostApiRefV2,
         section: &toml::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(), HostApiSectionError> {
         let surface = section
             .get("surface_kind")
             .and_then(toml::Value::as_str)
@@ -1021,7 +1054,7 @@ impl HostApiManifestContract for TestProductAdapterContract {
         if surface == "telegram" {
             Ok(())
         } else {
-            Err("surface_kind must be telegram".to_string())
+            Err(HostApiSectionError::from("surface_kind must be telegram"))
         }
     }
 }
@@ -1037,7 +1070,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "echo.say"
 description = "Echo text"
 effects = ["dispatch_capability"]
@@ -1059,7 +1098,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/echo.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "echo.say"
 description = "Echo text"
 effects = ["dispatch_capability"]
@@ -1132,7 +1177,13 @@ image = "python:3.12-slim"
 command = "pytest"
 args = ["tests/"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "project-tools.pytest"
 description = "Run pytest"
 effects = ["execute_code"]
@@ -1156,7 +1207,13 @@ transport = "stdio"
 command = "github-mcp-server"
 args = ["--stdio"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github-mcp.search_issues"
 description = "Search GitHub issues"
 effects = ["network", "dispatch_capability"]
@@ -1188,7 +1245,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/tool.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "hookext.run"
 description = "Run hookext"
 effects = ["dispatch_capability"]
@@ -1280,6 +1343,7 @@ type = "always"
         &manifest_with_hooks(hooks),
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &contracts(),
     )
     .expect_err("hook entry without id must be rejected");
     assert!(
@@ -1304,7 +1368,13 @@ hooks = ["not-a-table"]
 kind = "wasm"
 module = "wasm/tool.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "hookext.run"
 description = "Run hookext"
 effects = ["dispatch_capability"]
@@ -1318,6 +1388,7 @@ prompt_doc_ref = "prompts/hookext/run.md"
         manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &contracts(),
     )
     .expect_err("non-table hook entry must be rejected");
     assert!(
@@ -1344,6 +1415,7 @@ type = "always"
         &manifest_with_hooks(hooks),
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &contracts(),
     )
     .expect_err("whitespace-only hook id must be rejected");
     assert!(
@@ -1377,6 +1449,7 @@ type = "always"
         &manifest_with_hooks(&hooks),
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &contracts(),
     )
     .expect_err("oversized hook entry must be rejected");
     assert!(
@@ -1410,6 +1483,7 @@ export = "observe"
         &manifest_with_hooks(hooks),
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &contracts(),
     )
     .expect_err("duplicate hook ids must be rejected");
     assert!(
@@ -1441,6 +1515,7 @@ type = "always"
         &manifest_with_hooks(&hooks),
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &contracts(),
     )
     .expect_err("over-cap hook count must be rejected");
     assert!(
@@ -1477,6 +1552,7 @@ type = "always"
         &manifest_with_hooks(&hooks),
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &contracts(),
     )
     .expect("exactly MAX_MANIFEST_HOOKS entries must be accepted");
     assert_eq!(manifest.hooks.len(), MAX_MANIFEST_HOOKS);
@@ -1502,6 +1578,7 @@ type = "always"
         &manifest_with_hooks(hooks),
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &contracts(),
     )
     .unwrap();
     assert_eq!(v2.hooks.len(), 1);

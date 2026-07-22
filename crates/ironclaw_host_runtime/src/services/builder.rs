@@ -2,15 +2,13 @@ use std::any::type_name;
 
 use std::sync::Arc;
 
-#[cfg(feature = "libsql")]
 use super::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
 use super::PostgresRootFilesystem;
 use super::{
     ApprovalRequestStore, AuditSink, CapabilityLeaseStore, CoalescingEventSink, DurableAuditLog,
     DurableAuditSink, DurableEventLog, DurableEventSink, EffectiveRuntimePolicy, EventBatchConfig,
     EventSink, FilesystemApprovalRequestStore, FilesystemResourceGovernor, FilesystemRunStateStore,
-    FilesystemTurnStateStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
+    FilesystemTurnStateRowStore, FirstPartyCapabilityRegistry, HostRuntimeServices, McpExecutor,
     NetworkHttpEgress, ProcessBackendKind, ProcessExecutor, ProcessObligationLifecycleStore,
     ProcessResultStore, ProcessStore, ProductionComponentType, ProductionImplementationReadiness,
     ProductionWiringComponent, ProductionWiringIssueKind, ProductionWiringReport,
@@ -37,7 +35,6 @@ where
     S: ProcessStore + 'static,
     R: ProcessResultStore + 'static,
 {
-    #[cfg(any(feature = "postgres", feature = "libsql"))]
     fn with_root_filesystem<T>(self, filesystem: Arc<T>) -> HostRuntimeServices<T, G, S, R>
     where
         T: RootFilesystem + 'static,
@@ -83,6 +80,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             post_edit_check,
             mut component_types,
         } = self;
@@ -128,12 +126,12 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             post_edit_check,
             component_types,
         }
     }
 
-    #[cfg(feature = "postgres")]
     pub fn with_postgres_root_filesystem(
         self,
         filesystem: Arc<PostgresRootFilesystem>,
@@ -141,7 +139,6 @@ where
         self.with_root_filesystem(filesystem)
     }
 
-    #[cfg(feature = "libsql")]
     pub fn with_libsql_root_filesystem(
         self,
         filesystem: Arc<LibSqlRootFilesystem>,
@@ -194,6 +191,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             post_edit_check,
             mut component_types,
         } = self;
@@ -249,6 +247,7 @@ where
             run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
+            extension_tool_resolver,
             post_edit_check,
             component_types,
         }
@@ -485,7 +484,7 @@ where
     where
         FsBackend: RootFilesystem + 'static,
     {
-        let store = Arc::new(FilesystemTurnStateStore::new(scoped_filesystem));
+        let store = Arc::new(FilesystemTurnStateRowStore::new(scoped_filesystem));
         self.with_turn_state_and_transition_port(store)
     }
 

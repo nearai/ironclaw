@@ -57,7 +57,7 @@ async def _create_response(client: httpx.AsyncClient, path="/v1/responses", **pa
     response = None
     for attempt in range(6):
         response = await client.post(path, json={"model": "default", **payload})
-        if response.status_code != 429:
+        if response.status_code != 429 and not _is_retryable_service_unavailable(response):
             break
         await asyncio.sleep(1 + attempt * 0.5)
     assert response is not None
@@ -66,6 +66,21 @@ async def _create_response(client: httpx.AsyncClient, path="/v1/responses", **pa
     assert body["id"].startswith("resp_")
     assert body["object"] == "response"
     return body
+
+
+def _is_retryable_service_unavailable(response: httpx.Response) -> bool:
+    if response.status_code != 503:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    if isinstance(error, dict) and error.get("code") == "service_unavailable":
+        return True
+    return error == "service_unavailable" or body.get("kind") == "service_unavailable"
 
 
 async def test_reborn_legacy_responses_non_streaming_text_input(

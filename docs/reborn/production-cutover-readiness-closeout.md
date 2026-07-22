@@ -2,6 +2,16 @@
 
 Issues: #3026, #4621
 
+> **Superseded in part**: `src/` (the v1 legacy monolith referenced throughout
+> this note as "the legacy path") was deleted under Tier B
+> (`docs/plans/2026-07-02-reborn-internal-module-refactor.md` §8). Deploy
+> configs (Railway, the GCP systemd unit, Docker CI) were repointed at Reborn
+> in the same change. The "keep the legacy v1 path as the serving path"
+> rollback note in this doc no longer applies — there is no v1 path to fall
+> back to; rollback is now profile/deployment-based only (disable the Reborn
+> profile or roll back the deploy). The `legacy_main_does_not_compose_reborn_runtime`
+> test this doc cites was removed along with `src/main.rs`.
+
 This note is the final closeout map for the Reborn production wiring and
 cutover-readiness epic. It does not make Reborn default-on and it does not
 perform a v1 data migration. It records the current production-readiness source
@@ -48,7 +58,7 @@ layer.
 | Migration-dry-run validates but does not switch live traffic | `migration_dry_run_validates_libsql_shape`, process-port fail-closed tests, and `runtime_rejects_migration_dry_run_before_live_traffic`. |
 | Production fails closed on missing/local-only/unverified/unsupported services | `build_production_shaped` wiring validation, `ProductionWiringReport` mapping tests, and required-backend parity tests for libSQL/PostgreSQL. |
 | Redacted stable readiness diagnostics | `readiness_diagnostics_do_not_carry_sensitive_detail_fields`, backend URL/secret redaction assertions, and operator observability backend contract requirements. |
-| AppBuilder/default startup stays clear | Reborn production composition remains in `ironclaw_reborn_composition`; legacy `src/main.rs` is covered by `legacy_main_does_not_compose_reborn_runtime`. |
+| AppBuilder/default startup stays clear | Reborn production composition remains in `ironclaw_reborn_composition`. (Historical: this was also guarded by `legacy_main_does_not_compose_reborn_runtime` against legacy `src/main.rs`, removed along with `src/` under Tier B.) |
 | Reborn binary remains thin bootstrap | `ironclaw` delegates to command modules and Reborn-owned factories; `reborn_binary_main_is_thin_bootstrap` guards this mechanically. |
 | WebUI/Product Workflow consume facade APIs | `RebornWebuiBundle`, `build_webui_services`, product-live adapter tests, and crate guardrails in `crates/ironclaw_reborn_composition/CLAUDE.md`. |
 | Required graph components included or diagnosed | Host-runtime `ProductionWiringReport`, Reborn readiness diagnostic component mapping, and #4620 backend-parity readiness tests. |
@@ -90,7 +100,6 @@ Recommended closeout validation:
 ```bash
 cargo fmt --all -- --check
 cargo test -p ironclaw_reborn_composition runtime_rejects_disabled_profile_before_local_substrate_lookup
-cargo test -p ironclaw_reborn_composition runtime_rejects_migration_dry_run_before_live_traffic --features libsql --locked
-cargo test -p ironclaw_architecture legacy_main_does_not_compose_reborn_runtime
+cargo test -p ironclaw_reborn_composition runtime_rejects_migration_dry_run_before_live_traffic --locked
 cargo test -p ironclaw_architecture reborn_binary_main_is_thin_bootstrap
 ```

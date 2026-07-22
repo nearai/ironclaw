@@ -4,8 +4,7 @@
 //! composition, one-way hashing of callback material, and sanitized response
 //! rendering. It deliberately delegates durable flow state, provider exchange,
 //! credential mutation, and continuation dispatch to [`RebornProductAuthServices`].
-
-// arch-exempt: large_file, product-auth route composition surface, plan #5905
+// arch-exempt: large_file, product-auth serve router and DTO/route composition surface; decomposition into per-route submodules tracked by the Slack-OAuth audit, plan #5604
 
 mod accounts;
 mod lifecycle;
@@ -14,17 +13,14 @@ mod oauth;
 #[cfg(test)]
 mod oauth_start_tests;
 
-pub(crate) use oauth::{
-    CallbackScopeResolution, OAuthCallbackDescriptor, OAuthCallbackTerminalHookFuture,
-    oauth_provider_callback_handler,
-};
-
 use std::{
     hash::Hash,
     num::{NonZeroU32, NonZeroU64, NonZeroUsize},
     sync::{Arc, Mutex},
     time::Duration,
 };
+
+use lru::LruCache;
 
 use axum::{
     Json, Router,
@@ -35,19 +31,17 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use ironclaw_auth::{
-    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef,
-    AuthInteractionId, AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId,
-    AuthSurface, AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountId,
+    AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowStatus, AuthGateRef, AuthInteractionId,
+    AuthProductError, AuthProductScope, AuthProviderId, AuthSessionId, AuthSurface,
+    AuthorizationCodeHash, CredentialAccountChoiceRequest, CredentialAccountId,
     CredentialAccountLabel, CredentialAccountListPage, CredentialAccountListRequest,
     CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountStatus,
     CredentialAccountUpdateBinding, CredentialRecoveryProjection, CredentialRecoveryRequest,
-    CredentialRefreshReport, CredentialRefreshRequest, GOOGLE_PROVIDER_ID, GoogleOAuthRouteConfig,
-    OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackState, OAuthCallbackStateKind,
+    CredentialRefreshReport, CredentialRefreshRequest, OAuthAuthorizationCode,
+    OAuthAuthorizationUrl, OAuthCallbackState, OAuthCallbackStateKind,
     OAuthProviderCallbackRequest, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret,
-    ProviderScope, SLACK_PERSONAL_PROVIDER_ID, SecretCleanupAction, SecretCleanupReport,
-    SecretCleanupRequest, Timestamp, TurnRunRef, binding_scope_owns_account,
-    build_google_authorization_url, parse_google_callback_scopes, parse_google_requested_scopes,
-    pkce_s256_challenge,
+    ProviderScope, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, Timestamp,
+    TurnRunRef, binding_scope_owns_account,
 };
 use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{
@@ -61,21 +55,14 @@ use ironclaw_host_api::{
 use ironclaw_product_workflow::{
     LifecyclePackageKind, RebornServicesApi, RebornServicesError, WebUiAuthenticatedCaller,
 };
-use lru::LruCache;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
-use crate::product_auth::api::auth::{
-    RebornDcrOAuthStartFlowRequest, RebornOAuthCallbackAttemptError,
-    RebornOAuthCallbackFailureStage, RebornOAuthStartFlowRequest,
-};
-use crate::slack::slack_host_beta::SlackPersonalConnectionScopeResolver;
-use crate::slack::slack_personal_binding::{
-    RebornUserIdentityBindingDeleteStore, SlackPersonalUserBinder, SlackUserBindingLifecycleStore,
-};
+use crate::extension_host::channel_identity::ProviderIdentityHookFactory;
+use crate::product_auth::api::auth::RebornOAuthStartFlowRequest;
 use crate::{
     RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest, RebornManualTokenSubmitResponse,
     RebornOAuthCallbackError, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
@@ -86,13 +73,11 @@ pub(crate) const OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/start"
 pub(crate) const OAUTH_CALLBACK_PATH: &str = "/api/reborn/product-auth/oauth/callback/{flow_id}";
 pub(crate) const OAUTH_FLOW_STATUS_PATH: &str =
     "/api/reborn/product-auth/oauth/flow/{flow_id}/status";
-pub(crate) const OAUTH_FLOW_RECONCILE_PATH: &str =
-    "/api/reborn/product-auth/oauth/flow/{flow_id}/reconcile";
-pub(crate) const GOOGLE_OAUTH_START_PATH: &str = "/api/reborn/product-auth/oauth/google/start";
-pub(crate) const GOOGLE_OAUTH_CALLBACK_PATH: &str =
-    "/api/reborn/product-auth/oauth/google/callback";
-pub(crate) const SLACK_PERSONAL_OAUTH_CALLBACK_PATH: &str =
-    "/api/reborn/product-auth/oauth/slack_personal/callback";
+/// One public callback per vendor, `{provider}` resolved as recipe data —
+/// the path shape vendor-registered redirect URLs already point at
+/// (checklist AUTH-13).
+pub(crate) const VENDOR_OAUTH_CALLBACK_PATH: &str =
+    "/api/reborn/product-auth/oauth/{provider}/callback";
 pub(crate) const EXTENSION_OAUTH_START_PATH: &str =
     "/api/webchat/v2/extensions/{package_id}/setup/oauth/start";
 pub(crate) const MANUAL_TOKEN_SUBMIT_PATH: &str = "/api/reborn/product-auth/manual-token/submit";
@@ -108,10 +93,7 @@ pub(crate) const LIFECYCLE_CLEANUP_PATH: &str = "/api/reborn/product-auth/lifecy
 const OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.start";
 const OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.callback";
 const OAUTH_FLOW_STATUS_ROUTE_ID: &str = "product_auth.oauth.flow_status";
-const OAUTH_FLOW_RECONCILE_ROUTE_ID: &str = "product_auth.oauth.flow_reconcile";
-const GOOGLE_OAUTH_START_ROUTE_ID: &str = "product_auth.oauth.google.start";
-const GOOGLE_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.google.callback";
-const SLACK_PERSONAL_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.slack_personal.callback";
+const VENDOR_OAUTH_CALLBACK_ROUTE_ID: &str = "product_auth.oauth.vendor.callback";
 const EXTENSION_OAUTH_START_ROUTE_ID: &str = "webui_v2.extensions.oauth.start";
 const MANUAL_TOKEN_SUBMIT_ROUTE_ID: &str = "product_auth.manual_token.submit";
 const MANUAL_TOKEN_SETUP_ROUTE_ID: &str = "product_auth.manual_token.setup";
@@ -162,7 +144,7 @@ const OAUTH_RATE_WINDOW_SECONDS: NonZeroU32 = match NonZeroU32::new(60) {
     // SAFETY: 60 is a non-zero literal rate-limit window.
     None => unreachable!(),
 };
-pub(crate) const PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS: i64 = 10 * 60;
+const PRODUCT_AUTH_FLOW_MAX_TTL_SECONDS: i64 = 10 * 60;
 const PRODUCT_AUTH_BACKEND_TIMEOUT: Duration = Duration::from_secs(30);
 const OAUTH_CALLBACK_QUERY_MAX_BYTES: usize = 16 * 1024;
 const OAUTH_CALLBACK_FIELD_MAX_BYTES: usize = 512;
@@ -172,13 +154,19 @@ const RAW_OAUTH_VALUE_MAX_BYTES: usize = 4 * 1024;
 #[derive(Clone)]
 pub struct ProductAuthRouteState {
     product_auth: Arc<RebornProductAuthServices>,
+    /// Installed-inventory guard for extension OAuth starts: a flow may be
+    /// minted only for an extension the caller actually has installed
+    /// (fail-closed — an unwired lookup rejects rather than skips).
     installed_extension_lookup: Option<Arc<dyn InstalledExtensionLookup>>,
     tenant_id: TenantId,
     default_agent_id: Option<AgentId>,
     default_project_id: Option<ProjectId>,
-    google_oauth: Option<GoogleOAuthRouteConfig>,
-    slack_personal_oauth: Option<crate::slack::slack_setup::SlackPersonalSetupServiceSlot>,
-    slack_personal_oauth_binding: Option<SlackPersonalOAuthBindingConfig>,
+    /// The vendor-blind post-exchange provider-identity hook — registered
+    /// by composition wiring as data (the generic channel identity
+    /// binding), never a vendor match arm in a handler. The factory
+    /// receives the callback's vendor id and resolves what (if anything)
+    /// to bind itself.
+    provider_identity_hook: Option<Arc<ProviderIdentityHookFactory>>,
     // First-slice WebUI OAuth stores the raw PKCE verifier process-locally
     // because `AuthFlowRecord` deliberately serializes hashes only. Production
     // HA must replace this with a host-owned encrypted verifier store before
@@ -186,6 +174,10 @@ pub struct ProductAuthRouteState {
     pkce_verifiers: ExpiringLruCache<AuthFlowId, StoredPkceVerifier>,
 }
 
+/// Answers "does this caller have this extension installed?" for the
+/// extension OAuth start guard. Implemented over the WebUI facade
+/// (`RebornServicesApi::list_extensions`) by production wiring; tests may
+/// substitute a scripted lookup.
 #[async_trait::async_trait]
 trait InstalledExtensionLookup: Send + Sync {
     async fn is_installed(
@@ -242,9 +234,7 @@ impl ProductAuthRouteState {
             tenant_id,
             default_agent_id,
             default_project_id,
-            google_oauth: None,
-            slack_personal_oauth: None,
-            slack_personal_oauth_binding: None,
+            provider_identity_hook: None,
             pkce_verifiers: ExpiringLruCache::new(
                 OAUTH_PKCE_VERIFIER_CACHE_CAPACITY,
                 StoredPkceVerifier::expires_at,
@@ -252,6 +242,8 @@ impl ProductAuthRouteState {
         }
     }
 
+    /// Wire the WebUI facade as the installed-extension inventory source for
+    /// the extension OAuth start guard.
     pub fn with_webui_api(mut self, webui_api: Arc<dyn RebornServicesApi>) -> Self {
         self.installed_extension_lookup = Some(Arc::new(RebornServicesInstalledExtensionLookup {
             api: webui_api,
@@ -265,7 +257,11 @@ impl ProductAuthRouteState {
         self
     }
 
-    async fn require_installed_extension(
+    /// Fail-closed installed-inventory guard for extension OAuth starts: no
+    /// wired lookup rejects as unavailable (never skips the check), a lookup
+    /// failure rejects as unavailable, and a missing installation rejects
+    /// with the terminal not-installed conflict.
+    pub(super) async fn require_installed_extension(
         &self,
         caller: &WebUiAuthenticatedCaller,
         requester_extension: &ExtensionId,
@@ -293,71 +289,33 @@ impl ProductAuthRouteState {
         Ok(())
     }
 
-    pub fn with_google_oauth(mut self, config: GoogleOAuthRouteConfig) -> Self {
-        self.google_oauth = Some(config);
+    /// Register the post-exchange provider-identity hook. The handler
+    /// hands it the callback's vendor id — data lookup, no vendor branch.
+    pub fn with_provider_identity_hook(
+        mut self,
+        factory: Arc<ProviderIdentityHookFactory>,
+    ) -> Self {
+        self.provider_identity_hook = Some(factory);
         self
     }
 
-    pub(crate) fn product_auth_services(&self) -> &RebornProductAuthServices {
-        &self.product_auth
+    pub(super) fn provider_identity_hook(
+        &self,
+        vendor: &str,
+        callback_scope: &AuthProductScope,
+    ) -> Option<crate::product_auth::api::auth::OAuthProviderIdentityCheck> {
+        self.provider_identity_hook
+            .as_ref()
+            .and_then(|factory| factory(vendor, callback_scope))
     }
 
-    fn google_oauth_config(&self) -> Result<&GoogleOAuthRouteConfig, ProductAuthRouteFailure> {
-        self.google_oauth
-            .as_ref()
+    fn auth_engine(&self) -> Result<Arc<ironclaw_auth::AuthEngine>, ProductAuthRouteFailure> {
+        self.product_auth
+            .auth_engine()
             .ok_or_else(ProductAuthRouteFailure::backend_unavailable)
     }
 
-    pub fn with_slack_personal_oauth(
-        mut self,
-        slot: crate::slack::slack_setup::SlackPersonalSetupServiceSlot,
-    ) -> Self {
-        self.slack_personal_oauth = Some(slot);
-        self
-    }
-
-    pub(crate) async fn slack_personal_oauth_credentials(
-        &self,
-    ) -> Result<
-        (
-            ironclaw_auth::OAuthClientId,
-            ironclaw_auth::OAuthRedirectUri,
-        ),
-        ProductAuthRouteFailure,
-    > {
-        let slot = self.slack_personal_oauth.as_ref().ok_or_else(|| {
-            tracing::warn!(
-                "Slack personal OAuth slot not configured (IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI not set)"
-            );
-            ProductAuthRouteFailure::backend_unavailable()
-        })?;
-        let service = slot.get().ok_or_else(|| {
-            tracing::warn!("Slack personal OAuth slot not yet filled (startup race)");
-            ProductAuthRouteFailure::backend_unavailable()
-        })?;
-        let (client_id, _secret) = service.oauth_credentials().await.map_err(|e| {
-            tracing::warn!(error = %e, "Slack personal OAuth credentials not configured");
-            ProductAuthRouteFailure::malformed_config()
-        })?;
-        let redirect_uri = slot.redirect_uri().clone();
-        Ok((client_id, redirect_uri))
-    }
-
-    pub fn with_slack_personal_oauth_binding(
-        mut self,
-        config: SlackPersonalOAuthBindingConfig,
-    ) -> Self {
-        self.slack_personal_oauth_binding = Some(config);
-        self
-    }
-
-    pub(crate) fn slack_personal_oauth_binding_config(
-        &self,
-    ) -> Option<&SlackPersonalOAuthBindingConfig> {
-        self.slack_personal_oauth_binding.as_ref()
-    }
-
-    pub(crate) fn store_pkce_verifier(
+    fn store_pkce_verifier(
         &self,
         flow_id: AuthFlowId,
         verifier: SecretString,
@@ -382,8 +340,23 @@ impl ProductAuthRouteState {
             .ok_or_else(ProductAuthRouteFailure::unknown_or_expired_flow)
     }
 
-    pub(crate) fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
+    fn remove_pkce_verifier(&self, flow_id: AuthFlowId) {
         self.pkce_verifiers.remove(&flow_id);
+    }
+
+    /// Terminal-outcome cleanup: drop the same-process cached verifier AND
+    /// the durable per-flow copy (best-effort). Early defensive cache
+    /// removals (unknown flow, cross-vendor path) must NOT use this — the
+    /// legitimate callback may still need the durable copy.
+    async fn forget_pkce_verifier_everywhere(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+    ) {
+        self.remove_pkce_verifier(flow_id);
+        self.product_auth
+            .discard_setup_pkce_verifier(scope, flow_id)
+            .await;
     }
 }
 
@@ -399,63 +372,12 @@ impl std::fmt::Debug for ProductAuthRouteState {
             .field("tenant_id", &self.tenant_id)
             .field("default_agent_id", &self.default_agent_id)
             .field("default_project_id", &self.default_project_id)
-            .field("google_oauth", &self.google_oauth.is_some());
-        builder.field("slack_personal_oauth", &self.slack_personal_oauth.is_some());
-        builder.field(
-            "slack_personal_oauth_binding",
-            &self.slack_personal_oauth_binding.is_some(),
-        );
+            .field(
+                "provider_identity_hook",
+                &self.provider_identity_hook.is_some(),
+            );
         builder
             .field("pkce_verifiers", &"ExpiringLruCache<...>")
-            .finish()
-    }
-}
-
-#[derive(Clone)]
-pub struct SlackPersonalOAuthBindingConfig {
-    pub(crate) binding_service: Arc<dyn SlackPersonalUserBinder>,
-    pub(crate) connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
-    /// Undoes an identity binding written by the callback identity hook when
-    /// `complete_oauth_callback` fails afterwards; the binding is the
-    /// user-visible "connected" signal, so it must not survive a completion
-    /// failure that already deleted the token material.
-    pub(crate) binding_rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
-    pub(crate) lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore>,
-}
-
-impl SlackPersonalOAuthBindingConfig {
-    pub(crate) fn new(
-        binding_service: Arc<dyn SlackPersonalUserBinder>,
-        connection_scope_resolver: Arc<dyn SlackPersonalConnectionScopeResolver>,
-        binding_rollback_store: Arc<dyn RebornUserIdentityBindingDeleteStore>,
-        lifecycle_store: Arc<dyn SlackUserBindingLifecycleStore>,
-    ) -> Self {
-        Self {
-            binding_service,
-            connection_scope_resolver,
-            binding_rollback_store,
-            lifecycle_store,
-        }
-    }
-}
-
-impl std::fmt::Debug for SlackPersonalOAuthBindingConfig {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SlackPersonalOAuthBindingConfig")
-            .field("binding_service", &self.binding_service)
-            .field(
-                "connection_scope_resolver",
-                &"Arc<dyn SlackPersonalConnectionScopeResolver>",
-            )
-            .field(
-                "binding_rollback_store",
-                &"Arc<dyn RebornUserIdentityBindingDeleteStore>",
-            )
-            .field(
-                "lifecycle_store",
-                &"Arc<dyn SlackUserBindingLifecycleStore>",
-            )
             .finish()
     }
 }
@@ -536,44 +458,6 @@ pub struct ProductAuthRouteMount {
     pub descriptors: Vec<IngressRouteDescriptor>,
 }
 
-async fn extension_oauth_start_handler(
-    State(state): State<ProductAuthRouteState>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Path(package_id): Path<String>,
-    Json(request): Json<ExtensionOAuthStartRequest>,
-) -> Result<Json<ProductOAuthStartResponse>, ProductAuthRouteFailure> {
-    let requester_extension =
-        ExtensionId::new(package_id).map_err(|_| ProductAuthRouteFailure::invalid_request())?;
-    state
-        .require_installed_extension(&caller, &requester_extension)
-        .await?;
-    let response = if request.provider == SLACK_PERSONAL_PROVIDER_ID {
-        crate::slack::slack_personal_oauth::start_extension_oauth_flow(
-            state.clone(),
-            caller.clone(),
-            request,
-            requester_extension.clone(),
-        )
-        .await?
-    } else {
-        oauth::start_extension_oauth_flow(
-            state.clone(),
-            caller.clone(),
-            request,
-            requester_extension.clone(),
-        )
-        .await?
-    };
-    if let Err(error) = state
-        .require_installed_extension(&caller, &requester_extension)
-        .await
-    {
-        oauth::abort_started_extension_oauth_flow(&state, &response.0).await?;
-        return Err(error);
-    }
-    Ok(response)
-}
-
 // Product-auth HTTP is a host-owned auth/secret-ingress boundary. Its
 // mutations enter `RebornProductAuthServices` directly; they are not in-turn
 // tool calls and must not surface raw secrets through the model-visible
@@ -583,13 +467,9 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
     let public = Router::new()
         .route(OAUTH_CALLBACK_PATH, get(oauth::oauth_callback_handler))
         .route(
-            GOOGLE_OAUTH_CALLBACK_PATH,
-            get(oauth::google_oauth_callback_handler),
+            VENDOR_OAUTH_CALLBACK_PATH,
+            get(oauth::vendor_oauth_callback_handler),
         );
-    let public = public.route(
-        SLACK_PERSONAL_OAUTH_CALLBACK_PATH,
-        get(crate::slack::slack_personal_oauth::slack_personal_oauth_callback_handler),
-    );
 
     ProductAuthRouteMount {
         protected: Router::new()
@@ -599,16 +479,8 @@ pub fn product_auth_route_mount(state: ProductAuthRouteState) -> ProductAuthRout
                 get(oauth::oauth_flow_status_handler),
             )
             .route(
-                OAUTH_FLOW_RECONCILE_PATH,
-                post(oauth::oauth_flow_reconcile_handler),
-            )
-            .route(
-                GOOGLE_OAUTH_START_PATH,
-                post(oauth::google_oauth_start_handler),
-            )
-            .route(
                 EXTENSION_OAUTH_START_PATH,
-                post(extension_oauth_start_handler),
+                post(oauth::extension_oauth_start_handler),
             )
             .route(
                 MANUAL_TOKEN_SUBMIT_PATH,
@@ -651,9 +523,7 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
     // and stops descriptor blocks from drifting per-route.
     const PROTECTED_MUTATIONS: &[(&str, &str)] = &[
         (OAUTH_START_ROUTE_ID, OAUTH_START_PATH),
-        (GOOGLE_OAUTH_START_ROUTE_ID, GOOGLE_OAUTH_START_PATH),
         (EXTENSION_OAUTH_START_ROUTE_ID, EXTENSION_OAUTH_START_PATH),
-        (OAUTH_FLOW_RECONCILE_ROUTE_ID, OAUTH_FLOW_RECONCILE_PATH),
         (MANUAL_TOKEN_SUBMIT_ROUTE_ID, MANUAL_TOKEN_SUBMIT_PATH),
         (MANUAL_TOKEN_SETUP_ROUTE_ID, MANUAL_TOKEN_SETUP_PATH),
         (
@@ -698,15 +568,9 @@ pub(crate) fn product_auth_route_descriptors() -> Vec<IngressRouteDescriptor> {
         callback_policy(),
     ));
     descriptors.push(descriptor(
-        GOOGLE_OAUTH_CALLBACK_ROUTE_ID,
+        VENDOR_OAUTH_CALLBACK_ROUTE_ID,
         NetworkMethod::Get,
-        GOOGLE_OAUTH_CALLBACK_PATH,
-        callback_policy(),
-    ));
-    descriptors.push(descriptor(
-        SLACK_PERSONAL_OAUTH_CALLBACK_ROUTE_ID,
-        NetworkMethod::Get,
-        SLACK_PERSONAL_OAUTH_CALLBACK_PATH,
+        VENDOR_OAUTH_CALLBACK_PATH,
         callback_policy(),
     ));
     descriptors
@@ -827,22 +691,12 @@ pub(super) struct OAuthStartRequest {
 }
 
 #[derive(Deserialize)]
-pub(super) struct GoogleOAuthStartRequest {
+pub(super) struct ExtensionOAuthStartRequest {
+    provider: String,
     account_label: String,
     scopes: Vec<String>,
     expires_at: Timestamp,
-    session_id: Option<String>,
-    thread_id: Option<String>,
     invocation_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct ExtensionOAuthStartRequest {
-    pub(crate) provider: String,
-    pub(crate) account_label: String,
-    pub(crate) scopes: Vec<String>,
-    pub(crate) expires_at: Timestamp,
-    pub(crate) invocation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -913,10 +767,10 @@ pub(crate) struct ManualTokenSubmitResponse {
 /// invocation to carry forward.
 // Option<T> fields already default to None in serde without #[serde(default)].
 #[derive(Default, Deserialize)]
-pub(crate) struct ScopeFields {
-    pub(crate) session_id: Option<String>,
-    pub(crate) thread_id: Option<String>,
-    pub(crate) invocation_id: Option<String>,
+pub(super) struct ScopeFields {
+    session_id: Option<String>,
+    thread_id: Option<String>,
+    invocation_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1026,7 +880,7 @@ pub(super) struct OAuthCallbackQuery {
 }
 
 #[derive(Deserialize)]
-pub(super) struct GoogleOAuthCallbackQuery {
+pub(super) struct VendorOAuthCallbackQuery {
     state: Option<RawCallbackValue>,
     code: Option<RawSecretValue>,
     error: Option<String>,
@@ -1035,55 +889,48 @@ pub(super) struct GoogleOAuthCallbackQuery {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ProductAuthRouteFailure {
+pub(super) struct ProductAuthRouteFailure {
     status: StatusCode,
     body: RebornOAuthCallbackError,
-    callback_failure_stage: RebornOAuthCallbackFailureStage,
 }
 
 impl ProductAuthRouteFailure {
-    pub(crate) fn new(status: StatusCode, code: AuthErrorCode) -> Self {
+    fn new(status: StatusCode, code: AuthErrorCode) -> Self {
         Self {
             status,
             body: RebornOAuthCallbackError {
                 code,
                 retryable: matches!(code, AuthErrorCode::BackendUnavailable),
             },
-            callback_failure_stage: RebornOAuthCallbackFailureStage::Terminal,
         }
     }
 
-    pub(crate) fn invalid_request() -> Self {
+    fn invalid_request() -> Self {
         Self::new(StatusCode::BAD_REQUEST, AuthErrorCode::InvalidRequest)
     }
 
-    pub(crate) fn extension_not_installed() -> Self {
+    /// The requested extension is not in the caller's installed inventory —
+    /// terminal for this start attempt (409, not retryable).
+    fn extension_not_installed() -> Self {
         Self::new(StatusCode::CONFLICT, AuthErrorCode::InvalidRequest)
     }
 
-    pub(crate) fn malformed_callback() -> Self {
+    fn malformed_callback() -> Self {
         Self::new(StatusCode::BAD_REQUEST, AuthErrorCode::MalformedCallback)
     }
 
-    pub(crate) fn unknown_or_expired_flow() -> Self {
+    fn unknown_or_expired_flow() -> Self {
         Self::new(StatusCode::NOT_FOUND, AuthErrorCode::UnknownOrExpiredFlow)
     }
 
-    pub(crate) fn backend_unavailable() -> Self {
+    fn backend_unavailable() -> Self {
         Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
             AuthErrorCode::BackendUnavailable,
         )
     }
 
-    pub(crate) fn malformed_config() -> Self {
-        Self::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            AuthErrorCode::MalformedConfig,
-        )
-    }
-
-    pub(crate) fn backend_timeout() -> Self {
+    fn backend_timeout() -> Self {
         Self::new(
             StatusCode::GATEWAY_TIMEOUT,
             AuthErrorCode::BackendUnavailable,
@@ -1109,15 +956,6 @@ impl From<RebornOAuthCallbackError> for ProductAuthRouteFailure {
     }
 }
 
-impl From<RebornOAuthCallbackAttemptError> for ProductAuthRouteFailure {
-    fn from(error: RebornOAuthCallbackAttemptError) -> Self {
-        let callback_failure_stage = error.stage();
-        let mut failure = route_failure_from_callback_error(error.error());
-        failure.callback_failure_stage = callback_failure_stage;
-        failure
-    }
-}
-
 pub(super) fn route_failure_from_callback_error(
     error: RebornOAuthCallbackError,
 ) -> ProductAuthRouteFailure {
@@ -1135,13 +973,11 @@ pub(super) fn route_failure_from_callback_error(
         }
         AuthErrorCode::CredentialMissing
         | AuthErrorCode::AccountSelectionRequired
-        | AuthErrorCode::ProviderIdentityAlreadyConnected
-        | AuthErrorCode::ConnectionConflict => StatusCode::CONFLICT,
+        | AuthErrorCode::ProviderIdentityAlreadyConnected => StatusCode::CONFLICT,
     };
     ProductAuthRouteFailure {
         status,
         body: error,
-        callback_failure_stage: RebornOAuthCallbackFailureStage::Terminal,
     }
 }
 
@@ -1215,7 +1051,7 @@ pub(super) fn scope_from_authenticated_caller_parts(
 /// when `invocation_id` is absent. Use for follow-up routes where the browser
 /// MUST carry back the id minted by a prior setup/start response so the host
 /// can re-derive the matching scope without minting a fresh, unmatched one.
-pub(crate) fn scope_from_authenticated_caller_parts_requiring_invocation(
+pub(super) fn scope_from_authenticated_caller_parts_requiring_invocation(
     caller: &WebUiAuthenticatedCaller,
     fields: &ScopeFields,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
@@ -1225,7 +1061,7 @@ pub(crate) fn scope_from_authenticated_caller_parts_requiring_invocation(
     scope_from_authenticated_caller_parts(caller, fields)
 }
 
-pub(crate) async fn scoped_update_binding_for_requester(
+pub(super) async fn scoped_update_binding_for_requester(
     state: &ProductAuthRouteState,
     scope: AuthProductScope,
     provider: AuthProviderId,
@@ -1447,7 +1283,7 @@ pub(super) fn validate_callback_field(
         .map_err(|_| ProductAuthRouteFailure::malformed_callback())
 }
 
-pub(crate) fn scope_hint(scope: &AuthProductScope) -> OAuthCallbackScopeHint {
+pub(super) fn scope_hint(scope: &AuthProductScope) -> OAuthCallbackScopeHint {
     OAuthCallbackScopeHint {
         user_id: scope.resource.user_id.clone(),
         agent_id: scope.resource.agent_id.clone(),
@@ -1497,11 +1333,11 @@ pub(super) fn compose_authorization_url(
     OAuthAuthorizationUrl::new(endpoint.to_string()).map_err(ProductAuthRouteFailure::from)
 }
 
-pub(crate) fn opaque_state_hash(value: &str) -> Result<OpaqueStateHash, ProductAuthRouteFailure> {
+pub(super) fn opaque_state_hash(value: &str) -> Result<OpaqueStateHash, ProductAuthRouteFailure> {
     OpaqueStateHash::new(sha256_hex(value)).map_err(ProductAuthRouteFailure::from)
 }
 
-pub(crate) fn pkce_verifier_hash(value: &str) -> Result<PkceVerifierHash, ProductAuthRouteFailure> {
+pub(super) fn pkce_verifier_hash(value: &str) -> Result<PkceVerifierHash, ProductAuthRouteFailure> {
     PkceVerifierHash::new(sha256_hex(value)).map_err(ProductAuthRouteFailure::from)
 }
 
@@ -1684,7 +1520,7 @@ pub(super) fn parse_optional_extension(
 /// same way; centralising the timeout/error wiring stops each handler from
 /// having to re-derive the same four lines and keeps the failure projection
 /// identical across routes.
-pub(crate) async fn run_with_backend_timeout<T, E, F>(
+pub(super) async fn run_with_backend_timeout<T, E, F>(
     future: F,
 ) -> Result<T, ProductAuthRouteFailure>
 where
@@ -1701,28 +1537,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AuthChallengeProvider;
     use crate::RebornAuthContinuationDispatcher;
-    use crate::product_auth::oauth::notion_oauth::notion_provider_spec;
-    use crate::product_auth::oauth::oauth_dcr::{
-        OAuthDcrProvider, OAuthDcrProviderConfig, OAuthDcrProviderRegistry,
-    };
-    use crate::product_auth::oauth::oauth_dcr_protocol::flow_secret_handle;
     use async_trait::async_trait;
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, header};
     use ironclaw_auth::{
         AuthFlowManager, AuthInteractionService, AuthProviderClient,
         CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
-        CredentialOwnership, CredentialSetupService, NewCredentialAccount, SecretCleanupService,
+        CredentialSetupService, SecretCleanupService,
     };
-    use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
     use ironclaw_host_api::{
-        NetworkMethod, RuntimeCredentialAccountProviderId, RuntimeCredentialAuthRequirement,
-        RuntimeHttpEgress, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle,
+        NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
+        RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId,
     };
+    use ironclaw_product_workflow::AuthChallengeProvider;
     use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
+    use std::sync::Mutex;
     use tower::ServiceExt;
 
     // Contract: the origin-independent reconnect flow-status route is a
@@ -1783,20 +1614,11 @@ mod tests {
         ) -> Result<(), AuthProductError> {
             Ok(())
         }
-    }
-
-    struct SequencedInstalledExtensionLookup {
-        calls: std::sync::atomic::AtomicUsize,
-    }
-
-    #[async_trait]
-    impl InstalledExtensionLookup for SequencedInstalledExtensionLookup {
-        async fn is_installed(
+        async fn dispatch_canceled_auth_continuation(
             &self,
-            _caller: &WebUiAuthenticatedCaller,
-            _extension_id: &ExtensionId,
-        ) -> Result<bool, RebornServicesError> {
-            Ok(self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
+            Ok(())
         }
     }
 
@@ -1826,17 +1648,12 @@ mod tests {
                 .push(event);
             Ok(())
         }
-    }
-
-    fn test_state() -> ProductAuthRouteState {
-        ProductAuthRouteState::new(
-            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
-                NoopDispatcher,
-            ))),
-            TenantId::new("tenant-alpha").expect("tenant"),
-            None,
-            None,
-        )
+        async fn dispatch_canceled_auth_continuation(
+            &self,
+            _event: ironclaw_auth::AuthContinuationEvent,
+        ) -> Result<(), ironclaw_auth::AuthProductError> {
+            Ok(())
+        }
     }
 
     fn test_resource_scope() -> ResourceScope {
@@ -1855,6 +1672,17 @@ mod tests {
         WebUiAuthenticatedCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("user-alpha").expect("user"),
+            None,
+            None,
+        )
+    }
+
+    fn test_state() -> ProductAuthRouteState {
+        ProductAuthRouteState::new(
+            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+                NoopDispatcher,
+            ))),
+            TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
         )
@@ -1899,26 +1727,84 @@ mod tests {
         assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
     }
 
-    #[tokio::test]
-    async fn extension_oauth_start_handler_starts_dcr_setup_flow_for_notion() {
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-        let dcr_provider = Arc::new(
-            OAuthDcrProvider::new(
-                OAuthDcrProviderConfig {
-                    spec: notion_provider_spec(),
-                    callback_origin: "http://127.0.0.1:3000".to_string(),
-                    client_name: "Ironclaw".to_string(),
-                    account_label: CredentialAccountLabel::new("notion").expect("label"),
-                    scopes: Vec::new(),
-                },
-                Arc::new(RouteDcrSetupEgress),
+    /// Shared engine-backed test rig: a synthetic vendor recipe (statically
+    /// credentialed or DCR) + scripted vendor egress behind the real engine.
+    fn test_vendor_recipe(
+        with_client_credentials: bool,
+        resource: Option<&str>,
+    ) -> ironclaw_auth::ResolvedVendorAuthRecipe {
+        let mut recipe = serde_json::json!({
+            "method": "oauth2_code",
+            "display_name": "Vendor account",
+            "authorization_endpoint": "https://auth.vendorco.example/authorize",
+            "token_endpoint": "https://auth.vendorco.example/token",
+            "scopes": ["items:read"],
+            "token_response": {
+                "access_token": "/access_token",
+                "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+            },
+        });
+        if with_client_credentials {
+            recipe["client_credentials"] =
+                serde_json::json!({ "client_id_handle": "vendorco_oauth_client_id" });
+        }
+        ironclaw_auth::ResolvedVendorAuthRecipe {
+            vendor: "vendorco".to_string(),
+            recipe: serde_json::from_value(recipe).expect("test recipe parses"),
+            token_exchange_resource: resource.map(str::to_string),
+        }
+    }
+
+    #[derive(Debug)]
+    struct StaticTestCredentials;
+
+    #[async_trait]
+    impl ironclaw_auth::EngineClientCredentialsSource for StaticTestCredentials {
+        async fn resolve(
+            &self,
+            _vendor: &str,
+            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+        ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, AuthProductError> {
+            Ok(ironclaw_auth::EngineOAuthClientMaterial {
+                client_id: ironclaw_auth::OAuthClientId::new("vendorco-client-id")?,
+                client_secret: None,
+            })
+        }
+    }
+
+    fn test_engine(
+        recipe: ironclaw_auth::ResolvedVendorAuthRecipe,
+        egress: Arc<dyn RuntimeHttpEgress>,
+        secret_store: Arc<dyn SecretStore>,
+    ) -> Arc<ironclaw_auth::AuthEngine> {
+        Arc::new(ironclaw_auth::AuthEngine::new(
+            ironclaw_auth::AuthEngineDeps {
+                recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![recipe])),
+                client_credentials: Arc::new(StaticTestCredentials),
+                egress,
                 secret_store,
-                Arc::new(NoopObligationHandler),
-            )
-            .expect("DCR provider"),
+                callback_base: ironclaw_auth::EngineCallbackBase::new(
+                    "http://127.0.0.1:3000/api/reborn/product-auth/oauth",
+                )
+                .expect("callback base"),
+                dcr_client_name: "Ironclaw".to_string(),
+            },
+        ))
+    }
+
+    /// A recipe without `client_credentials` declares dynamic client
+    /// registration: the start route triggers discovery + registration once
+    /// and the authorize URL uses the DISCOVERED endpoint with the static
+    /// vendor callback as its redirect (AUTH-13).
+    #[tokio::test]
+    async fn extension_oauth_start_runs_dcr_for_recipes_without_client_credentials() {
+        let engine = test_engine(
+            test_vendor_recipe(false, Some("https://mcp.vendorco.example/mcp")),
+            Arc::new(RouteDcrSetupEgress),
+            Arc::new(FilesystemSecretStore::ephemeral()),
         );
         let product_auth = RebornProductAuthServices::local_dev_in_memory(Arc::new(NoopDispatcher))
-            .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![dcr_provider])));
+            .with_auth_engine(engine);
         let state = ProductAuthRouteState::new(
             Arc::new(product_auth),
             TenantId::new("tenant-alpha").expect("tenant"),
@@ -1934,12 +1820,12 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/webchat/v2/extensions/notion/setup/oauth/start")
+                    .uri("/api/webchat/v2/extensions/vendorco-tools/setup/oauth/start")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "provider": "notion",
-                            "account_label": "work notion",
+                            "provider": "vendorco",
+                            "account_label": "work account",
                             "scopes": [],
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": InvocationId::new().to_string(),
@@ -1956,205 +1842,32 @@ mod tests {
             .await
             .expect("response body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
-        assert_eq!(json["provider"], "notion");
-        assert_eq!(json["continuation"]["type"], "lifecycle_activation");
-        assert_eq!(json["continuation"]["package_ref"], "notion");
+        assert_eq!(json["provider"], "vendorco");
+        assert_eq!(json["continuation"]["type"], "setup_only");
         let authorization_url = json["authorization_url"]
             .as_str()
             .expect("authorization url");
         let parsed = url::Url::parse(authorization_url).expect("authorization URL");
-        assert_eq!(parsed.host_str(), Some("oauth.notion.com"));
+        assert_eq!(
+            parsed.host_str(),
+            Some("oauth.vendorco.example"),
+            "authorize URL uses the DISCOVERED endpoint, not the manifest placeholder"
+        );
         let redirect_uri = parsed
             .query_pairs()
             .find_map(|(name, value)| (name == "redirect_uri").then(|| value.into_owned()))
             .expect("redirect uri");
-        let redirect = url::Url::parse(&redirect_uri).expect("callback redirect URL");
         assert_eq!(
-            redirect
-                .query_pairs()
-                .find_map(|(name, value)| (name == "account_label").then(|| value.into_owned())),
-            Some("work notion".to_string())
+            redirect_uri, "http://127.0.0.1:3000/api/reborn/product-auth/oauth/vendorco/callback",
+            "the registered redirect is the static vendor callback path"
         );
     }
 
+    /// The full serve-tier round trip on the generic routes: start → vendor
+    /// callback → grant persisted — including that a start whose
+    /// account-binding lookup is unavailable still proceeds without a binding.
     #[tokio::test]
-    async fn extension_oauth_start_aborts_flow_when_extension_disappears_after_creation() {
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-        let dcr_provider = Arc::new(
-            OAuthDcrProvider::new(
-                OAuthDcrProviderConfig {
-                    spec: notion_provider_spec(),
-                    callback_origin: "http://127.0.0.1:3000".to_string(),
-                    client_name: "Ironclaw".to_string(),
-                    account_label: CredentialAccountLabel::new("notion").expect("label"),
-                    scopes: Vec::new(),
-                },
-                Arc::new(RouteDcrSetupEgress),
-                secret_store,
-                Arc::new(NoopObligationHandler),
-            )
-            .expect("DCR provider"),
-        );
-        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let product_auth = Arc::new(
-            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
-                .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![
-                    dcr_provider,
-                ]))),
-        );
-        let mut state = ProductAuthRouteState::new(
-            product_auth,
-            TenantId::new("tenant-alpha").expect("tenant"),
-            None,
-            None,
-        );
-        state.installed_extension_lookup = Some(Arc::new(SequencedInstalledExtensionLookup {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-        }));
-        let app = product_auth_route_mount(state)
-            .protected
-            .layer(axum::Extension(test_caller()));
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/webchat/v2/extensions/notion/setup/oauth/start")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "provider": "notion",
-                            "account_label": "work notion",
-                            "scopes": [],
-                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
-                            "invocation_id": InvocationId::new().to_string(),
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("route response");
-
-        assert_eq!(response.status(), StatusCode::CONFLICT);
-        let flows = shared.flow_records_snapshot();
-        assert_eq!(flows.len(), 1);
-        assert_eq!(flows[0].status, AuthFlowStatus::Canceled);
-    }
-
-    #[tokio::test]
-    async fn installed_extension_lookup_is_required_even_in_test_builds() {
-        let state = ProductAuthRouteState::new(
-            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
-                NoopDispatcher,
-            ))),
-            TenantId::new("tenant-alpha").expect("tenant"),
-            None,
-            None,
-        );
-
-        let error = state
-            .require_installed_extension(
-                &test_caller(),
-                &ExtensionId::new("notion").expect("extension"),
-            )
-            .await
-            .expect_err("missing production lookup must fail closed");
-
-        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
-    }
-
-    #[tokio::test]
-    async fn extension_google_oauth_start_binds_existing_configured_account_with_matching_scope() {
-        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let product_auth = Arc::new(RebornProductAuthServices::from_shared(
-            shared.clone(),
-            Arc::new(NoopDispatcher),
-        ));
-        let state = ProductAuthRouteState::new(
-            product_auth,
-            TenantId::new("tenant-alpha").expect("tenant"),
-            None,
-            None,
-        )
-        .with_test_installed_extension_lookup()
-        .with_google_oauth(
-            GoogleOAuthRouteConfig::new(
-                "google-client.apps.googleusercontent.com",
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
-            )
-            .expect("google oauth route config"),
-        );
-        let app = product_auth_route_mount(state)
-            .protected
-            .layer(axum::Extension(test_caller()));
-        let flow_invocation_id = InvocationId::new();
-        let mut existing_resource = test_resource_scope();
-        existing_resource.invocation_id = flow_invocation_id;
-        let existing_scope = AuthProductScope::new(existing_resource, AuthSurface::Callback);
-        let account = shared
-            .create_account(NewCredentialAccount {
-                scope: existing_scope.clone(),
-                provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).expect("provider"),
-                label: CredentialAccountLabel::new("google-drive google").expect("label"),
-                status: CredentialAccountStatus::Configured,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(SecretHandle::new("google-drive-access").expect("secret")),
-                refresh_secret: Some(SecretHandle::new("google-drive-refresh").expect("secret")),
-                scopes: vec![
-                    ProviderScope::new("https://www.googleapis.com/auth/drive")
-                        .expect("provider scope"),
-                ],
-            })
-            .await
-            .expect("seed configured google account");
-
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/api/webchat/v2/extensions/google-drive/setup/oauth/start")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(
-                        serde_json::json!({
-                            "provider": GOOGLE_PROVIDER_ID,
-                            "account_label": "google-drive google",
-                            "scopes": ["https://www.googleapis.com/auth/drive"],
-                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
-                            "invocation_id": flow_invocation_id.to_string(),
-                        })
-                        .to_string(),
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("route response");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("response body");
-        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
-        let flow_id = AuthFlowId::from_uuid(
-            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
-        );
-        let flow = shared
-            .get_flow(&existing_scope, flow_id)
-            .await
-            .expect("flow lookup")
-            .expect("flow");
-        let update_binding = flow
-            .update_binding
-            .expect("matching account should be bound for OAuth reconnect");
-        assert_eq!(update_binding.account_id, account.id);
-        assert_eq!(update_binding.ownership, CredentialOwnership::UserReusable);
-    }
-
-    #[tokio::test]
-    async fn extension_google_oauth_start_continues_when_update_binding_lookup_is_unavailable() {
+    async fn vendor_oauth_callback_completes_a_started_flow() {
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
         let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
         let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
@@ -2162,29 +1875,33 @@ mod tests {
         let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
         let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
         let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
-        let product_auth = Arc::new(RebornProductAuthServices::new(
-            flow_manager,
-            interaction_service,
-            credential_setup_service,
-            credential_account_service,
-            provider_client,
-            cleanup_service,
-            Arc::new(NoopDispatcher),
-        ));
+        let engine = test_engine(
+            test_vendor_recipe(true, None),
+            Arc::new(PanickingDcrEgress),
+            Arc::new(FilesystemSecretStore::ephemeral()),
+        );
+        // `RebornProductAuthServices::new` wires no account record source: the
+        // update-binding lookup is unavailable and the start must proceed
+        // without a binding rather than failing.
+        let product_auth = Arc::new(
+            RebornProductAuthServices::new(
+                flow_manager,
+                interaction_service,
+                credential_setup_service,
+                credential_account_service,
+                provider_client,
+                cleanup_service,
+                Arc::new(NoopDispatcher),
+            )
+            .with_auth_engine(engine),
+        );
         let state = ProductAuthRouteState::new(
             product_auth,
             TenantId::new("tenant-alpha").expect("tenant"),
             None,
             None,
         )
-        .with_test_installed_extension_lookup()
-        .with_google_oauth(
-            GoogleOAuthRouteConfig::new(
-                "google-client.apps.googleusercontent.com",
-                "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
-            )
-            .expect("google oauth route config"),
-        );
+        .with_test_installed_extension_lookup();
         let app = product_auth_route_mount(state.clone())
             .protected
             .layer(axum::Extension(test_caller()));
@@ -2194,13 +1911,13 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/webchat/v2/extensions/google-drive/setup/oauth/start")
+                    .uri("/api/webchat/v2/extensions/vendorco-tools/setup/oauth/start")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "provider": GOOGLE_PROVIDER_ID,
-                            "account_label": "google-drive google",
-                            "scopes": ["https://www.googleapis.com/auth/drive"],
+                            "provider": "vendorco",
+                            "account_label": "work account",
+                            "scopes": ["items:read"],
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": flow_invocation_id.to_string(),
                         })
@@ -2239,24 +1956,21 @@ mod tests {
             .expect("oauth state");
         let encoded_state =
             url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
-        let encoded_scope = url::form_urlencoded::byte_serialize(
-            "https://www.googleapis.com/auth/drive".as_bytes(),
-        )
-        .collect::<String>();
         let uri = format!(
-            "{GOOGLE_OAUTH_CALLBACK_PATH}?state={encoded_state}&code=google-auth-code&scope={encoded_scope}"
+            "/api/reborn/product-auth/oauth/vendorco/callback?state={encoded_state}&code=vendor-auth-code&scope=items:read"
         )
         .parse::<Uri>()
         .expect("callback uri");
 
-        let response = oauth::google_oauth_callback_handler(
+        let response = oauth::vendor_oauth_callback_handler(
             State(state),
+            Path("vendorco".to_string()),
             RawQuery(uri.query().map(str::to_string)),
             uri,
             HeaderMap::new(),
         )
         .await
-        .expect("extension google callback should complete");
+        .expect("vendor callback should complete");
 
         assert_eq!(response.status(), StatusCode::OK);
         let completed_flow = shared
@@ -2271,18 +1985,141 @@ mod tests {
             .get_account(CredentialAccountLookupRequest {
                 scope: flow_scope,
                 account_id,
-                requester_extension: Some(ExtensionId::new("google-drive").expect("extension")),
+                requester_extension: Some(ExtensionId::new("vendorco-tools").expect("extension")),
             })
             .await
             .expect("account lookup")
             .expect("account");
 
         assert_eq!(account.status, CredentialAccountStatus::Configured);
-        assert_eq!(account.provider.as_str(), GOOGLE_PROVIDER_ID);
+        assert_eq!(account.provider.as_str(), "vendorco");
+    }
+
+    /// Restart/replica regression for the durable setup-PKCE port: the
+    /// process-local verifier cache dies with the route state, so a callback
+    /// arriving after a restart (or on another replica) can only complete
+    /// through the per-flow verifier `start_setup_oauth_flow` wrote to the
+    /// injected secret store before creating the flow.
+    #[tokio::test]
+    async fn vendor_oauth_callback_completes_after_route_state_restart() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+        let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
+        let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+        let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+        let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+        let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
+        let engine = test_engine(
+            test_vendor_recipe(true, None),
+            Arc::new(PanickingDcrEgress),
+            Arc::new(FilesystemSecretStore::ephemeral()),
+        );
+        let product_auth = Arc::new(
+            RebornProductAuthServices::new(
+                flow_manager,
+                interaction_service,
+                credential_setup_service,
+                credential_account_service,
+                provider_client,
+                cleanup_service,
+                Arc::new(NoopDispatcher),
+            )
+            .with_auth_engine(engine),
+        );
+        let started_state = ProductAuthRouteState::new(
+            Arc::clone(&product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_test_installed_extension_lookup();
+        let app = product_auth_route_mount(started_state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+        let flow_invocation_id = InvocationId::new();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/vendorco-tools/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": "vendorco",
+                            "account_label": "work account",
+                            "scopes": ["items:read"],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": flow_invocation_id.to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("response body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("start json");
+        let flow_id = AuthFlowId::from_uuid(
+            Uuid::parse_str(json["flow_id"].as_str().expect("flow id")).expect("flow uuid"),
+        );
+        let authorization_url = json["authorization_url"]
+            .as_str()
+            .expect("authorization url");
+        let state_value = Url::parse(authorization_url)
+            .expect("authorization url")
+            .query_pairs()
+            .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
+            .expect("oauth state");
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
+        let uri = format!(
+            "/api/reborn/product-auth/oauth/vendorco/callback?state={encoded_state}&code=vendor-auth-code&scope=items:read"
+        )
+        .parse::<Uri>()
+        .expect("callback uri");
+
+        // Simulated restart: a FRESH route state over the same product-auth
+        // services. Its process-local PKCE cache is empty by construction.
+        let restarted_state = ProductAuthRouteState::new(
+            Arc::clone(&product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+        .with_test_installed_extension_lookup();
+
+        let response = oauth::vendor_oauth_callback_handler(
+            State(restarted_state),
+            Path("vendorco".to_string()),
+            RawQuery(uri.query().map(str::to_string)),
+            uri,
+            HeaderMap::new(),
+        )
+        .await
+        .expect("callback must complete from the durable setup verifier");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut flow_resource = test_resource_scope();
+        flow_resource.invocation_id = flow_invocation_id;
+        let flow_scope = AuthProductScope::new(flow_resource, AuthSurface::Callback);
+        let completed_flow = shared
+            .get_flow(&flow_scope, flow_id)
+            .await
+            .expect("completed flow lookup")
+            .expect("completed flow");
+        assert_eq!(completed_flow.status, AuthFlowStatus::Completed);
+        assert!(
+            completed_flow.credential_account_id.is_some(),
+            "callback should persist an account id"
+        );
     }
 
     #[tokio::test]
-    async fn extension_oauth_start_handler_returns_config_error_when_dcr_registry_is_missing() {
+    async fn extension_oauth_start_fails_closed_without_a_composed_engine() {
         let state = ProductAuthRouteState::new(
             Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
                 NoopDispatcher,
@@ -2300,12 +2137,12 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
-                    .uri("/api/webchat/v2/extensions/notion/setup/oauth/start")
+                    .uri("/api/webchat/v2/extensions/vendorco-tools/setup/oauth/start")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
                         serde_json::json!({
-                            "provider": "notion",
-                            "account_label": "work notion",
+                            "provider": "vendorco",
+                            "account_label": "work account",
                             "scopes": [],
                             "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
                             "invocation_id": InvocationId::new().to_string(),
@@ -2322,30 +2159,125 @@ mod tests {
             .await
             .expect("response body");
         let json: serde_json::Value = serde_json::from_slice(&body).expect("error json");
-        assert_eq!(json["code"], "malformed_config");
+        assert_eq!(json["code"], "backend_unavailable");
     }
 
+    /// The installed-inventory guard is fail-closed: a state without a wired
+    /// lookup rejects the start rather than skipping the check.
     #[tokio::test]
-    async fn dcr_oauth_callback_retrieves_pkce_from_registry_when_route_cache_misses() {
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-        let secret_store_for_provider: Arc<dyn SecretStore> = secret_store.clone();
-        let dcr_provider = Arc::new(
-            OAuthDcrProvider::new(
-                OAuthDcrProviderConfig {
-                    spec: notion_provider_spec(),
-                    callback_origin: "http://127.0.0.1:3000".to_string(),
-                    client_name: "Ironclaw".to_string(),
-                    account_label: CredentialAccountLabel::new("notion").expect("label"),
-                    scopes: Vec::new(),
-                },
-                Arc::new(PanickingDcrEgress),
-                secret_store_for_provider,
-                Arc::new(NoopObligationHandler),
+    async fn installed_extension_lookup_is_required_even_in_test_builds() {
+        let state = ProductAuthRouteState::new(
+            Arc::new(RebornProductAuthServices::local_dev_in_memory(Arc::new(
+                NoopDispatcher,
+            ))),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+
+        let error = state
+            .require_installed_extension(
+                &test_caller(),
+                &ExtensionId::new("notion").expect("extension"),
             )
-            .expect("DCR provider"),
+            .await
+            .expect_err("missing production lookup must fail closed");
+
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.body.code, AuthErrorCode::BackendUnavailable);
+    }
+
+    /// Reports installed on the first inventory check and uninstalled on
+    /// every later one — the shape of an uninstall racing an OAuth start.
+    struct SequencedInstalledExtensionLookup {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl InstalledExtensionLookup for SequencedInstalledExtensionLookup {
+        async fn is_installed(
+            &self,
+            _caller: &WebUiAuthenticatedCaller,
+            _extension_id: &ExtensionId,
+        ) -> Result<bool, RebornServicesError> {
+            Ok(self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
+        }
+    }
+
+    /// An uninstall racing the start (installed at the pre-check, gone at
+    /// the post-check) must abort the just-started flow: the caller gets the
+    /// terminal not-installed conflict and the minted flow is canceled so a
+    /// late callback cannot complete it.
+    #[tokio::test]
+    async fn extension_oauth_start_aborts_the_started_flow_when_uninstall_races() {
+        let engine = test_engine(
+            test_vendor_recipe(true, None),
+            Arc::new(PanickingDcrEgress),
+            Arc::new(FilesystemSecretStore::ephemeral()),
+        );
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let product_auth =
+            RebornProductAuthServices::from_shared(shared.clone(), Arc::new(NoopDispatcher))
+                .with_auth_engine(engine);
+        let mut state = ProductAuthRouteState::new(
+            Arc::new(product_auth),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        );
+        state.installed_extension_lookup = Some(Arc::new(SequencedInstalledExtensionLookup {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }));
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/vendorco-tools/setup/oauth/start")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "provider": "vendorco",
+                            "account_label": "work account",
+                            "scopes": ["items:read"],
+                            "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                            "invocation_id": InvocationId::new().to_string(),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let flows = shared.flow_records_snapshot();
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].status, AuthFlowStatus::Canceled);
+    }
+
+    /// The callback retrieves the PKCE verifier from the durable gate store
+    /// when the route-local cache misses (cross-process callback).
+    #[tokio::test]
+    async fn oauth_callback_retrieves_pkce_from_gate_store_when_route_cache_misses() {
+        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+        let engine = test_engine(
+            test_vendor_recipe(true, None),
+            Arc::new(PanickingDcrEgress),
+            Arc::new(FilesystemSecretStore::ephemeral()),
+        );
+        let driver = Arc::new(
+            crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver::new(
+                engine.clone(),
+                secret_store.clone() as Arc<dyn SecretStore>,
+            ),
         );
         let product_auth = RebornProductAuthServices::local_dev_in_memory(Arc::new(NoopDispatcher))
-            .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![dcr_provider])));
+            .with_auth_engine(engine)
+            .with_oauth_gate_driver(driver);
         let state = ProductAuthRouteState::new(
             Arc::new(product_auth),
             TenantId::new("tenant-alpha").expect("tenant"),
@@ -2354,26 +2286,26 @@ mod tests {
         );
         let flow_id = AuthFlowId::new();
         let scope = AuthProductScope::new(test_resource_scope(), AuthSurface::Callback);
-        let provider = AuthProviderId::new("notion").expect("provider");
-        let verifier = "dcr-pkce-verifier";
+        let provider = AuthProviderId::new("vendorco").expect("provider");
+        let verifier = "gate-pkce-verifier";
 
         secret_store
             .put(
                 scope.resource.clone(),
-                flow_secret_handle(&notion_provider_spec(), flow_id, "pkce")
-                    .expect("flow secret handle"),
+                SecretHandle::new(format!("oauth-gate-flow-pkce-{flow_id}"))
+                    .expect("gate pkce handle"),
                 SecretMaterial::from(verifier.to_string()),
                 None,
             )
             .await
-            .expect("stored DCR PKCE verifier");
+            .expect("stored gate PKCE verifier");
 
         let query = OAuthCallbackQuery {
             user_id: Some(scope.resource.user_id.to_string()),
             invocation_id: Some(scope.resource.invocation_id.to_string()),
             state: Some(RawCallbackValue::new("opaque-state".to_string()).expect("state")),
-            provider: Some("notion".to_string()),
-            account_label: Some("notion".to_string()),
+            provider: Some("vendorco".to_string()),
+            account_label: Some("vendorco".to_string()),
             code: Some(RawSecretValue::new("oauth-code".to_string()).expect("code")),
             error: None,
             agent_id: None,
@@ -2383,52 +2315,42 @@ mod tests {
             scopes: None,
         };
 
-        let outcome = oauth::callback_outcome_from_query(
-            &state,
-            flow_id,
-            &scope,
-            Some(&provider),
-            None,
-            &query,
-        )
-        .await
-        .expect("callback outcome");
+        let outcome =
+            oauth::callback_outcome_from_query(&state, flow_id, &scope, Some(&provider), &query)
+                .await
+                .expect("callback outcome");
 
         let RebornOAuthCallbackOutcome::Authorized { provider_request } = outcome else {
             panic!("expected authorized callback outcome");
         };
         assert_eq!(provider_request.provider, provider);
-        assert_eq!(provider_request.account_label.as_str(), "notion");
         assert_eq!(provider_request.pkce_verifier.expose_secret(), verifier);
     }
 
+    /// The blocked-turn gate round trip on the generic paths: gate challenge
+    /// (recipe-driven driver) → vendor callback → continuation dispatched.
     #[tokio::test]
-    async fn dcr_oauth_callback_resumes_blocked_turn_gate() {
+    async fn vendor_oauth_callback_resumes_blocked_turn_gate() {
         let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-        let secret_store_for_provider: Arc<dyn SecretStore> = secret_store;
+        let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
         let dispatcher = Arc::new(RecordingDispatcher::default());
-        let dcr_provider = Arc::new(
-            OAuthDcrProvider::new(
-                OAuthDcrProviderConfig {
-                    spec: notion_provider_spec(),
-                    callback_origin: "http://127.0.0.1:3000".to_string(),
-                    client_name: "Ironclaw".to_string(),
-                    account_label: CredentialAccountLabel::new("notion").expect("label"),
-                    scopes: Vec::new(),
-                },
-                Arc::new(RouteDcrSetupEgress),
-                secret_store_for_provider,
-                Arc::new(NoopObligationHandler),
-            )
-            .expect("DCR provider"),
+        let engine = test_engine(
+            test_vendor_recipe(true, None),
+            Arc::new(ScriptedTokenExchangeEgress),
+            Arc::new(FilesystemSecretStore::ephemeral()),
+        );
+        let driver = Arc::new(
+            crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver::new(
+                engine.clone(),
+                Arc::clone(&secret_store),
+            ),
         );
         let product_auth = Arc::new(
             RebornProductAuthServices::from_shared(shared.clone(), dispatcher.clone())
                 .with_flow_record_source(shared)
-                .with_dcr_oauth_registry(Arc::new(OAuthDcrProviderRegistry::new(vec![
-                    dcr_provider,
-                ]))),
+                .with_provider_client(engine.clone() as Arc<dyn AuthProviderClient>)
+                .with_auth_engine(engine)
+                .with_oauth_gate_driver(driver),
         );
         let state = ProductAuthRouteState::new(
             product_auth.clone(),
@@ -2444,19 +2366,19 @@ mod tests {
         );
         let owner_user_id = UserId::new("user-alpha").expect("user");
         let run_id = TurnRunId::new();
-        let gate_ref = "gate:notion-auth";
+        let gate_ref = "gate:vendor-auth";
         let requirements = vec![RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("notion").expect("provider"),
+            provider: VendorId::new("vendorco").expect("provider"),
             setup: Default::default(),
-            requester_extension: ExtensionId::new("notion").expect("extension"),
-            provider_scopes: Vec::new(),
+            requester_extension: ExtensionId::new("vendorco-tools").expect("extension"),
+            provider_scopes: vec!["items:read".to_string()],
         }];
 
         let challenge = product_auth
             .challenge_for_gate(&turn_scope, &owner_user_id, run_id, gate_ref, &requirements)
             .await
             .expect("challenge lookup")
-            .expect("notion oauth challenge");
+            .expect("vendor oauth challenge");
         let authorization_url = challenge.authorization_url.expect("authorization url");
         let parsed_authorization =
             Url::parse(authorization_url.as_str()).expect("authorization URL");
@@ -2464,38 +2386,23 @@ mod tests {
             .query_pairs()
             .find_map(|(name, value)| (name == "state").then(|| value.into_owned()))
             .expect("oauth state");
-        let redirect_uri = parsed_authorization
-            .query_pairs()
-            .find_map(|(name, value)| (name == "redirect_uri").then(|| value.into_owned()))
-            .expect("redirect uri");
-        let mut callback_url = Url::parse(&redirect_uri).expect("callback redirect URL");
-        {
-            let mut query = callback_url.query_pairs_mut();
-            query.append_pair("state", &state_value);
-            query.append_pair("code", "notion-auth-code");
-        }
+        let encoded_state =
+            url::form_urlencoded::byte_serialize(state_value.as_bytes()).collect::<String>();
         let uri = format!(
-            "{}?{}",
-            callback_url.path(),
-            callback_url.query().expect("callback query")
+            "/api/reborn/product-auth/oauth/vendorco/callback?state={encoded_state}&code=vendor-auth-code"
         )
         .parse::<Uri>()
         .expect("callback uri");
-        let flow_id = callback_url
-            .path_segments()
-            .and_then(|mut segments| segments.next_back())
-            .expect("flow id")
-            .to_string();
 
-        let response = oauth::oauth_callback_handler(
+        let response = oauth::vendor_oauth_callback_handler(
             State(state),
-            Path(flow_id),
+            Path("vendorco".to_string()),
             RawQuery(uri.query().map(str::to_string)),
             uri,
             HeaderMap::new(),
         )
         .await
-        .expect("notion callback");
+        .expect("vendor callback");
 
         assert_eq!(response.status(), StatusCode::OK);
         let events = dispatcher.events();
@@ -2518,10 +2425,12 @@ mod tests {
             &self,
             _request: RuntimeHttpEgressRequest,
         ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
-            panic!("callback PKCE fallback test must not perform DCR HTTP egress")
+            panic!("this test must not perform vendor HTTP egress")
         }
     }
 
+    /// Scripted vendor egress: DCR discovery/registration for the synthetic
+    /// vendor's resource server.
     #[derive(Debug)]
     struct RouteDcrSetupEgress;
 
@@ -2532,17 +2441,14 @@ mod tests {
             request: RuntimeHttpEgressRequest,
         ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
             let body = match request.url.as_str() {
-                "https://mcp.notion.com/mcp/.well-known/oauth-protected-resource" => {
-                    br#"{"authorization_servers":["https://oauth.notion.com"]}"#.to_vec()
+                "https://mcp.vendorco.example/mcp/.well-known/oauth-protected-resource" => {
+                    br#"{"authorization_servers":["https://oauth.vendorco.example"]}"#.to_vec()
                 }
-                "https://oauth.notion.com/.well-known/oauth-authorization-server" => {
-                    br#"{"authorization_endpoint":"https://oauth.notion.com/authorize","token_endpoint":"https://oauth.notion.com/token","registration_endpoint":"https://oauth.notion.com/register"}"#.to_vec()
+                "https://oauth.vendorco.example/.well-known/oauth-authorization-server" => {
+                    br#"{"authorization_endpoint":"https://oauth.vendorco.example/authorize","token_endpoint":"https://oauth.vendorco.example/token","registration_endpoint":"https://oauth.vendorco.example/register"}"#.to_vec()
                 }
-                "https://oauth.notion.com/register" => br#"{"client_id":"dcr-client","registration_client_uri":"https://oauth.notion.com/register/dcr-client","registration_access_token":"registration-token"}"#.to_vec(),
-                "https://oauth.notion.com/register/dcr-client"
-                    if request.method == NetworkMethod::Delete =>
-                {
-                    br#"{}"#.to_vec()
+                "https://oauth.vendorco.example/register" => {
+                    br#"{"client_id":"dcr-client"}"#.to_vec()
                 }
                 other => panic!("unexpected DCR route egress URL: {other}"),
             };
@@ -2558,16 +2464,27 @@ mod tests {
         }
     }
 
+    /// Scripted vendor token endpoint for exchange-completing tests.
     #[derive(Debug)]
-    struct NoopObligationHandler;
+    struct ScriptedTokenExchangeEgress;
 
     #[async_trait]
-    impl CapabilityObligationHandler for NoopObligationHandler {
-        async fn satisfy(
+    impl RuntimeHttpEgress for ScriptedTokenExchangeEgress {
+        async fn execute(
             &self,
-            _request: CapabilityObligationRequest<'_>,
-        ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
-            Ok(())
+            request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, ironclaw_host_api::RuntimeHttpEgressError> {
+            assert_eq!(request.url, "https://auth.vendorco.example/token");
+            let body = br#"{"access_token":"vendor-access-token","scope":"items:read"}"#.to_vec();
+            Ok(RuntimeHttpEgressResponse {
+                status: 200,
+                headers: Vec::new(),
+                request_bytes: request.body.len() as u64,
+                response_bytes: body.len() as u64,
+                body,
+                saved_body: None,
+                redaction_applied: false,
+            })
         }
     }
 }

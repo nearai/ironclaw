@@ -50,7 +50,6 @@
 // does not exercise every variant.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -71,7 +70,7 @@ use ironclaw_product_workflow::{
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };
 use ironclaw_reborn_composition::build_default_budget_accountant;
-use ironclaw_reborn_composition::test_support::SlackChannelConnectionTestBundle;
+use ironclaw_reborn_composition::test_support::ChannelConnectionTestBundle;
 use ironclaw_reborn_config::BudgetDefaults;
 use ironclaw_resources::test_support::in_memory_backed_budget_gate_store;
 use ironclaw_resources::{
@@ -93,7 +92,7 @@ use ironclaw_runner::subagent::{
         store::FilesystemAwaitEdgeStore,
     },
     flavors::StaticSubagentDefinitionResolver,
-    goal_store::InMemoryBoundedSubagentGoalStore,
+    goal_store::in_memory_backed_subagent_goal_store,
 };
 use ironclaw_runner::turn_scheduler::TurnRunSchedulerHandle;
 use ironclaw_threads::SessionThreadService;
@@ -102,8 +101,8 @@ use ironclaw_turns::run_profile::{
     ModelProfileId,
 };
 use ironclaw_turns::{
-    FilesystemTurnStateStore, InMemoryTurnEventSink, InMemoryTurnStateStoreLimits,
-    LoopCheckpointStore, TurnCoordinator, TurnEventSink, TurnScope, TurnStateStore,
+    FilesystemTurnStateRowStore, InMemoryTurnEventSink, LoopCheckpointStore, TurnCoordinator,
+    TurnEventSink, TurnScope, TurnStateStore, TurnStateStoreLimits,
 };
 
 use super::builder::{
@@ -127,7 +126,7 @@ use super::scripted_provider::{
     ErrLlm, ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
-use super::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
+use super::test_adapter::RebornTestIngress;
 use crate::support::trace_llm::TraceLlm;
 
 /// Per-capability preset constructors layered on `build_base`/`into_group`
@@ -165,9 +164,10 @@ use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_che
 pub(crate) struct GroupSharedStorage {
     /// Thread history + turn state composite, shared across all threads.
     pub(crate) composite: Arc<CompositeRootFilesystem>,
-    /// Path to the on-disk SQLite file for `StorageMode::LibSql`; `None` for
-    /// `StorageMode::InMemory`. Used by `assert_reply_persists_after_reopen`.
-    pub(crate) libsql_db_path: Option<PathBuf>,
+    /// Fresh-connection reopen handle per storage mode (SQLite file path /
+    /// Postgres URL + live container). Used by
+    /// `assert_reply_persists_after_reopen`.
+    pub(crate) storage_reopen: super::builder::StorageReopen,
     /// Durable root TempDir: keeps the composite's on-disk files alive for
     /// the group's lifetime. `Drop` deletes the directory (req 3).
     pub(crate) turn_root: Arc<tempfile::TempDir>,
@@ -178,12 +178,12 @@ pub(crate) struct GroupSharedStorage {
     /// Capability backend. Groups use `HostRuntime`; the degenerate single-shot
     /// path may use `Recording`.
     pub(crate) capability: GroupCapability,
-    /// C-SLACK-LIFECYCLE (issue #6105): the REAL Slack channel-connection
+    /// C-SLACK-LIFECYCLE (issue #6105): the REAL generic channel-connection
     /// facade + OAuth-callback-shaped connect handles, built over the
-    /// capability harness's own `RebornServices` (same durable host state,
-    /// same late-bound cleanup slot `extension_remove` dispatches to).
+    /// capability harness's own `RebornServices` (same durable stores, same
+    /// late-bound cleanup slot `extension_remove` dispatches to).
     /// `Some` only for `extension_lifecycle()` groups.
-    pub(crate) slack_channel_connection: Option<Arc<SlackChannelConnectionTestBundle>>,
+    pub(crate) channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
     /// The group's single shared `TurnCoordinator`, over the ONE planned
     /// runtime built once at group construction (Option P: one
     /// scheduler/coordinator/executor over the shared turn-run queue, exactly
@@ -203,9 +203,9 @@ pub(crate) struct GroupSharedStorage {
     /// model hot path.
     pub(crate) scope_gateway: Arc<ScopeRegistryGateway>,
     /// The group's single shared turn-state store. All threads share one
-    /// `FilesystemTurnStateStore` (isolation is by `run_id`, not by path —
+    /// `FilesystemTurnStateRowStore` (isolation is by `run_id`, not by path —
     /// see `turns_scope_path`, which has no `thread_id` component).
-    pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     /// S2 seam: the SAME canonical binding `turn_store`'s `/turns` mount is
     /// scoped to (`scoped_turns_fs_composite`). Retained so a reopen can
     /// rebuild the identical scoped path independently, instead of
@@ -428,7 +428,7 @@ impl RebornIntegrationGroup {
             runner_lease_ttl_override: None,
             lease_recovery_interval_override: None,
             real_gate_dispatch_services: false,
-            slack_channel_connection: None,
+            channel_connection: None,
         }
     }
 
@@ -440,11 +440,11 @@ impl RebornIntegrationGroup {
         self.shared.trace_capture_scope.as_deref()
     }
 
-    /// C-SLACK-LIFECYCLE (issue #6105): the real Slack channel-connection
+    /// C-SLACK-LIFECYCLE (issue #6105): the real generic channel-connection
     /// bundle for this group. `Some` only for [`Self::extension_lifecycle`]
     /// groups.
-    pub fn slack_channel_connection(&self) -> Option<Arc<SlackChannelConnectionTestBundle>> {
-        self.shared.slack_channel_connection.clone()
+    pub fn channel_connection(&self) -> Option<Arc<ChannelConnectionTestBundle>> {
+        self.shared.channel_connection.clone()
     }
 
     /// The group-canonical binding's ACTOR user id — the identity capability
@@ -583,7 +583,7 @@ impl RebornIntegrationGroup {
 struct GroupBaseData {
     product_harness: RebornProductWorkflowHarness,
     composite: Arc<CompositeRootFilesystem>,
-    libsql_db_path: Option<PathBuf>,
+    storage_reopen: super::builder::StorageReopen,
     turn_root: Arc<tempfile::TempDir>,
     /// A throwaway probe binding resolved once at group construction, used
     /// ONLY to derive the group-level shared turn store path and the
@@ -659,11 +659,11 @@ pub struct RebornIntegrationGroupBuilder {
     /// keeps the `Rejecting*InteractionService` stubs, matching today's
     /// behavior byte-for-byte).
     real_gate_dispatch_services: bool,
-    /// C-SLACK-LIFECYCLE (issue #6105): the real Slack channel-connection
+    /// C-SLACK-LIFECYCLE (issue #6105): the real generic channel-connection
     /// bundle built over the capability harness's own `RebornServices`.
     /// Set by `extension_lifecycle()` before `into_group`; `None` for every
     /// other constructor.
-    slack_channel_connection: Option<Arc<SlackChannelConnectionTestBundle>>,
+    channel_connection: Option<Arc<ChannelConnectionTestBundle>>,
 }
 
 impl RebornIntegrationGroupBuilder {
@@ -684,7 +684,7 @@ impl RebornIntegrationGroupBuilder {
         );
         let product_harness = RebornProductWorkflowHarness::filesystem_temp(scope)?;
         let turn_root = Arc::new(tempfile::tempdir()?);
-        let (composite, libsql_db_path) =
+        let (composite, storage_reopen) =
             build_storage_composite(self.storage, turn_root.path()).await?;
 
         // Resolve the group-canonical binding ONCE here so `into_group` can
@@ -696,8 +696,7 @@ impl RebornIntegrationGroupBuilder {
         // drift. The probe persists one deterministic, inert binding for
         // `conv-canonical-probe` (no thread submits turns against it); group
         // tests assert on cross-thread persistence, not binding counts.
-        let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new("reborn-itest", "itest-install")?;
         let probe = ingress.verified_text_envelope_with_trigger(
             "group-canonical-probe",
             HARNESS_ACTOR_ID,
@@ -713,7 +712,7 @@ impl RebornIntegrationGroupBuilder {
         Ok(GroupBaseData {
             product_harness,
             composite,
-            libsql_db_path,
+            storage_reopen,
             turn_root,
             canonical_binding,
         })
@@ -744,16 +743,16 @@ impl RebornIntegrationGroupBuilder {
         // public builder method (`ironclaw_turns::filesystem_store`); this only
         // calls it a second time with a shortened `runner_lease_ttl` when a test
         // opts in via `with_runner_lease_ttl_for_test`. `None` (default) leaves
-        // `InMemoryTurnStateStoreLimits::default()` untouched, byte-identical to
+        // `TurnStateStoreLimits::default()` untouched, byte-identical to
         // today's behavior.
-        let mut turn_state_limits = InMemoryTurnStateStoreLimits::default();
+        let mut turn_state_limits = TurnStateStoreLimits::default();
         if let Some(ttl) = self.runner_lease_ttl_override {
             turn_state_limits.runner_lease_ttl = ttl;
         }
         let turns_scoped_fs =
             scoped_turns_fs_composite(Arc::clone(&base.composite), &base.canonical_binding)?;
-        let turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>> = Arc::new(
-            FilesystemTurnStateStore::new(Arc::clone(&turns_scoped_fs))
+        let turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>> = Arc::new(
+            FilesystemTurnStateRowStore::new(Arc::clone(&turns_scoped_fs))
                 .with_limits(turn_state_limits),
         );
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
@@ -808,7 +807,7 @@ impl RebornIntegrationGroupBuilder {
         // "one shared handle, never a per-store fixed view" rule.
         let await_edge_store =
             Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(&turns_scoped_fs)));
-        let await_edge_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+        let await_edge_goal_store = Arc::new(in_memory_backed_subagent_goal_store());
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
             await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
@@ -1026,7 +1025,7 @@ impl RebornIntegrationGroupBuilder {
         Ok(RebornIntegrationGroup {
             shared: Arc::new(GroupSharedStorage {
                 composite: base.composite,
-                libsql_db_path: base.libsql_db_path,
+                storage_reopen: base.storage_reopen,
                 turn_root: base.turn_root,
                 product_harness: base.product_harness,
                 capability,
@@ -1045,7 +1044,7 @@ impl RebornIntegrationGroupBuilder {
                 budget_account,
                 planned_runtime_parts_shape,
                 real_gate_dispatch_services: self.real_gate_dispatch_services,
-                slack_channel_connection: self.slack_channel_connection,
+                channel_connection: self.channel_connection,
             }),
         })
     }
@@ -1215,8 +1214,7 @@ impl<'g> RebornThreadBuilder<'g> {
         // service is backed by `shared.product_harness`, which is shared; the
         // idempotency ledger is also shared (per-binding idempotency).
         let actor_id = self.actor_id.as_deref().unwrap_or(HARNESS_ACTOR_ID);
-        let adapter = RebornTestProductAdapter::new("reborn-itest", "itest-install")?;
-        let ingress = RebornTestIngress::new(adapter);
+        let ingress = RebornTestIngress::new("reborn-itest", "itest-install")?;
         let probe = ingress.verified_text_envelope_with_trigger(
             "binding-probe",
             actor_id,
@@ -1371,7 +1369,7 @@ impl<'g> RebornThreadBuilder<'g> {
 
         Ok(RebornIntegrationHarness {
             ingress,
-            workflow,
+            workflow: Arc::new(workflow),
             conversation_id: self.conversation_id,
             actor_id: actor_id.to_owned(),
             binding,

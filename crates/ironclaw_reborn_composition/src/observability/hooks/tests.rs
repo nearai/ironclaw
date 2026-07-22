@@ -15,6 +15,7 @@ use std::sync::Arc;
 use ironclaw_hooks::dispatch::HookDispatcherBuilder;
 
 use crate::error::RebornBuildError;
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use ironclaw_extensions::ExtensionRegistry;
 
 use ironclaw_extensions::v2::ManifestSource;
@@ -82,7 +83,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/{id}.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{id}.run"
 description = "Run {id}"
 effects = ["dispatch_capability"]
@@ -104,8 +111,13 @@ fn registry_with_manifest_source(
     toml: &str,
     source: ManifestSource,
 ) -> ExtensionRegistry {
-    let manifest =
-        ExtensionManifest::parse(toml, source, &HostPortCatalog::empty()).expect("manifest parses");
+    let manifest = ExtensionManifest::parse(
+        toml,
+        source,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .expect("manifest parses");
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new(format!("/system/extensions/{id}")).expect("valid root path"),
@@ -287,6 +299,7 @@ fn projection_with(packages: &[(&str, ManifestSource, String)]) -> HookProjectio
             &manifest_toml(id, hooks_block),
             *source,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest parses");
         let package = ExtensionPackage::from_manifest(
@@ -894,10 +907,10 @@ async fn failed_merge_does_not_consume_hook_budget() {
     // `alpha`, so discovery's `registry.insert(alpha)` FAILS (duplicate).
     // The failed merge must not consume budget; `beta` must still merge.
     let mut builtin = ExtensionRegistry::new();
-    let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
-        .expect("default host api contracts");
+    let contracts =
+        product_extension_host_api_contract_registry().expect("default host api contracts");
     let dup = ExtensionPackage::from_manifest(
-        ExtensionManifest::parse_with_host_api_contracts(
+        ExtensionManifest::parse(
             &manifest_toml_with_hook("alpha"),
             ManifestSource::InstalledLocal,
             &HostPortCatalog::empty(),
@@ -996,4 +1009,15 @@ body = { mode = "nonsense" }
         "the tenant-attributed entry point must NOT fall back to the synthetic \
          audit tenant; captured {captured:?}"
     );
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

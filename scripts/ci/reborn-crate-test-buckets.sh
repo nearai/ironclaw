@@ -63,7 +63,6 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_first_party_extensions: "wasm-sandbox",
       ironclaw_wasm: "wasm-sandbox",
       ironclaw_wasm_limiter: "wasm-sandbox",
-      ironclaw_wasm_product_adapters: "wasm-sandbox",
       ironclaw_wasm_sandbox_core: "wasm-sandbox",
 
       ironclaw_filesystem: "llm-mcp",
@@ -103,8 +102,8 @@ jq -c -n --argjson packages "${packages_json}" '
       ironclaw_common: "adapters-misc",
       ironclaw_extensions: "adapters-misc",
       ironclaw_reborn_traces: "adapters-misc",
-      ironclaw_slack_v2_adapter: "adapters-misc",
-      ironclaw_telegram_v2_adapter: "adapters-misc"
+      ironclaw_slack_extension: "adapters-misc",
+      ironclaw_telegram_extension: "adapters-misc"
     };
 
   bucket_map as $bucket_map

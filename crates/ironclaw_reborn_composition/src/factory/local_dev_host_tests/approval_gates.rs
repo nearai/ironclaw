@@ -13,7 +13,7 @@ use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, MountView, NetworkPolicy, NetworkTargetPattern, Principal,
-    ResourceEstimate, ResourceScope, RuntimeKind, ThreadId, TrustClass, UserId,
+    ResourceEstimate, ResourceScope, RunId, RuntimeKind, ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, ECHO_CAPABILITY_ID,
@@ -883,6 +883,7 @@ fn shell_execution_context(user_id: &str, thread_id: &str) -> ExecutionContext {
     let thread_id = ThreadId::new(thread_id).expect("thread id"); // safety: callers pass static valid test ids.
     context.thread_id = Some(thread_id.clone());
     context.resource_scope.thread_id = Some(thread_id);
+    context.run_id = Some(RunId::new());
     context.validate().expect("thread-scoped context"); // safety: fixed test context should validate.
     context
 }
@@ -1241,6 +1242,7 @@ fn echo_spawn_execution_context(user_id: &str, thread_id: &str) -> ExecutionCont
     let thread_id = ThreadId::new(thread_id).expect("thread id"); // safety: callers pass static valid test ids.
     context.thread_id = Some(thread_id.clone());
     context.resource_scope.thread_id = Some(thread_id);
+    context.run_id = Some(RunId::new());
     context.validate().expect("thread-scoped context"); // safety: fixed test context should validate.
     context
 }

@@ -102,20 +102,6 @@ impl ExtensionLifecycleService {
         Ok(())
     }
 
-    pub async fn update(&mut self, package: ExtensionPackage) -> Result<(), ExtensionError> {
-        let current = self.registry.existing_package(&package.id)?.clone();
-        self.registry.validate_replacement(&package)?;
-        let capability_surface_changed = current.capabilities != package.capabilities;
-        self.emit_lifecycle_event(ExtensionLifecycleEvent::from_package(
-            ExtensionLifecycleOperation::Update,
-            &package,
-            capability_surface_changed,
-        ))
-        .await?;
-        self.registry.replace_validated(package);
-        Ok(())
-    }
-
     pub async fn remove(&mut self, id: &ExtensionId) -> Result<(), ExtensionError> {
         let package = self.registry.existing_package(id)?.clone();
         self.emit_lifecycle_event(ExtensionLifecycleEvent::from_package(
@@ -230,6 +216,16 @@ mod tests {
         }
     }
 
+    fn capability_provider_contracts() -> crate::HostApiContractRegistry {
+        let mut contracts = crate::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                crate::CapabilityProviderHostApiContract::new().expect("contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
+    }
+
     fn test_package(extension_id: &str) -> ExtensionPackage {
         let manifest = format!(
             r#"
@@ -244,7 +240,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/{extension_id}.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.read"
 description = "read"
 effects = ["network"]
@@ -258,6 +260,7 @@ output_schema_ref = "schemas/read.output.json"
             &manifest,
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
+            &capability_provider_contracts(),
         )
         .expect("manifest parses");
         ExtensionPackage::from_manifest(

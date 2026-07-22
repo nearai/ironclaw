@@ -25,10 +25,9 @@ use ironclaw_host_runtime::{
 use ironclaw_reborn_composition::{
     LibSqlProductionSubstrateConfig, PollSettings, PostgresProductionSubstrateConfig,
     RebornBuildInput, RebornCompositionProfile, RebornProductionRuntimePolicy, RebornRuntime,
-    RebornRuntimeIdentity, RebornRuntimeInput, WebuiAuthentication, WebuiAuthenticator,
-    WebuiServeConfig, build_libsql_production_host_runtime_services,
+    RebornRuntimeIdentity, RebornRuntimeInput, build_libsql_production_host_runtime_services,
     build_postgres_production_host_runtime_services, build_reborn_runtime, build_webui_services,
-    hosted_single_tenant_runtime_policy, local_runtime_build_input, webui_v2_app,
+    hosted_single_tenant_runtime_policy, local_runtime_build_input,
 };
 use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_resources::{
@@ -42,7 +41,7 @@ use ironclaw_triggers::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AllowAllTurnAdmissionPolicy, BlockedReason, CancelRunRequest,
-    CheckpointSchemaId, FilesystemTurnStateStoreKind, GateRef, GetLoopCheckpointRequest,
+    CheckpointSchemaId, FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest,
     GetRunStateRequest, IdempotencyKey, InMemoryRunProfileResolver, LoopCheckpointKind,
     LoopCheckpointStore, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
     ResumeTurnRequest, RunProfileRequest, RunProfileVersion, SanitizedCancelReason,
@@ -54,6 +53,9 @@ use ironclaw_turns::{
         BlockRunRequest, CancelRunCompletionRequest, ClaimRunRequest, CompleteRunRequest,
         TurnRunTransitionPort,
     },
+};
+use ironclaw_webui::{
+    WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app,
 };
 use secrecy::ExposeSecret;
 use serde::Serialize;
@@ -417,11 +419,9 @@ where
         MountPermissions::read_write_list_delete(),
     )])?;
     let scoped = Arc::new(ScopedFilesystem::with_fixed_view(fs, mounts));
-    let store = match backend {
-        BackendName::Libsql => FilesystemTurnStateStoreKind::row(scoped),
-        BackendName::Postgres => FilesystemTurnStateStoreKind::row(scoped),
-    };
-    Ok(Arc::new(store))
+    // Both backends run the one production turn-state store; `backend` only
+    // varies the durable filesystem mounted underneath `scoped` (above).
+    Ok(Arc::new(FilesystemTurnStateRowStore::new(scoped)))
 }
 
 struct ControlPlaneStores {

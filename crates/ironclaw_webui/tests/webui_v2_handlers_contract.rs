@@ -15,10 +15,11 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderName, Method, Request, StatusCode, header};
+use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId,
-    UserId,
+    ActivityId, AgentId, CapabilityId, ExtensionId, InstallationState, InvocationId, ProjectId,
+    Resolution, RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -27,15 +28,14 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    FsMount, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
-    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, ProjectFsEntry,
-    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    FsMount, LOGS_VIEW, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_LOGS_VIEW,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
+    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
     RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
     RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
@@ -55,21 +55,23 @@ use ironclaw_product_workflow::{
     RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
     RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
     RebornRemoveMemberRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
+    RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
+    RunArtifactLogs, RunArtifactRedaction, SetActiveLlmRequest, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
-    EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus,
+    AcceptedMessageRef, EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
+    TurnRunId, TurnStatus,
 };
 use ironclaw_webui::webui_v2::{
     DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, WebUiV2Capabilities, WebUiV2RouteOptions, WebUiV2State,
@@ -250,6 +252,8 @@ struct StubServices {
     global_auto_approve_calls: Mutex<usize>,
     stall_global_auto_approve: Mutex<bool>,
     next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
+    view_queries: Mutex<Vec<RebornViewQuery>>,
+    invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -275,8 +279,6 @@ struct StubServices {
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
     next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
-    list_connectable_channels_calls: Mutex<usize>,
-    next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
     get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
@@ -356,13 +358,6 @@ impl StubServices {
     fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
         *self
             .next_set_outbound_preferences_error
-            .lock()
-            .expect("lock") = Some(error);
-    }
-
-    fn fail_list_connectable_channels(&self, error: RebornServicesError) {
-        *self
-            .next_list_connectable_channels_error
             .lock()
             .expect("lock") = Some(error);
     }
@@ -616,6 +611,117 @@ impl RebornServicesApi for StubServices {
             summary_artifacts: Vec::new(),
             next_cursor: None,
         })
+    }
+
+    async fn invoke(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        self.invoke_calls
+            .lock()
+            .expect("lock")
+            .push((capability, input, activity_id));
+        Err(service_unavailable_error(false))
+    }
+
+    async fn query(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        self.view_queries.lock().expect("lock").push(query.clone());
+        match query.view_id.as_str() {
+            id if id == RUN_ARTIFACT_VIEW.id => {
+                let request: RebornRunArtifactRequest =
+                    serde_json::from_value(query.params).expect("artifact params");
+                let run_id = TurnRunId::parse(&request.run_id).expect("test run id");
+                let artifact = RebornRunArtifact {
+                    schema: RUN_ARTIFACT_SCHEMA.to_string(),
+                    generated_at: Utc::now(),
+                    thread_id: request.thread_id,
+                    run: RebornGetRunStateResponse {
+                        turn_id: "turn-artifact".to_string(),
+                        run_id,
+                        status: TurnStatus::Completed,
+                        event_cursor: EventCursor(1),
+                        accepted_message_ref: AcceptedMessageRef::new("msg:artifact")
+                            .expect("message ref"),
+                        resolved_run_profile_id: "default".to_string(),
+                        resolved_run_profile_version: 1,
+                        received_at: Utc::now(),
+                        checkpoint_id: None,
+                        gate_ref: None,
+                        failure: None,
+                        usage: None,
+                        cost: None,
+                    },
+                    messages: Vec::new(),
+                    logs: RunArtifactLogs {
+                        source: "test".to_string(),
+                        available: true,
+                        complete: false,
+                        truncated: false,
+                        unavailable_reason: None,
+                        entries: Vec::new(),
+                    },
+                    redaction: RunArtifactRedaction {
+                        pipeline: "deterministic-trace-redactor-v1".to_string(),
+                        applied: false,
+                    },
+                };
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(artifact).expect("artifact payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == LOGS_VIEW.id => {
+                let mut request: RebornLogQueryRequest =
+                    serde_json::from_value(query.params).expect("logs params");
+                request.cursor = query.cursor.or(request.cursor);
+                if request.tail && request.follow {
+                    return Err(RebornServicesError {
+                        code: RebornServicesErrorCode::InvalidRequest,
+                        kind: RebornServicesErrorKind::Validation,
+                        status_code: 400,
+                        retryable: false,
+                        field: Some("follow".to_string()),
+                        validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                    });
+                }
+                self.query_logs_calls.lock().expect("lock").push(request);
+                let response = RebornLogQueryResponse {
+                    source: "test".to_string(),
+                    entries: Vec::new(),
+                    next_cursor: None,
+                    tail_supported: true,
+                    follow_supported: true,
+                };
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(response).expect("logs payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == OPERATOR_LOGS_VIEW.id => {
+                let mut request: RebornOperatorLogsQuery =
+                    serde_json::from_value(query.params).expect("operator logs params");
+                request.cursor = query.cursor.or(request.cursor);
+                self.query_operator_logs_calls
+                    .lock()
+                    .expect("lock")
+                    .push(request);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(operator_command_response(
+                        RebornOperatorArea::Logs,
+                    ))
+                    .expect("operator logs payload"),
+                    next_cursor: None,
+                })
+            }
+            _ => Err(rejecting_reborn_services_error()),
+        }
     }
 
     async fn list_fs_mounts(
@@ -1022,37 +1128,6 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn list_connectable_channels(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        *self.list_connectable_channels_calls.lock().expect("lock") += 1;
-        if let Some(error) = self
-            .next_list_connectable_channels_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(error);
-        }
-        Ok(RebornConnectableChannelListResponse {
-            channels: vec![RebornConnectableChannelInfo {
-                channel: "telegram".to_string(),
-                display_name: "Telegram".to_string(),
-                strategy: RebornChannelConnectStrategy::InboundProofCode,
-                action: RebornChannelConnectAction {
-                    title: "Telegram account connection".to_string(),
-                    instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
-                    input_placeholder: "Enter Telegram pairing code...".to_string(),
-                    submit_label: "Connect".to_string(),
-                    success_message: "Telegram account connected.".to_string(),
-                    error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
-                },
-                command_aliases: vec!["telegram".to_string()],
-            }],
-        })
-    }
-
     async fn get_operator_setup(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1195,44 +1270,6 @@ impl RebornServicesApi for StubServices {
         Ok(operator_config_diagnostic_command_plane_response(
             RebornOperatorArea::Status,
         ))
-    }
-
-    async fn query_logs(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
-        if request.tail && request.follow {
-            return Err(RebornServicesError {
-                code: RebornServicesErrorCode::InvalidRequest,
-                kind: RebornServicesErrorKind::Validation,
-                status_code: 400,
-                retryable: false,
-                field: Some("follow".to_string()),
-                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
-            });
-        }
-
-        self.query_logs_calls.lock().expect("lock").push(request);
-        Ok(RebornLogQueryResponse {
-            source: "test".to_string(),
-            entries: Vec::new(),
-            next_cursor: None,
-            tail_supported: true,
-            follow_supported: true,
-        })
-    }
-
-    async fn query_operator_logs(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        query: RebornOperatorLogsQuery,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        self.query_operator_logs_calls
-            .lock()
-            .expect("lock")
-            .push(query);
-        Ok(operator_command_response(RebornOperatorArea::Logs))
     }
 
     async fn run_operator_service_lifecycle(
@@ -1391,7 +1428,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
             package_ref,
-            phase: LifecyclePhase::UnsupportedOrLegacy,
+            phase: InstallationState::Unsupported,
             blockers: Vec::new(),
             payload: None,
             secrets: Vec::new(),
@@ -1883,6 +1920,40 @@ async fn get_timeline_threads_path_into_request() {
     let calls = services.get_timeline_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].thread_id, "thread-x");
+}
+
+#[tokio::test]
+async fn get_run_artifact_threads_path_and_run_path_into_request() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+    let run_id = "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18";
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/webchat/v2/threads/thread-x/runs/{run_id}/artifact"
+                ))
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let payload: Value = serde_json::from_slice(&body).expect("artifact json");
+    assert_eq!(payload["schema"], RUN_ARTIFACT_SCHEMA);
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, RUN_ARTIFACT_VIEW.id);
+    let request: RebornRunArtifactRequest =
+        serde_json::from_value(queries[0].params.clone()).expect("artifact params");
+    assert_eq!(request.thread_id, "thread-x");
+    assert_eq!(request.run_id, run_id);
 }
 
 // The attachment-bytes route carries three path segments and returns raw
@@ -3128,43 +3199,6 @@ async fn list_outbound_delivery_targets_dispatches_through_facade() {
 }
 
 #[tokio::test]
-async fn list_connectable_channels_dispatches_through_facade() {
-    let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/channels/connectable")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_json(response).await;
-    assert_eq!(body["channels"][0]["channel"], "telegram");
-    assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
-    assert_eq!(
-        body["channels"][0]["action"]["instructions"],
-        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
-    );
-    assert_eq!(
-        body["channels"][0]["action"]["error_message"],
-        "Invalid or expired Telegram pairing code. Message the bot to get a new one."
-    );
-    assert_eq!(
-        *services
-            .list_connectable_channels_calls
-            .lock()
-            .expect("lock"),
-        1
-    );
-}
-
-#[tokio::test]
 async fn get_session_returns_caller_identity_and_capabilities() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
@@ -4041,6 +4075,60 @@ async fn logs_reject_ambiguous_tail_follow_modes() {
     assert!(services.query_logs_calls.lock().expect("lock").is_empty());
 }
 
+/// The operator configuration PUT is an ingress adapter over the canonical
+/// product mutation conduit. It must not call an admin store or vendor handler
+/// directly, and the untrusted wire idempotency key must be consumed at ingress
+/// rather than forwarded as capability input authority.
+#[tokio::test]
+async fn admin_configuration_put_dispatches_through_generic_invoke() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/operator/extension-configuration/extension.slack")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "values": [{"handle": "slack_team_id", "value": "T-ONE"}],
+                        "expected_revision": 7,
+                        "idempotency_key": "opaque-client-retry-key",
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let calls = services.invoke_calls.lock().expect("lock");
+
+    assert_eq!(
+        (status, calls.len()),
+        (StatusCode::SERVICE_UNAVAILABLE, 1),
+        "the route must reach generic invoke and preserve its failure status"
+    );
+    let (capability, input, _activity_id) = &calls[0];
+    assert!(
+        !capability.as_str().contains("slack"),
+        "the mutation capability must be extension-generic: {capability}"
+    );
+    assert_eq!(input["group_id"], "extension.slack");
+    assert_eq!(input["expected_revision"], 7);
+    assert_eq!(input["values"][0]["handle"], "slack_team_id");
+    assert!(
+        input.get("idempotency_key").is_none(),
+        "the authorized invocation scope, not untrusted input, owns idempotency: {input}"
+    );
+}
+
 #[tokio::test]
 async fn operator_config_key_routes_dispatch_path_and_body() {
     let services = Arc::new(StubServices::default());
@@ -4239,37 +4327,6 @@ async fn operator_config_set_failure_does_not_echo_secret_value() {
     let rendered = serde_json::to_string(&body).expect("render body");
     assert_eq!(body["kind"], "service_unavailable");
     assert!(!rendered.contains("sk-secret-value"));
-}
-
-#[tokio::test]
-async fn list_connectable_channels_error_maps_to_http_status() {
-    let services = Arc::new(StubServices::default());
-    services.fail_list_connectable_channels(RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
-    });
-    let router = router_with(services);
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/channels/connectable")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = read_json(response).await;
-    assert_eq!(body["error"], "unavailable");
-    assert_eq!(body["kind"], "service_unavailable");
-    assert_eq!(body["retryable"], true);
 }
 
 #[tokio::test]
@@ -4553,7 +4610,7 @@ async fn get_extension_setup_dispatches_package_ref_to_facade() {
     let body = read_json(response).await;
     assert_eq!(body["package_ref"]["id"], "telegram");
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert_eq!(body["phase"], "unsupported");
 }
 
 // The path segment must become a lifecycle package ref at the
@@ -4583,7 +4640,7 @@ async fn setup_extension_dispatches_package_ref_to_facade() {
         "facade must echo the package id from the path",
     );
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert_eq!(body["phase"], "unsupported");
     assert!(
         body.get("status").is_none(),
         "setup_extension must not expose legacy status aliases: {body}"
@@ -5826,10 +5883,10 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
     );
 
     let mut body = response.into_body();
-    // Read until we see an `error` event chunk, or the stream closes.
+    // Read until we see a `stream_error` event chunk, or the stream closes.
     let bytes = collect_sse_until(&mut body, Duration::from_secs(2), |buf| {
-        buf.windows(b"event: error".len())
-            .any(|w| w == b"event: error")
+        buf.windows(b"event: stream_error".len())
+            .any(|w| w == b"event: stream_error")
             && buf.windows(2).any(|w| w == b"\n\n")
     })
     .await;
@@ -5837,10 +5894,10 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
     let events = parse_sse_events(&bytes);
     let error_event = events
         .iter()
-        .find(|event| event.event.as_deref() == Some("error"))
+        .find(|event| event.event.as_deref() == Some("stream_error"))
         .unwrap_or_else(|| {
             panic!(
-                "expected an SSE `error` event, got: {events:?}; raw: {}",
+                "expected an SSE `stream_error` event, got: {events:?}; raw: {}",
                 String::from_utf8_lossy(&bytes)
             )
         });

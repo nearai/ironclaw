@@ -1536,3 +1536,4 @@ fn mode_label(mode: SpawnSubagentMode) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+// arch-exempt: large_file, subagent port migration remains centralized, plan #6175

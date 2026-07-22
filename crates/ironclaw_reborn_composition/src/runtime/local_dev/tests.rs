@@ -59,7 +59,9 @@ mod tests {
         EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
         EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SEARCH_CAPABILITY_ID,
     };
-    use crate::outbound::outbound_preferences::OutboundDeliveryTargetEntry;
+    use crate::outbound::outbound_preferences::{
+        OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+    };
     use crate::outbound::{
         OutboundDeliveryTargetProvider, OutboundDeliveryTargetRegistry,
         RebornOutboundPreferencesFacade,
@@ -354,7 +356,11 @@ mod tests {
             {
                 return Ok(Vec::new());
             }
-            Ok(vec![self.entry.clone()])
+            // Fixture answers a single expected caller; claim that caller as
+            // owner so the entry survives the registry caller-scoping filter.
+            let mut entry = self.entry.clone();
+            entry.owner = OutboundDeliveryTargetOwner::for_caller(caller);
+            Ok(vec![entry])
         }
     }
 
@@ -639,7 +645,7 @@ mod tests {
                 dir.path().join("local-dev"),
             )
             .with_runtime_policy(local_dev_minimal_approval_policy())
-            .with_google_oauth_backend(google_oauth_backend),
+            .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_oauth_backend),
         )
         .await
         .expect("local-dev services build");
@@ -1994,6 +2000,7 @@ mod tests {
                 EffectKind::SpawnProcess,
                 EffectKind::ExecuteCode,
                 EffectKind::Network,
+                EffectKind::UseSecret,
                 EffectKind::ExternalWrite
             ]
         );
@@ -3639,6 +3646,11 @@ mod tests {
                 summary: slack_target_summary,
                 capabilities: slack_target_capabilities,
                 reply_target_binding_ref: slack_reply_target.clone(),
+                // Overwritten with the querying caller at list-time.
+                owner: OutboundDeliveryTargetOwner::new(
+                    TenantId::new("tenant-outbound-delivery").expect("tenant id"),
+                    UserId::new("outbound-delivery-owner").expect("user id"),
+                ),
             },
         ));
         let slack_provider_delegate: Arc<dyn OutboundDeliveryTargetProvider> =
@@ -4359,6 +4371,11 @@ mod tests {
                     auth_prompts: false,
                 },
                 reply_target_binding_ref: slack_reply_target.clone(),
+                // Overwritten with the querying caller at list-time.
+                owner: OutboundDeliveryTargetOwner::new(
+                    TenantId::new("tenant-outbound-delivery").expect("tenant id"),
+                    UserId::new("outbound-delivery-owner").expect("user id"),
+                ),
             },
         ));
         let slack_provider_delegate: Arc<dyn OutboundDeliveryTargetProvider> =
@@ -5348,7 +5365,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_capability_port_extension_search_reads_system_catalog() {
+    async fn local_dev_extension_search_makes_every_bundled_result_model_visible() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
             "local-dev-extension-search-owner",
@@ -5396,29 +5413,46 @@ mod tests {
             .find(|definition| definition.capability_id.as_str() == EXTENSION_SEARCH_CAPABILITY_ID)
             .expect("extension_search tool definition");
 
-        let candidate = port
-            .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                provider_tool_call_with_name(
-                    tool_definition.name.as_str(),
-                    serde_json::json!({"query": "gmail"}),
-                ),
-            ))
-            .await
-            .expect("extension_search provider tool call stages");
-        assert_eq!(
-            candidate.capability_id.as_str(),
-            EXTENSION_SEARCH_CAPABILITY_ID
-        );
+        let extension_ids = ironclaw_first_party_extensions::packages::bundled_packages()
+            .iter()
+            .map(|package| package.id)
+            .collect::<Vec<_>>();
+        for (index, extension_id) in extension_ids.into_iter().enumerate() {
+            let mut tool_call = provider_tool_call_with_name(
+                tool_definition.name.as_str(),
+                serde_json::json!({"query": extension_id}),
+            );
+            tool_call.turn_id = Some(format!("extension-search-turn-{index}"));
+            tool_call.id = format!("extension-search-call-{index}");
+            let candidate = port
+                .register_provider_tool_call(RegisterProviderToolCallRequest::new(tool_call))
+                .await
+                .expect("extension_search provider tool call stages");
+            assert_eq!(
+                candidate.capability_id.as_str(),
+                EXTENSION_SEARCH_CAPABILITY_ID
+            );
 
-        let outcome = port
-            .invoke_capability(invocation_for_candidate(&candidate))
-            .await
-            .expect("extension_search invocation");
+            let outcome = port
+                .invoke_capability(invocation_for_candidate(&candidate))
+                .await
+                .expect("extension_search invocation");
 
-        assert!(
-            matches!(outcome, Resolution::Done(_)),
-            "extension_search should be authorized to read the system extension catalog, got {outcome:?}"
-        );
+            let Resolution::Done(outcome) = outcome else {
+                panic!(
+                    "extension_search should be authorized to read the system extension catalog"
+                );
+            };
+            let preview = outcome.refs.preview.as_ref().unwrap_or_else(|| {
+                panic!("the model must receive the {extension_id} search result inline")
+            });
+            assert!(
+                preview
+                    .as_str()
+                    .contains(&format!("\"id\":\"{extension_id}\"")),
+                "the model-visible result must contain the {extension_id} catalog entry: {preview}"
+            );
+        }
     }
 
     #[tokio::test]

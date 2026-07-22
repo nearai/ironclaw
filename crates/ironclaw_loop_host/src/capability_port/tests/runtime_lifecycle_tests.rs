@@ -10,8 +10,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_host_api::{
     ApprovalRequestId, Blocked, CapabilityDisplayOutputPreview, CapabilityId, ExtensionId,
-    FailureKind, ProcessId, Resolution, ResourceEstimate, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAuthRequirement, RuntimeKind,
+    FailureKind, ProcessId, Resolution, ResourceEstimate, RuntimeCredentialAuthRequirement,
+    RuntimeKind, VendorId,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
@@ -401,12 +401,11 @@ async fn runtime_capability_batch_continues_after_runtime_failure_outcome() {
 async fn runtime_capability_failed_and_unknown_outcomes_emit_failure_milestones() {
     let cases = [
         (
-            RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
-                capability_id: CapabilityId::new("demo.echo").expect("valid capability id"),
-                kind: RuntimeFailureKind::InvalidInput,
-                message: Some("invalid input".to_string()),
-                detail: None,
-            }),
+            RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure::new(
+                CapabilityId::new("demo.echo").expect("valid capability id"),
+                RuntimeFailureKind::InvalidInput,
+                Some("invalid input".to_string()),
+            )),
             CapabilityFailureKind::InvalidInput,
         ),
         (
@@ -579,7 +578,7 @@ async fn runtime_auth_gate_forwards_credential_requirements() {
     let capability_id = CapabilityId::new("demo.echo").expect("capability id");
     let provider_id = ExtensionId::new("demo").expect("provider id");
     let requirement = RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+        provider: VendorId::new("github").unwrap(),
         setup: Default::default(),
         requester_extension: provider_id.clone(),
         provider_scopes: Vec::new(),

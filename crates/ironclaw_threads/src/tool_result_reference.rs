@@ -97,6 +97,18 @@ impl ToolResultSafeSummary {
         validate_tool_result_safe_summary(value.into()).map(Self)
     }
 
+    /// Fixed redaction marker for a producer-supplied summary that fails
+    /// strict validation. Writers degrade the label to this marker instead of
+    /// ending the run; the real tool output still reaches the model via the
+    /// result reference / model observation.
+    pub fn redacted_tool_result_summary() -> Self {
+        debug_assert!(
+            validate_tool_result_safe_summary("the tool result summary was redacted".to_string())
+                .is_ok()
+        );
+        Self("the tool result summary was redacted".to_string())
+    }
+
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -706,7 +718,7 @@ fn validate_model_observation_text(
 /// boundary and keep matching exactly as before.
 ///
 /// This scan runs on UNTRUSTED text only. Host-authored remediation — which
-/// legitimately names `config set google.client_secret` — is exempted upstream
+/// legitimately names `config set provider.client_secret` — is exempted upstream
 /// by PROVENANCE (`ObservationProvenance::HostAuthored`), not by a content
 /// heuristic here. A previous revision tried the heuristic route
 /// (`is_config_set_key_reference`, a byte-walking parser for the exact

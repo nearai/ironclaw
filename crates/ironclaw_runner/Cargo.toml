@@ -14,28 +14,10 @@ publish = false
 layer = "kernel"
 
 [features]
-libsql-secrets = [
-    "dep:ironclaw_secrets",
-    "dep:libsql",
-    "dep:secrecy",
-    "dep:ironclaw_filesystem",
-    "filesystem-goal-store",
-]
-filesystem-goal-store = ["dep:ironclaw_filesystem"]
-# Local-dev trigger-fire access store (libSQL-backed). Named for its original
-# WebChat user-store home; the canonical user store has since moved to the
-# filesystem identity resolver, so this feature now only gates the
-# `local_trigger_access` module.
-webui-user-store = ["dep:libsql"]
-filesystem-local-trigger-access = ["dep:ironclaw_filesystem"]
-# Opt-in because the restart coverage opens real libSQL-backed turn/thread stores.
-# Keep separate from `libsql-secrets` so local `cargo test -p ironclaw_runner`
-# stays fast, while CI can exercise process-restart persistence explicitly.
-libsql-restart-tests = [
-    "dep:libsql",
-    "dep:ironclaw_filesystem",
-    "filesystem-goal-store",
-]
+# Exposes filesystem-backed in-memory test constructors to integration tests and
+# downstream harnesses. Off by default so production builds do not carry test
+# helpers.
+test-support = []
 
 [dependencies]
 async-trait = "0.1"
@@ -58,14 +40,12 @@ ironclaw_loop_host = { path = "../ironclaw_loop_host", version = "0.1.0" }
 ironclaw_observability = { path = "../ironclaw_observability" }
 ironclaw_run_state = { path = "../ironclaw_run_state", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }
-ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0", optional = true }
-ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", optional = true }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 jsonschema = { version = "0.46", default-features = false }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 parking_lot = "0.12"
-secrecy = { version = "0.10", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -74,19 +54,20 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
+ironclaw_runner = { path = ".", features = ["test-support"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
 chrono = "0.4"
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }
 ironclaw_authorization = { path = "../ironclaw_authorization", version = "0.1.0" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections", version = "0.1.0" }
 ironclaw_extensions = { path = "../ironclaw_extensions", version = "0.1.0" }
-ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_processes = { path = "../ironclaw_processes", version = "0.1.0", features = ["test-support"] }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store", version = "0.1.0" }
 ironclaw_resources = { path = "../ironclaw_resources", version = "0.1.0" }
 ironclaw_scripts = { path = "../ironclaw_scripts", version = "0.1.0" }
 ironclaw_skills = { path = "../ironclaw_skills", version = "0.3.0", default-features = false }
 ironclaw_trust = { path = "../ironclaw_trust", version = "0.1.0" }
+ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0", features = ["test-support"] }
 rust_decimal = "1"
 serde = "1"
 serde_json = "1"

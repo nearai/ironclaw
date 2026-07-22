@@ -491,6 +491,15 @@ export function fetchTimeline({ threadId, limit, cursor } = {}) {
   return apiFetch(url.pathname + url.search);
 }
 
+export function fetchRunArtifact({ threadId, runId } = {}) {
+  if (!threadId || !runId) {
+    return Promise.reject(new Error("threadId and runId are required"));
+  }
+  return apiFetch(
+    `${V2_BASE}/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/artifact`,
+  );
+}
+
 // --- Attachments ---
 
 // Path for one landed attachment's bytes. The (thread, message, attachment)
@@ -618,7 +627,7 @@ export function cancelRun({
 
 // --- Gate resolution ---
 
-// `resolution` is one of "approved" | "denied" | "credential_provided" | "cancelled".
+// `resolution` is one of "approved" | "declined" | "credential_provided".
 // `always` is only meaningful when `resolution === "approved"`.
 // `credentialRef` is only meaningful when `resolution === "credential_provided"`.
 export function resolveGate({

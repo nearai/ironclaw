@@ -120,50 +120,197 @@ fn write_sparse_reborn_config(reborn_home: &Path) {
     .expect("config");
 }
 
-#[test]
-fn dockerfile_reborn_builds_with_production_features() {
-    let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
-        .expect("Dockerfile.reborn");
+fn shell_words(text: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = text.chars().peekable();
+    let mut quote = None;
 
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (None, '\\') => {
+                if matches!(chars.peek(), Some('\r' | '\n')) {
+                    if matches!(chars.peek(), Some('\r')) {
+                        chars.next();
+                    }
+                    if matches!(chars.peek(), Some('\n')) {
+                        chars.next();
+                    }
+                } else if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            (Some('"'), '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            (None, '\'' | '"') => {
+                quote = Some(ch);
+            }
+            (Some(active), _) if ch == active => {
+                quote = None;
+            }
+            (None, ch) if ch.is_whitespace() => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            _ => word.push(ch),
+        }
+    }
+
+    if !word.is_empty() {
+        words.push(word);
+    }
+
+    words
+}
+
+fn split_cargo_feature_value(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .filter(|feature| !feature.is_empty())
+}
+
+fn cargo_command_features(text: &str) -> Vec<String> {
+    let words = shell_words(text);
+    let mut features = Vec::new();
+    let mut index = 0;
+    while index < words.len() {
+        let word = &words[index];
+        if word == "--features" || word == "-F" {
+            if let Some(value) = words.get(index + 1) {
+                features.extend(split_cargo_feature_value(value).map(str::to_owned));
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(value) = word.strip_prefix("--features=") {
+            features.extend(split_cargo_feature_value(value).map(str::to_owned));
+        }
+        if let Some(value) = word.strip_prefix("-F")
+            && !value.is_empty()
+        {
+            features.extend(split_cargo_feature_value(value).map(str::to_owned));
+        }
+        index += 1;
+    }
+    features
+}
+
+fn assert_no_removed_backend_cargo_features(text: &str, label: &str) {
+    let features = cargo_command_features(text);
     assert!(
-        dockerfile
-            .matches("libsql,postgres,inmemory-turn-state")
-            .count()
-            >= 2,
-        "Dockerfile.reborn must compile both cargo-chef deps and final binary with libsql, postgres, and the in-memory turn-state authority: {dockerfile}"
+        !features
+            .iter()
+            .any(|feature| feature == "libsql" || feature == "postgres"),
+        "{label} must not pass removed backend Cargo features: parsed features={features:?}\n{text}"
     );
+}
+
+fn package_metadata_dist_features(manifest: &str) -> Vec<String> {
+    let manifest: toml::Table = manifest.parse().expect("parse Cargo manifest");
+    manifest
+        .get("package")
+        .and_then(|package| package.get("metadata"))
+        .and_then(|metadata| metadata.get("dist"))
+        .and_then(|dist| dist.get("features"))
+        .and_then(toml::Value::as_array)
+        .map(|features| {
+            features
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn cargo_feature_parser_detects_removed_backend_spellings() {
+    for input in [
+        "cargo build --features libsql",
+        "cargo build --features=postgres",
+        "cargo build --features 'libsql,other'",
+        "cargo build -F postgres",
+        "cargo build -Flibsql",
+        "cargo build -Fpostgres,other",
+    ] {
+        let features = cargo_command_features(input);
+        assert!(
+            features
+                .iter()
+                .any(|feature| feature == "libsql" || feature == "postgres"),
+            "expected removed backend feature in parsed features={features:?} for {input}"
+        );
+    }
+}
+
+#[test]
+fn dist_feature_parser_detects_basic_and_literal_strings() {
+    let manifest = r#"
+[package]
+name = "ironclaw"
+
+[package.metadata.dist]
+dist = true
+features = [
+    "libsql",
+    'postgres',
+    "lib\u0073ql",
+]
+
+[package.metadata.wix]
+"#;
+    assert_eq!(
+        package_metadata_dist_features(manifest),
+        vec![
+            "libsql".to_string(),
+            "postgres".to_string(),
+            "libsql".to_string()
+        ]
+    );
+}
+
+#[test]
+fn dockerfile_reborn_builds_without_backend_feature_flags() {
+    let dockerfile =
+        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
+
+    assert_no_removed_backend_cargo_features(&dockerfile, "Dockerfile");
     assert!(
         dockerfile.contains("--bin ironclaw")
             && dockerfile
                 .contains("COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw"),
-        "Dockerfile.reborn must build and copy the canonical ironclaw binary: {dockerfile}"
+        "Dockerfile must build and copy the canonical ironclaw binary: {dockerfile}"
     );
     assert!(
         dockerfile.contains("corepack enable pnpm")
             && dockerfile.matches("pnpm install --frozen-lockfile").count() >= 2
             && dockerfile.contains("crates/ironclaw_webui/frontend"),
-        "Dockerfile.reborn must install WebUI frontend dependencies before cargo-chef and the final binary build: {dockerfile}"
+        "Dockerfile must install WebUI frontend dependencies before cargo-chef and the final binary build: {dockerfile}"
     );
     assert!(
         dockerfile.contains("config.production.toml"),
-        "Dockerfile.reborn must ship the opt-in production config: {dockerfile}"
+        "Dockerfile must ship the opt-in production config: {dockerfile}"
     );
     assert!(
         dockerfile.contains("config.hosted-single-tenant-volume.toml"),
-        "Dockerfile.reborn must ship the hosted volume seed config: {dockerfile}"
+        "Dockerfile must ship the hosted volume seed config: {dockerfile}"
     );
     let builder_stage = dockerfile
         .split_once("FROM deps AS builder")
         .map(|(_, stage)| stage)
-        .expect("Dockerfile.reborn should define a builder stage");
+        .expect("Dockerfile should define a builder stage");
     assert!(
         builder_stage.contains("COPY migrations/ migrations/")
             && dockerfile.matches("COPY migrations/ migrations/").count() == 1,
-        "Dockerfile.reborn must copy repo-level SQL migrations exactly once in the builder stage for postgres include_str! builds: {dockerfile}"
+        "Dockerfile must copy repo-level SQL migrations exactly once in the builder stage for postgres include_str! builds: {dockerfile}"
     );
     assert!(
         !dockerfile.contains("IRONCLAW_REBORN_HOME=/data/ironclaw-reborn"),
-        "Dockerfile.reborn must let the entrypoint resolve Railway volume mounts before falling back to /data: {dockerfile}"
+        "Dockerfile must let the entrypoint resolve Railway volume mounts before falling back to /data: {dockerfile}"
     );
     assert!(
         !dockerfile.contains("\nVOLUME "),
@@ -203,8 +350,6 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
         ("aarch64-apple-darwin", "macos-15"),
         ("x86_64-pc-windows-msvc", "windows-2022"),
     ];
-    let release_features = "libsql,postgres,inmemory-turn-state";
-
     assert_eq!(
         compile_workflow.matches("          - target: ").count(),
         target_runners.len(),
@@ -225,11 +370,11 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
             && compile_workflow.contains("            --bin ironclaw \\\n")
             && !compile_workflow.contains("--bin ironclaw-reborn")
             && compile_workflow.contains("--target \"$TARGET\"")
-            && compile_workflow
-                .contains(&format!("  REBORN_RELEASE_FEATURES: {release_features}\n"))
-            && compile_workflow.contains("            --features \"$REBORN_RELEASE_FEATURES\""),
-        "Reborn release CI must fully link the shipping binary and keep all target results"
+            && !compile_workflow.contains("REBORN_RELEASE_FEATURES")
+            && !compile_workflow.contains("--features \"$REBORN_RELEASE_FEATURES\""),
+        "Reborn release CI must fully link the shipping binary without removed backend feature flags and keep all target results"
     );
+    assert_no_removed_backend_cargo_features(&compile_workflow, "Reborn release CI");
     assert!(
         compile_workflow.matches("musl: true").count() == 2
             && compile_workflow.contains("sudo apt-get install --yes musl-tools binutils file")
@@ -373,47 +518,30 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
     assert!(
         cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
             && cli_manifest.contains("[package.metadata.dist]\ndist = true")
-            && cli_manifest
-                .contains("features = [\"libsql\", \"postgres\", \"inmemory-turn-state\"]")
             && cli_manifest.contains("[package.metadata.wix]")
             && cli_manifest.contains("[[bin]]\nname = \"ironclaw\""),
-        "the canonical Reborn package must be cargo-dist enabled with production features and WiX metadata"
+        "the canonical Reborn package must be cargo-dist enabled without removed backend feature flags and with WiX metadata"
+    );
+    let dist_features = package_metadata_dist_features(&cli_manifest);
+    assert!(
+        !dist_features
+            .iter()
+            .any(|feature| feature == "libsql" || feature == "postgres"),
+        "the canonical Reborn package must be cargo-dist enabled without removed backend feature flags and with WiX metadata: parsed dist features={dist_features:?}\n{cli_manifest}"
     );
 }
 
 #[test]
-fn dockerfile_reborn_ships_extension_ownership_migration() {
-    let dockerfile = std::fs::read_to_string(workspace_root().join("Dockerfile.reborn"))
-        .expect("Dockerfile.reborn");
-    let deps_stage = dockerfile
-        .split_once("FROM chef AS deps")
-        .and_then(|(_, stages)| stages.split_once("FROM deps AS builder"))
-        .map(|(stage, _)| stage)
-        .expect("Dockerfile.reborn should define a deps stage");
-    let builder_stage = dockerfile
-        .split_once("FROM deps AS builder")
-        .map(|(_, stage)| stage)
-        .expect("Dockerfile.reborn should define a builder stage");
-
+fn dockerfile_does_not_package_the_retired_ownership_migration() {
+    // Greenfield reconciliation (owner decision D1): the one-time extension
+    // ownership migration crate is deleted, so the image must not try to
+    // build or ship its binary.
+    let dockerfile =
+        std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
     assert!(
-        deps_stage.contains("--package ironclaw_reborn_migration")
-            && deps_stage.contains("--no-default-features")
-            && deps_stage.contains("--features libsql")
-            && deps_stage.contains("--recipe-path recipe.json"),
-        "Dockerfile.reborn must cache the libSQL-only extension ownership migration dependencies: {dockerfile}"
-    );
-    assert!(
-        builder_stage.contains("--package ironclaw_reborn_migration")
-            && builder_stage.contains("--no-default-features")
-            && builder_stage.contains("--features libsql")
-            && builder_stage.contains("--bin ironclaw-reborn-extension-ownership-migration"),
-        "Dockerfile.reborn must build the libSQL-only extension ownership migration binary: {dockerfile}"
-    );
-    assert!(
-        dockerfile.contains(
-            "COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migration /usr/local/bin/ironclaw-reborn-extension-ownership-migration"
-        ),
-        "Dockerfile.reborn must copy the extension ownership migration into the runtime image: {dockerfile}"
+        !dockerfile.contains("ironclaw_reborn_migration")
+            && !dockerfile.contains("ironclaw-reborn-extension-ownership-migration"),
+        "Dockerfile must not reference the deleted ownership-migration crate: {dockerfile}"
     );
 }
 
@@ -2206,89 +2334,6 @@ fn serve_resolves_bearer_token_from_reborn_home_webui_token_file() {
     let _ = child.wait();
 }
 
-#[test]
-fn serve_env_slack_enabled_mounts_slack_events_route() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let reborn_home = temp.path().join("reborn-home");
-    let home = temp.path().join("home");
-    std::fs::create_dir_all(&home).expect("home dir");
-    let _serve_port_guard = SERVE_PORT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let port = unused_local_port();
-
-    let mut child = reborn_command()
-        .args(["serve", "--host", "127.0.0.1", "--port"])
-        .arg(port.to_string())
-        .env("HOME", &home)
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env(
-            "IRONCLAW_REBORN_WEBUI_TOKEN",
-            // >=32 bytes: serve now enforces the session-signing entropy
-            // floor unconditionally (it signs admin-minted session tokens
-            // even without SSO).
-            "reborn-smoke-test-token-0123456789abcdef",
-        )
-        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
-        .env("IRONCLAW_REBORN_SLACK_ENABLED", "true")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("ironclaw-reborn serve should start");
-    let stderr = child.stderr.take().expect("stderr should be piped");
-    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr).lines() {
-            if stderr_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let mut stderr_text = String::new();
-    loop {
-        if let Some(status) = child.try_wait().expect("serve child status") {
-            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("serve did not reach listener banner; stderr: {stderr_text}");
-        }
-        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(Ok(line)) => {
-                stderr_text.push_str(&line);
-                stderr_text.push('\n');
-                if stderr_text.contains("ironclaw: WebChat v2 listener") {
-                    break;
-                }
-            }
-            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("serve stderr closed before banner; stderr: {stderr_text}");
-            }
-        }
-    }
-
-    let status_line = match post_slack_events_status_line(port) {
-        Ok(status_line) => status_line,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("{error}");
-        }
-    };
-
-    let _ = child.kill();
-    let _ = child.wait();
-    assert!(
-        !status_line.contains(" 404 "),
-        "env-enabled Slack route should be mounted, got status line: {status_line}"
-    );
-}
-
 /// `true` when `config_text` carries a live (uncommented) `provider_id =`
 /// line — used to assert a de-seeded `config.toml` has no `[llm.default]`
 /// slot. A plain `.contains("provider_id =")` also matches the stub's own
@@ -2348,22 +2393,6 @@ fn http_status_line(port: u16, request: &str, label: &str) -> Result<String, Str
         .read_line(&mut status_line)
         .map_err(|error| format!("read {label} status line failed: {error}"))?;
     Ok(status_line)
-}
-
-fn post_slack_events_status_line(port: u16) -> Result<String, String> {
-    http_status_line(
-        port,
-        concat!(
-            "POST /webhooks/slack/events HTTP/1.1\r\n",
-            "Host: 127.0.0.1\r\n",
-            "Content-Type: application/json\r\n",
-            "Content-Length: 2\r\n",
-            "Connection: close\r\n",
-            "\r\n",
-            "{}"
-        ),
-        "Slack route probe",
-    )
 }
 
 #[test]
@@ -3920,7 +3949,7 @@ fn config_init_with_force_overwrites() {
     assert!(!config_text.contains("partial config"));
     assert!(!providers_text.contains("partial providers"));
     assert!(config_text.contains("api_version = \"ironclaw.runtime/v1\""));
-    assert!(providers_text.contains("\"id\": \"acme-openrouter\""));
+    assert!(providers_text.contains("\"id\": \"example-openrouter\""));
 }
 
 #[test]
@@ -3987,45 +4016,6 @@ fn onboard_bootstraps_reborn_home_without_touching_v1_state() {
     assert!(
         !v1_home.exists(),
         "onboard must not create or read explicit v1 state"
-    );
-}
-
-#[cfg(not(feature = "libsql"))]
-#[test]
-fn onboard_reduced_feature_build_reports_llm_provisioning_as_unavailable() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let process_home = temp.path().join("process-home");
-    let reborn_home = temp.path().join("reborn-home");
-    std::fs::create_dir_all(&process_home).expect("create process home");
-
-    let output = reborn_command()
-        .arg("onboard")
-        .env_clear()
-        .env("HOME", &process_home)
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env("IRONCLAW_DISABLE_OS_KEYCHAIN", "1")
-        .output()
-        .expect("reduced-feature ironclaw onboard should run");
-
-    assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("llm_credentials: unavailable in this build"),
-        "the feature-off outcome must not be reported as non-interactive: {stdout}"
-    );
-    assert!(
-        stdout.contains("--features full") && stdout.contains("rerun `ironclaw onboard`"),
-        "reduced-feature onboarding must print feature-specific remediation: {stdout}"
-    );
-    assert!(
-        !stdout.contains(
-            "configure LLM credentials: rerun `ironclaw onboard` from an interactive terminal"
-        ),
-        "feature-disabled provisioning must not blame terminal interactivity: {stdout}"
     );
 }
 
@@ -5750,7 +5740,7 @@ fn onboard_with_force_overwrites_existing_files_and_marker() {
     assert!(!providers_text.contains("custom providers"));
     assert!(!marker_text.contains("custom marker"));
     assert!(config_text.contains("api_version = \"ironclaw.runtime/v1\""));
-    assert!(providers_text.contains("\"id\": \"acme-openrouter\""));
+    assert!(providers_text.contains("\"id\": \"example-openrouter\""));
     let marker: serde_json::Value = serde_json::from_str(&marker_text).expect("valid marker JSON");
     assert_eq!(marker["schema_version"], "ironclaw.reborn.onboarding/v1");
 }
@@ -6957,13 +6947,13 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
         "the independent Docker workflow must remain manually and periodically runnable"
     );
     assert!(
-        workspace_manifest.contains("name = \"ironclaw_legacy\"")
+        workspace_manifest.contains("name = \"ironclaw_reborn_integration_tests\"")
             && workspace_manifest.contains("[package.metadata.dist]\ndist = false")
             && workspace_manifest.contains("packages = [\"ironclaw\"]")
             && workspace_manifest.contains("allow-dirty = [\"ci\"]")
             && cli_manifest.contains("[package]\nname = \"ironclaw\"\nversion = \"")
             && cli_manifest.contains("[package.metadata.dist]\ndist = true"),
-        "cargo-dist package selection must exclude legacy and enable only Reborn"
+        "cargo-dist package selection must exclude the root test-only package and enable only Reborn"
     );
     assert!(
         wix_manifest.contains("Name='ironclaw'")
@@ -6972,6 +6962,35 @@ fn release_ci_publishes_reborn_without_enabling_legacy_or_docker_paths() {
             && !wix_manifest.contains("ironclaw-legacy")
             && !root.join("wix/main.wxs").exists(),
         "the MSI definition must install only the canonical Reborn executable"
+    );
+    let cli_package_section = cli_manifest
+        .split_once("[package]\n")
+        .map(|(_, remainder)| remainder)
+        .and_then(|remainder| remainder.split_once("\n[").map(|(section, _)| section))
+        .expect("Reborn CLI manifest must define a [package] section");
+    let cli_description = cli_package_section
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("description = \"")
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .expect("Reborn CLI manifest must define a package description");
+    let wix_package_element = wix_manifest
+        .split_once("<Package Id='*'")
+        .map(|(_, remainder)| remainder)
+        .and_then(|remainder| remainder.split_once("/>").map(|(element, _)| element))
+        .expect("Reborn WiX manifest must define a Package element");
+    let wix_description = wix_package_element
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("Description='")
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .expect("Reborn WiX Package element must define a Description attribute");
+    assert_eq!(
+        wix_description, cli_description,
+        "the checked-in WiX package description must match the Cargo package metadata"
     );
     let reborn_cli_selector = code_style_workflow
         .lines()

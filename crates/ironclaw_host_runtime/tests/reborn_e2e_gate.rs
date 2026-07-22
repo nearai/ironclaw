@@ -397,6 +397,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
     let input_sentinel = "BACKEND_FAILURE_INPUT_SENTINEL_3067";
+    let backend_registry_token = concat!("ghp_", "012345678901234567890123456789012345");
     let backend_secret = "BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live";
 
     let outcome = runtime
@@ -416,6 +417,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
             for forbidden in [
                 input_sentinel,
                 backend_secret,
+                backend_registry_token,
                 "/private/tmp/backend-path",
                 "sk-live",
             ] {
@@ -425,6 +427,24 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
                 );
             }
             assert!(failure.message.is_some());
+            // The descriptive cause is NOT lost: it rides the in-process-only
+            // `model_visible_cause` channel (absent from Debug/rows/events)
+            // toward the model-visible Diagnostic seam, registry-scrubbed.
+            let cause = failure
+                .model_visible_cause()
+                .expect("backend cause must survive on the model-visible channel");
+            assert!(
+                cause.contains("BACKEND_PROVIDER_ERROR_SECRET_3067"),
+                "descriptive cause must survive for the model: {cause}"
+            );
+            // The registry belt scrubs credential-shaped tokens out of the
+            // cause before it can reach the model (the loop seam re-scrubs
+            // `sk-`-prefixed shapes and injection-fences on top). A path is
+            // deliberately NOT scrubbed here — the model needs it to recover.
+            assert!(
+                !cause.contains(backend_registry_token),
+                "registry credential must be scrubbed from the model-visible cause: {cause}"
+            );
         }
         other => panic!("expected sanitized backend failure, got {other:?}"),
     }
@@ -437,6 +457,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
     for forbidden in [
         input_sentinel,
         backend_secret,
+        backend_registry_token,
         "/private/tmp/backend-path",
         "sk-live",
     ] {
@@ -781,7 +802,10 @@ struct FailingScriptBackend;
 
 impl ScriptBackend for FailingScriptBackend {
     fn execute(&self, _request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
-        Err("BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live".to_string())
+        Err(format!(
+            "BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live {}",
+            concat!("ghp_", "012345678901234567890123456789012345")
+        ))
     }
 }
 
@@ -858,6 +882,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -865,7 +890,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
 fn execution_context_with_dispatch_grant() -> ExecutionContext {
     let mut grants = CapabilitySet::default();
     grants.grants.push(dispatch_grant());
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Script,
@@ -873,11 +898,13 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_without_grants() -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Script,
@@ -885,7 +912,9 @@ fn execution_context_without_grants() -> ExecutionContext {
         CapabilitySet::default(),
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn dispatch_grant() -> CapabilityGrant {
@@ -1008,3 +1037,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

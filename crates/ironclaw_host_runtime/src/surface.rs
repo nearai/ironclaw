@@ -13,8 +13,8 @@ use crate::{
     CapabilitySurfaceVersion, HostRuntimeError, VisibleCapabilityRequest, VisibleCapabilitySurface,
     capability_catalog::read_json_ref,
     first_party_tools::{BUILTIN_FIRST_PARTY_PROVIDER, resolve_builtin_input_schema_ref},
-    plan_capability,
 };
+use ironclaw_runtime_policy::plan_capability;
 
 const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
     RuntimeKind::Wasm,
@@ -581,6 +581,7 @@ mod tests {
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
             resource_profile: None,
+            origin_gate_matrix: None,
         };
         let registry = ExtensionRegistry::new();
         let runtime_policy = test_runtime_policy();

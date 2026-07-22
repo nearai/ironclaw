@@ -1,4 +1,4 @@
-// arch-exempt: large_file, mechanical LocalFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
+// arch-exempt: large_file, mechanical DiskFilesystem->DiskFilesystem Bucket-2 rename (arch-simplification §4.4), no logic change, plan #6168
 use std::{
     collections::{BTreeMap, HashMap},
     io::Write,
@@ -16,7 +16,6 @@ use chrono::{DateTime, Datelike, TimeZone, Utc};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_events::InMemoryAuditSink;
 use ironclaw_extensions::ExtensionRegistry;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::runtime_policy::{
@@ -182,6 +181,94 @@ async fn builtin_first_party_package_declares_expected_capabilities() {
         builtin_first_party_handlers(Arc::new(InMemoryTriggerRepository::default())).unwrap();
     for id in all_builtin_capability_ids() {
         assert!(handlers.contains_handler(&capability_id(id)));
+    }
+}
+
+/// §5.3 S3 (behavior-neutral): every builtin tool-package descriptor carries a
+/// declared `origin_gate_matrix`. `LoopRun` mirrors today's effect gate exactly
+/// (Ungated iff the id is in the reviewed `UNGATED_LOOP_RUN_CAPABILITIES`
+/// allowlist, else GatedUnlessGranted); `Product`/`Automation` are deny-by-
+/// default until a reviewed ingress slice declares a producer. This is the
+/// load-bearing "allowlist <=> loop_run == Ungated" invariant, checked over the
+/// production descriptors the tool package actually emits.
+#[tokio::test]
+async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matrix() {
+    let package = builtin_first_party_package().unwrap();
+    for descriptor in &package.capabilities {
+        let matrix = descriptor
+            .origin_gate_matrix
+            .as_ref()
+            .unwrap_or_else(|| panic!("{} must declare an origin_gate_matrix", descriptor.id));
+        assert_ne!(
+            matrix.loop_run,
+            OriginGatePolicy::ConsentSufficient,
+            "{}: ConsentSufficient is Product-only; not valid on loop_run",
+            descriptor.id
+        );
+        assert_ne!(
+            matrix.automation,
+            OriginGatePolicy::ConsentSufficient,
+            "{}: ConsentSufficient is Product-only; not valid on automation",
+            descriptor.id
+        );
+        assert_eq!(
+            matrix.product,
+            OriginGatePolicy::Forbidden,
+            "{} product must be deny-by-default",
+            descriptor.id
+        );
+        assert_eq!(
+            matrix.automation,
+            OriginGatePolicy::Forbidden,
+            "{} automation must be deny-by-default",
+            descriptor.id
+        );
+        let expected_loop_run = if UNGATED_LOOP_RUN_CAPABILITIES.contains(&descriptor.id.as_str()) {
+            OriginGatePolicy::Ungated
+        } else {
+            OriginGatePolicy::GatedUnlessGranted
+        };
+        assert_eq!(
+            matrix.loop_run, expected_loop_run,
+            "{} loop_run must match its allowlist membership",
+            descriptor.id
+        );
+    }
+
+    // Concrete spot checks so a reader sees the intended posture, independent of
+    // the allowlist derivation: read-only/dispatch-only caps are Ungated, any
+    // write/network/process cap is GatedUnlessGranted.
+    let loop_run = |id: &str| {
+        package
+            .capabilities
+            .iter()
+            .find(|descriptor| descriptor.id.as_str() == id)
+            .and_then(|descriptor| descriptor.origin_gate_matrix.as_ref())
+            .map(|matrix| matrix.loop_run)
+            .unwrap_or_else(|| panic!("{id} descriptor with matrix"))
+    };
+    for ungated in [
+        ECHO_CAPABILITY_ID,
+        JSON_CAPABILITY_ID,
+        READ_FILE_CAPABILITY_ID,
+        MEMORY_SEARCH_CAPABILITY_ID,
+        TRIGGER_LIST_CAPABILITY_ID,
+        PROFILE_SET_CAPABILITY_ID,
+    ] {
+        assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
+    }
+    for gated in [
+        WRITE_FILE_CAPABILITY_ID,
+        HTTP_CAPABILITY_ID,
+        MEMORY_WRITE_CAPABILITY_ID,
+        SKILL_INSTALL_CAPABILITY_ID,
+        TRIGGER_CREATE_CAPABILITY_ID,
+    ] {
+        assert_eq!(
+            loop_run(gated),
+            OriginGatePolicy::GatedUnlessGranted,
+            "{gated}"
+        );
     }
 }
 
@@ -3409,6 +3496,51 @@ async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
 }
 
 #[tokio::test]
+async fn builtin_shell_tenant_sandbox_process_uses_callers_scope_for_two_user_isolation() {
+    let local_process = Arc::new(RecordingProcessPort::default());
+    let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
+    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let runtime = runtime_with_local_and_sandbox_process_ports(
+        Arc::clone(&local_process),
+        Arc::clone(&sandbox_process),
+        tenant_sandbox_process_policy(),
+    );
+    let user_a = UserId::new("user-a").unwrap();
+    let user_b = UserId::new("user-b").unwrap();
+    let tenant = TenantId::new("tenant-shared").unwrap();
+    let mut context = execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy());
+    context.run_id = Some(RunId::new());
+    let agent_id = context.agent_id.clone();
+    let project_id = context.project_id.clone();
+    set_context_scope(
+        &mut context,
+        tenant.clone(),
+        user_b.clone(),
+        agent_id,
+        project_id,
+    );
+    let expected_scope = context.resource_scope.clone();
+
+    let output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "cat /workspace/user-a-secret.txt"}),
+        context,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["sandboxed"], json!(true));
+    assert!(local_process.requests.lock().unwrap().is_empty());
+    let requests = sandbox_transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].scope, expected_scope);
+    assert_eq!(requests[0].scope.tenant_id, tenant);
+    assert_eq!(requests[0].scope.user_id, user_b);
+    assert_ne!(requests[0].scope.user_id, user_a);
+}
+
+#[tokio::test]
 async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
     let process_port = Arc::new(RecordingProcessPort::default());
     let runtime =
@@ -6082,12 +6214,14 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
     };
     assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
     assert_eq!(failure.capability_id, capability_id(HTTP_CAPABILITY_ID));
+    // Message is now the sanitized `DenyReason::PolicyDenied` form the kernel
+    // produces (see #6386): it conveys a policy denial and must not leak the
+    // internal `NetworkMode::` planner enum token.
+    let message = failure.message.as_deref().unwrap_or_default();
+    assert!(message.contains("denied"), "unexpected message: {message}");
     assert!(
-        failure
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("NetworkMode::Deny")
+        !message.contains("NetworkMode::"),
+        "message leaked internal planner enum token: {message}"
     );
     assert!(egress.requests().is_empty());
 }
@@ -7252,7 +7386,6 @@ async fn builtin_coding_blocks_sensitive_host_paths_like_v1() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn builtin_coding_blocks_sensitive_resolved_libsql_paths() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -9630,7 +9763,7 @@ where
             .map(|grant| dispatch_grant(grant.as_ref()))
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9638,7 +9771,9 @@ where
         capability_set,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_with_mounts<I>(grants: I, mounts: MountView) -> ExecutionContext
@@ -9652,7 +9787,7 @@ where
             .map(|grant| dispatch_grant_with_mounts(grant.as_ref(), mounts.clone()))
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9660,7 +9795,9 @@ where
         capability_set,
         mounts,
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_with_network<I>(grants: I, network: NetworkPolicy) -> ExecutionContext
@@ -9692,7 +9829,7 @@ where
             })
             .collect(),
     };
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::FirstParty,
@@ -9700,7 +9837,9 @@ where
         capability_set,
         mounts,
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn set_context_scope(

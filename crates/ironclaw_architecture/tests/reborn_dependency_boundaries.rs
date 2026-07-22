@@ -470,7 +470,6 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
     ];
     let untrusted_src_roots = [
         "crates/ironclaw_capabilities/src",
-        "crates/ironclaw_channel_host/src",
         "crates/ironclaw_first_party_extension_ports/src",
         "crates/ironclaw_first_party_extensions/src",
         "crates/ironclaw_host_api/src",
@@ -479,10 +478,9 @@ fn untrusted_ingress_paths_cannot_submit_host_trusted_inbound() {
         "crates/ironclaw_product_adapter_registry/src",
         "crates/ironclaw_product_workflow/src",
         "crates/ironclaw_webui/src",
-        "crates/ironclaw_wasm_product_adapters/src",
-        "crates/ironclaw_telegram_v2_adapter/src",
         "crates/ironclaw_telegram_extension/src",
-        "crates/ironclaw_slack_v2_adapter/src",
+        "crates/ironclaw_slack_extension/src",
+        "crates/ironclaw_telegram_v2_adapter/src",
     ];
 
     let mut violations = Vec::new();
@@ -570,12 +568,15 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         &dependencies,
         "ironclaw",
         [
+            "ironclaw_extension_host",
             "ironclaw_reborn_composition",
             "ironclaw_reborn_config",
             "ironclaw_reborn_traces",
             "ironclaw_webui",
+            "ironclaw_slack_extension",
+            "ironclaw_telegram_extension",
         ],
-        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        "ironclaw should enter Reborn through ironclaw_reborn_composition (assembled-runtime and provider-admin facade), ironclaw_reborn_config (boot-config contract), ironclaw_reborn_traces (contributor-side TraceCommons client extracted from the legacy monolith), and ironclaw_webui (host-owned WebUI serve lifecycle) — plus ironclaw_extension_host (the NativeExtensionFactory contract) and concrete extension crates for the binary-assembled native factory registry (DEL-7: only the binary and tests may link concrete extension crates). Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -796,26 +797,8 @@ fn reborn_turns_public_surface_keeps_runner_api_explicit() {
 }
 
 #[test]
-fn reborn_runner_llm_wiring_stays_out_of_root_src() {
+fn reborn_runner_llm_wiring_is_isolated() {
     let root = workspace_root();
-    let root_lib =
-        std::fs::read_to_string(root.join("src/lib.rs")).expect("root src/lib.rs must be readable");
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_support;"),
-        "retired Reborn loop-support wiring must not return to root src/lib.rs"
-    );
-    assert!(
-        !root.join("src/reborn_loop_support.rs").exists(),
-        "retired Reborn loop-support wiring must not return under root src/"
-    );
-    assert!(
-        !root_lib.contains("pub mod reborn_loop_host;"),
-        "Reborn loop-host wiring must live under crates/ironclaw_loop_host, not root src/lib.rs"
-    );
-    assert!(
-        !root.join("src/reborn_loop_host.rs").exists(),
-        "Reborn loop-host wiring must not live under root src/"
-    );
 
     let reborn_gateway = root.join("crates/ironclaw_runner/src/model_gateway.rs");
     assert!(
@@ -831,9 +814,10 @@ fn reborn_runner_llm_wiring_stays_out_of_root_src() {
     );
 
     // Reborn crates may reuse the extracted LLM crate, but never on its default
-    // terms: `ironclaw_llm`'s defaults drag in the root app's postgres/libsql/tui
-    // feature set, which would couple the Reborn stack back to the v1 monolith.
-    // `default-features = false` on every edge is the durable invariant.
+    // terms: `ironclaw_llm`'s defaults pull in extra provider/backend features
+    // (e.g. `bedrock`) Reborn doesn't need. `default-features = false` on every
+    // edge is the durable invariant, keeping the Reborn stack's dependency
+    // footprint minimal and explicit.
     for manifest_path in [
         "crates/ironclaw_runner/Cargo.toml",
         "crates/ironclaw_reborn_composition/Cargo.toml",
@@ -866,7 +850,9 @@ fn provider_tool_names_stay_at_model_protocol_boundaries() {
         "crates/ironclaw_safety/src/provider_validation.rs",
         // Host loop/run/thread protocol structs that preserve exact model
         // provider names for tool-result roundtrips and historical replay.
-        "crates/ironclaw_turns/src/run_profile/host.rs",
+        // The provider-tool-call DTOs live in the `capability` submodule after
+        // the `host.rs` -> `host/` decomposition.
+        "crates/ironclaw_turns/src/run_profile/host/capability.rs",
         "crates/ironclaw_threads/src/tool_result_reference.rs",
         // Loop support owns capability-id <-> provider-name surface snapshots,
         // synthetic provider tools, provider-call registration, and replay refs.
@@ -1947,253 +1933,6 @@ fn wasm_sandbox_core_module_stays_domain_free_v1_parity_kernel() {
 }
 
 #[test]
-fn wasm_product_adapter_crate_has_local_guardrails() {
-    let guardrails = workspace_root().join("crates/ironclaw_wasm_product_adapters/CLAUDE.md");
-    assert!(
-        guardrails.exists(),
-        "ironclaw_wasm_product_adapters needs local CLAUDE.md guardrails before becoming a Reborn boundary crate"
-    );
-}
-
-#[test]
-fn wasm_product_adapter_crate_keeps_minimal_host_glue_dependencies() {
-    let metadata = cargo_metadata();
-    let packages = metadata["packages"]
-        .as_array()
-        .expect("cargo metadata must include packages");
-    let package = packages
-        .iter()
-        .find(|package| package["name"] == "ironclaw_wasm_product_adapters")
-        .expect("ironclaw_wasm_product_adapters must be a workspace package");
-    let mut deps = package["dependencies"]
-        .as_array()
-        .expect("dependencies")
-        .iter()
-        .filter(|dependency| is_normal_dependency(dependency))
-        .filter_map(|dependency| dependency["name"].as_str())
-        .collect::<Vec<_>>();
-    deps.sort_unstable();
-
-    // Deliberate additions beyond the original auth/egress primitives:
-    //   * async-trait, tokio  — required by the native ProductAdapter runner
-    //     (async traits, semaphore-based admission control, timeout).
-    //   * chrono              — receive-timestamp for TrustedInboundContext.
-    //   * hex                 — HMAC signature encoding in the auth verifier.
-    //   * tracing             — structured logging for hardened error paths
-    //                           added in the zmanian review.
-    //   * serde_json          — validates temporary JSON-shim WIT payloads.
-    //   * ironclaw_wasm  — shared v1-style minimal WASI sandbox kernel module.
-    //   * wasmtime            — component type and generated binding instantiation.
-    // Every addition is justified by a concrete call site in src/. Adding a
-    // dep here without a matching call site is a contract violation — and
-    // adding workflow/runtime crates beyond this list still requires
-    // updating both the wasm crate's CLAUDE.md and this expected set.
-    let expected = vec![
-        "async-trait",
-        "chrono",
-        "hex",
-        "hmac",
-        "http",
-        "ironclaw_product_adapters",
-        "ironclaw_wasm",
-        "serde_json",
-        "sha2",
-        "subtle",
-        "thiserror",
-        "tokio",
-        "tracing",
-        "wasmtime",
-    ];
-    assert_eq!(
-        deps, expected,
-        "ironclaw_wasm_product_adapters should stay thin host glue; add runtime/workflow dependencies only when a call-site proves they are required"
-    );
-}
-
-#[test]
-fn wasm_product_adapter_runtime_uses_v1_style_minimal_wasi() {
-    let root = workspace_root();
-    let core = std::fs::read_to_string(root.join("crates/ironclaw_wasm/src/wasm_sandbox_core.rs"))
-        .expect("WASM sandbox core module must be readable");
-    let adapter_store =
-        std::fs::read_to_string(root.join("crates/ironclaw_wasm_product_adapters/src/store.rs"))
-            .expect("ProductAdapter WASM store must be readable");
-    let adapter_runtime = std::fs::read_to_string(
-        root.join("crates/ironclaw_wasm_product_adapters/src/component_runtime.rs"),
-    )
-    .expect("ProductAdapter WASM runtime must be readable");
-
-    assert!(
-        adapter_store.contains("SandboxStoreCore")
-            && adapter_runtime.contains("add_minimal_wasi_to_linker"),
-        "ProductAdapter components should use the shared v1-style WASM sandbox core instead of duplicating WASI setup"
-    );
-    assert!(
-        core.contains("wasmtime_wasi::p2::add_to_linker_sync"),
-        "shared sandbox core should register WASI p2 like v1 tools/channels"
-    );
-    assert!(
-        core.contains("WasiCtxBuilder::new().build()"),
-        "shared sandbox core should use the v1 minimal default: no env, args, preopens, or inherited network"
-    );
-    for forbidden in [
-        "inherit_env",
-        "inherit_stdio",
-        "preopened_dir",
-        "inherit_network",
-        "allow_ip_name_lookup(true)",
-        "socket_addr_check(|_, _| Box::pin(async { true }))",
-    ] {
-        assert!(
-            !core.contains(forbidden)
-                && !adapter_store.contains(forbidden)
-                && !adapter_runtime.contains(forbidden),
-            "ProductAdapter minimal WASI must not enable `{forbidden}`; HTTP egress stays host-mediated"
-        );
-    }
-}
-
-#[test]
-fn wasm_product_adapter_wit_preserves_product_adapter_trust_boundary() {
-    let wit = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit"),
-    )
-    .expect("product adapter WIT must be readable");
-
-    assert!(
-        wit.contains("record parsed-inbound"),
-        "WIT should name adapter output as ParsedProductInbound, not a trusted envelope"
-    );
-    assert!(
-        wit.contains("result<parsed-inbound, string>"),
-        "parse-inbound should return a parsed inbound payload; host glue stamps TrustedInboundContext and builds ProductInboundEnvelope"
-    );
-    for forbidden in [
-        "result<option<parsed-envelope>",
-        "record parsed-envelope",
-        "envelope-json",
-        "Returns `none`",
-        "ProductInboundEnvelope",
-    ] {
-        assert!(
-            !wit.contains(forbidden),
-            "WIT must not use `{forbidden}`; no-op events are ProductInboundPayload::NoOp and envelopes are host-stamped"
-        );
-    }
-
-    let response_record = wit
-        .split("record egress-response {")
-        .nth(1)
-        .and_then(|rest| rest.split('}').next())
-        .expect("egress-response record must exist");
-    assert!(
-        !response_record.contains("headers"),
-        "WASM egress responses must not expose raw response headers to adapters"
-    );
-}
-
-#[test]
-fn wasm_product_adapter_wit_declares_egress_targets_as_paired_records() {
-    // Henry's review (PR #3352, 2026-05-12T05:04:30Z) flagged that the
-    // WIT manifest previously exposed `declared-egress-hosts: list<string>`
-    // and `declared-credential-handles: list<string>` as independent
-    // lists, which contradicted the Rust `EgressPolicy` that now
-    // requires exact `(host, Option<credential_handle>)` pairs.
-    // Independent lists could not express "Slack token only for Slack",
-    // forcing the future host glue to either reintroduce the cross-pair
-    // leak the Rust policy closes or invent pair metadata the manifest
-    // did not carry.
-    //
-    // The WIT now declares a `declared-egress-target` record and the
-    // manifest carries `declared-egress-targets: list<declared-egress-
-    // target>`. This boundary test pins the new shape — a regression
-    // that splits the pair back into independent lists fails here.
-    let wit = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit"),
-    )
-    .expect("product adapter WIT must be readable");
-
-    assert!(
-        wit.contains("record declared-egress-target"),
-        "WIT must declare a paired `declared-egress-target` record so the manifest can express the (host, optional credential_handle) contract the Rust EgressPolicy enforces"
-    );
-    assert!(
-        wit.contains("declared-egress-targets: list<declared-egress-target>"),
-        "adapter-manifest must carry `declared-egress-targets: list<declared-egress-target>` (paired) instead of independent host/handle lists"
-    );
-
-    // Egress-request must reference the paired target by a single
-    // index, not split into separate host/handle indexes — the WIT
-    // shape mirrors the Rust pair-contract.
-    assert!(
-        wit.contains("egress-target-index: u32"),
-        "egress-request must reference a single paired target via `egress-target-index`"
-    );
-
-    // Forbidden: the prior independent-list shape and split indexes
-    // that allowed cross-pair leak by construction.
-    for forbidden in [
-        "declared-egress-hosts: list<string>",
-        "declared-credential-handles: list<string>",
-        "host-index: u32",
-        "credential-handle-index: option<u32>",
-    ] {
-        assert!(
-            !wit.contains(forbidden),
-            "WIT must not carry the prior independent-list / split-index shape `{forbidden}` — it could not express the paired Rust contract and would reintroduce the cross-pair credential leak"
-        );
-    }
-}
-
-#[test]
-fn wasm_product_adapter_wit_pins_json_shim_shape() {
-    // Henry's review on PR #3352 flagged that the WIT carries adapter
-    // payloads as JSON strings (`parsed-json`, `evidence-json`,
-    // `outbound-json`, `egress-request-json`, `capabilities-json`),
-    // which weakens the typed component-model boundary. The host
-    // re-validates every JSON crossing on the Rust side via serde, so
-    // the seal contract still holds — but the typed redesign is a
-    // followup. This test pins the current shim shape so a future
-    // change must EITHER:
-    //   (a) update this test alongside the corresponding typed record
-    //       (deliberate redesign), OR
-    //   (b) fail boundary checks (accidental shape drift).
-    let wit = std::fs::read_to_string(
-        workspace_root().join("crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit"),
-    )
-    .expect("product adapter WIT must be readable");
-
-    // Top-level documentation MUST call out the shim explicitly so a
-    // reviewer doesn't have to infer the intent from the field names.
-    for required_doc in ["TEMPORARY", "JSON-string payload shim", "Follow-up"] {
-        assert!(
-            wit.contains(required_doc),
-            "WIT must document the JSON-shim status (`{required_doc}` missing); \
-             see top-of-file comment block before `package`"
-        );
-    }
-
-    // The five known JSON-shim fields. Each is the temporary surface
-    // covering a typed Rust DTO in `ironclaw_product_adapters`.
-    let shim_fields = [
-        ("parsed-inbound", "parsed-json: string"),
-        ("auth-evidence", "evidence-json: string"),
-        ("outbound-envelope", "outbound-json: string"),
-        ("outbound-render", "egress-request-json: string"),
-        ("adapter-manifest", "capabilities-json: string"),
-    ];
-    for (record, field) in shim_fields {
-        assert!(
-            wit.contains(field),
-            "WIT JSON-shim field `{field}` in record `{record}` is missing. \
-             If you removed it as part of a typed redesign, update this test \
-             to assert the new typed shape instead — otherwise the boundary \
-             is silently drifting"
-        );
-    }
-}
-
-#[test]
 fn reborn_runtime_http_egress_has_single_network_boundary() {
     let forbidden = [
         ForbiddenRuntimeNetworkUse {
@@ -2310,9 +2049,8 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_product_adapters/src",
         "crates/ironclaw_product_adapter_registry/src",
         "crates/ironclaw_product_workflow/src",
-        "crates/ironclaw_wasm_product_adapters/src",
-        "crates/ironclaw_telegram_v2_adapter/src",
-        "crates/ironclaw_slack_v2_adapter/src",
+        "crates/ironclaw_telegram_extension/src",
+        "crates/ironclaw_slack_extension/src",
         "crates/ironclaw_outbound/src",
         "crates/ironclaw_conversations/src",
         "crates/ironclaw_turns/src",
@@ -2772,35 +2510,6 @@ struct BoundaryRule {
 fn boundary_rules() -> Vec<BoundaryRule> {
     vec![
         BoundaryRule {
-            // The v1→Reborn migration tool is an intentional one-way bridge:
-            // it reads through the root `ironclaw_legacy` crate and writes through the
-            // Reborn state substrate + composition's `migration-support` seam.
-            // That bridge must stay a *state* converter — it must not grow
-            // direct deps on the serving/runtime/engine layers (gateway, engine,
-            // runtime lanes, dispatcher, webui) or it would quietly become a
-            // second live entry point into Reborn.
-            crate_name: "ironclaw_reborn_migration",
-            forbidden: vec![
-                "ironclaw_dispatcher",
-                "ironclaw_engine",
-                "ironclaw_gateway",
-                "ironclaw_llm",
-                "ironclaw_loop_host",
-                "ironclaw_mcp",
-                "ironclaw_network",
-                "ironclaw_product_adapters",
-                "ironclaw_product_workflow",
-                "ironclaw_runner",
-                "ironclaw",
-                "ironclaw_reborn_event_store",
-                "ironclaw_run_state",
-                "ironclaw_runtime_policy",
-                "ironclaw_scripts",
-                "ironclaw_tui",
-                "ironclaw_wasm",
-            ],
-        },
-        BoundaryRule {
             crate_name: "ironclaw_product_workflow",
             forbidden: vec![
                 "ironclaw_dispatcher",
@@ -2815,22 +2524,12 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // Product-neutral delivery orchestration consumes channel-host
-            // contracts but never a concrete channel or an application root.
-            crate_name: "ironclaw_channel_delivery",
-            forbidden: vec![
-                "ironclaw_reborn_composition",
-                "ironclaw",
-                "ironclaw_webui_v2",
-                "ironclaw_slack_v2_adapter",
-                "ironclaw_telegram_extension",
-            ],
-        },
-        BoundaryRule {
-            // Product auth is a Reborn contract/facade vocabulary. It may
-            // describe behavior-compatible v1 inventory, but implementation
-            // code must not reach into v1 routes, extension managers, secret
-            // stores, runtimes, or channel-specific stacks.
+            // Product auth is a Reborn contract/facade vocabulary plus the
+            // recipe-driven auth engine (extension-runtime workstream D). The
+            // engine owns token secret storage, so the Reborn-native
+            // `ironclaw_secrets` store is allowed; implementation code must
+            // still not reach into v1 routes, extension managers, runtimes,
+            // or channel-specific stacks.
             crate_name: "ironclaw_auth",
             forbidden: vec![
                 "ironclaw_legacy",
@@ -2866,7 +2565,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_runtime_policy",
                 "ironclaw_safety",
                 "ironclaw_scripts",
-                "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_storage",
                 "ironclaw_threads",
@@ -2874,7 +2572,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_tui",
                 "ironclaw_turns",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         // NOTE(webui-merge): the former `ironclaw_webui_v2` BoundaryRule was
@@ -2933,7 +2630,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_tui",
                 "ironclaw_turns",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
@@ -2972,7 +2668,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_threads",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
@@ -3016,7 +2711,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_threads",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
@@ -3058,7 +2752,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_secrets",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
@@ -3173,7 +2866,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_tui",
                 "ironclaw_turns",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
@@ -3342,12 +3034,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",
-                "ironclaw_telegram_v2_adapter",
+                "ironclaw_telegram_extension",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
@@ -3355,8 +3046,12 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             // normalization/rendering over the ProductAdapter DTO surface.
             // Host auth verification, credential resolution, delivery fanout,
             // workflow admission, and runtime/network authority stay outside
-            // the adapter crate.
-            crate_name: "ironclaw_slack_v2_adapter",
+            // the adapter crate. `ironclaw_host_api` is deliberately allowed:
+            // concrete extension crates depend on host_api /
+            // product_adapters CONTRACT types only (`RestrictedEgress`,
+            // `SecretHandle` — extension-runtime implementation.md §3), which
+            // the P4 `ChannelAdapter` signatures require.
+            crate_name: "ironclaw_slack_extension",
             forbidden: vec![
                 "ironclaw_legacy",
                 "ironclaw_authorization",
@@ -3371,7 +3066,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
                 "ironclaw_gateway",
-                "ironclaw_host_api",
                 "ironclaw_host_runtime",
                 "ironclaw_llm",
                 "ironclaw_loop_host",
@@ -3394,12 +3088,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_scripts",
                 "ironclaw_secrets",
                 "ironclaw_skills",
-                "ironclaw_telegram_v2_adapter",
+                "ironclaw_telegram_extension",
                 "ironclaw_threads",
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
@@ -3475,40 +3168,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_trust",
                 "ironclaw_tui",
                 "ironclaw_wasm",
-                "ironclaw_wasm_product_adapters",
-            ],
-        },
-        BoundaryRule {
-            crate_name: "ironclaw_wasm_product_adapters",
-            forbidden: vec![
-                "ironclaw_legacy",
-                "ironclaw_authorization",
-                "ironclaw_approvals",
-                "ironclaw_capabilities",
-                "ironclaw_conversations",
-                "ironclaw_dispatcher",
-                "ironclaw_engine",
-                "ironclaw_events",
-                "ironclaw_extensions",
-                "ironclaw_filesystem",
-                "ironclaw_gateway",
-                "ironclaw_host_runtime",
-                "ironclaw_mcp",
-                "ironclaw_memory",
-                "ironclaw_network",
-                "ironclaw_outbound",
-                "ironclaw_processes",
-                "ironclaw_reborn_event_store",
-                "ironclaw_resources",
-                "ironclaw_run_state",
-                "ironclaw_runtime_policy",
-                "ironclaw_safety",
-                "ironclaw_scripts",
-                "ironclaw_secrets",
-                "ironclaw_skills",
-                "ironclaw_threads",
-                "ironclaw_tui",
-                "ironclaw_turns",
             ],
         },
         BoundaryRule {
@@ -3687,7 +3346,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                // ironclaw_filesystem is permitted: FilesystemTurnStateStore
+                // ironclaw_filesystem is permitted: FilesystemTurnStateRowStore
                 // routes turn-coordination persistence through ScopedFilesystem
                 // under the universal-fs-dispatch rework (plan
                 // 2026-05-14-universal-fs-dispatch).
@@ -3868,13 +3527,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         reason: "runtime process management still depends on resource contracts currently classed with kernel behavior",
     },
     LayerMatrixException {
-        crate_name: "ironclaw_dispatcher",
-        dependency_name: "ironclaw_extensions",
-        introduced: "2026-07-09",
-        removes_in: "W7",
-        reason: "dispatcher still reaches extension routing until the kernel consolidation makes dispatcher an internal kernel module",
-    },
-    LayerMatrixException {
         crate_name: "ironclaw_event_projections",
         dependency_name: "ironclaw_turns",
         introduced: "2026-07-09",
@@ -3985,13 +3637,6 @@ const LAYER_MATRIX_EXCEPTIONS: &[LayerMatrixException] = &[
         introduced: "2026-07-09",
         removes_in: "W3.6",
         reason: "webui ingress still reaches composition until the composition webui module is folded into ingress and runtime handles are inverted",
-    },
-    LayerMatrixException {
-        crate_name: "ironclaw_reborn_migration",
-        dependency_name: "ironclaw_legacy",
-        introduced: "2026-07-09",
-        removes_in: "Tier B",
-        reason: "the migration app intentionally reads v1 state until the legacy root is retired",
     },
 ];
 

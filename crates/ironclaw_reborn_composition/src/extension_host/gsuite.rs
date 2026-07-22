@@ -17,10 +17,10 @@ use ironclaw_first_party_extensions::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, ExtensionId, HostApiError, NetworkScheme,
-    NetworkTargetPattern, RequestedTrustClass, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
+    NetworkTargetPattern, RequestedTrustClass, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, RuntimeCredentialRequirement,
     RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeDispatchErrorKind,
-    SecretHandle, TrustClass, VirtualPath,
+    SecretHandle, TrustClass, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
@@ -191,6 +191,7 @@ fn package_from_spec(spec: &GsuitePackageSpec) -> Result<ExtensionPackage, Exten
                 service: spec.service.to_string(),
             },
             host_apis: Vec::new(),
+            host_api_surfaces: Vec::new(),
             hooks: Vec::new(),
             capabilities,
         },
@@ -213,10 +214,10 @@ fn capability_manifest(
             "schemas/{}/{}.input.v1.json",
             spec.schema_prefix, capability.short_name
         ))?,
-        output_schema_ref: CapabilityProfileSchemaRef::new(format!(
+        output_schema_ref: Some(CapabilityProfileSchemaRef::new(format!(
             "schemas/{}/{}.output.v1.json",
             spec.schema_prefix, capability.short_name
-        ))?,
+        ))?),
         prompt_doc_ref: Some(CapabilityProfileSchemaRef::new(format!(
             "prompts/{}/{}.md",
             spec.schema_prefix, capability.short_name
@@ -227,6 +228,7 @@ fn capability_manifest(
         // special-case, not a manifest-declared allowlist.
         network_targets: Vec::new(),
         resource_profile: Some(gsuite_resource_profile()),
+        origin_gate_matrix: None,
     })
 }
 
@@ -238,7 +240,7 @@ fn runtime_credentials(
     Ok(vec![RuntimeCredentialRequirement {
         handle: SecretHandle::new(spec.credential_handle)?,
         source: RuntimeCredentialRequirementSource::ProductAuthAccount {
-            provider: RuntimeCredentialAccountProviderId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)?,
+            provider: VendorId::new(ironclaw_auth::GOOGLE_PROVIDER_ID)?,
             setup: RuntimeCredentialAccountSetup::OAuth {
                 scopes: provider_scopes.clone(),
             },

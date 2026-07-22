@@ -16,7 +16,6 @@ mod filesystem_store;
 mod ids;
 mod lifecycle;
 pub mod loop_exit;
-pub(crate) mod memory;
 mod origin;
 mod request;
 mod response;
@@ -25,6 +24,8 @@ pub mod runner;
 pub mod scope;
 mod status;
 mod store;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use admission::{
     AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
@@ -57,8 +58,7 @@ pub use external_tool_catalog::{
     InMemoryExternalToolCatalog, PendingExternalCall,
 };
 pub use filesystem_store::{
-    FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, FilesystemTurnStateStore,
-    FilesystemTurnStateStoreKind, TurnStateDurabilityPolicy,
+    FilesystemTurnStateBlockPersistence, FilesystemTurnStateRowStore, TurnStateStoreLimits,
 };
 pub use ids::{
     AcceptedMessageRef, CapabilityActivityId, GateRef, IdempotencyKey, LoopDiagnosticRef,
@@ -77,7 +77,6 @@ pub use loop_exit::{
     LoopExitEvidencePort, LoopExitMapping, LoopExitValidationDecision, LoopExitViolation,
     LoopExitViolationKind, LoopFailed, LoopFailureKind,
 };
-pub use memory::{InMemoryTurnStateStore, InMemoryTurnStateStoreLimits};
 pub use origin::{
     ProductTurnContext, RunOriginAdapter, TurnOriginKind, TurnOwner, TurnSurfaceType,
 };
@@ -104,9 +103,9 @@ pub use run_profile::{
 };
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
-    AdmissionRejection, AdmissionRejectionReason, BlockedReason, ModelInvalidOutputDetailReason,
-    SanitizedCancelReason, SanitizedFailure, TurnActiveRunRefState, TurnCapacityResource,
-    TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
+    AdmissionRejection, AdmissionRejectionReason, BlockedReason, GateKind,
+    ModelInvalidOutputDetailReason, SanitizedCancelReason, SanitizedFailure, TurnActiveRunRefState,
+    TurnCapacityResource, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
     is_recoverability_critical,
 };
 pub use store::{

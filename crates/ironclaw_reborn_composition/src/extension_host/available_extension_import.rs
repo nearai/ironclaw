@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ironclaw_extensions::{
     ExtensionAssetPath, ExtensionManifestRecord, ExtensionPackage, ExtensionRuntimeV2,
     ManifestSource,
@@ -5,6 +7,8 @@ use ironclaw_extensions::{
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ExtensionId, RuntimeKind, VirtualPath};
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, ProductWorkflowError};
+
+use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 use super::available_extensions::{
     AvailableExtensionAsset, AvailableExtensionAssetContent, AvailableExtensionPackage,
@@ -164,15 +168,14 @@ pub(crate) fn imported_extension_package(
             reason: format!("host port catalog rejected imported extension: {error}"),
         }
     })?;
-    let contracts =
-        ironclaw_host_runtime::default_host_api_contract_registry().map_err(|error| {
-            ProductWorkflowError::InvalidBindingRequest {
-                reason: format!("host API contract registry rejected imported extension: {error}"),
-            }
-        })?;
+    let contracts = product_extension_host_api_contract_registry().map_err(|error| {
+        ProductWorkflowError::InvalidBindingRequest {
+            reason: format!("host API contract registry rejected imported extension: {error}"),
+        }
+    })?;
     // Uploads are always validated as InstalledLocal. Only binary-compiled
     // packages may claim the HostBundled trust/runtime tier.
-    let record = ExtensionManifestRecord::from_toml_with_contracts(
+    let record = ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::InstalledLocal,
         &host_ports,
@@ -216,7 +219,7 @@ pub(crate) fn imported_extension_package(
     if let ExtensionRuntimeV2::Wasm { module } = &record.manifest().runtime {
         let module_bytes = files
             .iter()
-            .find(|(path, _)| path == module)
+            .find(|(path, _)| path.as_str() == module.as_str())
             .map(|(_, bytes)| bytes.as_slice())
             .unwrap_or_default();
         let is_component = module_bytes.len() >= 8
@@ -240,11 +243,16 @@ pub(crate) fn imported_extension_package(
             package.id.as_str(),
         )?,
         manifest_toml: record.raw_toml().to_string(),
+        resolved_manifest: Arc::new(record.resolved().clone()),
         source: ManifestSource::InstalledLocal,
         package,
         cleanup_requirements: Vec::new(),
         surface_kinds,
+        channel_directions: None,
+        channel_presentation: None,
         assets,
+        onboarding_override: None,
+        oauth_setup_override: None,
     })
 }
 
@@ -257,7 +265,9 @@ fn manifest_declared_asset_paths(
     }
     for capability in &manifest.capabilities {
         declared.push(capability.input_schema_ref.as_str().to_string());
-        declared.push(capability.output_schema_ref.as_str().to_string());
+        if let Some(output_schema_ref) = &capability.output_schema_ref {
+            declared.push(output_schema_ref.as_str().to_string());
+        }
         if let Some(prompt_doc_ref) = &capability.prompt_doc_ref {
             declared.push(prompt_doc_ref.as_str().to_string());
         }
@@ -413,7 +423,7 @@ output_schema_ref = "schemas/search.output.json"
     #[tokio::test]
     async fn filesystem_catalog_skips_reserved_host_bundled_extension_ids() {
         let fs = InMemoryBackend::default();
-        for id in ["gmail", "slack_bot"] {
+        for id in ["gmail"] {
             fs.write_file(
                 &VirtualPath::new(format!("/system/extensions/{id}/manifest.toml")).unwrap(),
                 b"not parsed because the id is host-bundled",
@@ -428,7 +438,6 @@ output_schema_ref = "schemas/search.output.json"
         .await
         .unwrap();
         assert_eq!(catalog.search("").count(), 0);
-        assert_eq!(catalog.search("slack_bot").count(), 0);
     }
 
     #[tokio::test]
@@ -603,9 +612,9 @@ prompt_doc_ref = "prompts/run.md"
         ] {
             let host_ports =
                 ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog");
-            let contracts = ironclaw_host_runtime::default_host_api_contract_registry()
-                .expect("host API contracts");
-            let record = ExtensionManifestRecord::from_toml_with_contracts(
+            let contracts =
+                product_extension_host_api_contract_registry().expect("host API contracts");
+            let record = ExtensionManifestRecord::from_toml(
                 manifest,
                 ManifestSource::InstalledLocal,
                 &host_ports,
@@ -655,7 +664,16 @@ prompt_doc_ref = "prompts/run.md"
                 .to_vec(),
         )])
         .expect_err("first-party trust claims must be rejected");
-        assert!(format!("{error}").contains("not allowed to assert trust"));
+        // The bundled github manifest is v3, so the rejection comes from the
+        // v3 reader's source/trust gate ("trust `FirstPartyRequested` is not
+        // allowed for this manifest source"); the v2 wording is "not allowed
+        // to assert trust". Pin the shared semantic: the error names trust
+        // and ties the rejection to the manifest source.
+        let message = format!("{error}");
+        assert!(
+            message.contains("trust") && message.contains("not allowed for this manifest source"),
+            "import must reject the first-party trust claim for an InstalledLocal source: {error}"
+        );
     }
 
     #[test]

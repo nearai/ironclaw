@@ -6,10 +6,11 @@ use ironclaw_approvals::{ApprovalResolver, LeaseApproval};
 use ironclaw_authorization::*;
 use ironclaw_capabilities::*;
 use ironclaw_dispatcher::{
-    RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher, RuntimeExecutor,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
+    RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_run_state::*;
@@ -20,14 +21,12 @@ use support::*;
 
 #[tokio::test]
 async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() {
-    let adapter = Arc::new(RecordingRuntimeAdapter::new(
-        json!({"via":"runtime-dispatcher"}),
-    ));
-    let (registry, dispatcher, governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
+    let (registry, dispatcher, governor, events, adapter) =
+        runtime_dispatcher_stack(json!({"via":"runtime-dispatcher"}));
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let authorizer = GrantAuthorizer::new();
     let host =
-        CapabilityHost::new(registry.as_ref(), &dispatcher, &authorizer).with_run_state(&run_state);
+        capability_host(registry.as_ref(), &dispatcher, &authorizer).with_run_state(&run_state);
     let context = execution_context(CapabilitySet {
         grants: vec![dispatch_grant()],
     });
@@ -42,7 +41,6 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -86,12 +84,12 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
 
 #[tokio::test]
 async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_dispatcher() {
-    let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"approved":true})));
-    let (registry, dispatcher, _governor, events) = runtime_dispatcher_stack(Arc::clone(&adapter));
+    let (registry, dispatcher, _governor, events, adapter) =
+        runtime_dispatcher_stack(json!({"approved":true}));
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -106,7 +104,6 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -124,7 +121,7 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
         .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -135,7 +132,6 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap();
@@ -175,7 +171,6 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
             capability_id: capability_id(),
             estimate: ResourceEstimate::default().set_output_bytes(1_024),
             input: json!({"message":"approved"}),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -191,12 +186,12 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
 
 #[tokio::test]
 async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_or_lease_claim() {
-    let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"must_not":"dispatch"})));
-    let (registry, dispatcher, _governor, _events) = runtime_dispatcher_stack(Arc::clone(&adapter));
+    let (registry, dispatcher, _governor, _events, adapter) =
+        runtime_dispatcher_stack(json!({"must_not":"dispatch"}));
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -211,7 +206,6 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -228,7 +222,7 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
     let wrong_context = context_for_user_with_invocation("other-user", invocation_id);
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -239,7 +233,6 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -277,12 +270,12 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
 
 #[tokio::test]
 async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
-    let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"must_not":"dispatch"})));
-    let (registry, dispatcher, _governor, _events) = runtime_dispatcher_stack(Arc::clone(&adapter));
+    let (registry, dispatcher, _governor, _events, adapter) =
+        runtime_dispatcher_stack(json!({"must_not":"dispatch"}));
     let run_state = ironclaw_run_state::in_memory_backed_run_state_store();
     let approval_requests = ironclaw_run_state::in_memory_backed_approval_request_store();
     let leases = in_memory_backed_capability_lease_store();
-    let block_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
+    let block_host = capability_host(registry.as_ref(), &dispatcher, &ApprovalAuthorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests);
     let context = execution_context(CapabilitySet::default());
@@ -297,7 +290,6 @@ async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
             capability_id: capability_id(),
             estimate: estimate.clone(),
             input: input.clone(),
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -319,7 +311,7 @@ async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
     .unwrap();
 
     let resume_authorizer = GrantAuthorizer::new();
-    let resume_host = CapabilityHost::new(registry.as_ref(), &dispatcher, &resume_authorizer)
+    let resume_host = capability_host(registry.as_ref(), &dispatcher, &resume_authorizer)
         .with_run_state(&run_state)
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
@@ -330,7 +322,6 @@ async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
             capability_id: capability_id(),
             estimate,
             input,
-            trust_decision: trust_decision(),
         })
         .await
         .unwrap_err();
@@ -361,13 +352,15 @@ struct RecordedRuntimeRequest {
 
 struct RecordingRuntimeAdapter {
     output: Value,
+    governor: Arc<InMemoryResourceGovernor>,
     requests: Mutex<Vec<RecordedRuntimeRequest>>,
 }
 
 impl RecordingRuntimeAdapter {
-    fn new(output: Value) -> Self {
+    fn new(output: Value, governor: Arc<InMemoryResourceGovernor>) -> Self {
         Self {
             output,
+            governor,
             requests: Mutex::new(Vec::new()),
         }
     }
@@ -382,15 +375,10 @@ impl RecordingRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
-    fn supports_lane(&self, lane: RuntimeLane) -> bool {
-        lane == RuntimeLane::Wasm
-    }
-
+impl BoundCapabilityAdapter for RecordingRuntimeAdapter {
     async fn dispatch_json(
         &self,
-        _lane: RuntimeLane,
-        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedRuntimeRequest {
             capability_id: request.capability_id.clone(),
@@ -405,21 +393,21 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunt
             .set_output_bytes(serde_json::to_vec(&output).unwrap().len() as u64);
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
-            None => request
+            None => self
                 .governor
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| DispatchError::Wasm {
                     kind: RuntimeDispatchErrorKind::Resource,
-                    safe_summary: None,
+                    model_visible_cause: None,
                 })?,
         };
         let output_bytes = usage.output_bytes;
-        let receipt = request
+        let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::Resource,
-                safe_summary: None,
+                model_visible_cause: None,
             })?;
         Ok(RuntimeAdapterResult {
             output,
@@ -431,33 +419,41 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingRunt
     }
 }
 
-type RecordingDispatcher = RuntimeDispatcher<
-    'static,
-    DiskFilesystem,
-    InMemoryResourceGovernor,
-    Arc<RecordingRuntimeAdapter>,
->;
+struct SingleCapabilityResolver {
+    capability_id: CapabilityId,
+    resolved: ResolvedCapability,
+}
+
+impl ToolResolver for SingleCapabilityResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        (capability_id == &self.capability_id).then(|| self.resolved.clone())
+    }
+}
 
 fn runtime_dispatcher_stack(
-    adapter: Arc<RecordingRuntimeAdapter>,
+    output: Value,
 ) -> (
     Arc<ironclaw_extensions::ExtensionRegistry>,
-    RecordingDispatcher,
+    RuntimeDispatcher<'static, InMemoryResourceGovernor>,
     Arc<InMemoryResourceGovernor>,
     InMemoryEventSink,
+    Arc<RecordingRuntimeAdapter>,
 ) {
     let registry = Arc::new(registry_with_echo_capability());
-    let filesystem = Arc::new(DiskFilesystem::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        Arc::clone(&registry),
-        filesystem,
-        Arc::clone(&governor),
-        adapter,
-    )
-    .with_event_sink_arc(Arc::new(events.clone()));
-    (registry, dispatcher, governor, events)
+    let adapter = Arc::new(RecordingRuntimeAdapter::new(output, Arc::clone(&governor)));
+    let resolver: Arc<dyn ToolResolver> = Arc::new(SingleCapabilityResolver {
+        capability_id: capability_id(),
+        resolved: ResolvedCapability {
+            provider: ExtensionId::new("echo").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            adapter: Arc::clone(&adapter) as Arc<dyn BoundCapabilityAdapter>,
+        },
+    });
+    let dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&governor))
+        .with_event_sink_arc(Arc::new(events.clone()));
+    (registry, dispatcher, governor, events, adapter)
 }
 
 async fn approve_dispatch(

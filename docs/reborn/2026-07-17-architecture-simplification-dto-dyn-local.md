@@ -1434,7 +1434,7 @@ carries **~108K LOC of product/transport code** — the core of #6168:
 | **Slack** | `ironclaw_slack_v2_adapter` (protocol, ~3K) + `composition/src/slack/` (**~40.6K** host: serve / delivery / egress / setup / identity) | one `SlackProductAdapter` |
 | **Telegram** | `ironclaw_telegram_v2_adapter` (~2.7K) + ~69 refs in composition | one `TelegramProductAdapter` (closest to clean today — the reference shape) |
 | **OpenAI-compat API** | `ironclaw_reborn_openai_compat` (~7.5K) + ~441 refs in composition | one `OpenAiCompatProductAdapter` |
-| **CLI** | `ironclaw_reborn_cli` over the `RebornRuntime` facade | CLI adapter over `ProductSurface` (`RebornRuntime` is today's proto-`ProductSurface`) |
+| **CLI** | canonical `ironclaw` package over the `RebornRuntime` facade | CLI adapter over `ProductSurface` (`RebornRuntime` is today's proto-`ProductSurface`) |
 
 Plus cross-cutting product concerns currently inside composition that belong to the
 adapters (their deliver / auth side) or the kernel, not the assembler:
@@ -2209,15 +2209,12 @@ open PR not yet on `main`.
   repointed to `Filesystem*Store<InMemoryBackend>`: approval stores (#6195,
   #6203), capability-lease (#6197), process stores (#6200, the §9 landed
   exception), run-state (#6203), budget-gate (#6210), outbound-state (#6212),
-  triggered-run-delivery (#6213). The `InMemory*Store` allowlist ratchet is frozen
-  (#6204, `reborn_inmemory_store_ratchet.rs`) and annotated with per-entry
-  achievable-floor status (#6216). **Deferred, by the §9 caveat:** the turns
+  triggered-run-delivery (#6213). The former `InMemory*Store` allowlist ratchet
+  was removed after its tracked entries were eliminated. **Deferred, by the §9 caveat:** the turns
   cluster (`InMemoryTurnStateStore` + checkpoint / loop-checkpoint /
   instruction-materialization) — the trickiest case, gated behind Slice 0's
-  reference model. Still allowlisted besides turns: build-first stores with no
-  filesystem variant yet (e.g. `InMemorySessionStore`) and a few domain stores
-  (subagent-goal, openai-compat-ref, extension-installation, secret(s), Slack
-  route / DM).
+  reference model. The follow-on ratchet cleanup removed the remaining
+  allowlisted stores, including the former session-store exception.
 - **Slice B — `Local*` → config (§4.4), renames + ratchets done; config
   collapse pending.** Bucket 2/3 renames landed: `LocalFilesystem`→`DiskFilesystem`
   (#6209), `LocalHostProcessPort`→`HostProcessPort` (#6206),

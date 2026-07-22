@@ -127,12 +127,17 @@ fn asset_manifest(extension_id: &str) -> ironclaw_extensions::ExtensionManifest 
         "gmail" => include_str!("../../ironclaw_first_party_extensions/assets/gmail/manifest.toml"),
         other => panic!("unknown GSuite asset manifest {other}"),
     };
-    ironclaw_extensions::ExtensionManifest::parse(
+    // Parse through the single record entry point so this test follows the
+    // production path for both manifest schemas (v3 today).
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
         manifest_toml,
         ManifestSource::HostBundled,
         &ironclaw_host_api::HostPortCatalog::empty(),
+        None,
+        &capability_provider_contracts(),
     )
-    .unwrap()
+    .unwrap();
+    ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone()).unwrap()
 }
 
 fn asset_schema(path: &str) -> serde_json::Value {
@@ -318,7 +323,10 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                     capability.effects.clone(),
                     capability.default_permission,
                     capability.input_schema_ref.as_str().to_string(),
-                    capability.output_schema_ref.as_str().to_string(),
+                    capability
+                        .output_schema_ref
+                        .as_ref()
+                        .map(|output| output.as_str().to_string()),
                     capability
                         .prompt_doc_ref
                         .as_ref()
@@ -352,6 +360,17 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                 )
             })
             .collect::<Vec<_>>();
+        // The account-setup scope list is the package's recipe ceiling —
+        // uniform across every credential (manifest v3); per-tool least
+        // privilege lives in provider_scopes.
+        let mut ceiling: Vec<String> = Vec::new();
+        for capability in spec.capabilities {
+            for scope in capability.required_scopes {
+                if !ceiling.iter().any(|existing| existing == scope) {
+                    ceiling.push((*scope).to_string());
+                }
+            }
+        }
         let expected = spec
             .capabilities
             .iter()
@@ -369,10 +388,8 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                         "schemas/{}/{}.input.v1.json",
                         spec.schema_prefix, capability.short_name
                     ),
-                    format!(
-                        "schemas/{}/{}.output.v1.json",
-                        spec.schema_prefix, capability.short_name
-                    ),
+                    // Manifest v3 declares no output schema refs.
+                    None,
                     Some(format!(
                         "prompts/{}/{}.md",
                         spec.schema_prefix, capability.short_name
@@ -380,7 +397,7 @@ async fn bundled_gsuite_asset_manifests_match_package_specs() {
                     vec![(
                         spec.credential_handle.to_string(),
                         ironclaw_auth::GOOGLE_PROVIDER_ID.to_string(),
-                        required_scopes.clone(),
+                        ceiling.clone(),
                         required_scopes,
                         spec.credential_host_pattern.to_string(),
                     )],
@@ -801,4 +818,15 @@ async fn bundled_gsuite_handler_returns_not_configured_tool_result_when_no_googl
          embed its own restart step on top of the appended apply_step_text): {text}"
     );
     assert!(!text.contains("restarts automatically"), "text: {text}");
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

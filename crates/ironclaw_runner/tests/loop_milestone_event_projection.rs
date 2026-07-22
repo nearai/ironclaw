@@ -37,14 +37,15 @@ use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     SessionThreadService, ThreadScope,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, CapabilityActivityId, EventCursor,
-    GetRunStateRequest, InMemoryRunProfileResolver, InMemoryTurnStateStore, LoopCompletionKind,
-    LoopExitId, LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCheckpointId,
-    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
-    TurnStateStore, TurnStatus,
+    FilesystemTurnStateRowStore, GetRunStateRequest, InMemoryRunProfileResolver,
+    LoopCompletionKind, LoopExitId, LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest,
+    RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
+    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
+    TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind, FinalizeAssistantMessage,
         HookDecisionSummary, InstructionSafetyContext, LoopCheckpointKind, LoopDriverId,
@@ -681,7 +682,7 @@ struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<FilesystemCheckpointStateStore<InMemoryBackend>>,
     turn_state_store: Arc<StaticTurnStateStore>,
-    loop_checkpoint_store: Arc<InMemoryTurnStateStore>,
+    loop_checkpoint_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     gateway: Arc<ControlledGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     thread_scope: ThreadScope,
@@ -750,7 +751,7 @@ impl HostFixture {
     ) -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let checkpoint_state_store = in_memory_checkpoint_state_store();
-        let loop_checkpoint_store = Arc::new(InMemoryTurnStateStore::default());
+        let loop_checkpoint_store = Arc::new(in_memory_turn_state_store());
         let gateway = Arc::new(gateway);
         let thread_scope = ThreadScope {
             tenant_id: tenant_id(),

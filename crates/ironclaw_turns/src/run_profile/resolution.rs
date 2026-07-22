@@ -642,7 +642,7 @@ mod tests {
     use super::*;
     use ironclaw_host_api::{
         ApprovalRequestId, CorrelationId, DispatchInputIssueCode, ExtensionId, GateRecord,
-        RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
+        RuntimeCredentialAccountSetup, VendorId,
     };
 
     fn result_ref() -> LoopResultRef {
@@ -659,7 +659,7 @@ mod tests {
 
     fn credential_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+            provider: VendorId::new("github").unwrap(),
             setup: RuntimeCredentialAccountSetup::ManualToken,
             requester_extension: ExtensionId::new("github").unwrap(),
             provider_scopes: vec!["repo".to_string()],

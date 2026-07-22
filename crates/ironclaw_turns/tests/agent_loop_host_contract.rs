@@ -7,14 +7,15 @@ use chrono::{TimeZone, Utc};
 use ironclaw_host_api::{
     AgentId, Blocked, CapabilityId, ProjectId, Resolution, RuntimeKind, TenantId, ThreadId, UserId,
 };
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
-    DefaultTurnCoordinator, IdempotencyKey, InMemoryTurnStateStore, LoopBlocked, LoopBlockedKind,
-    LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef,
-    ProductTurnContext, ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCheckpointId, TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnStatus,
+    DefaultTurnCoordinator, IdempotencyKey, LoopBlocked, LoopBlockedKind, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, ProductTurnContext,
+    ReplyTargetBindingRef, RunOriginAdapter, RunProfileRequest, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCheckpointId,
+    TurnCoordinator, TurnLeaseToken, TurnOriginKind, TurnOwner, TurnRunId, TurnRunState,
+    TurnRunnerId, TurnStatus,
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
@@ -22,10 +23,10 @@ use ironclaw_turns::{
         CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation, CapabilityProgress,
         CapabilitySurfaceVersion, CommunicationRuntimeContext, ConcurrencyHint,
         ConnectedChannelSummary, ConnectedChannelsState, DeliveryTargetState,
-        DeliveryTargetSummary, FinalizeAssistantMessage, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InMemoryLoopHostMilestoneSink, InstructionBundleBuilder, InstructionBundleFingerprint,
-        InstructionBundleRequest, InstructionMaterializationStore, InstructionSafetyContext,
+        DeliveryTargetSummary, EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
+        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
+        InstructionMaterializationStore, InstructionSafetyContext,
         LOOP_CONTEXT_SNIPPET_MODEL_CONTENT_MAX_BYTES, LoopCancellationPort, LoopCancellationSignal,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
@@ -36,11 +37,12 @@ use ironclaw_turns::{
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
         LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway,
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary,
-        LoopTranscriptPort, ModelWorkOutcome, ModelWorkRequest, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopRuntimeContext, LoopSafeSummary, LoopTranscriptPort, ModelWorkOutcome,
+        ModelWorkRequest, ParentLoopOutput, PromptMode, PromptSkillContextMetadata,
+        SkillTrustLevel, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -402,7 +404,7 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
                     safe_summary: "alpha skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "alpha".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 },
                 LoopContextSnippet {
@@ -1011,7 +1013,7 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
                     safe_summary: "GitHub skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "github".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 }],
                 memory_snippets: Vec::new(),
@@ -1035,7 +1037,7 @@ async fn instruction_bundle_materializes_oversized_snippet_content_separate_from
 fn skill_instruction_request(
     model_content: impl Into<String>,
     safe_summary: impl Into<String>,
-    trust_level: &str,
+    trust_level: SkillTrustLevel,
 ) -> InstructionBundleRequest {
     InstructionBundleRequest {
         context_bundle: LoopContextBundle {
@@ -1048,7 +1050,7 @@ fn skill_instruction_request(
                 safe_summary: safe_summary.into(),
                 metadata: Some(LoopContextSnippetMetadata {
                     source_name: "github".to_string(),
-                    trust_level: trust_level.to_string(),
+                    trust_level,
                 }),
             }],
             memory_snippets: Vec::new(),
@@ -1075,7 +1077,7 @@ async fn instruction_bundle_rejects_empty_model_content() {
                     safe_summary: "empty skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "empty".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 }],
                 memory_snippets: Vec::new(),
@@ -1109,7 +1111,7 @@ async fn instruction_bundle_rejects_oversized_model_content() {
                     safe_summary: "oversized skill".to_string(),
                     metadata: Some(LoopContextSnippetMetadata {
                         source_name: "oversized".to_string(),
-                        trust_level: "trusted".to_string(),
+                        trust_level: SkillTrustLevel::Trusted,
                     }),
                 }],
                 memory_snippets: Vec::new(),
@@ -1141,7 +1143,7 @@ async fn instruction_bundle_allows_security_vocabulary_in_model_content() {
         .build(skill_instruction_request(
             model_content.clone(),
             "Security review skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .unwrap();
 
@@ -1166,7 +1168,7 @@ async fn instruction_bundle_allows_trusted_skill_credential_shaped_value() {
         .build(skill_instruction_request(
             body.clone(),
             "GitHub skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .expect("trusted skill body must bypass content checks after #5169");
 
@@ -1186,7 +1188,7 @@ async fn instruction_bundle_allows_trusted_skill_authorization_scheme_value() {
         .build(skill_instruction_request(
             "Use Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZTEyMzQ",
             "GitHub skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .expect("trusted skill body must bypass content checks after #5169");
 }
@@ -1198,7 +1200,7 @@ async fn instruction_bundle_rejects_trusted_skill_security_vocabulary_in_summary
         .build(skill_instruction_request(
             "Use the GitHub API with an Authorization header.",
             "Use Authorization: Bearer",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .unwrap_err();
 
@@ -1212,7 +1214,7 @@ async fn instruction_bundle_rejects_untrusted_skill_security_vocabulary() {
         .build(skill_instruction_request(
             "Use the GitHub API with an Authorization: Bearer header.",
             "GitHub skill",
-            "installed",
+            SkillTrustLevel::Installed,
         ))
         .unwrap_err();
 
@@ -1240,7 +1242,7 @@ async fn instruction_bundle_does_not_extend_trust_to_an_untrusted_chain_loaded_c
                         safe_summary: "code-review skill".to_string(),
                         metadata: Some(LoopContextSnippetMetadata {
                             source_name: "code-review".to_string(),
-                            trust_level: "trusted".to_string(),
+                            trust_level: SkillTrustLevel::Trusted,
                         }),
                     },
                     LoopContextSnippet {
@@ -1250,7 +1252,7 @@ async fn instruction_bundle_does_not_extend_trust_to_an_untrusted_chain_loaded_c
                         safe_summary: "github companion skill".to_string(),
                         metadata: Some(LoopContextSnippetMetadata {
                             source_name: "github".to_string(),
-                            trust_level: "installed".to_string(),
+                            trust_level: SkillTrustLevel::Installed,
                         }),
                     },
                 ],
@@ -1277,7 +1279,11 @@ async fn instruction_bundle_rejects_untrusted_skill_host_path_and_secret_value()
         "Use Authorization: Bearer ghp_secretvalue123",
     ] {
         let error = InstructionBundleBuilder::new(context.clone())
-            .build(skill_instruction_request(body, "GitHub skill", "installed"))
+            .build(skill_instruction_request(
+                body,
+                "GitHub skill",
+                SkillTrustLevel::Installed,
+            ))
             .unwrap_err();
         assert_eq!(
             error.kind,
@@ -1324,7 +1330,7 @@ async fn instruction_bundle_allows_trusted_skill_host_path() {
         .build(skill_instruction_request(
             "Read /Users/alice/.config/token before calling GitHub",
             "GitHub skill",
-            "trusted",
+            SkillTrustLevel::Trusted,
         ))
         .expect("trusted skill body must bypass the host-path check after #5169");
 }
@@ -1468,7 +1474,7 @@ async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
             },
         ],
     };
-    let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let port = HostManagedLoopPromptPort::new(
         host.context.clone(),
         host.clone(),
@@ -1735,7 +1741,7 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
         host.milestone_sink.clone(),
     )
     .with_instruction_materialization_store(Arc::new(
-        InMemoryInstructionMaterializationStore::default(),
+        EphemeralInstructionMaterializationStore::default(),
     ));
 
     let bundle = port
@@ -1771,7 +1777,7 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
             if skill_context.as_slice() == [PromptSkillContextMetadata {
                 ordinal: 0,
                 source_name: "alpha".to_string(),
-                trust_level: "trusted".to_string(),
+                trust_level: SkillTrustLevel::Trusted,
             }]
     ));
 }
@@ -2051,7 +2057,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
         }],
     };
-    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let materialization_store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let port = HostManagedLoopPromptPort::new(
         host.context.clone(),
         host.clone(),
@@ -2811,6 +2817,30 @@ struct HangingLoopModelGateway {
     delay: std::time::Duration,
 }
 
+struct ProgressingLoopModelGateway;
+
+#[async_trait]
+impl LoopModelGateway for ProgressingLoopModelGateway {
+    async fn stream_model(
+        &self,
+        _request: LoopModelGatewayRequest,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        panic!("progress-aware entry point must be used")
+    }
+
+    async fn stream_model_with_progress(
+        &self,
+        request: LoopModelGatewayRequest,
+        progress_sink: Arc<dyn LoopModelProgressSink>,
+    ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        for text in ["one", "one two", "one two three"] {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            progress_sink.model_text_update(text.to_string()).await;
+        }
+        Ok(success_response(&request.context))
+    }
+}
+
 #[async_trait]
 impl LoopModelGateway for HangingLoopModelGateway {
     async fn stream_model(
@@ -2861,6 +2891,36 @@ async fn host_managed_model_port_times_out_a_hung_gateway() {
             .any(|milestone| milestone.kind.kind_name() == "model_failed"),
         "a timed-out model call must emit a model_failed milestone"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn host_managed_model_port_allows_long_calls_that_keep_streaming_progress() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port = HostManagedLoopModelPort::new(
+        context.clone(),
+        Arc::new(ProgressingLoopModelGateway),
+        milestone_sink,
+    );
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            inline_messages: Vec::new(),
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+            }],
+            surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
+            model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+            capability_view: None,
+        })
+        .await
+        .expect("progress must reset the model-call idle timeout");
+
+    assert!(matches!(
+        response.output,
+        ParentLoopOutput::AssistantReply(_)
+    ));
 }
 
 struct RecordingAgentLoopHost {
@@ -2954,7 +3014,7 @@ impl RecordingAgentLoopHost {
                 .strip_prefix("skill:")
                 .map(|source_name| LoopContextSnippetMetadata {
                     source_name: source_name.to_string(),
-                    trust_level: "trusted".to_string(),
+                    trust_level: SkillTrustLevel::Trusted,
                 });
         self.context_instruction_snippets.push(LoopContextSnippet {
             snippet_ref,
@@ -3275,7 +3335,7 @@ async fn claimed_run_context() -> LoopRunContext {
         Some(ProjectId::new("project-loop").unwrap()),
         ThreadId::new("thread-loop-host").unwrap(),
     );
-    let store = Arc::new(InMemoryTurnStateStore::default());
+    let store = Arc::new(in_memory_turn_state_store());
     let coordinator = DefaultTurnCoordinator::new(store.clone());
     let response = coordinator
         .submit_turn(SubmitTurnRequest {
@@ -4202,6 +4262,7 @@ async fn instruction_bundle_runtime_communication_renders_all_fields() {
                     name: "Slack".to_string(),
                     authenticated: true,
                     active: true,
+                    presentation: None,
                 }]),
                 delivery_target: DeliveryTargetState::Set(DeliveryTargetSummary {
                     display_name: "#general".to_string(),

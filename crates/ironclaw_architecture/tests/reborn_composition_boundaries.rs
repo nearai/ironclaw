@@ -37,13 +37,10 @@ const SUBSTRATE_CRATES: &[&str] = &[
     "ironclaw_loop_host",
     "ironclaw_runner",
     "ironclaw_reborn_openai_compat",
-    "ironclaw_channel_host",
-    "ironclaw_channel_delivery",
     "ironclaw_telegram_extension",
     "ironclaw_product_adapters",
     "ironclaw_product_workflow",
     "ironclaw_triggers",
-    "ironclaw_wasm_product_adapters",
 ];
 
 #[test]
@@ -168,29 +165,6 @@ fn extension_host_cluster_stays_internal() {
         assert!(
             !has_module_decl(&lib, &root_decl) && !has_module_decl(&lib, &public_root_decl),
             "{module} must not be reintroduced as a crate-root module"
-        );
-    }
-}
-
-#[test]
-fn legacy_main_does_not_compose_reborn_runtime() {
-    let root = workspace_root();
-    let legacy_main =
-        std::fs::read_to_string(root.join("src/main.rs")).expect("legacy main.rs readable");
-
-    for forbidden in [
-        "ironclaw_reborn_composition",
-        "ironclaw_reborn_cli",
-        "build_reborn_runtime",
-        "build_reborn_services",
-        "RebornBuildInput",
-        "RebornRuntimeInput",
-        "RebornCompositionProfile",
-    ] {
-        assert!(
-            !legacy_main.contains(forbidden),
-            "legacy src/main.rs must stay on the v1/AppBuilder path and must not compose \
-             Reborn runtime startup directly; found `{forbidden}`"
         );
     }
 }
@@ -324,7 +298,6 @@ const EXTENSION_HOST_INTERNAL_MODULES: &[&str] = &[
     "bundled_skills",
     "extension_activation_credentials",
     "extension_credential_requirements",
-    "extension_installation_store",
     "extension_lifecycle",
     "extension_lifecycle_capabilities",
     "extension_lifecycle_capabilities_auth_tests",

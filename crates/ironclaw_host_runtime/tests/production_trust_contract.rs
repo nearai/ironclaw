@@ -2,11 +2,11 @@ mod support;
 
 use support::legacy_capability_fixture_to_v2;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome,
@@ -35,7 +35,7 @@ fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRu
 #[tokio::test]
 async fn production_runtime_uses_host_policy_decision_instead_of_request_claims() {
     let registry = Arc::new(registry_with_manifest(LOCAL_INSTALLED_MANIFEST));
-    let dispatcher = Arc::new(CountingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let runtime = DefaultHostRuntime::new(
         Arc::clone(&registry),
@@ -63,7 +63,7 @@ async fn production_runtime_uses_host_policy_decision_instead_of_request_claims(
         other => panic!("expected Completed outcome, got {other:?}"),
     }
     assert_eq!(
-        dispatcher.count(),
+        dispatcher.call_count(),
         1,
         "host-owned trust policy should supply the effective decision before authorization"
     );
@@ -72,7 +72,7 @@ async fn production_runtime_uses_host_policy_decision_instead_of_request_claims(
 #[tokio::test]
 async fn trust_downgrade_denies_future_invocation_before_dispatch_side_effects() {
     let registry = Arc::new(registry_with_manifest(LOCAL_INSTALLED_MANIFEST));
-    let dispatcher = Arc::new(CountingDispatcher::default());
+    let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
     let policy = Arc::new(privileged_local_manifest_policy());
     let runtime = DefaultHostRuntime::new(
@@ -96,7 +96,7 @@ async fn trust_downgrade_denies_future_invocation_before_dispatch_side_effects()
         matches!(first_outcome, RuntimeCapabilityOutcome::Completed(_)),
         "first invocation should use the host policy's privileged decision"
     );
-    assert_eq!(dispatcher.count(), 1);
+    assert_eq!(dispatcher.call_count(), 1);
 
     policy
         .mutate_with(
@@ -124,7 +124,7 @@ async fn trust_downgrade_denies_future_invocation_before_dispatch_side_effects()
 
     assert_authorization_failed(second_outcome);
     assert_eq!(
-        dispatcher.count(),
+        dispatcher.call_count(),
         1,
         "downgraded trust must fail closed before any second dispatch side effect"
     );
@@ -140,45 +140,21 @@ fn assert_authorization_failed(outcome: RuntimeCapabilityOutcome) {
     }
 }
 
-#[derive(Default)]
-struct CountingDispatcher {
-    count: Mutex<usize>,
-}
-
-impl CountingDispatcher {
-    fn count(&self) -> usize {
-        *self
-            .count
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-#[async_trait]
-impl CapabilityDispatcher for CountingDispatcher {
-    async fn dispatch_json(
-        &self,
-        request: CapabilityDispatchRequest,
-    ) -> Result<CapabilityDispatchResult, DispatchError> {
-        *self
-            .count
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
-        Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
-            provider: extension_id(),
-            runtime: RuntimeKind::Wasm,
-            output: json!({"ok": true}),
-            display_preview: None,
-            usage: ResourceUsage::default(),
-            receipt: ResourceReceipt {
-                id: ResourceReservationId::new(),
-                scope: request.scope,
-                status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
-                actual: Some(ResourceUsage::default()),
-            },
-        })
+fn dispatch_result() -> CapabilityDispatchResult {
+    CapabilityDispatchResult {
+        capability_id: capability_id(),
+        provider: extension_id(),
+        runtime: RuntimeKind::Wasm,
+        output: json!({"ok": true}),
+        display_preview: None,
+        usage: ResourceUsage::default(),
+        receipt: ResourceReceipt {
+            id: ResourceReservationId::new(),
+            scope: ResourceScope::system(),
+            status: ReservationStatus::Reconciled,
+            estimate: ResourceEstimate::default(),
+            actual: Some(ResourceUsage::default()),
+        },
     }
 }
 
@@ -200,6 +176,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -249,7 +226,7 @@ fn execution_context_with_dispatch_grant(trust: TrustClass) -> ExecutionContext 
             max_invocations: None,
         },
     });
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -257,7 +234,9 @@ fn execution_context_with_dispatch_grant(trust: TrustClass) -> ExecutionContext 
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn capability_id() -> CapabilityId {
@@ -290,3 +269,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

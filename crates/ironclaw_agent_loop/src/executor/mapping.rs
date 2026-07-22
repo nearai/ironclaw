@@ -3,7 +3,7 @@ use ironclaw_turns::{
     LoopBlockedKind, LoopFailureKind, SanitizedFailure,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind,
-        LoopCheckpointKind, LoopGateKind,
+        LoopCheckpointKind, LoopGateKind, LoopSafeSummary, sanitize_model_visible_text,
     },
 };
 
@@ -118,13 +118,39 @@ pub(super) fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecu
     if error.kind == AgentLoopHostErrorKind::Cancelled {
         return AgentLoopExecutorError::Cancelled;
     }
-    tracing::warn!(
-        kind = error.kind.as_str(),
-        safe_summary = error.safe_summary.as_str(),
-        "capability host error mapped to HostUnavailable"
-    );
-    AgentLoopExecutorError::HostUnavailable {
+    // Fail soft on a malformed summary: a summary that fails strict validation
+    // (e.g. contains `/`, `{`) must NOT bork the run. Degrade to a canned
+    // fallback and carry the real cause on the model-visible detail channel so
+    // the failure explainer/runner still sees why the call failed. debug! only
+    // — info!/warn! corrupt the REPL/TUI (see repo CLAUDE.md).
+    let raw_summary = error.safe_summary;
+    let (safe_summary, rejected_summary_detail) = match LoopSafeSummary::new(raw_summary.clone()) {
+        Ok(summary) => (summary, None),
+        Err(validation_error) => {
+            tracing::debug!(
+                kind = error.kind.as_str(),
+                validation_error = %validation_error,
+                "capability host error summary rejected; using fallback"
+            );
+            (
+                LoopSafeSummary::capability_failure_summary(raw_summary.clone()),
+                Some(sanitize_model_visible_text(raw_summary)),
+            )
+        }
+    };
+    let detail = error.detail.or(rejected_summary_detail);
+    if detail.is_none() && error.reason_kind.is_none() && error.diagnostic_ref.is_none() {
+        return AgentLoopExecutorError::HostUnavailable {
+            stage: HostStage::Capability,
+        };
+    }
+    AgentLoopExecutorError::HostUnavailableWithDiagnostics {
         stage: HostStage::Capability,
+        kind: error.kind,
+        safe_summary,
+        reason_kind: error.reason_kind,
+        diagnostic_ref: error.diagnostic_ref,
+        detail,
     }
 }
 
@@ -240,12 +266,27 @@ fn sanitized_failure_category(
     })
 }
 
-pub(super) fn sanitized_strategy_summary(
+/// Sanitize a strategy summary, failing soft: a summary that fails strict
+/// validation degrades to a fixed fallback instead of aborting the run, and the
+/// secret-value-scrubbed raw cause is returned alongside so the caller can carry
+/// it on the model-visible detail channel.
+pub(super) fn sanitized_strategy_summary_or_fallback(
     summary: String,
-) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
-    SanitizedStrategySummary::new(summary).map_err(|_| AgentLoopExecutorError::PlannerContract {
-        detail: "host returned unsafe strategy summary",
-    })
+    fallback: &'static str,
+) -> (SanitizedStrategySummary, Option<String>) {
+    match SanitizedStrategySummary::new(summary.clone()) {
+        Ok(summary) => (summary, None),
+        Err(validation_error) => {
+            tracing::debug!(
+                validation_error = %validation_error,
+                "strategy summary rejected; using fallback"
+            );
+            (
+                SanitizedStrategySummary::from_trusted_static(fallback),
+                Some(sanitize_model_visible_text(summary)),
+            )
+        }
+    }
 }
 
 pub(super) fn honor_retry_alteration(

@@ -52,16 +52,18 @@ use ironclaw_runner::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
         store::FilesystemAwaitEdgeStore,
     },
+    subagent::goal_store::in_memory_backed_subagent_goal_store,
 };
 use ironclaw_threads::{
     InMemorySessionThreadService, SessionThreadService, ThreadHistoryRequest, ThreadMessageRecord,
     ThreadScope,
 };
 use ironclaw_trust::EffectiveTrustClass;
+use ironclaw_turns::test_support::in_memory_turn_state_store;
 use ironclaw_turns::{
-    CancelRunRequest, GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, LoopResultRef,
-    SanitizedCancelReason, TurnActor, TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake,
-    TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, FilesystemTurnStateRowStore, GetRunStateRequest, IdempotencyKey,
+    LoopResultRef, SanitizedCancelReason, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
+    TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
         CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
@@ -82,7 +84,7 @@ pub struct ProductLiveAgentLoopHarness {
     binding: ResolvedBinding,
     thread_scope: ThreadScope,
     thread_service: InMemorySessionThreadService,
-    turn_store: Arc<InMemoryTurnStateStore>,
+    turn_store: Arc<FilesystemTurnStateRowStore<InMemoryBackend>>,
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
     composition: RebornRuntimeLoopComposition<dyn SessionThreadService, RecordingModelGateway>,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
@@ -247,7 +249,7 @@ impl ProductLiveAgentLoopHarness {
             mission_id: None,
         };
         let thread_service = InMemorySessionThreadService::default();
-        let turn_store = Arc::new(InMemoryTurnStateStore::default());
+        let turn_store = Arc::new(in_memory_turn_state_store());
         let checkpoint_store = Arc::clone(&turn_store);
         let model_requests = Arc::new(Mutex::new(Vec::new()));
         let model_responses = VecDeque::from(config.model_responses);
@@ -369,9 +371,7 @@ impl ProductLiveAgentLoopHarness {
         let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
             ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
         )));
-        let await_edge_goal_store = Arc::new(
-            ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
-        );
+        let await_edge_goal_store = Arc::new(in_memory_backed_subagent_goal_store());
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
             await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,

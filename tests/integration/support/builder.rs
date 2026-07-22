@@ -36,7 +36,8 @@ use ironclaw_llm::Role;
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
 use ironclaw_product_adapters::{ProductInboundAck, ProductTriggerReason, ProductWorkflow};
 use ironclaw_product_workflow::{
-    DefaultProductWorkflow, ProductConversationRouteKind, ResolveBindingRequest, ResolvedBinding,
+    ConversationBindingService, DefaultProductWorkflow, ProductConversationRouteKind,
+    ResolveBindingRequest, ResolvedBinding,
 };
 use ironclaw_runner::loop_driver_host::HookDispatcherBuilderFactory;
 use ironclaw_runner::runtime::ToolDisclosureMode;
@@ -45,10 +46,10 @@ use ironclaw_turns::run_profile::{
     CommunicationContextProvider, InstructionSafetyContext, LoopHostMilestone,
 };
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, FilesystemTurnStateStore, GateRef, GateResumeDisposition,
-    GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnPrecondition,
-    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator,
-    TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, CancelRunResponse, FilesystemTurnStateRowStore, GateRef,
+    GateResumeDisposition, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
+    ResumeTurnPrecondition, ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnCoordinator, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
 };
 
 use super::capability_backend::{
@@ -91,6 +92,31 @@ pub enum StorageMode {
     /// Real SQLite on a per-test `TempDir`: full SQL + migrations + CAS.
     /// Enables `assert_reply_persists_after_reopen`.
     LibSql,
+    /// Real PostgreSQL in a per-`build()` testcontainer: full SQL +
+    /// migrations. Requires a reachable Docker daemon — provisioning
+    /// failure FAILS the test (REL-3: a Postgres skip is a failure, not a
+    /// pass; locally run `colima start` / start Docker first).
+    Postgres,
+}
+
+/// How a reopen assertion gets a genuinely fresh storage connection, per
+/// [`StorageMode`]. Postgres keeps the container handle alive for the
+/// group's lifetime (dropping it kills the database).
+pub(crate) enum StorageReopen {
+    None,
+    LibSql {
+        db_path: PathBuf,
+    },
+    Postgres {
+        database_url: String,
+        // Boxed: the container handle dwarfs the other variants
+        // (clippy::large_enum_variant) and is only held for its Drop.
+        _container: Box<
+            testcontainers_modules::testcontainers::ContainerAsync<
+                testcontainers_modules::postgres::Postgres,
+            >,
+        >,
+    },
 }
 
 /// Builder for [`RebornIntegrationHarness`]. The script is fixed at build time
@@ -545,7 +571,7 @@ impl RebornIntegrationHarnessBuilder {
 /// the real decorator chain. See module docs.
 pub struct RebornIntegrationHarness {
     pub(crate) ingress: RebornTestIngress,
-    pub(crate) workflow: DefaultProductWorkflow,
+    pub(crate) workflow: std::sync::Arc<DefaultProductWorkflow>,
     pub(crate) conversation_id: String,
     /// External (raw, pre-resolution) actor id every submit for this thread is
     /// made under. Defaults to `HARNESS_ACTOR_ID`; a group thread built with
@@ -562,7 +588,7 @@ pub struct RebornIntegrationHarness {
     pub(crate) actor_id: String,
     pub(crate) binding: ResolvedBinding,
     pub(crate) turn_scope: TurnScope,
-    pub(crate) turn_store: Arc<FilesystemTurnStateStore<HarnessTurnBackend>>,
+    pub(crate) turn_store: Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>>,
     pub(crate) thread_harness: RebornThreadHarness<CompositeRootFilesystem>,
     /// Turn coordinator, used to resume a `BlockedApproval`/`BlockedAuth` run
     /// after `approve_gate`/`deny_gate` resolves the gate. Mirrors the binary-E2E
@@ -820,7 +846,63 @@ impl RebornIntegrationHarness {
             text,
             ProductTriggerReason::DirectChat,
         )?;
-        Ok(self.workflow.accept_inbound(envelope).await?)
+        Ok(self.workflow.submit_inbound(envelope).await?)
+    }
+
+    /// The REAL per-thread `DefaultProductWorkflow` (durable idempotency
+    /// ledger → conversation binding → turn submission) as the
+    /// `ProductWorkflow` seam — the generic channel inbound sink submits
+    /// through this exact instance.
+    pub(crate) fn product_workflow_for_test(&self) -> std::sync::Arc<DefaultProductWorkflow> {
+        std::sync::Arc::clone(&self.workflow)
+    }
+
+    /// A fresh binding-service instance over the GROUP-shared product
+    /// harness storage — the SAME durable binding ledger the workflow above
+    /// resolves through at admission. Delivery proofs hand this to the
+    /// generic run-delivery components so observer-side binding reads see
+    /// admission-time writes.
+    pub(crate) fn binding_service_for_test(
+        &self,
+    ) -> HarnessResult<Arc<dyn ConversationBindingService>> {
+        Ok(Arc::new(self._shared.product_harness.binding_service()?))
+    }
+
+    /// A thread-service instance over the group-shared threads storage
+    /// (requests carry their own `ThreadScope`, so this serves any binding's
+    /// thread, not just this harness thread's).
+    pub(crate) fn thread_service_for_test(
+        &self,
+    ) -> HarnessResult<Arc<dyn ironclaw_threads::SessionThreadService>> {
+        Ok(Arc::new(self.thread_harness.service_instance()?))
+    }
+
+    /// The group-shared turn coordinator every thread's runs execute on.
+    pub(crate) fn turn_coordinator_for_test(&self) -> Arc<dyn TurnCoordinator> {
+        Arc::clone(&self.coordinator)
+    }
+
+    /// The group-shared turn-state store paired with
+    /// [`Self::turn_coordinator_for_test`]. Composition test seams that must
+    /// inspect or resume the caller's real runs use this pair instead of the
+    /// capability harness's disjoint bootstrap store.
+    pub(crate) fn turn_state_store_for_test(
+        &self,
+    ) -> Arc<FilesystemTurnStateRowStore<HarnessTurnBackend>> {
+        Arc::clone(&self._shared.turn_store)
+    }
+
+    /// Register a scripted model gateway for a scope OTHER than this
+    /// harness thread's own (which is registered at build time): delivery
+    /// proofs pre-resolve the vendor conversation's binding and register its
+    /// scope here so the admitted run reaches a scripted model instead of
+    /// the routing-miss sentinel. Panics on duplicate registration.
+    pub(crate) fn register_scope_gateway_for_test(
+        &self,
+        scope: TurnScope,
+        gateway: Arc<dyn ironclaw_loop_host::HostManagedModelGateway>,
+    ) {
+        self._shared.scope_gateway.register(scope, gateway);
     }
 
     /// Submit a user turn and wait until it blocks on an approval gate, returning
@@ -926,7 +1008,33 @@ impl RebornIntegrationHarness {
     /// re-instantiates the service over the same in-process handle — asserts
     /// re-instantiation only, not durability (nothing on disk to read back).
     pub async fn assert_reply_persists_after_reopen(&self, text: &str) -> HarnessResult<()> {
-        if let Some(db_path) = &self._shared.libsql_db_path {
+        if let StorageReopen::Postgres { database_url, .. } = &self._shared.storage_reopen {
+            // A genuinely fresh pool + composite over the same database —
+            // independent of the live `Arc` (migrations are idempotent and
+            // dedup per schema key).
+            let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+                postgres_pool(database_url)?,
+            ));
+            filesystem
+                .run_migrations()
+                .await
+                .map_err(|error| format!("Postgres reopen migrations failed: {error}"))?;
+            let mut fresh_composite = CompositeRootFilesystem::new();
+            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+                &mut fresh_composite,
+                filesystem,
+            )?;
+            let fresh_harness = RebornThreadHarness::filesystem_shared_composite(
+                self.thread_harness.scope.clone(),
+                Arc::new(fresh_composite),
+                Arc::clone(&self._shared.turn_root),
+            )?;
+            return fresh_harness
+                .assert_final_reply(self.binding.thread_id.clone(), text)
+                .await
+                .map_err(Into::into);
+        }
+        if let StorageReopen::LibSql { db_path } = &self._shared.storage_reopen {
             // Open a fresh composite — independent of the live one.
             // `libsql::Builder::new_local` opens (or creates) the file at `db_path`;
             // under the M1 mutation (LibSql → InMemory) the file does not exist and
@@ -963,36 +1071,50 @@ impl RebornIntegrationHarness {
         run_id: TurnRunId,
         expected_gate_ref: &GateRef,
     ) -> HarnessResult<()> {
-        let db_path = self
-            ._shared
-            .libsql_db_path
-            .as_ref()
-            .ok_or("assert_gate_survives_reopen requires StorageMode::LibSql")?;
+        let StorageReopen::LibSql { db_path } = &self._shared.storage_reopen else {
+            return Err("assert_gate_survives_reopen requires StorageMode::LibSql".into());
+        };
         let fresh_composite = reopen_fresh_libsql_composite(db_path).await?;
-        let fresh_turn_store = FilesystemTurnStateStore::new(scoped_turns_fs_composite(
-            fresh_composite,
-            &self._shared.canonical_binding,
-        )?);
-        let state = fresh_turn_store
-            .get_run_state(GetRunStateRequest {
-                scope: self.turn_scope.clone(),
-                run_id,
-            })
-            .await?;
-        if state.status != TurnStatus::BlockedApproval {
-            return Err(format!(
-                "expected BlockedApproval after reopen, got {:?}",
-                state.status
-            )
-            .into());
-        }
-        match state.gate_ref.as_ref().map(GateRef::as_str) {
-            Some(seen) if seen == expected_gate_ref.as_str() => Ok(()),
-            other => Err(format!(
-                "gate ref after reopen was {other:?}, expected {:?}",
-                expected_gate_ref.as_str()
-            )
-            .into()),
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            // The live store exposes its hot snapshot before a critical append's
+            // caller receives the durable ack. Rebuild this fresh row-store view
+            // on every attempt so an early Running read is not cached indefinitely.
+            let fresh_turn_store = FilesystemTurnStateRowStore::new(scoped_turns_fs_composite(
+                Arc::clone(&fresh_composite),
+                &self._shared.canonical_binding,
+            )?);
+            let state = fresh_turn_store
+                .get_run_state(GetRunStateRequest {
+                    scope: self.turn_scope.clone(),
+                    run_id,
+                })
+                .await?;
+            if state.status == TurnStatus::BlockedApproval {
+                return match state.gate_ref.as_ref().map(GateRef::as_str) {
+                    Some(seen) if seen == expected_gate_ref.as_str() => Ok(()),
+                    other => Err(format!(
+                        "gate ref after reopen was {other:?}, expected {:?}",
+                        expected_gate_ref.as_str()
+                    )
+                    .into()),
+                };
+            }
+            if state.status.is_terminal() || state.status.is_blocked() {
+                return Err(format!(
+                    "expected BlockedApproval after reopen, got {:?}",
+                    state.status
+                )
+                .into());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "timed out waiting for BlockedApproval after reopen; last status={:?}",
+                    state.status
+                )
+                .into());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -1183,6 +1305,13 @@ impl RebornIntegrationHarness {
     pub(super) fn captured_network_requests(&self) -> Vec<NetworkHttpRequest> {
         let mut all = self.capability_recorder.network_http_requests();
         all.split_off(self.baseline_network_count)
+    }
+
+    /// Test-visible twin of [`Self::captured_network_requests`] for suites
+    /// asserting raw recorded wire requests (vendor host + injected
+    /// credential), baseline-sliced per thread like every other seam.
+    pub(crate) fn captured_network_requests_for_test(&self) -> Vec<NetworkHttpRequest> {
+        self.captured_network_requests()
     }
 
     /// S1 seam: every request that reached the real-egress-pipeline's
@@ -1531,10 +1660,22 @@ impl RebornIntegrationHarness {
 
     /// Seed a Configured credential account WITH real secret material for
     /// `provider` through the production manual-token flow, scoped so this
-    /// group's CAPABILITY dispatch finds it: account selection matches all of
-    /// `(tenant, user, agent, project)`, and the user must be the capability
-    /// harness's dispatch user — which, on groups that do not align it to the
-    /// binding subject, differs from this thread's binding actor.
+    /// thread's CAPABILITY dispatch finds it: account selection matches all of
+    /// `(tenant, user, agent, project)`, and the user must be the one
+    /// dispatch-time execution-context resolution actually stamps on the run.
+    ///
+    /// That user is NOT the capability harness's fixed constructor user: the
+    /// production capability surface (`local_dev_visible_capability_request` /
+    /// `local_dev_resource_scope_for_run` in
+    /// `crates/ironclaw_reborn_composition/src/runtime/local_dev.rs`) resolves
+    /// the execution user per run as `thread owner → run actor → fixed
+    /// fallback`, and every harness thread run carries an actor — so the fixed
+    /// fallback never applies here. Seeding under the harness's fixed
+    /// constructor user (the old behavior) left every credentialed extension
+    /// activation `BlockedAuth` in groups that do not align the harness user
+    /// to the binding subject, because the activation credential gate looked
+    /// up the run's resolved user while the seed rows sat under the
+    /// constructor user.
     pub async fn seed_capability_credential_account(
         &self,
         provider: &str,
@@ -1549,7 +1690,14 @@ impl RebornIntegrationHarness {
                 );
             }
         };
-        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        // Mirror production execution-user resolution (owner → actor); the
+        // harness fixed-user fallback is unreachable for thread-driven runs.
+        let dispatch_user = self
+            .turn_scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| self.binding.actor_user_id.clone());
+        let scope = self.run_resource_scope_for_user(dispatch_user);
         harness
             .seed_credential_account_with_material(&scope, provider, label, provider_scopes)
             .await
@@ -1569,7 +1717,15 @@ impl RebornIntegrationHarness {
                 );
             }
         };
-        let scope = self.run_resource_scope_for_user(harness.capability_user_id().clone());
+        // Mirror production execution-user resolution (owner → actor), the
+        // same derivation `seed_capability_credential_account` uses — the
+        // revoke must land on the accounts that seeding created.
+        let dispatch_user = self
+            .turn_scope
+            .explicit_owner_user_id()
+            .cloned()
+            .unwrap_or_else(|| self.binding.actor_user_id.clone());
+        let scope = self.run_resource_scope_for_user(dispatch_user);
         let revoked = harness
             .revoke_credential_accounts_for_provider(&scope, provider)
             .await?;
@@ -1584,9 +1740,9 @@ impl RebornIntegrationHarness {
 
     /// This thread's run `(tenant, agent, project)` scope with `user_id` as
     /// the owner — the exact four fields dispatch-time credential-account
-    /// selection matches. Which user is correct depends on the caller: the
-    /// binding actor for user-aligned groups, the capability dispatch user
-    /// otherwise.
+    /// selection matches. Pass the run's resolved execution user (thread
+    /// owner → binding actor), the same resolution production capability
+    /// dispatch applies — see `seed_capability_credential_account`.
     fn run_resource_scope_for_user(&self, user_id: UserId) -> ResourceScope {
         ResourceScope {
             tenant_id: self.turn_scope.tenant_id.clone(),
@@ -1760,15 +1916,15 @@ async fn reopen_fresh_libsql_composite(
 pub(crate) async fn build_storage_composite(
     mode: StorageMode,
     dir: &Path,
-) -> HarnessResult<(Arc<CompositeRootFilesystem>, Option<PathBuf>)> {
+) -> HarnessResult<(Arc<CompositeRootFilesystem>, StorageReopen)> {
     let mut composite = CompositeRootFilesystem::new();
-    let db_path = match mode {
+    let reopen = match mode {
         StorageMode::InMemory => {
             ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
                 &mut composite,
                 Arc::new(InMemoryBackend::new()),
             )?;
-            None
+            StorageReopen::None
         }
         StorageMode::LibSql => {
             ironclaw_reborn_composition::test_support::build_default_local_dev_database_roots_for_test(
@@ -1777,10 +1933,85 @@ pub(crate) async fn build_storage_composite(
             )
             .await?;
             // The canonical filename is the production constant — one source of truth.
-            Some(dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME))
+            StorageReopen::LibSql {
+                db_path: dir.join(ironclaw_reborn_composition::test_support::LOCAL_DEV_DB_FILENAME),
+            }
+        }
+        StorageMode::Postgres => {
+            let (container, database_url) = start_postgres_testcontainer().await?;
+            let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+                postgres_pool(&database_url)?,
+            ));
+            filesystem
+                .run_migrations()
+                .await
+                .map_err(|error| format!("Postgres migrations failed: {error}"))?;
+            ironclaw_reborn_composition::test_support::mount_local_dev_database_roots_for_test(
+                &mut composite,
+                filesystem,
+            )?;
+            StorageReopen::Postgres {
+                database_url,
+                _container: Box::new(container),
+            }
         }
     };
-    Ok((Arc::new(composite), db_path))
+    Ok((Arc::new(composite), reopen))
+}
+
+/// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
+/// a test failure (REL-3): in CI it panics with the docker context; locally
+/// the message names the fix.
+pub(crate) async fn start_postgres_testcontainer() -> HarnessResult<(
+    testcontainers_modules::testcontainers::ContainerAsync<
+        testcontainers_modules::postgres::Postgres,
+    >,
+    String,
+)> {
+    use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
+
+    let image = testcontainers_modules::postgres::Postgres::default()
+        .with_db_name("ironclaw_test")
+        .with_user("postgres")
+        .with_password("postgres")
+        .with_tag("16-alpine");
+    let unavailable = |error: String| -> String {
+        if std::env::var("CI").is_ok() {
+            panic!("StorageMode::Postgres requires Docker in CI and provisioning failed: {error}");
+        }
+        format!(
+            "StorageMode::Postgres requires a reachable Docker daemon \
+             (locally: `colima start` or start Docker Desktop; a Postgres \
+             skip is a failure per REL-3): {error}"
+        )
+    };
+    let container = image
+        .start()
+        .await
+        .map_err(|error| unavailable(error.to_string()))?;
+    let host = container
+        .get_host()
+        .await
+        .map_err(|error| unavailable(error.to_string()))?;
+    let port = container
+        .get_host_port_ipv4(5432)
+        .await
+        .map_err(|error| unavailable(error.to_string()))?;
+    Ok((
+        container,
+        format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
+    ))
+}
+
+pub(crate) fn postgres_pool(database_url: &str) -> HarnessResult<deadpool_postgres::Pool> {
+    let config: tokio_postgres::Config = database_url
+        .parse()
+        .map_err(|error| format!("testcontainer database URL must parse: {error}"))?;
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
+        .map_err(|error| format!("Postgres pool must build: {error}").into())
 }
 
 /// Build a `ScopedFilesystem` that maps `/turns` → the turn-state path for
@@ -1887,3 +2118,4 @@ pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessRes
 // and per-thread harness assembly (`RebornThreadBuilder::build`) live in
 // `group.rs` (imported above) — that module owns `GroupSharedStorage` and the
 // capability mode types.
+// arch-exempt: large_file, integration builder remains centralized during fixture migration, plan #6175

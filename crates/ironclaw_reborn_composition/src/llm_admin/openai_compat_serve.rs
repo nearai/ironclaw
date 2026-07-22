@@ -81,23 +81,6 @@ const OPENAI_COMPAT_PENDING_EXTERNAL_TOOL_FALLBACK_DELAY: Duration = Duration::f
 const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// OpenAI-compatible conversation bindings must survive a restart, so these
-/// routes need a durable backend. Without one the mount is refused rather than
-/// served over non-durable bindings.
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub async fn build_openai_compat_route_mount(
-    _runtime: &RebornRuntime,
-    _tenant_id: TenantId,
-    _default_agent_id: AgentId,
-    _default_project_id: Option<ProjectId>,
-) -> Result<ProtectedRouteMount, RebornBuildError> {
-    Err(RebornBuildError::InvalidConfig {
-        reason: "OpenAI-compatible routes require durable conversation bindings;                  configure a storage backend"
-            .to_string(),
-    })
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn build_openai_compat_route_mount(
     runtime: &RebornRuntime,
     tenant_id: TenantId,

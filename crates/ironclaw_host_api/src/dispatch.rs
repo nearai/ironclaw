@@ -12,12 +12,13 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::{
-    CapabilityId, ExtensionId, HostRemediation, MountView, ResourceEstimate, ResourceReceipt,
-    ResourceReservation, ResourceScope, ResourceUsage, RunId, RuntimeCredentialAuthRequirement,
-    RuntimeKind, SecretHandle, UserId,
+    Authorized, CapabilityId, ExtensionId, HostRemediation, MountView, ResourceEstimate,
+    ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage, RunId,
+    RuntimeCredentialAuthRequirement, RuntimeKind, SecretHandle, UserId,
 };
 
-/// Request for one already-authorized declared capability dispatch.
+/// Internal adapter request produced after a sealed [`Authorized`] witness is
+/// consumed by the dispatcher.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilityDispatchRequest {
     pub capability_id: CapabilityId,
@@ -367,6 +368,12 @@ pub enum DispatchError {
         capability: CapabilityId,
         runtime: RuntimeKind,
     },
+    #[error("capability {capability} has no sealed dispatch authorization")]
+    MissingAuthorization { capability: CapabilityId },
+    #[error("authorized dispatch witness for capability {capability} has expired")]
+    AuthorizationExpired { capability: CapabilityId },
+    #[error("process dispatch is missing durable authorization for capability {capability}")]
+    MissingProcessAuthorization { capability: CapabilityId },
     /// Authentication is required to dispatch this capability.
     ///
     /// `required_secrets` names the credentials the caller must stage.  The
@@ -378,18 +385,33 @@ pub enum DispatchError {
         required_secrets: Vec<SecretHandle>,
         credential_requirements: Vec<RuntimeCredentialAuthRequirement>,
     },
+    /// MCP dispatch failure. `model_visible_cause` carries the raw backend cause —
+    /// it is NOT yet display/model-safe: secret VALUES are scrubbed downstream
+    /// at the model-visible Diagnostic seam (`scrub_model_visible_detail`),
+    /// and display surfaces run their own redaction. Do not log or surface it
+    /// directly.
     #[error("MCP dispatch failed: {kind}")]
-    Mcp { kind: RuntimeDispatchErrorKind },
+    Mcp {
+        kind: RuntimeDispatchErrorKind,
+        model_visible_cause: Option<String>,
+    },
+    /// Script dispatch failure. Same `model_visible_cause` contract as [`Self::Mcp`]:
+    /// raw cause, scrubbed downstream — not directly displayable.
     #[error("script dispatch failed: {kind}")]
-    Script { kind: RuntimeDispatchErrorKind },
-    /// WASM guest dispatch failure. `safe_summary` carries the stable,
-    /// host-sanitized error code a structured guest error declared (e.g. a
-    /// Slack `channel_not_found`), so the model-visible failure keeps its
-    /// actionable cause instead of collapsing to the kind's generic sentence.
+    Script {
+        kind: RuntimeDispatchErrorKind,
+        model_visible_cause: Option<String>,
+    },
+    /// WASM guest dispatch failure. `model_visible_cause` carries the best available
+    /// cause: the stable, host-sanitized error code a structured guest error
+    /// declared (e.g. a Slack `channel_not_found`) when present, otherwise the
+    /// raw error text (secret VALUES are scrubbed downstream at the
+    /// model-visible Diagnostic seam), so the failure keeps its actionable
+    /// cause instead of collapsing to the kind's generic sentence.
     #[error("WASM dispatch failed: {kind}")]
     Wasm {
         kind: RuntimeDispatchErrorKind,
-        safe_summary: Option<String>,
+        model_visible_cause: Option<String>,
     },
     #[error("first-party dispatch failed: {kind}")]
     FirstParty {
@@ -436,6 +458,18 @@ impl fmt::Debug for DispatchError {
                 .field("capability", capability)
                 .field("runtime", runtime)
                 .finish(),
+            Self::MissingAuthorization { capability } => f
+                .debug_struct("MissingAuthorization")
+                .field("capability", capability)
+                .finish(),
+            Self::AuthorizationExpired { capability } => f
+                .debug_struct("AuthorizationExpired")
+                .field("capability", capability)
+                .finish(),
+            Self::MissingProcessAuthorization { capability } => f
+                .debug_struct("MissingProcessAuthorization")
+                .field("capability", capability)
+                .finish(),
             // `required_secrets` handle names are omitted from Debug output to
             // prevent leaking secret identifiers into logs and error chains.
             Self::AuthRequired {
@@ -457,8 +491,8 @@ impl fmt::Debug for DispatchError {
                     ),
                 )
                 .finish(),
-            Self::Mcp { kind } => f.debug_struct("Mcp").field("kind", kind).finish(),
-            Self::Script { kind } => f.debug_struct("Script").field("kind", kind).finish(),
+            Self::Mcp { kind, .. } => f.debug_struct("Mcp").field("kind", kind).finish(),
+            Self::Script { kind, .. } => f.debug_struct("Script").field("kind", kind).finish(),
             Self::Wasm { kind, .. } => f.debug_struct("Wasm").field("kind", kind).finish(),
             Self::FirstParty { kind, .. } => {
                 f.debug_struct("FirstParty").field("kind", kind).finish()
@@ -488,9 +522,14 @@ impl DispatchError {
             Self::RuntimeMismatch { .. } => DispatchFailureKind::RuntimeMismatch,
             Self::MissingRuntimeBackend { .. } => DispatchFailureKind::MissingRuntimeBackend,
             Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
+            Self::MissingAuthorization { .. }
+            | Self::AuthorizationExpired { .. }
+            | Self::MissingProcessAuthorization { .. } => {
+                DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::PolicyDenied)
+            }
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
-            Self::Mcp { kind }
-            | Self::Script { kind }
+            Self::Mcp { kind, .. }
+            | Self::Script { kind, .. }
             | Self::Wasm { kind, .. }
             | Self::FirstParty { kind, .. } => DispatchFailureKind::Runtime(*kind),
         }
@@ -507,9 +546,12 @@ impl DispatchError {
             Self::RuntimeMismatch { .. } => "runtime_mismatch",
             Self::MissingRuntimeBackend { .. } => "missing_runtime_backend",
             Self::UnsupportedRuntime { .. } => "unsupported_runtime",
+            Self::MissingAuthorization { .. } => "missing_authorization",
+            Self::AuthorizationExpired { .. } => "authorization_expired",
+            Self::MissingProcessAuthorization { .. } => "missing_process_authorization",
             Self::AuthRequired { .. } => "auth_required",
-            Self::Mcp { kind }
-            | Self::Script { kind }
+            Self::Mcp { kind, .. }
+            | Self::Script { kind, .. }
             | Self::Wasm { kind, .. }
             | Self::FirstParty { kind, .. } => kind.event_kind(),
         }
@@ -522,7 +564,7 @@ pub trait CapabilityDispatcher: Send + Sync {
     /// Dispatches one already-authorized JSON capability request and must not perform caller-facing authorization or approval resolution.
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        authorized: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError>;
 }
 

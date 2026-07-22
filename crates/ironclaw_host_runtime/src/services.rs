@@ -14,18 +14,14 @@ use async_trait::async_trait;
 use ironclaw_approvals::{ApprovalResolver, PersistentApprovalPolicyStore};
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::CapabilityObligationHandler;
-use ironclaw_dispatcher::{
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher, RuntimeExecutor,
-};
+use ironclaw_dispatcher::{RuntimeAdapterResult, RuntimeDispatcher, ToolResolver};
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
     InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
     SecurityAuditSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime, SharedExtensionRegistry};
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{DiskFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
@@ -59,9 +55,8 @@ use ironclaw_secrets::{
 };
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{
-    DefaultTurnCoordinator, FilesystemTurnStateStore, InMemoryTurnStateStore,
-    NoopTurnRunWakeNotifier, RunProfileResolver, TurnRunWakeNotifier, TurnStateStore,
-    runner::TurnRunTransitionPort,
+    DefaultTurnCoordinator, FilesystemTurnStateRowStore, NoopTurnRunWakeNotifier,
+    RunProfileResolver, TurnRunWakeNotifier, TurnStateStore, runner::TurnRunTransitionPort,
 };
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError, WasmHostSecrets,
@@ -78,20 +73,22 @@ use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostProcessPort, HostRuntimeError,
     HostRuntimeHttpEgressPort, InvocationServicesResolutionRequest, InvocationServicesResolver,
-    LocalInvocationServicesResolver, PlannerError, PostEditCheckConfig,
-    ProcessObligationLifecycleStore, RuntimeBackendHealth, RuntimeProcessPort,
-    RuntimeSecretMaterialStager, RuntimeSecretStageError, TenantSandboxProcessPort,
-    ToolCallHttpEgress, plan_capability,
+    LocalInvocationServicesResolver, PostEditCheckConfig, ProcessObligationLifecycleStore,
+    RuntimeBackendHealth, RuntimeProcessPort, RuntimeSecretMaterialStager, RuntimeSecretStageError,
+    TenantSandboxProcessPort, ToolCallHttpEgress,
 };
+use ironclaw_runtime_policy::{PlannerError, plan_capability};
 use process_executor::{HostProcessExecutor, RuntimeDispatchProcessExecutor};
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
 type SharedToolCallHttpEgress = Arc<Mutex<Option<Arc<dyn ToolCallHttpEgress>>>>;
 
 mod builder;
+mod extension_tool_binder;
 mod production_services;
 mod production_wiring;
 mod runtime_adapters;
+mod tool_resolver;
 mod wasm_diagnostics;
 mod wasm_execution;
 
@@ -103,10 +100,17 @@ pub use production_wiring::{
     ProductionEventStoreWiringError, ProductionWiringComponent, ProductionWiringConfig,
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
 };
+#[cfg(test)]
+use runtime_adapters::RuntimeAdapter;
 use runtime_adapters::{
-    FirstPartyRuntimeAdapter, McpRuntimeAdapter, RuntimeLaneExecutor, ScriptRuntimeAdapter,
-    ServiceResolvedRuntimeAdapter, WasmRuntimeAdapter,
+    FirstPartyRuntimeAdapter, McpRuntimeAdapter, RuntimeAdapterRequest, RuntimeLaneExecutor,
+    ScriptRuntimeAdapter, ServiceResolvedRuntimeAdapter, WasmRuntimeAdapter,
 };
+use tool_resolver::RegistryLaneToolResolver;
+
+use extension_tool_binder::ServiceLanePackageBinder;
+pub use extension_tool_binder::{ExtensionLaneToolBinder, ExtensionToolBindError};
+use ironclaw_dispatcher::ChainToolResolver;
 
 /// Concrete composition bundle for one Reborn host-runtime vertical slice.
 ///
@@ -164,6 +168,11 @@ where
     run_profile_resolver: Option<Arc<dyn RunProfileResolver>>,
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
+    /// Late-installed extension-host snapshot resolver (composition builds
+    /// the extension host after these services; same slot pattern as the
+    /// egress ports). Present ⇒ the registry-lane resolver serves built-ins
+    /// only.
+    extension_tool_resolver: Arc<Mutex<Option<Arc<dyn ToolResolver>>>>,
     post_edit_check: Option<PostEditCheckConfig>,
     component_types: ProductionComponentTypes,
 }
@@ -179,6 +188,8 @@ pub struct ProductAuthProviderRuntimePorts {
     obligation_handler: Arc<dyn CapabilityObligationHandler>,
     secret_store: Arc<dyn SecretStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+    network_policy_store: Arc<NetworkObligationPolicyStore>,
+    credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
 }
 
 /// Alias for [`RuntimeSecretStageError`], which re-exports
@@ -191,12 +202,16 @@ impl ProductAuthProviderRuntimePorts {
         obligation_handler: Arc<dyn CapabilityObligationHandler>,
         secret_store: Arc<dyn SecretStore>,
         secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+        network_policy_store: Arc<NetworkObligationPolicyStore>,
+        credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
     ) -> Self {
         Self {
             runtime_http_egress,
             obligation_handler,
             secret_store,
             secret_injection_store,
+            network_policy_store,
+            credential_account_resolver,
         }
     }
 
@@ -225,9 +240,79 @@ impl ProductAuthProviderRuntimePorts {
         capability_id: &CapabilityId,
         handle: &SecretHandle,
     ) -> Result<(), ProductAuthCredentialStageError> {
+        self.stage_material_once(source_scope, handle, target_scope, capability_id, handle)
+            .await
+    }
+
+    /// Stage one declared credential requirement for a host-driven call that
+    /// bypasses the dispatch obligation pipeline (hosted-MCP discovery runs
+    /// at activation, not through a capability invocation, so nothing else
+    /// stages its connection credential). Product-auth accounts resolve
+    /// through the same resolver and AuthRequired classification the
+    /// obligation lane uses.
+    pub async fn stage_credential_requirement_once(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        requirement: &ironclaw_host_api::RuntimeCredentialRequirement,
+        requester_extension: &ironclaw_host_api::ExtensionId,
+    ) -> Result<(), ProductAuthCredentialStageError> {
+        use ironclaw_host_api::RuntimeCredentialRequirementSource;
+        match &requirement.source {
+            RuntimeCredentialRequirementSource::SecretHandle => {
+                self.stage_secret_once(scope, capability_id, &requirement.handle)
+                    .await
+            }
+            RuntimeCredentialRequirementSource::ProductAuthAccount { provider, setup } => {
+                let resolver = self
+                    .credential_account_resolver
+                    .as_ref()
+                    .ok_or(ProductAuthCredentialStageError::Backend)?;
+                let access_secret = resolver
+                    .resolve_access_secret(crate::obligations::RuntimeCredentialAccountRequest {
+                        scope,
+                        provider,
+                        setup,
+                        provider_scopes: &requirement.provider_scopes,
+                        requester_extension,
+                    })
+                    .await?;
+                self.stage_material_once(
+                    &access_secret.scope,
+                    &access_secret.handle,
+                    scope,
+                    capability_id,
+                    &requirement.handle,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Stage the network policy for a host-driven call that bypasses the
+    /// dispatch obligation pipeline (see
+    /// [`Self::stage_credential_requirement_once`]).
+    pub fn stage_network_policy_once(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        policy: ironclaw_host_api::NetworkPolicy,
+    ) {
+        self.network_policy_store
+            .insert(scope, capability_id, policy);
+    }
+
+    async fn stage_material_once(
+        &self,
+        source_scope: &ResourceScope,
+        source_handle: &SecretHandle,
+        target_scope: &ResourceScope,
+        capability_id: &CapabilityId,
+        target_handle: &SecretHandle,
+    ) -> Result<(), ProductAuthCredentialStageError> {
         let lease = self
             .secret_store
-            .lease_once(source_scope, handle)
+            .lease_once(source_scope, source_handle)
             .await
             .map_err(stage_secret_error)?;
         let secret = self
@@ -236,7 +321,7 @@ impl ProductAuthProviderRuntimePorts {
             .await
             .map_err(stage_secret_error)?;
         self.secret_injection_store
-            .insert(target_scope, capability_id, handle, secret)
+            .insert(target_scope, capability_id, target_handle, secret)
             .map_err(|_| ProductAuthCredentialStageError::Backend)
     }
 }
@@ -336,6 +421,7 @@ where
             run_profile_resolver: None,
             turn_run_transition_port: None,
             turn_run_wake_notifier: None,
+            extension_tool_resolver: Arc::new(Mutex::new(None)),
             post_edit_check: None,
             component_types: ProductionComponentTypes {
                 trust_policy: None,
@@ -382,12 +468,78 @@ where
             .wasm_runtime_credential_provider_captured
     }
 
-    /// Builds a runtime dispatcher over the closed [`RuntimeLaneExecutor`].
-    ///
-    /// Each configured lane becomes an enum variant; the dispatcher holds one
-    /// monomorphized executor and routes by `RuntimeLane` match rather than a
-    /// per-lane trait-object registry (arch-simplification §4.2).
-    fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, F, G, RuntimeLaneExecutor> {
+    /// Builds a runtime dispatcher over the resolver chain: the
+    /// extension-host snapshot resolver when composition installed one,
+    /// falling through to the registry-lane resolver.
+    fn runtime_dispatcher(&self) -> RuntimeDispatcher<'static, G> {
+        let registry_resolver = self.registry_lane_tool_resolver();
+        let resolver: Arc<dyn ToolResolver> =
+            match extension_tool_resolver(&self.extension_tool_resolver) {
+                Some(extension_resolver) => Arc::new(ChainToolResolver::new(vec![
+                    extension_resolver,
+                    registry_resolver,
+                ])),
+                None => registry_resolver,
+            };
+        let mut dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&self.governor));
+        if let Some(event_sink) = &self.event_sink {
+            dispatcher = dispatcher.with_event_sink_arc(Arc::clone(event_sink));
+        }
+
+        dispatcher
+    }
+
+    /// Installs the extension-host snapshot resolver ahead of the registry
+    /// lookup in the dispatch chain. From this point the registry-lane
+    /// resolver serves only host built-ins — activated extension
+    /// capabilities must resolve from the active snapshot (the cutover has
+    /// no fallback). Must be called before the host runtime facade is built.
+    pub fn set_extension_tool_resolver(&self, resolver: Arc<dyn ToolResolver>) {
+        let mut slot = match self.extension_tool_resolver.lock() {
+            Ok(slot) => slot,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = Some(resolver);
+    }
+
+    /// The binder the extension host's loaders use to prebind WASM / hosted
+    /// MCP / first-party-registry packages to their runtime lanes as
+    /// [`ironclaw_host_api::ToolAdapter`]s. The lanes stay host-private.
+    pub fn extension_lane_tool_binder(&self) -> ExtensionLaneToolBinder {
+        ExtensionLaneToolBinder::new(Arc::new(ServiceLanePackageBinder {
+            executor: self.runtime_lane_executor(),
+            filesystem: Arc::clone(&self.filesystem),
+            governor: Arc::clone(&self.governor),
+            runtime_policy: self
+                .runtime_policy
+                .clone()
+                .unwrap_or_else(local_testing_runtime_policy),
+        }))
+    }
+
+    /// Builds the registry-backed [`ToolResolver`]: every configured runtime
+    /// lane, prebound per capability whenever the shared registry publishes a
+    /// new version. When composition installs an extension resolver, this
+    /// resolver is restricted to the host's built-in provider.
+    fn registry_lane_tool_resolver(&self) -> Arc<dyn ToolResolver> {
+        let provider_allowlist = extension_tool_resolver(&self.extension_tool_resolver)
+            .is_some()
+            .then(crate::first_party_tools::builtin_provider_allowlist);
+        Arc::new(RegistryLaneToolResolver::new(
+            Arc::clone(&self.registry),
+            self.runtime_lane_executor(),
+            Arc::clone(&self.filesystem),
+            Arc::clone(&self.governor),
+            self.runtime_policy
+                .clone()
+                .unwrap_or_else(local_testing_runtime_policy),
+            provider_allowlist,
+        ))
+    }
+
+    /// The configured closed runtime-lane executor shared by the registry
+    /// resolver and extension tool binder.
+    fn runtime_lane_executor(&self) -> Arc<RuntimeLaneExecutor<F, G>> {
         let mut invocation_services_resolver = LocalInvocationServicesResolver::new(
             Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
             runtime_http_egress(&self.runtime_http_egress),
@@ -411,9 +563,6 @@ where
         let invocation_services: Arc<dyn InvocationServicesResolver> =
             Arc::new(invocation_services_resolver);
 
-        // `Script` executes on the `Process` lane; `Mcp`/`Wasm` keep the
-        // service-resolution decorator; `FirstParty` resolves services itself
-        // (so it is not double-wrapped) — preserving the prior wiring exactly.
         let process = self.script_runtime.as_ref().map(|runtime| {
             ServiceResolvedRuntimeAdapter::new(
                 Arc::new(ScriptRuntimeAdapter::from_executor(Arc::clone(runtime))),
@@ -438,24 +587,7 @@ where
                 Arc::clone(&invocation_services),
             )
         });
-        let executor = RuntimeLaneExecutor::new(first_party, wasm, mcp, process);
-
-        let mut dispatcher = RuntimeDispatcher::from_shared_registry(
-            Arc::clone(&self.registry),
-            Arc::clone(&self.filesystem),
-            Arc::clone(&self.governor),
-            executor,
-        )
-        .with_runtime_policy(
-            self.runtime_policy
-                .clone()
-                .unwrap_or_else(local_testing_runtime_policy),
-        );
-        if let Some(event_sink) = &self.event_sink {
-            dispatcher = dispatcher.with_event_sink_arc(Arc::clone(event_sink));
-        }
-
-        dispatcher
+        Arc::new(RuntimeLaneExecutor::new(first_party, wasm, mcp, process))
     }
 
     /// Builds the upper facade without production validation.
@@ -498,6 +630,8 @@ where
             self.obligation_handler(),
             secret_store,
             Arc::clone(&self.secret_injection_store),
+            Arc::clone(&self.network_policy_store),
+            self.runtime_credential_account_resolver.clone(),
         ))
     }
 
@@ -509,13 +643,18 @@ where
     /// Builds the upper facade with the same dispatcher, process services,
     /// stores, cancellation registry, result store, and runtime health graph.
     fn build_host_runtime(&self) -> DefaultHostRuntime {
-        let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
-        let process_executor = Arc::new(HostProcessExecutor::new(
-            Arc::new(RuntimeDispatchProcessExecutor::new(Arc::clone(&dispatcher))),
-            self.process_sandbox_executor.clone(),
-        ));
         let lifecycle_process_store = Arc::clone(&self.process_lifecycle_store);
         let process_store: Arc<dyn ProcessStore> = lifecycle_process_store.clone();
+        let dispatcher: Arc<dyn CapabilityDispatcher> = Arc::new(self.runtime_dispatcher());
+        let process_executor = Arc::new(HostProcessExecutor::new(
+            Arc::new(RuntimeDispatchProcessExecutor::new(
+                Arc::clone(&dispatcher),
+                ironclaw_capabilities::process_authorization_remint_port(Arc::clone(
+                    &process_store,
+                )),
+            )),
+            self.process_sandbox_executor.clone(),
+        ));
         let result_failure_cleanup_store = Arc::clone(&lifecycle_process_store);
         let process_manager: Arc<dyn ProcessManager> = Arc::new(
             ironclaw_processes::BackgroundProcessManager::new(
@@ -742,6 +881,15 @@ fn set_tool_call_http_egress(
         Err(poisoned) => {
             *poisoned.into_inner() = Some(tool_call_http_egress);
         }
+    }
+}
+
+fn extension_tool_resolver(
+    slot: &Arc<Mutex<Option<Arc<dyn ToolResolver>>>>,
+) -> Option<Arc<dyn ToolResolver>> {
+    match slot.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
     }
 }
 

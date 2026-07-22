@@ -1,27 +1,18 @@
 // arch-exempt: large_file, Google OAuth resolution hardening remains at the existing runtime config seam, plan #4088
 use std::io::{IsTerminal, Write};
-use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
-use ironclaw_reborn_composition::OAuthRedirectUri;
-use ironclaw_reborn_composition::SlackPersonalSetupServiceSlot;
-use ironclaw_reborn_composition::host_api::UserId;
-use ironclaw_reborn_composition::host_api::{AgentId, TenantId};
-#[cfg(feature = "postgres")]
+use ironclaw_reborn_composition::TriggerFireAccessPolicy;
+use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
+    KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
     RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
-};
-use ironclaw_reborn_composition::{
-    LocalTriggerAccessReconciliation, LocalTriggerAccessRole, LocalTriggerAccessSource,
-    LocalTriggerAccessStore, local_trigger_access_fire_checker, open_local_trigger_access_store,
 };
 use ironclaw_reborn_config::{
     REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile, seed_default_config_file_if_missing,
@@ -31,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+mod account_setups;
+mod native_extensions;
 // Crate-wide process-env lock lives here (see test_env.rs). `pub(crate)` so
 // non-runtime env-mutating tests (e.g. commands::serve_sso) serialize against
 // the same mutex — all unit tests link into one binary, so a second, separate
@@ -191,7 +184,7 @@ pub(crate) fn execute(
         .build()?;
     rt.block_on(async move {
         let runtime_input =
-            with_run_local_trigger_fire_access_checker(runtime_input, &boot_config).await?;
+            apply_run_trigger_fire_access_policy(runtime_input, &boot_config).await?;
         let runtime = build_reborn_runtime(runtime_input).await?;
         print_runtime_banner(&boot_config);
 
@@ -210,7 +203,7 @@ pub(crate) fn execute(
     Ok(())
 }
 
-async fn with_run_local_trigger_fire_access_checker(
+async fn apply_run_trigger_fire_access_policy(
     runtime_input: RebornRuntimeInput,
     config: &RebornBootConfig,
 ) -> anyhow::Result<RebornRuntimeInput> {
@@ -220,12 +213,6 @@ async fn with_run_local_trigger_fire_access_checker(
         }
 
         let config_file = read_config_file(config)?;
-        let tenant_id = TenantId::new(&runtime_input.identity.tenant_id).with_context(|| {
-            format!(
-                "[identity].tenant `{}` is invalid",
-                runtime_input.identity.tenant_id
-            )
-        })?;
         let user_id = UserId::new(default_owner_id(config_file.as_ref()))
             .context("[identity].default_owner is invalid")?;
         let agent_id = AgentId::new(&runtime_input.identity.agent_id).with_context(|| {
@@ -234,66 +221,12 @@ async fn with_run_local_trigger_fire_access_checker(
                 runtime_input.identity.agent_id
             )
         })?;
-        let profile = effective_profile(config, config_file.as_ref())?;
-        let user_store_path = ironclaw_reborn_composition::local_dev_db_path(
-            &local_runtime_storage_root(config, profile),
-        );
-        let access_store =
-            open_trigger_access_store_for_profile(&runtime_input, profile, &user_store_path)
-                .await?;
-        let user_ids = [user_id];
-        access_store
-            .reconcile_local_access(LocalTriggerAccessReconciliation {
-                tenant_id: &tenant_id,
-                user_ids: &user_ids,
-                agent_id: Some(&agent_id),
-                project_id: None,
-                role: LocalTriggerAccessRole::Owner,
-                source: LocalTriggerAccessSource::LocalDevRunBootstrap,
-            })
-            .await
-            .context("failed to reconcile local trigger-fire access for `run`")?;
-
-        Ok(runtime_input
-            .with_trigger_fire_access_checker(local_trigger_access_fire_checker(access_store)))
-    }
-}
-
-pub(crate) async fn open_trigger_access_store_for_profile(
-    runtime_input: &RebornRuntimeInput,
-    profile: RebornProfile,
-    local_store_path: &Path,
-) -> anyhow::Result<Arc<dyn LocalTriggerAccessStore>> {
-    match profile {
-        RebornProfile::HostedSingleTenant => {
-            #[cfg(feature = "postgres")]
-            {
-                let services = runtime_input.services.as_ref().context(
-                    "profile=hosted-single-tenant requires runtime services before trigger-fire access can be wired",
-                )?;
-                let store = services
-                    .open_hosted_single_tenant_trigger_access_store()
-                    .await
-                    .context("failed to initialize hosted trigger-fire access store")?;
-                let store: Arc<dyn LocalTriggerAccessStore> = store;
-                Ok(store)
-            }
-            #[cfg(not(feature = "postgres"))]
-            {
-                let _ = runtime_input;
-                let _ = local_store_path;
-                anyhow::bail!(
-                    "profile=hosted-single-tenant requires the `postgres` feature for trigger-fire access"
-                );
-            }
-        }
-        _ => {
-            let store = open_local_trigger_access_store(local_store_path)
-                .await
-                .context("failed to initialize local trigger-fire access store")?;
-            let store: Arc<dyn LocalTriggerAccessStore> = store;
-            Ok(store)
-        }
+        // The `run` owner grant is a static single owner — a config value,
+        // built into the runtime's fire-time checker without any persisted
+        // trigger-access store (arch-simplification §4.4).
+        Ok(runtime_input.with_trigger_fire_access_policy(
+            TriggerFireAccessPolicy::disabled().with_static_owner(user_id, agent_id, None),
+        ))
     }
 }
 
@@ -483,8 +416,9 @@ pub(crate) fn build_runtime_input(
         .map(|b| b.inner)
 }
 
-/// Build [`CredentialRefreshSettings`] for the proactive Google OAuth keepalive
-/// worker.
+/// Build [`KeepaliveSweepSettings`] for the engine-owned credential keepalive
+/// sweep (vendors opt in by declaring `refresh.keepalive_idle_seconds` in
+/// their auth recipe).
 ///
 /// Enabled by default on the local `serve` surface (so refresh tokens stay warm
 /// for long-running deployments) and disabled for every other caller, mirroring
@@ -493,11 +427,11 @@ pub(crate) fn build_runtime_input(
 /// present-but-blank value falls through to the caller default.
 fn credential_refresh_settings(
     caller: RuntimeInputCaller,
-) -> anyhow::Result<CredentialRefreshSettings> {
+) -> anyhow::Result<KeepaliveSweepSettings> {
     let base = if caller == RuntimeInputCaller::Serve {
-        CredentialRefreshSettings::enabled()
+        KeepaliveSweepSettings::enabled()
     } else {
-        CredentialRefreshSettings::default()
+        KeepaliveSweepSettings::default()
     };
     apply_credential_refresh_override(base, std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED"))
 }
@@ -506,9 +440,9 @@ fn credential_refresh_settings(
 /// settings value. Pure (env lookup is passed in) so the override semantics are
 /// unit-testable without mutating process-global environment state.
 fn apply_credential_refresh_override(
-    mut settings: CredentialRefreshSettings,
+    mut settings: KeepaliveSweepSettings,
     raw: Result<String, std::env::VarError>,
-) -> anyhow::Result<CredentialRefreshSettings> {
+) -> anyhow::Result<KeepaliveSweepSettings> {
     match raw {
         Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
             "" => {}
@@ -545,7 +479,6 @@ fn apply_credential_refresh_override(
 ///   with no GUI session). `onboard` already pays that cost interactively;
 ///   `serve` is the boot path this fix unblocks. `run` stays fail-fast so
 ///   a forgotten env var doesn't hang instead of erroring clearly.
-#[cfg(feature = "libsql")]
 fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     config: &RebornBootConfig,
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
@@ -598,29 +531,24 @@ fn resolve_reborn_runtime_llm_with_stored_key_fallback(
     .map_err(Into::into)
 }
 
-/// Feature-off fallback: without `libsql` there is no local-dev secret store
-/// to check, so behavior here is byte-identical to calling
-/// `resolve_reborn_runtime_llm` directly — a required-but-unset API key
-/// still fails closed with `ApiKeyEnvUnset`.
-#[cfg(not(feature = "libsql"))]
-fn resolve_reborn_runtime_llm_with_stored_key_fallback(
-    config: &RebornBootConfig,
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-    _caller: RuntimeInputCaller,
-) -> anyhow::Result<Option<ironclaw_reborn_composition::ResolvedRebornLlm>> {
-    ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file).map_err(Into::into)
-}
-
 pub(crate) fn build_runtime_input_with_options(
     config: &RebornBootConfig,
     caller: RuntimeInputCaller,
     options: RuntimeInputOptions,
 ) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
-    let slack_personal_lazy_slot = runtime_services.slack_personal_lazy_slot.clone();
+
+    // The binary assembles the native extension factory registry and the
+    // channel-adapter bindings (DEL-7's target shape); composition receives
+    // them as input and never links a concrete extension crate.
+    let services_input = runtime_services
+        .services_input
+        .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
+        .with_channel_extension_bindings(native_extensions::bundled_channel_extension_bindings())
+        .with_account_setup_descriptors(account_setups::bundled_account_setup_descriptors());
 
     #[allow(unused_mut)]
-    let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
+    let mut runtime_input = RebornRuntimeInput::from_services(services_input)
         .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
         .with_trigger_poller_settings(trigger_poller_settings(
             runtime_services.config_file.as_ref(),
@@ -669,19 +597,16 @@ pub(crate) fn build_runtime_input_with_options(
 
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
-        slack_personal_lazy_slot,
     })
 }
 
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornBuildInput,
-    pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
 }
 
 pub(crate) struct BuiltRuntimeInput {
     pub(crate) inner: RebornRuntimeInput,
-    pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
 }
 
 #[derive(Clone, Debug)]
@@ -729,16 +654,8 @@ pub(crate) fn build_services_input_with_options(
         hosted_domain_hint: _hosted_domain_hint,
     }) = resolve_google_oauth_config_from_env(config, config_file.as_ref())?
     {
-        services_input = services_input.with_google_oauth_backend(client);
+        services_input = services_input.with_vendor_oauth_client("google", client);
     }
-    let slack_personal_lazy_slot =
-        if let Some(redirect_uri) = resolve_slack_personal_oauth_redirect_uri_from_env()? {
-            let slot = SlackPersonalSetupServiceSlot::new(redirect_uri);
-            services_input = services_input.with_slack_personal_oauth_lazy(slot.clone());
-            Some(slot)
-        } else {
-            None
-        };
     let identity = runtime_identity(config_file.as_ref());
     let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
@@ -746,7 +663,6 @@ pub(crate) fn build_services_input_with_options(
 
     Ok(RuntimeServicesInput {
         services_input,
-        slack_personal_lazy_slot,
         config_file,
     })
 }
@@ -781,7 +697,6 @@ fn build_standalone_local_runtime_services_input(
     Ok(services_input)
 }
 
-#[cfg(feature = "postgres")]
 fn build_hosted_single_tenant_services_input(
     profile: RebornProfile,
     owner_id: &str,
@@ -808,20 +723,6 @@ fn build_hosted_single_tenant_services_input(
     )
 }
 
-#[cfg(not(feature = "postgres"))]
-fn build_hosted_single_tenant_services_input(
-    profile: RebornProfile,
-    _owner_id: &str,
-    _config: &RebornBootConfig,
-    _config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> anyhow::Result<RebornBuildInput> {
-    anyhow::bail!(
-        "profile={profile} requires a binary built with the `postgres` feature for hosted \
-         single-tenant storage; the default PostgreSQL URL env var is IRONCLAW_REBORN_POSTGRES_URL"
-    )
-}
-
-#[cfg(feature = "postgres")]
 fn build_production_services_input(
     profile: RebornProfile,
     owner_id: &str,
@@ -834,18 +735,6 @@ fn build_production_services_input(
     )
     .map_err(anyhow::Error::from)
 }
-#[cfg(not(feature = "postgres"))]
-fn build_production_services_input(
-    profile: RebornProfile,
-    _owner_id: &str,
-    _config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> anyhow::Result<RebornBuildInput> {
-    anyhow::bail!(
-        "profile={profile} requires a binary built with the `postgres` feature for production \
-         storage; the default PostgreSQL URL env var is IRONCLAW_REBORN_POSTGRES_URL"
-    )
-}
-
 /// Resolve the Google OAuth backend config for boot, merging env vars with
 /// the operator's `[google]` config.toml section and the encrypted
 /// client-secret store. See [`resolve_google_oauth_config_state_merged`]
@@ -898,12 +787,6 @@ pub(crate) fn resolve_google_oauth_config_state_from_env(
 /// env secret exists, avoiding unnecessary keychain or filesystem access on
 /// unconfigured and partial hosts. Status never calls this material-reading
 /// path because secret presence cannot affect its public-field diagnosis.
-///
-/// `libsql`-gated because that is the only Cargo feature under which
-/// `config set google.client_secret` can ever have written anything here —
-/// a binary without it can't have populated the store, so there is nothing
-/// to read.
-#[cfg(feature = "libsql")]
 fn google_oauth_client_secret_from_store(
     config: &RebornBootConfig,
 ) -> anyhow::Result<Option<SecretString>> {
@@ -924,51 +807,18 @@ fn google_oauth_client_secret_from_store(
     })
 }
 
-#[cfg(not(feature = "libsql"))]
-fn google_oauth_client_secret_from_store(
-    _config: &RebornBootConfig,
-) -> anyhow::Result<Option<SecretString>> {
-    Ok(None)
-}
-
-pub(crate) fn resolve_slack_personal_oauth_redirect_uri_from_env()
--> anyhow::Result<Option<OAuthRedirectUri>> {
-    resolve_slack_personal_oauth_redirect_uri(optional_nonempty_env)
-}
-
-fn resolve_slack_personal_oauth_redirect_uri(
-    mut lookup: impl FnMut(&str) -> Option<String>,
-) -> anyhow::Result<Option<OAuthRedirectUri>> {
-    let Some(raw) = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI") else {
-        return Ok(None);
-    };
-    let uri = OAuthRedirectUri::new(raw)
-        .context("invalid IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI")?;
-    Ok(Some(uri))
-}
-
 /// Outcome of resolving Google OAuth config from env, the `[google]`
-/// config.toml section, and the encrypted client-secret store (merged by
-/// [`resolve_google_oauth_config_state_merged`]). Distinguishes "nothing set
-/// at all" from "asymmetrically partial" (`client_id` present without
-/// `redirect_uri`, or vice versa) so callers can log/report specifically —
-/// both degrade to no active Google OAuth backend rather than a boot
-/// failure. `client_secret` is intentionally NOT part of the asymmetry: a
-/// missing secret alone still yields `Configured` (public-client PKCE).
+/// config.toml section, and the encrypted client-secret store. Partial public
+/// configuration disables the backend without failing boot; the client secret
+/// is optional because Google OAuth supports public-client PKCE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GoogleOAuthConfigState {
-    /// No Google OAuth vars/config present at all — silent, not a
-    /// misconfiguration.
     Unconfigured,
-    /// `client_id` is present without `redirect_uri`.
     MissingRedirectUri,
-    /// `redirect_uri` is present without `client_id`.
     MissingClientId,
 }
 
 impl GoogleOAuthConfigState {
-    /// Convert the closed missing-field state to an operator-facing config
-    /// key only at the CLI rendering boundary.
     pub(crate) fn missing_config_key(&self) -> Option<&'static str> {
         match self {
             Self::Unconfigured => None,
@@ -978,23 +828,12 @@ impl GoogleOAuthConfigState {
     }
 }
 
-/// Either a fully resolved Google OAuth backend config, or a
-/// [`GoogleOAuthConfigState`] explaining why one wasn't built.
 #[derive(Debug, Clone)]
 pub(crate) enum GoogleOAuthResolution {
     Configured(ResolvedGoogleOAuthConfig),
     Disabled(GoogleOAuthConfigState),
 }
 
-/// Env-only resolver — the pure lookup-closure testing seam predating the
-/// `[google]` config.toml / secret-store merge. Delegates to
-/// [`resolve_google_oauth_config_state_merged`] with no config/store input,
-/// which is mathematically identical to the old env-only "nothing set at
-/// all" check (each merged field collapses to exactly the
-/// reborn-prefixed-or-legacy env pair when `config_google` and
-/// `store_client_secret` are both `None`). Kept as a separate, still-pure
-/// entry point so existing env-wins test coverage keeps compiling and
-/// passing unchanged.
 #[cfg(test)]
 fn resolve_google_oauth_config_state(
     lookup: impl FnMut(&str) -> Option<String>,
@@ -1002,20 +841,6 @@ fn resolve_google_oauth_config_state(
     resolve_google_oauth_config_state_merged(lookup, None, None)
 }
 
-/// Resolve Google OAuth backend config state with precedence **env (wins) ->
-/// `[google]` config.toml, field by field**; `client_secret` additionally
-/// falls back to the encrypted secret store when neither env var carries it.
-/// `hosted_domain_hint` follows the same env -> config precedence as
-/// `client_id`/`redirect_uri`.
-///
-/// Pure: `env_lookup` is an injected closure and `store_client_secret` is a
-/// pre-fetched value rather than this function doing its own I/O — the same
-/// PURE lookup-closure testing seam the pre-merge env-only tests already
-/// relied on, now widened to cover the config-file and secret-store inputs
-/// too without giving this function a runtime dependency. The boot caller
-/// reads config plus stored secret material; the status caller reads config
-/// but deliberately supplies no stored secret because an optional PKCE client
-/// secret cannot affect its public-field diagnosis.
 #[cfg(test)]
 fn resolve_google_oauth_config_state_merged(
     env_lookup: impl FnMut(&str) -> Option<String>,
@@ -1077,9 +902,6 @@ impl GoogleOAuthEnvInputs {
     }
 }
 
-/// Classify only the two public fields that determine whether Google OAuth is
-/// disabled. `None` means both are present; an optional client secret cannot
-/// change this result because public-client PKCE remains valid without one.
 fn resolve_google_oauth_public_config_state(
     env: &GoogleOAuthEnvInputs,
     config_google: Option<&ironclaw_reborn_config::GoogleSection>,
@@ -1112,7 +934,6 @@ fn resolve_google_oauth_config_state_from_inputs(
     config_google: Option<&ironclaw_reborn_config::GoogleSection>,
     store_client_secret: Option<SecretString>,
 ) -> anyhow::Result<GoogleOAuthResolution> {
-    // env (wins) -> [google] config.toml, field by field.
     let client_id = env
         .reborn_client_id
         .or(env.legacy_client_id)
@@ -1165,10 +986,6 @@ fn resolve_google_oauth_config_state_from_inputs(
             ));
         }
         (None, None) => {
-            // Neither client_id nor redirect_uri set, but some other
-            // Google var/field (client_secret / hosted_domain_hint) is —
-            // treat as unconfigured rather than partial: those two
-            // fields alone don't signal OAuth setup intent.
             return Ok(GoogleOAuthResolution::Disabled(
                 GoogleOAuthConfigState::Unconfigured,
             ));
@@ -1582,28 +1399,26 @@ fn runner_settings(
 mod tests {
     use std::{collections::HashMap, sync::MutexGuard};
 
+    use ironclaw_reborn_composition::TriggerFireAccessPolicy;
     use ironclaw_reborn_composition::{
-        CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
+        KeepaliveSweepSettings, RebornCompositionProfile, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
-    use ironclaw_reborn_composition::{LocalTriggerAccessRole, LocalTriggerAccessSource};
     use ironclaw_reborn_config::RebornBootConfig;
     use secrecy::SecretString;
 
+    use super::apply_run_trigger_fire_access_policy;
     use super::test_env::EnvGuard;
-    use super::with_run_local_trigger_fire_access_checker;
     use super::{
         GoogleOAuthConfigState, GoogleOAuthEnvInputs, GoogleOAuthResolution, RuntimeInputCaller,
         RuntimeInputOptions, apply_credential_refresh_override, block_on_cli, build_runtime_input,
         build_runtime_input_with_options, no_assistant_text_message, protect_reborn_log_filter,
         resolve_google_oauth_config, resolve_google_oauth_config_state,
         resolve_google_oauth_config_state_merged,
-        resolve_google_oauth_config_state_with_store_loader,
-        resolve_slack_personal_oauth_redirect_uri, runner_settings,
+        resolve_google_oauth_config_state_with_store_loader, runner_settings,
     };
     use ironclaw_reborn_config::GoogleSection;
-    // Only the `#[cfg(feature = "libsql")]` hosted-volume test consumes this.
-    #[cfg(feature = "libsql")]
+    // Only the hosted-volume tests consume this.
     use super::local_runtime_storage_root;
     use ironclaw_reborn_composition::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 
@@ -2072,14 +1887,14 @@ mod tests {
     fn credential_refresh_override_keeps_caller_default_without_env() {
         // Serve base is enabled; absent env leaves it enabled.
         let serve = apply_credential_refresh_override(
-            CredentialRefreshSettings::enabled(),
+            KeepaliveSweepSettings::enabled(),
             Err(std::env::VarError::NotPresent),
         )
         .expect("absent env is valid");
         assert!(serve.enabled, "Serve default stays on when env unset");
         // Non-Serve base is disabled; absent env leaves it disabled.
         let other = apply_credential_refresh_override(
-            CredentialRefreshSettings::default(),
+            KeepaliveSweepSettings::default(),
             Err(std::env::VarError::NotPresent),
         )
         .expect("absent env is valid");
@@ -2090,7 +1905,7 @@ mod tests {
     fn credential_refresh_override_kill_switch_disables() {
         for raw in ["0", "false", "FALSE", " 0 "] {
             let out = apply_credential_refresh_override(
-                CredentialRefreshSettings::enabled(),
+                KeepaliveSweepSettings::enabled(),
                 Ok(raw.to_string()),
             )
             .expect("valid kill-switch value");
@@ -2102,7 +1917,7 @@ mod tests {
     fn credential_refresh_override_force_on_enables() {
         for raw in ["1", "true", "TRUE", " true "] {
             let out = apply_credential_refresh_override(
-                CredentialRefreshSettings::default(),
+                KeepaliveSweepSettings::default(),
                 Ok(raw.to_string()),
             )
             .expect("valid force-on value");
@@ -2113,7 +1928,7 @@ mod tests {
     #[test]
     fn credential_refresh_override_blank_falls_through_to_base() {
         let out = apply_credential_refresh_override(
-            CredentialRefreshSettings::enabled(),
+            KeepaliveSweepSettings::enabled(),
             Ok("   ".to_string()),
         )
         .expect("blank value is valid");
@@ -2123,7 +1938,7 @@ mod tests {
     #[test]
     fn credential_refresh_override_invalid_value_is_error() {
         let result = apply_credential_refresh_override(
-            CredentialRefreshSettings::default(),
+            KeepaliveSweepSettings::default(),
             Ok("maybe".to_string()),
         );
         assert!(result.is_err(), "invalid value must be a hard error");
@@ -2140,7 +1955,6 @@ mod tests {
         EnvGuard::clear("IRONCLAW_CREDENTIAL_REFRESH_ENABLED")
     }
 
-    #[cfg(feature = "postgres")]
     fn clear_reborn_postgres_tls_env() -> (EnvGuard, EnvGuard) {
         (
             EnvGuard::clear("DATABASE_SSLMODE"),
@@ -2305,7 +2119,6 @@ regex_activation_enabled = false
         assert_eq!(policy.secret_mode.as_str(), "inherited_env");
     }
 
-    #[cfg(feature = "libsql")]
     #[test]
     fn build_runtime_input_accepts_hosted_single_tenant_volume_profile() {
         let _lock = lock_runtime_env();
@@ -2343,7 +2156,6 @@ regex_activation_enabled = false
         );
     }
 
-    #[cfg(feature = "postgres")]
     fn boot_config_with_config_toml(
         profile: &str,
         config_toml: &str,
@@ -2362,7 +2174,6 @@ regex_activation_enabled = false
         (temp, config)
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_for_local_dev_rejects_policy_section() {
         let _lock = lock_runtime_env();
@@ -2386,7 +2197,6 @@ default_profile = "secure_default"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_for_hosted_volume_rejects_storage_section() {
         let _lock = lock_runtime_env();
@@ -2411,7 +2221,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_storage_section() {
         let _lock = lock_runtime_env();
@@ -2440,7 +2249,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_postgres_url_env_value() {
         let _lock = lock_runtime_env();
@@ -2483,7 +2291,6 @@ default_profile = "secure_default"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_storage_section_missing_backend_field() {
         let _lock = lock_runtime_env();
@@ -2508,7 +2315,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_policy_section() {
         let _lock = lock_runtime_env();
@@ -2541,7 +2347,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_invalid_policy_deployment_mode() {
         let _lock = lock_runtime_env();
@@ -2578,7 +2383,6 @@ default_profile = "secure_default"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_invalid_policy_default_profile() {
         let _lock = lock_runtime_env();
@@ -2615,7 +2419,6 @@ default_profile = "not_a_profile"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_unsupported_backend() {
         let _lock = lock_runtime_env();
@@ -2639,7 +2442,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_whitespace_only_postgres_url() {
         let _lock = lock_runtime_env();
@@ -2666,7 +2468,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_hosted_single_tenant_constructs_postgres_local_runtime_input() {
         let _lock = lock_runtime_env();
@@ -2707,7 +2508,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         drop(allow_cleartext);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_rejects_invalid_postgres_pool_max_size_override() {
         let _lock = lock_runtime_env();
@@ -2747,7 +2547,6 @@ secret_master_key_env = "IRONCLAW_REBORN_SECRET_MASTER_KEY"
         drop(allow_cleartext);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_preserves_whitespace_secret_master_key() {
         let _lock = lock_runtime_env();
@@ -2777,7 +2576,6 @@ default_profile = "secure_default"
         assert_eq!(services.profile(), RebornCompositionProfile::Production);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_uses_custom_url_env_name() {
         let _lock = lock_runtime_env();
@@ -2809,7 +2607,6 @@ default_profile = "secure_default"
         assert_eq!(services.profile(), RebornCompositionProfile::Production);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_constructs_migration_dry_run_services_input() {
         let _lock = lock_runtime_env();
@@ -2843,7 +2640,6 @@ default_profile = "secure_default"
         );
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_requires_secret_master_key_env_value() {
         let _lock = lock_runtime_env();
@@ -2892,7 +2688,6 @@ default_profile = "secure_default"
         assert!(!rendered.contains("postgres://"));
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_remote_postgres_sslmode_disable_redacted() {
         let _lock = lock_runtime_env();
@@ -2944,7 +2739,6 @@ default_profile = "secure_default"
         assert!(!rendered.contains("db.example.com"));
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_database_sslmode_disable_without_opt_in() {
         let _lock = lock_runtime_env();
@@ -2985,7 +2779,6 @@ default_profile = "secure_default"
         assert!(!rendered.contains("db.example.com"));
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_allows_database_sslmode_disable_with_opt_in() {
         let _lock = lock_runtime_env();
@@ -3019,7 +2812,6 @@ default_profile = "secure_default"
         assert_eq!(services.profile(), RebornCompositionProfile::Production);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_rejects_invalid_cleartext_opt_in() {
         let _lock = lock_runtime_env();
@@ -3062,7 +2854,6 @@ default_profile = "secure_default"
         assert!(!rendered.contains("db.example.com"));
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_accepts_verify_full_database_sslmode() {
         let _lock = lock_runtime_env();
@@ -3095,7 +2886,6 @@ default_profile = "secure_default"
         assert_eq!(services.profile(), RebornCompositionProfile::Production);
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
     fn build_runtime_input_production_constructs_postgres_services_input() {
         let lock = lock_runtime_env();
@@ -3233,7 +3023,7 @@ enabled = true
 
     #[allow(clippy::await_holding_lock, reason = "serializes env guards")]
     #[tokio::test]
-    async fn run_trigger_poller_bootstrap_seeds_local_access_checker() {
+    async fn run_trigger_poller_sets_static_owner_access_policy() {
         let _lock = lock_runtime_env();
         let (_enabled, _interval) = clear_trigger_poller_env();
 
@@ -3263,100 +3053,26 @@ enabled = true
         let runtime_input =
             build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
 
-        let tenant_id = ironclaw_reborn_composition::host_api::TenantId::new("run-trigger-tenant")
-            .expect("tenant id");
         let user_id = ironclaw_reborn_composition::host_api::UserId::new("run-trigger-user")
             .expect("user id");
-        let stale_user_id = ironclaw_reborn_composition::host_api::UserId::new("run-trigger-stale")
-            .expect("stale user id");
         let agent_id = ironclaw_reborn_composition::host_api::AgentId::new("run-trigger-agent")
             .expect("agent id");
-        let project_id =
-            ironclaw_reborn_composition::host_api::ProjectId::new("run-trigger-project")
-                .expect("project id");
-        let user_store_path = config
-            .home()
-            .path()
-            .join("local-dev")
-            .join("reborn-local-dev.db");
-        let access_store =
-            ironclaw_reborn_composition::open_local_trigger_access_store(&user_store_path)
-                .await
-                .expect("open local trigger access store");
-        access_store
-            .seed_local_access(ironclaw_reborn_composition::LocalTriggerAccessSeed {
-                tenant_id: &tenant_id,
-                user_id: &stale_user_id,
-                agent_id: Some(&agent_id),
-                project_id: None,
-                role: LocalTriggerAccessRole::Owner,
-                source: LocalTriggerAccessSource::LocalDevRunBootstrap,
-            })
-            .await
-            .expect("seed stale run trigger access");
 
-        let runtime_input = with_run_local_trigger_fire_access_checker(runtime_input, &config)
+        let runtime_input = apply_run_trigger_fire_access_policy(runtime_input, &config)
             .await
-            .expect("bootstrap run trigger fire access checker");
+            .expect("bootstrap run trigger fire access policy");
 
-        let checker = runtime_input
-            .trigger_fire_access_checker
-            .expect("checker is wired");
-        let allowed = checker
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id: tenant_id.clone(),
-                creator_user_id: user_id,
-                agent_id: Some(agent_id.clone()),
-                project_id: None,
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check run trigger fire access");
+        // The `run` owner grant is the configured default owner at the default
+        // agent scope, no project (arch-simplification §4.4). The checker's
+        // allow/deny behavior is covered by StaticOwnerTriggerFireChecker's
+        // unit tests; here we assert the run edge resolves the right policy.
         assert_eq!(
-            allowed,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Allowed
+            runtime_input.trigger_fire_access,
+            TriggerFireAccessPolicy::disabled().with_static_owner(user_id, agent_id, None)
         );
-
-        let project_scoped_decision = checker
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id: tenant_id.clone(),
-                creator_user_id: ironclaw_reborn_composition::host_api::UserId::new(
-                    "run-trigger-user",
-                )
-                .expect("user id"),
-                agent_id: Some(agent_id.clone()),
-                project_id: Some(project_id.clone()),
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check project-scoped run trigger fire access");
-        assert_eq!(
-            project_scoped_decision,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
-                reason: "trigger creator does not have active local access for this scope"
-                    .to_string(),
-            }
-        );
-
-        let stale_decision = checker
-            .check_trigger_fire_access(ironclaw_reborn_composition::TriggerFireAccessCheck {
-                tenant_id,
-                creator_user_id: stale_user_id,
-                agent_id: Some(agent_id),
-                project_id: None,
-                trigger_id: ironclaw_reborn_composition::TriggerId::new(),
-                fire_slot: chrono::Utc::now(),
-            })
-            .await
-            .expect("check stale run trigger fire access");
-        assert_eq!(
-            stale_decision,
-            ironclaw_reborn_composition::TriggerFireAccessDecision::Denied {
-                reason: "trigger creator does not have active local access for this scope"
-                    .to_string(),
-            }
+        assert!(
+            runtime_input.trigger_fire_access_checker.is_none(),
+            "the run path sets a policy, not an explicit checker override"
         );
     }
 
@@ -3629,59 +3345,7 @@ poll_interval_secs = 15
     }
 
     #[test]
-    fn resolve_slack_personal_oauth_redirect_uri_returns_none_when_unset() {
-        let uri = resolve_slack_personal_oauth_redirect_uri(|_| None)
-            .expect("empty env should not fail setup");
-        assert!(uri.is_none());
-    }
-
-    #[test]
-    fn resolve_slack_personal_oauth_redirect_uri_returns_uri_when_set() {
-        const REDIRECT_URI: &str =
-            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback";
-        let vars = HashMap::from([(
-            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
-            REDIRECT_URI,
-        )]);
-        let uri =
-            resolve_slack_personal_oauth_redirect_uri(|name| vars.get(name).map(|v| v.to_string()))
-                .expect("valid redirect URI resolves")
-                .expect("URI present when var is set");
-        assert_eq!(uri.as_str(), REDIRECT_URI);
-    }
-
-    #[test]
-    fn resolve_google_oauth_config_reports_disabled_when_client_id_present_but_redirect_uri_missing()
-     {
-        let vars = HashMap::from([(
-            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
-            "reborn-client.apps.googleusercontent.com",
-        )]);
-
-        let config =
-            resolve_google_oauth_config(|name| vars.get(name).map(|value| value.to_string()))
-                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
-        assert!(
-            config.is_none(),
-            "client_id-without-redirect_uri must not build an active OAuth backend"
-        );
-
-        let state =
-            resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
-                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
-        match state {
-            GoogleOAuthResolution::Disabled(disabled) => {
-                assert_eq!(disabled, GoogleOAuthConfigState::MissingRedirectUri)
-            }
-            GoogleOAuthResolution::Configured(_) => {
-                panic!("expected Disabled(PartiallyConfigured), got Configured")
-            }
-        }
-    }
-
-    #[test]
-    fn resolve_google_oauth_config_reports_disabled_when_redirect_uri_present_but_client_id_missing()
-     {
+    fn resolve_google_oauth_config_errors_when_client_id_missing() {
         let vars = HashMap::from([(
             "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
             "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
@@ -4112,7 +3776,6 @@ poll_interval_secs = 15
     /// just that the pure merge function accepts a hand-built
     /// `SecretString` — the merge-function tests above already cover the
     /// precedence rules in isolation.
-    #[cfg(feature = "libsql")]
     #[test]
     fn google_oauth_client_secret_from_store_reads_back_a_stored_secret() {
         let _guard = lock_runtime_env();
@@ -4163,7 +3826,6 @@ poll_interval_secs = 15
     /// Deliberately does NOT set `IRONCLAW_DISABLE_OS_KEYCHAIN`; with no
     /// secret-store database, the loader must short-circuit to `None` before
     /// reaching the keychain and complete quickly without a GUI session.
-    #[cfg(feature = "libsql")]
     #[test]
     fn google_oauth_client_secret_from_store_is_read_only_on_a_pristine_home() {
         let _guard = lock_runtime_env();
