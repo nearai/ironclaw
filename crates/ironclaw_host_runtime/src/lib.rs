@@ -48,7 +48,6 @@ mod latency;
 pub mod memory_binding;
 pub mod memory_context;
 pub mod memory_native_extension;
-pub mod memory_profiles;
 pub mod memory_provider;
 mod obligations;
 mod post_edit_check;

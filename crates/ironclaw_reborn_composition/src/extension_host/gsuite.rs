@@ -205,7 +205,6 @@ fn capability_manifest(
 ) -> Result<CapabilityManifest, ExtensionError> {
     Ok(CapabilityManifest {
         id: CapabilityId::new(capability.id)?,
-        implements: Vec::new(),
         description: capability.description.to_string(),
         effects: capability.effects.to_vec(),
         default_permission: capability.default_permission,

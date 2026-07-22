@@ -6,10 +6,8 @@
 //! third-party extension without an admin override is a startup error). Also
 //! renders the redacted active-override diagnostics for startup/doctor.
 
-use ironclaw_host_api::CapabilityProfileId;
 use ironclaw_host_runtime::memory_binding::{
     MemoryAdminOverrideEntry, MemoryBindingInput, MemoryBindingPolicy, MemoryDeploymentProfile,
-    MemoryProfileBindingEntry,
 };
 use ironclaw_reborn_config::MemorySection;
 
@@ -36,35 +34,19 @@ fn deployment_profile(profile: RebornCompositionProfile) -> MemoryDeploymentProf
     }
 }
 
-fn parse_profile_id(value: &str) -> Result<CapabilityProfileId, RebornBuildError> {
-    CapabilityProfileId::new(value).map_err(|error| RebornBuildError::InvalidConfig {
-        reason: format!("invalid memory profile id '{value}': {error}"),
-    })
-}
-
 /// Resolve the memory binding policy from config + deployment profile,
-/// fail-closed. `None` config yields the default native binding for every
-/// required memory profile.
+/// fail-closed. `None` config binds the native provider by default.
 pub fn resolve_memory_binding_policy(
     memory: Option<&MemorySection>,
     profile: RebornCompositionProfile,
 ) -> Result<MemoryBindingPolicy, RebornBuildError> {
     let Some(memory) = memory else {
-        return MemoryBindingPolicy::native_default().map_err(map_binding_error);
+        return Ok(MemoryBindingPolicy::native_default());
     };
-
-    let mut bindings = Vec::with_capacity(memory.profile_bindings.len());
-    for binding in &memory.profile_bindings {
-        bindings.push(MemoryProfileBindingEntry {
-            profile_id: parse_profile_id(&binding.profile_id)?,
-            extension_id: binding.extension_id.clone(),
-        });
-    }
 
     let mut overrides = Vec::with_capacity(memory.admin_overrides.len());
     for over in &memory.admin_overrides {
         overrides.push(MemoryAdminOverrideEntry {
-            profile_id: parse_profile_id(&over.profile_id)?,
             extension_id: over.extension_id.clone(),
             deployment_profile: over.deployment_profile.clone(),
         });
@@ -73,7 +55,7 @@ pub fn resolve_memory_binding_policy(
     let input = MemoryBindingInput {
         deployment: deployment_profile(profile),
         native_available: true,
-        bindings,
+        provider: memory.provider.clone(),
         overrides,
     };
     MemoryBindingPolicy::resolve(input).map_err(map_binding_error)
@@ -100,23 +82,13 @@ pub fn memory_binding_diagnostics(policy: &MemoryBindingPolicy) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_reborn_config::{MemoryAdminOverride, MemoryProfileBinding};
+    use ironclaw_reborn_config::MemoryAdminOverride;
 
-    fn section(
-        profile_bindings: Vec<MemoryProfileBinding>,
-        admin_overrides: Vec<MemoryAdminOverride>,
-    ) -> MemorySection {
+    fn section(provider: Option<&str>, admin_overrides: Vec<MemoryAdminOverride>) -> MemorySection {
         MemorySection {
-            profile_bindings,
+            provider: provider.map(|value| value.to_string()),
             admin_overrides,
             ..Default::default()
-        }
-    }
-
-    fn binding(profile_id: &str, extension_id: &str) -> MemoryProfileBinding {
-        MemoryProfileBinding {
-            profile_id: profile_id.to_string(),
-            extension_id: extension_id.to_string(),
         }
     }
 
@@ -129,10 +101,7 @@ mod tests {
 
     #[test]
     fn production_disabled_binding_fails_startup() {
-        let memory = section(
-            vec![binding("memory.document_store.v1", "memory.disabled")],
-            Vec::new(),
-        );
+        let memory = section(Some("memory.disabled"), Vec::new());
         let err =
             resolve_memory_binding_policy(Some(&memory), RebornCompositionProfile::Production)
                 .expect_err("production must reject memory.disabled");
@@ -141,10 +110,7 @@ mod tests {
 
     #[test]
     fn production_third_party_without_override_fails_startup() {
-        let memory = section(
-            vec![binding("memory.document_store.v1", "acme.honcho")],
-            Vec::new(),
-        );
+        let memory = section(Some("acme.honcho"), Vec::new());
         let err =
             resolve_memory_binding_policy(Some(&memory), RebornCompositionProfile::Production)
                 .expect_err("production must reject unverified third-party");
@@ -154,9 +120,8 @@ mod tests {
     #[test]
     fn production_third_party_with_override_resolves_and_reports_redacted() {
         let memory = section(
-            vec![binding("memory.document_store.v1", "acme.honcho")],
+            Some("acme.honcho"),
             vec![MemoryAdminOverride {
-                profile_id: "memory.document_store.v1".to_string(),
                 extension_id: "acme.honcho".to_string(),
                 deployment_profile: "production".to_string(),
             }],
@@ -171,13 +136,10 @@ mod tests {
     }
 
     #[test]
-    fn invalid_profile_id_fails_startup() {
-        let memory = section(
-            vec![binding("not a valid id", "ironclaw.memory")],
-            Vec::new(),
-        );
+    fn invalid_provider_id_fails_startup() {
+        let memory = section(Some("not a valid id"), Vec::new());
         let err = resolve_memory_binding_policy(Some(&memory), RebornCompositionProfile::LocalDev)
-            .expect_err("invalid profile id rejected");
+            .expect_err("invalid provider id rejected");
         assert!(matches!(err, RebornBuildError::InvalidConfig { .. }));
     }
 }

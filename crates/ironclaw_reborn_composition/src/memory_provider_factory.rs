@@ -22,9 +22,7 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::CapabilityProfileId;
 use ironclaw_host_runtime::memory_binding::{MemoryBindingPolicy, MemoryProviderBinding};
-use ironclaw_host_runtime::memory_profiles::MEMORY_DOCUMENT_STORE_PROFILE_ID;
 use ironclaw_host_runtime::memory_provider::MemoryServiceResolver;
 use ironclaw_memory::{MemoryService, PromptWriteSafetyEventSink};
 #[cfg(feature = "memory-mem0")]
@@ -218,18 +216,13 @@ pub fn build_memory_service_resolver(
 ) -> MemoryServiceResolver {
     let resolver = MemoryServiceResolver::from_optional_policy(policy.clone());
 
-    // `None` policy = native default for every profile; nothing third-party to
-    // register. An impossible invalid profile id also leaves the resolver as-is
-    // (it fails closed at resolve time).
-    let (Some(policy), Ok(profile_id)) = (
-        policy,
-        CapabilityProfileId::new(MEMORY_DOCUMENT_STORE_PROFILE_ID),
-    ) else {
+    // `None` policy = native default; nothing third-party to register.
+    let Some(policy) = policy else {
         return resolver;
     };
 
-    match policy.binding_for(&profile_id) {
-        Some(binding @ MemoryProviderBinding::ThirdParty { extension_id }) => {
+    match policy.binding() {
+        binding @ MemoryProviderBinding::ThirdParty { extension_id } => {
             match create_document_store_provider(binding, deps) {
                 Some(provider) => resolver
                     .with_third_party_document_store_provider(extension_id.as_str(), provider),
@@ -237,7 +230,7 @@ pub fn build_memory_service_resolver(
                 None => resolver,
             }
         }
-        // Native / Disabled / unbound → the resolver already handles these.
+        // Native / Disabled → the resolver already handles these.
         _ => resolver,
     }
 }

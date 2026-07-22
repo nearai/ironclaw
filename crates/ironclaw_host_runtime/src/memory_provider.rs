@@ -23,12 +23,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::CapabilityProfileId;
 use ironclaw_memory::{MemoryService, PromptWriteSafetyEventSink};
 use ironclaw_memory_native::NativeMemoryService;
 
 use crate::memory_binding::{MemoryBindingPolicy, MemoryProviderBinding};
-use crate::memory_profiles::MEMORY_DOCUMENT_STORE_PROFILE_ID;
 
 /// How the document-store profile resolves, before constructing a provider.
 enum DocumentStoreResolution {
@@ -157,21 +155,18 @@ impl MemoryServiceResolver {
         }
     }
 
-    /// Resolve how the document-store profile binds, before provider construction.
-    /// Unknown/disabled (and the impossible invalid-id case) all fail closed.
+    /// Resolve how memory binds, before provider construction. Disabled fails
+    /// closed (no provider).
     fn document_store_resolution(&self) -> DocumentStoreResolution {
         let Some(policy) = &self.policy else {
             return DocumentStoreResolution::Native;
         };
-        let Ok(id) = CapabilityProfileId::new(MEMORY_DOCUMENT_STORE_PROFILE_ID) else {
-            return DocumentStoreResolution::Unavailable;
-        };
-        match policy.binding_for(&id) {
-            Some(MemoryProviderBinding::Native) => DocumentStoreResolution::Native,
-            Some(MemoryProviderBinding::ThirdParty { extension_id }) => {
+        match policy.binding() {
+            MemoryProviderBinding::Native => DocumentStoreResolution::Native,
+            MemoryProviderBinding::ThirdParty { extension_id } => {
                 DocumentStoreResolution::ThirdParty(extension_id.as_str().to_string())
             }
-            Some(MemoryProviderBinding::Disabled) | None => DocumentStoreResolution::Unavailable,
+            MemoryProviderBinding::Disabled => DocumentStoreResolution::Unavailable,
         }
     }
 }
@@ -181,7 +176,6 @@ mod tests {
     use super::*;
     use crate::memory_binding::{
         MEMORY_DISABLED_BINDING_SENTINEL, MemoryBindingInput, MemoryDeploymentProfile,
-        MemoryProfileBindingEntry,
     };
     use ironclaw_filesystem::InMemoryBackend;
 
@@ -191,13 +185,8 @@ mod tests {
 
     fn policy_with_document_store(extension_id: &str) -> MemoryBindingPolicy {
         MemoryBindingPolicy::resolve(MemoryBindingInput {
-            deployment: MemoryDeploymentProfile::LocalDev,
-            native_available: true,
-            bindings: vec![MemoryProfileBindingEntry {
-                profile_id: CapabilityProfileId::new(MEMORY_DOCUMENT_STORE_PROFILE_ID).unwrap(),
-                extension_id: extension_id.to_string(),
-            }],
-            overrides: Vec::new(),
+            provider: Some(extension_id.to_string()),
+            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::LocalDev)
         })
         .expect("policy resolves")
     }

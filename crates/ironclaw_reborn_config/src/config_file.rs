@@ -114,13 +114,15 @@ pub struct RebornConfigFile {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemorySection {
-    /// `profile_id -> extension_id` bindings. An unlisted required profile
-    /// defaults to the native provider at resolution time.
+    /// The memory provider extension id backing the always-on memory adapter:
+    /// `ironclaw.memory` (native, the default), `memory.disabled`, or a
+    /// third-party id (e.g. `mem0`). Omitted binds native. The provider is
+    /// chosen at compose time and is immutable at runtime (no runtime swap).
     #[serde(default)]
-    pub profile_bindings: Vec<MemoryProfileBinding>,
+    pub provider: Option<String>,
     /// Admin overrides authorizing an otherwise-rejected production binding,
-    /// scoped to `(extension_id, profile_id, deployment_profile)`. Production
-    /// composition still applies the resolver's fail-closed policy.
+    /// scoped to `(extension_id, deployment_profile)`. Production composition
+    /// still applies the resolver's fail-closed policy.
     #[serde(default)]
     pub admin_overrides: Vec<MemoryAdminOverride>,
     /// Connection base URL for a third-party memory provider that needs one,
@@ -136,22 +138,11 @@ pub struct MemorySection {
     pub mem0_base_url: Option<String>,
 }
 
-/// One `profile_id -> extension_id` memory binding.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct MemoryProfileBinding {
-    /// Memory capability profile id, e.g. `memory.document_store.v1`.
-    pub profile_id: String,
-    /// `ironclaw.memory`, `memory.disabled`, or a third-party id.
-    pub extension_id: String,
-}
-
-/// One admin override authorizing a production memory binding.
+/// One admin override authorizing a production memory binding, scoped to
+/// `(extension_id, deployment_profile)`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryAdminOverride {
-    /// Memory capability profile id the override applies to.
-    pub profile_id: String,
     /// Extension id the override authorizes.
     pub extension_id: String,
     /// Deployment-profile wire name (e.g. `production`) or `*` for all.
@@ -1243,26 +1234,14 @@ impl RebornConfigFile {
                 });
             }
         }
-        // Memory bindings (issue #3537). Structural + deployment-agnostic checks
-        // only: profile-id validity and fail-closed production policy are owned
-        // by the host-runtime binding resolver (it holds the profile catalog and
-        // knows the active deployment profile).
+        // Memory binding (issue #3537). Structural + deployment-agnostic checks
+        // only: fail-closed production policy is owned by the host-runtime
+        // binding resolver (it knows the active deployment profile).
         if let Some(memory) = &self.memory {
-            for (idx, binding) in memory.profile_bindings.iter().enumerate() {
-                check_non_empty_trimmed(
-                    Cow::Owned(format!("memory.profile_bindings[{idx}].profile_id")),
-                    &binding.profile_id,
-                )?;
-                check_non_empty_trimmed(
-                    Cow::Owned(format!("memory.profile_bindings[{idx}].extension_id")),
-                    &binding.extension_id,
-                )?;
+            if let Some(provider) = &memory.provider {
+                check_non_empty_trimmed(Cow::Borrowed("memory.provider"), provider)?;
             }
             for (idx, over) in memory.admin_overrides.iter().enumerate() {
-                check_non_empty_trimmed(
-                    Cow::Owned(format!("memory.admin_overrides[{idx}].profile_id")),
-                    &over.profile_id,
-                )?;
                 check_non_empty_trimmed(
                     Cow::Owned(format!("memory.admin_overrides[{idx}].extension_id")),
                     &over.extension_id,
@@ -2383,26 +2362,20 @@ tick_jitter_max_secs = 5
     }
 
     #[test]
-    fn memory_section_parses_bindings_and_overrides() {
+    fn memory_section_parses_provider_and_overrides() {
         let toml = r#"
-[[memory.profile_bindings]]
-profile_id = "memory.document_store.v1"
-extension_id = "ironclaw.memory"
+[memory]
+provider = "mem0"
 
 [[memory.admin_overrides]]
-profile_id = "memory.context_retrieval.v1"
-extension_id = "acme.honcho"
+extension_id = "mem0"
 deployment_profile = "production"
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("memory section parses");
         let memory = cfg.memory.as_ref().expect("memory section present");
-        assert_eq!(memory.profile_bindings.len(), 1);
-        assert_eq!(
-            memory.profile_bindings[0].profile_id,
-            "memory.document_store.v1"
-        );
-        assert_eq!(memory.profile_bindings[0].extension_id, "ironclaw.memory");
+        assert_eq!(memory.provider.as_deref(), Some("mem0"));
         assert_eq!(memory.admin_overrides.len(), 1);
+        assert_eq!(memory.admin_overrides[0].extension_id, "mem0");
         assert_eq!(memory.admin_overrides[0].deployment_profile, "production");
     }
 
@@ -2413,14 +2386,27 @@ deployment_profile = "production"
     }
 
     #[test]
-    fn memory_rejects_empty_extension_id() {
+    fn memory_rejects_empty_provider() {
+        // `provider` is the extension id backing the always-on adapter
+        // (the v2 `profile_bindings[].extension_id` collapsed into it).
         let toml = r#"
-[[memory.profile_bindings]]
-profile_id = "memory.document_store.v1"
-extension_id = ""
+[memory]
+provider = ""
 "#;
         let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("empty extension_id must be rejected");
+            .expect_err("empty provider must be rejected");
+        assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
+    }
+
+    #[test]
+    fn memory_rejects_empty_override_extension_id() {
+        let toml = r#"
+[[memory.admin_overrides]]
+extension_id = ""
+deployment_profile = "production"
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("empty override extension_id must be rejected");
         assert!(matches!(err, RebornConfigFileError::InvalidField { .. }));
     }
 
@@ -2428,7 +2414,6 @@ extension_id = ""
     fn memory_rejects_invalid_override_deployment_profile() {
         let toml = r#"
 [[memory.admin_overrides]]
-profile_id = "memory.document_store.v1"
 extension_id = "acme.honcho"
 deployment_profile = "prod"
 "#;
@@ -2442,7 +2427,6 @@ deployment_profile = "prod"
     fn memory_accepts_wildcard_override_deployment_profile() {
         let toml = r#"
 [[memory.admin_overrides]]
-profile_id = "memory.document_store.v1"
 extension_id = "acme.honcho"
 deployment_profile = "*"
 "#;

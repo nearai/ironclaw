@@ -31,10 +31,9 @@ use ironclaw_reborn_composition::{
     Mem0ConnectionConfig, MemoryProviderDeps, RebornCompositionProfile,
     build_memory_service_resolver, resolve_memory_binding_policy,
 };
-use ironclaw_reborn_config::{MemoryAdminOverride, MemoryProfileBinding, MemorySection};
+use ironclaw_reborn_config::{MemoryAdminOverride, MemorySection};
 use serde_json::json;
 
-const DOCUMENT_STORE_PROFILE: &str = "memory.document_store.v1";
 // Self-hosted mem0 OSS REST paths (no `/v1/` prefix; no trailing slash).
 const ADD_PATH: &str = "/memories";
 const SEARCH_PATH: &str = "/search";
@@ -75,12 +74,8 @@ fn write_request(target: &str, content: &str) -> MemoryServiceWriteRequest {
 /// production admin override an unverified third-party provider requires.
 fn mem0_section() -> MemorySection {
     MemorySection {
-        profile_bindings: vec![MemoryProfileBinding {
-            profile_id: DOCUMENT_STORE_PROFILE.to_string(),
-            extension_id: MEM0_MEMORY_EXTENSION_ID.to_string(),
-        }],
+        provider: Some(MEM0_MEMORY_EXTENSION_ID.to_string()),
         admin_overrides: vec![MemoryAdminOverride {
-            profile_id: DOCUMENT_STORE_PROFILE.to_string(),
             extension_id: MEM0_MEMORY_EXTENSION_ID.to_string(),
             deployment_profile: "production".to_string(),
         }],
@@ -197,10 +192,7 @@ fn mem0_binding_in_production_requires_an_admin_override() {
     // Without the override, a production deployment refuses to bind an unverified
     // third-party memory provider at all — the swap is gated, not free.
     let section = MemorySection {
-        profile_bindings: vec![MemoryProfileBinding {
-            profile_id: DOCUMENT_STORE_PROFILE.to_string(),
-            extension_id: MEM0_MEMORY_EXTENSION_ID.to_string(),
-        }],
+        provider: Some(MEM0_MEMORY_EXTENSION_ID.to_string()),
         admin_overrides: Vec::new(),
         ..Default::default()
     };
@@ -217,10 +209,7 @@ async fn local_dev_swaps_to_mem0_without_an_override() {
     // In local-dev the third-party binding is permitted without an override, so
     // the same factory registration yields the mem0 provider.
     let section = MemorySection {
-        profile_bindings: vec![MemoryProfileBinding {
-            profile_id: DOCUMENT_STORE_PROFILE.to_string(),
-            extension_id: MEM0_MEMORY_EXTENSION_ID.to_string(),
-        }],
+        provider: Some(MEM0_MEMORY_EXTENSION_ID.to_string()),
         admin_overrides: Vec::new(),
         ..Default::default()
     };

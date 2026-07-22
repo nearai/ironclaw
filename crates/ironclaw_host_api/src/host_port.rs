@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     HostApiError,
-    dotted_id::{PrefixRule, VersionRule, validate_dotted_id},
+    dotted_id::{PrefixRule, validate_dotted_id},
 };
 
 /// Host-runtime mediated HTTP egress port for runtime lanes that delegate
@@ -39,7 +39,6 @@ fn validate_dotted_host_port_id(value: &str) -> Result<(), HostApiError> {
         3,
         "must have at least host, domain, and service segments",
         PrefixRule::Required("host."),
-        VersionRule::Unversioned,
     )
 }
 

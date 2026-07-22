@@ -128,7 +128,6 @@ pub(super) fn mock_mcp_extension_package(
         hooks: Vec::new(),
         capabilities: vec![CapabilityManifest {
             id: CapabilityId::new(capability_id)?,
-            implements: Vec::new(),
             description: "Mock MCP capability".to_string(),
             effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
             default_permission: PermissionMode::Allow,

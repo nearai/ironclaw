@@ -695,18 +695,10 @@ mod tests {
     fn document_store_resolver(extension_id: &str) -> MemoryServiceResolver {
         use crate::memory_binding::{
             MemoryBindingInput, MemoryBindingPolicy, MemoryDeploymentProfile,
-            MemoryProfileBindingEntry,
         };
-        use crate::memory_profiles::MEMORY_DOCUMENT_STORE_PROFILE_ID;
-        use ironclaw_host_api::CapabilityProfileId;
         let policy = MemoryBindingPolicy::resolve(MemoryBindingInput {
-            deployment: MemoryDeploymentProfile::LocalDev,
-            native_available: true,
-            bindings: vec![MemoryProfileBindingEntry {
-                profile_id: CapabilityProfileId::new(MEMORY_DOCUMENT_STORE_PROFILE_ID).unwrap(),
-                extension_id: extension_id.to_string(),
-            }],
-            overrides: Vec::new(),
+            provider: Some(extension_id.to_string()),
+            ..MemoryBindingInput::native_default(MemoryDeploymentProfile::LocalDev)
         })
         .expect("policy resolves");
         MemoryServiceResolver::from_policy(policy)

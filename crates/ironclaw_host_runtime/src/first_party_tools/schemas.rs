@@ -5,12 +5,10 @@ use crate::first_party_tools::time::UNIX_MILLIS_THRESHOLD;
 /// Input schemas for the native memory extension (`ironclaw.memory`),
 /// served inline by `surface.rs` the way builtin schemas are.
 ///
-/// The bundled v2 manifest's asset schema files are the single source of truth:
+/// The bundled v3 manifest's asset schema files are the single source of truth:
 /// they are compiled in here and parsed, rather than materialized to the
-/// filesystem, because native memory rides the always-on lane.
-/// `document-{read,write}` use the `memory.document_store.v1` profile operation
-/// refs (so the conformance harness matches them); `search`/`tree` use
-/// native-local refs (they implement no profile).
+/// filesystem, because native memory rides the always-on lane. `document-{read,
+/// write}`, `search`, and `tree` each reference their own bundled schema file.
 pub(crate) fn resolve_native_memory_input_schema_ref(reference: &str) -> Option<Value> {
     let raw = match reference {
         "schemas/memory/document-read.input.v1.json" => {

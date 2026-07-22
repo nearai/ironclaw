@@ -1,8 +1,8 @@
-schema_version = "reborn.extension_manifest.v2"
+schema_version = "reborn.extension_manifest.v3"
 id = "ironclaw.memory"
 name = "Reborn Memory"
 version = "0.1.0"
-description = "Host-bundled memory extension (issue #3537). The read and write tools below implement the host-defined memory.document_store.v1 profile; search and tree are provider-specific model-facing tools that implement no portable profile. Registered on the always-on first-party lane (like the builtin toolset), so the tools are unconditionally available. The backing provider is resolved by the document-store profile binding — the native filesystem provider by default, swappable without changing these tools — not by install/enable lifecycle."
+description = "Host-bundled native memory backend (issue #3537). Provides the always-on memory adapter surface: the read/write/search/tree model tools plus the host-managed retrieve-before / record-after lifecycle. The native provider is filesystem-backed and is the default memory backend; the active backend is chosen by the compose-time [memory] binding (swappable to a mem0 backend without changing these tools). Registered on the always-on first-party lane, so the tools are unconditionally available with no install/enable step."
 # Requested trust only; the host trust policy computes effective trust. A
 # `first_party` runtime + reserved `ironclaw.*` id are accepted only for the
 # loader-supplied `HostBundled` source, and only when a matching host service
@@ -14,22 +14,18 @@ trust = "first_party_requested"
 kind = "first_party"
 service = "native_memory_provider"
 
-# Model-facing tools are declared through the host-defined
-# `ironclaw.capability_provider/v1` contract (extension-runtime §5.5): top-level
-# `[[capabilities]]` is no longer accepted, so the memory tools live under the
-# `capability_provider.tools` section this host_api projects.
-[[host_api]]
-id = "ironclaw.capability_provider/v1"
-section = "capability_provider.tools"
+# The [memory] surface marks this extension a backend for the host memory
+# adapter and declares the operation families it supports. document_store is
+# the model tool surface; context_retrieval / interaction_log gate the
+# host-managed retrieve-before / record-after lifecycle.
+[memory]
+operations = ["document_store", "context_retrieval", "interaction_log"]
 
-[capability_provider.tools]
-
-# memory.document_store.v1 — read operation, exposed as a model-facing tool. The
-# schema refs match the document_store profile's read-operation refs so the
-# conformance harness binds this capability to that operation.
-[[capability_provider.tools.capabilities]]
+# read/write model tools + native-only search/tree conveniences. All four are
+# routed to the bound MemoryService by the host; their input/output schemas are
+# served inline from the bundled asset files (the single source of truth).
+[[tools]]
 id = "ironclaw.memory.read"
-implements = ["memory.document_store.v1"]
 description = "Read a Reborn persistent memory document in the current tenant/user/agent/project scope."
 effects = ["read_filesystem"]
 default_permission = "allow"
@@ -38,12 +34,8 @@ input_schema_ref = "schemas/memory/document-read.input.v1.json"
 output_schema_ref = "schemas/memory/document-read.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/read.md"
 
-# memory.document_store.v1 — write operation, exposed as a model-facing tool.
-# Host prompt-write safety runs before dispatching writes to prompt-injected
-# memory files.
-[[capability_provider.tools.capabilities]]
+[[tools]]
 id = "ironclaw.memory.write"
-implements = ["memory.document_store.v1"]
 description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead."
 effects = ["read_filesystem", "write_filesystem"]
 default_permission = "allow"
@@ -52,11 +44,8 @@ input_schema_ref = "schemas/memory/document-write.input.v1.json"
 output_schema_ref = "schemas/memory/document-write.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/write.md"
 
-# Native search convenience. Implements no portable profile operation — it is a
-# provider-specific model tool layered on the same filesystem store.
-[[capability_provider.tools.capabilities]]
+[[tools]]
 id = "ironclaw.memory.search"
-implements = []
 description = "Search only Reborn internal persistent memory documents in the current tenant/user/agent/project scope; this does not search connected app or extension data."
 effects = ["read_filesystem"]
 default_permission = "allow"
@@ -65,10 +54,8 @@ input_schema_ref = "schemas/memory/search.input.v1.json"
 output_schema_ref = "schemas/memory/search.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/search.md"
 
-# Native tree/list convenience. Implements no portable profile operation.
-[[capability_provider.tools.capabilities]]
+[[tools]]
 id = "ironclaw.memory.tree"
-implements = []
 description = "List Reborn persistent memory documents as a compact tree."
 effects = ["read_filesystem"]
 default_permission = "allow"

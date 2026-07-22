@@ -547,7 +547,17 @@ pub(crate) fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
                 "/system/extensions/ironclaw.memory/manifest.toml".to_string(),
                 None,
                 HostTrustAssignment::first_party(),
-                vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+                // Mirror the production native-memory ceiling
+                // (`builtin_first_party_trust_policy` in factory.rs and the
+                // local-dev provider trust in runtime/local_dev.rs): the v3
+                // memory tools carry `DispatchCapability` like every other
+                // first-party model tool (echo/http/shell/…), so the ceiling
+                // must include it or every memory dispatch is `PolicyDenied`.
+                vec![
+                    EffectKind::DispatchCapability,
+                    EffectKind::ReadFilesystem,
+                    EffectKind::WriteFilesystem,
+                ],
                 None,
             ),
         ]),
