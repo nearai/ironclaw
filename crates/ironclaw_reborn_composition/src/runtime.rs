@@ -21,8 +21,6 @@
 
 // arch-exempt: large_file, needs Reborn runtime helper extraction, plan #4471
 use std::collections::{HashMap, HashSet};
-#[cfg(any(test, feature = "test-support"))]
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -115,8 +113,6 @@ use crate::extension_host::{
     admin_configuration::ComposedAdminConfigurationService,
     available_extensions::AdminConfigurationCatalogUse,
 };
-#[cfg(any(test, feature = "test-support"))]
-use crate::factory::{ComposedApprovalRequestStore, ComposedCapabilityLeaseStore};
 use crate::factory::{
     ComposedAutoApproveSettingStore, ComposedPersistentApprovalPolicyStore,
     ComposedToolPermissionOverrideStore, builtin_extension_registry,
@@ -1246,14 +1242,29 @@ impl RebornRuntime {
         Some(self.extension_management.installation_store_for_test())
     }
 
+    /// Test-support handles onto the approval/lease/gate stores the integration
+    /// harness drives approve/deny flows through. All four stores are
+    /// reconstructed fresh over the runtime's own composite root
+    /// (`crate::wrap_scoped(self.extension_filesystem)`), not read off a stored
+    /// field: every one is a stateless filesystem-backed CAS store, so a fresh
+    /// instance over the same root reads/writes the exact durable rows the
+    /// runtime's turns produce (the same reopen-over-same-root equivalence
+    /// `outbound_store_durability` relies on). This mirrors what production
+    /// composition builds at `factory.rs` (`FilesystemApprovalRequestStore` /
+    /// `FilesystemCapabilityLeaseStore` over `scoped_filesystem`). Test-support
+    /// only; zero bytes in production builds.
     #[cfg(any(test, feature = "test-support"))]
     pub fn local_dev_approval_test_parts(&self) -> Option<crate::RebornApprovalTestParts> {
-        let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
-            self.approval_requests.clone();
-        let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
-            self.capability_leases.clone();
         let capability_store_filesystem =
             crate::wrap_scoped(Arc::clone(&self.extension_filesystem));
+        let approval_requests: Arc<dyn ironclaw_run_state::ApprovalRequestStore> =
+            Arc::new(ironclaw_run_state::FilesystemApprovalRequestStore::new(
+                Arc::clone(&capability_store_filesystem),
+            ));
+        let capability_leases: Arc<dyn ironclaw_authorization::CapabilityLeaseStore> =
+            Arc::new(ironclaw_authorization::FilesystemCapabilityLeaseStore::new(
+                Arc::clone(&capability_store_filesystem),
+            ));
         let gate_record_store: Arc<dyn ironclaw_run_state::GateRecordStore> =
             Arc::new(ironclaw_run_state::FilesystemGateRecordStore::new(
                 Arc::clone(&capability_store_filesystem),
@@ -1298,11 +1309,6 @@ impl RebornRuntime {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn local_dev_storage_root_for_test(&self) -> Option<PathBuf> {
-        self.local_dev_storage_root.clone()
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
     pub fn local_dev_tool_permission_overrides_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>> {
@@ -1325,22 +1331,23 @@ impl RebornRuntime {
         Some(Arc::clone(&self.trigger_repository))
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn local_dev_triggered_run_delivery_for_test(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_outbound::TriggeredRunDeliveryStore>> {
-        Some(Arc::clone(&self.triggered_run_delivery))
-    }
-
+    // Single owner of the `ProjectScopedAttachmentReader` construction recipe
+    // for tests. Sources the workspace view from
+    // [`Self::read_write_workspace_filesystem`] (the same read-write handle the
+    // production `webui_workspace_filesystem` seam uses) rather than a dedicated
+    // stored handle: the reader only reads, so a read-write view is
+    // behaviorally identical for read paths, and this keeps the accessor off a
+    // separately-stored runtime field. Test-support only; zero bytes shipped in
+    // production builds.
     #[cfg(feature = "test-support")]
     fn local_dev_workspace_attachment_reader_for_test(
         &self,
     ) -> Option<Arc<crate::support::fs::ProjectScopedAttachmentReader<CompositeRootFilesystem>>>
     {
         Some(Arc::new(
-            crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
-                &self.workspace_filesystem,
-            )),
+            crate::support::fs::ProjectScopedAttachmentReader::new(
+                self.read_write_workspace_filesystem()?,
+            ),
         ))
     }
 
@@ -1880,24 +1887,6 @@ impl RebornRuntime {
         )))
     }
 
-    /// Test-only handle on the resource governor backing the budget
-    /// accountant. Exposed under `test-support` so integration tests can
-    /// assert ledger state after a `send_user_message` round-trip.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn budget_resource_governor(
-        &self,
-    ) -> Option<Arc<dyn ironclaw_resources::ResourceGovernor>> {
-        Some(Arc::clone(&self.resource_governor))
-    }
-
-    /// Test-only handle on the in-memory budget event sink wired to the
-    /// governor. Tests use `.drain()` / `.snapshot()` to inspect the
-    /// audit-event stream produced by a run.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn budget_event_sink(&self) -> Option<Arc<ironclaw_resources::InMemoryBudgetEventSink>> {
-        Some(self.in_memory_budget_event_sink.clone())
-    }
-
     /// Broadcast sink that fans every emitted `BudgetEvent` to any
     /// subscriber. The runtime always spawns its own subscriber — the
     /// [`crate::observability::budget_events::BudgetEventProjection`] task wired by
@@ -1914,26 +1903,6 @@ impl RebornRuntime {
         &self,
     ) -> Option<Arc<ironclaw_resources::BroadcastBudgetEventSink>> {
         Some(Arc::clone(&self.broadcast_budget_event_sink))
-    }
-
-    /// Test-only handle on the budget approval-gate store. Tests resolve
-    /// pending gates here (Approve / Cancel / let-expire) to drive the
-    /// F3/F4/F5 approval-flow scenarios.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn budget_gate_store(&self) -> Option<Arc<dyn ironclaw_resources::BudgetGateStore>> {
-        Some(Arc::clone(&self.budget_gate_store))
-    }
-
-    /// Test-only lookup scope for budget gates opened by a run in this
-    /// conversation. Durable gate stores route by the run's resource scope;
-    /// tests must not use `ResourceScope::system()` because the in-memory
-    /// store ignores scope while filesystem-backed stores do not.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn budget_gate_scope_for_conversation(
-        &self,
-        conversation: &ConversationId,
-    ) -> ironclaw_host_api::ResourceScope {
-        self.turn_scope_for(&conversation.0).to_resource_scope()
     }
 
     /// Test-only: enable the global auto-approve switch for this runtime's
@@ -1954,44 +1923,6 @@ impl RebornRuntime {
             })
             .await
             .expect("enabling global auto-approve should succeed");
-    }
-
-    /// Apply the outcome of a resolved [`BudgetApprovalGate`]: when the
-    /// gate is approved, raise the affected account's limit so a
-    /// subsequent `send_user_message` can re-issue the reservation that
-    /// previously crossed the pause threshold. Returns the resolved
-    /// gate.
-    ///
-    /// Production wires this through a gate-resolution route on the web
-    /// gateway; the test-only accessor lets E2E tests drive F3 / F4 / F5
-    /// without booting that surface.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn apply_resolved_budget_gate(
-        &self,
-        scope: &ironclaw_host_api::ResourceScope,
-        gate_id: ironclaw_resources::BudgetGateId,
-    ) -> Result<ironclaw_resources::BudgetApprovalGate, RebornRuntimeError> {
-        let budget_gate_store = Arc::clone(&self.budget_gate_store);
-        let resource_governor = Arc::clone(&self.resource_governor);
-        let gate = budget_gate_store
-            .get(scope, gate_id)
-            .map_err(|error| RebornRuntimeError::InvalidArgument {
-                reason: format!("budget gate read failed: {error}"),
-            })?
-            .ok_or_else(|| RebornRuntimeError::InvalidArgument {
-                reason: format!("unknown budget gate: {gate_id}"),
-            })?;
-        if let ironclaw_resources::BudgetGateStatus::Approved {
-            increased_limit, ..
-        } = &gate.status
-        {
-            resource_governor
-                .set_limit(gate.needed.account.clone(), increased_limit.clone())
-                .map_err(|error| RebornRuntimeError::InvalidArgument {
-                    reason: format!("failed to apply approved budget limit: {error}"),
-                })?;
-        }
-        Ok(gate)
     }
 
     /// Create a fresh conversation. Returns the opaque conversation id used

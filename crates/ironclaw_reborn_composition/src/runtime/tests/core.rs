@@ -4974,12 +4974,12 @@ async fn webui_workspace_filesystem_lands_attachment_with_read_write_mount() {
     let read_write_filesystem = runtime
         .webui_workspace_filesystem()
         .expect("local-dev runtime composes a read-write webui workspace filesystem");
-    // Mirrors production's `attachment_read_port` wiring (read-only
-    // `workspace_filesystem`), so the read side is the same authority a
-    // vision-capable model's multimodal part would resolve through.
-    let read_port = crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
-        &runtime.workspace_filesystem,
-    ));
+    // The read port reads the same durable bytes the lander writes; production's
+    // `attachment_read_port` uses the read-only workspace view, but the read side
+    // is byte-identical over the read-write view (the reader never writes), so
+    // this test resolves the same authority a vision-capable model would.
+    let read_port =
+        crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(&read_write_filesystem));
     let lander = crate::support::fs::ProjectScopedAttachmentLander::new(read_write_filesystem);
 
     let thread_scope = ThreadScope {

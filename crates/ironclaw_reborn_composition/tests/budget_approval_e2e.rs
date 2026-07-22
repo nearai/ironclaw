@@ -1,23 +1,40 @@
-//! Approval-flow E2E budget tests (#3841 follow-ups F3 / F4 / F5).
+//! Budget pause / approval-gate E2E tests (#3841 follow-ups).
 //!
-//! These tests drive a `send_user_message` past the pause threshold so
-//! the accountant returns `BudgetApprovalRequired`, then resolve the
-//! pending gate three different ways:
+//! These tests drive a `send_user_message` past the pause threshold so the
+//! accountant returns `BudgetApprovalRequired`, opens a budget gate, and the
+//! turn parks in `BlockedResource`. They assert that **observable** blocking
+//! outcome through production seams only:
 //!
-//! | # | Resolution | Expectation |
-//! |---|---|---|
-//! | F3 | `Approve { increased_limit }` | Subsequent send succeeds with the new cap |
-//! | F4 | `Cancel { by }` | Gate terminal; subsequent send still fails the same way |
-//! | F5 | Expiry via `expire_pending_older_than(cutoff)` | Same as cancel |
+//! * the budget cap is configured through the production
+//!   [`RebornRuntimeInput::with_budget_defaults`] seam and seeded on the fresh
+//!   user's first model call;
+//! * the pause is observed through `send_user_message_until_gate`, which
+//!   surfaces the same `RebornTurnDriveOutcome::BlockedOnGate { gate_ref, .. }`
+//!   a real caller (the WebUI facade) sees when a run parks on a gate;
+//! * the `BudgetEvent::GateOpened` carrying the real persisted gate id is
+//!   observed through the public
+//!   [`RebornRuntime::broadcast_budget_event_sink`] subscription — the same
+//!   fan-out the production projection drains.
 //!
-//! The gate store is wired into the accountant by
-//! `build_reborn_runtime` (local-dev composition); tests exercise the
-//! flow without standing up a separate gate-handler service.
+//! ## Not covered here — no production resolution seam
+//!
+//! The former F3 (approve-with-increased-limit → retry succeeds), F4 (cancel →
+//! retry stays blocked), and F5 (expire → retry stays blocked) scenarios drove
+//! budget-gate **resolution** directly through the runtime's
+//! `budget_gate_store()` + `apply_resolved_budget_gate()` test accessors.
+//! Those accessors were removed with the runtime store unification, and budget
+//! gate resolution (approve / cancel / expire) is **not** wired to any
+//! production caller today (the gate store is written only by the accountant
+//! opening gates; nothing resolves them outside the deleted test hooks). There
+//! is therefore no observable seam through which to drive resolution, so those
+//! scenarios are intentionally not reproduced here. See the accompanying report
+//! for the STOP rationale; they should return once a real gate-resolution route
+//! exists (the runtime comment pointed at a future web-gateway resolution
+//! surface).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::TenantId;
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
     NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -28,33 +45,9 @@ use ironclaw_reborn_composition::{
     PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornTurnDriveOutcome, build_reborn_runtime,
 };
-use ironclaw_resources::{
-    BudgetGateOutcome, BudgetGateStatus, BudgetPeriod, BudgetThresholds, ResourceAccount,
-    ResourceLimits,
-};
-use ironclaw_turns::run_profile::ModelProfileId;
-use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
-
-async fn wait_for_pending_gate_count(
-    store: &dyn ironclaw_resources::BudgetGateStore,
-    scope: &ironclaw_host_api::ResourceScope,
-    expected: usize,
-    context: &str,
-) -> Vec<ironclaw_resources::BudgetApprovalGate> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-
-    let pending = loop {
-        let pending = store.list_pending(scope).expect("list pending");
-        if pending.len() == expected || tokio::time::Instant::now() >= deadline {
-            break pending;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
-
-    assert_eq!(pending.len(), expected, "{context}; got {pending:?}");
-    pending
-}
+use ironclaw_reborn_config::BudgetDefaults;
+use ironclaw_resources::BudgetGateId;
+use ironclaw_turns::GateRef;
 
 fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
@@ -70,9 +63,10 @@ fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
-fn assert_budget_blocked_outcome(
-    outcome: RebornTurnDriveOutcome,
-) -> ironclaw_resources::BudgetGateId {
+/// Assert a turn-drive outcome is the expected budget pause, returning the
+/// budget gate id embedded in the surfaced `gate_ref`. Mirrors what a real
+/// caller reads off `BlockedOnGate` without touching the gate store.
+fn assert_budget_blocked_outcome(outcome: RebornTurnDriveOutcome) -> BudgetGateId {
     match outcome {
         RebornTurnDriveOutcome::BlockedOnGate {
             status,
@@ -86,13 +80,7 @@ fn assert_budget_blocked_outcome(
                 "unexpected budget approval status"
             );
             assert_eq!(partial_text, None);
-            let raw_id = gate_ref
-                .as_str()
-                .strip_prefix("gate:budget-")
-                .expect("budget approval should block on a budget gate ref");
-            ironclaw_resources::BudgetGateId::from_uuid(
-                uuid::Uuid::parse_str(raw_id).expect("budget gate ref should contain a UUID"),
-            )
+            budget_gate_id_from_ref(&gate_ref)
         }
         RebornTurnDriveOutcome::Terminal(reply) => {
             panic!("budget approval should block instead of terminal reply: {reply:?}");
@@ -100,21 +88,48 @@ fn assert_budget_blocked_outcome(
     }
 }
 
-/// Cost table tuned so a default-size reservation lands just above
-/// `pause_at` against the test user's $1.00 cap:
+/// Parse the `gate:budget-<uuid>` ref a paused budget run surfaces back into
+/// the typed [`BudgetGateId`], so the id can be compared against the
+/// `GateOpened` broadcast event without reading the gate store.
+fn budget_gate_id_from_ref(gate_ref: &GateRef) -> BudgetGateId {
+    let raw_id = gate_ref
+        .as_str()
+        .strip_prefix("gate:budget-")
+        .expect("budget approval should block on a budget gate ref");
+    BudgetGateId::from_uuid(
+        uuid::Uuid::parse_str(raw_id).expect("budget gate ref should contain a UUID"),
+    )
+}
+
+/// Cost table tuned so a default-size reservation lands above `pause_at`
+/// against the seeded $10 user cap:
 ///   estimate = 64 input × $0.05 + 20 output × $0.10 = $5.20 × 1.20 = $6.24
-/// → 624% utilization, well above pause(0.95) → ApprovalRequired.
+/// → 62.4% utilization, above pause(0.5) but below the hard ceiling → the
+/// cascade returns ApprovalRequired and opens a gate rather than denying.
 fn pause_inducing_cost_table() -> Arc<dyn ModelCostTable> {
     let mut table = StaticModelCostTable::new();
     table.insert(
-        ModelProfileId::new("interactive_model").unwrap(),
+        ironclaw_turns::run_profile::ModelProfileId::new("interactive_model").unwrap(),
         ModelCost {
-            input_per_token: dec!(0.05),
-            output_per_token: dec!(0.10),
+            input_per_token: rust_decimal_macros::dec!(0.05),
+            output_per_token: rust_decimal_macros::dec!(0.10),
             max_output_tokens: 20,
         },
     );
     Arc::new(table)
+}
+
+/// Budget defaults that seed a $10 user cap with a low warn(0.2)/pause(0.5)
+/// band — the production composition seam that replaces the old per-account
+/// `governor.set_limit`. The project dimension is unlimited so the user cap is
+/// the single binding constraint.
+fn pause_inducing_budget_defaults() -> BudgetDefaults {
+    let mut defaults = BudgetDefaults::compiled_defaults();
+    defaults.user_daily_usd = 10.00;
+    defaults.project_daily_usd = 0.0;
+    defaults.warn_at = 0.2;
+    defaults.pause_at = 0.5;
+    defaults
 }
 
 async fn build_runtime_with_pause_inducing_setup(
@@ -136,44 +151,18 @@ async fn build_runtime_with_pause_inducing_setup(
         interval: Duration::from_millis(10),
         max_total: Duration::from_secs(3),
     })
+    .with_budget_defaults(pause_inducing_budget_defaults())
     .with_model_gateway_override(gateway.clone())
     .with_model_cost_table_override(pause_inducing_cost_table());
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-
-    // Tight user cap so the estimate crosses pause but not the hard
-    // ceiling — that's how the cascade lands on RequiresApproval rather
-    // than LimitExceeded.
-    let governor = runtime.budget_resource_governor().expect("governor");
-    let user_account = ResourceAccount::user(
-        TenantId::new(format!("{tag}-tenant")).unwrap(),
-        ironclaw_host_api::UserId::new(format!("{tag}-owner")).unwrap(),
-    );
-    governor
-        .set_limit(
-            user_account,
-            ResourceLimits::default()
-                .set_max_usd(dec!(10.00))
-                .set_period(BudgetPeriod::Rolling24h)
-                .set_thresholds(BudgetThresholds {
-                    warn_at: 0.2,
-                    pause_at: 0.5,
-                }),
-        )
-        .unwrap();
     (runtime, gateway)
 }
 
-/// Drive the runtime past the pause threshold, then return the pending
-/// gate. The send must fail (no gateway call, no completion).
-async fn pump_until_pending_gate(
-    runtime: &RebornRuntime,
-    gateway: &BudgetTestGateway,
-) -> (
-    ironclaw_resources::BudgetGateId,
-    ironclaw_host_api::ResourceScope,
-) {
+/// Drive the runtime past the pause threshold and return the budget gate id
+/// surfaced on the blocked outcome. The send must park (no gateway call, no
+/// completion).
+async fn pump_until_pause(runtime: &RebornRuntime, gateway: &BudgetTestGateway) -> BudgetGateId {
     let conversation = runtime.new_conversation().await.expect("conversation");
-    let scope = runtime.budget_gate_scope_for_conversation(&conversation);
     let reply = tokio::time::timeout(
         Duration::from_secs(3),
         runtime.send_user_message_until_gate(&conversation, "first try"),
@@ -181,193 +170,41 @@ async fn pump_until_pending_gate(
     .await
     .expect("send finishes")
     .expect("budget approval should return a blocked gate outcome");
-    let blocked_gate_id = assert_budget_blocked_outcome(reply);
+    let gate_id = assert_budget_blocked_outcome(reply);
     assert_eq!(
         gateway.call_count(),
         0,
         "pause threshold must short-circuit before any model call"
     );
-
-    let store = runtime.budget_gate_store().expect("gate store");
-    let pending = wait_for_pending_gate_count(
-        store.as_ref(),
-        &scope,
-        1,
-        "exactly one pending gate expected after pause",
-    )
-    .await;
-    assert_eq!(
-        pending[0].id, blocked_gate_id,
-        "blocked outcome should cite the pending budget gate"
-    );
-    (pending[0].id, scope)
+    gate_id
 }
 
-/// F3: pause → user approves with an increased limit → retry succeeds.
+/// Crossing the pause threshold parks the turn on a budget gate: the run
+/// reaches `BlockedResource`, surfaces a `gate:budget-<uuid>` ref, and never
+/// dispatches the model. This is the observable core the former F3/F4/F5
+/// approval scenarios all began with; the resolution half of those scenarios
+/// has no production seam (see module docs).
 #[tokio::test]
-async fn f3_approval_with_increased_limit_unblocks_retry() {
+async fn budget_pause_blocks_run_on_budget_gate() {
     let root = tempfile::tempdir().unwrap();
     let (runtime, gateway) =
-        build_runtime_with_pause_inducing_setup("f3", root.path().to_path_buf()).await;
+        build_runtime_with_pause_inducing_setup("pause", root.path().to_path_buf()).await;
 
-    let (gate_id, gate_scope) = pump_until_pending_gate(&runtime, &gateway).await;
-
-    // Resolve: approve with a much larger cap so the next reservation
-    // succeeds.
-    let store = runtime.budget_gate_store().expect("gate store");
-    let approver = ironclaw_host_api::UserId::new("f3-approver").unwrap();
-    let increased = ResourceLimits::default()
-        .set_max_usd(dec!(1_000.00))
-        .set_period(BudgetPeriod::Rolling24h)
-        .set_thresholds(BudgetThresholds::DISABLED);
-    let resolved = store
-        .resolve(
-            &gate_scope,
-            gate_id,
-            BudgetGateOutcome::Approve {
-                increased_limit: increased.clone(),
-                by: approver,
-            },
-            chrono::Utc::now(),
-        )
-        .expect("resolve approve");
-    assert!(matches!(resolved.status, BudgetGateStatus::Approved { .. }));
-
-    // Apply the resolution to the governor — production wires this
-    // through a gate-resolution handler; the test-only accessor mimics
-    // that surface.
-    runtime
-        .apply_resolved_budget_gate(&gate_scope, gate_id)
-        .expect("apply resolved gate");
-
-    // Now retry. With the larger cap in place, the reservation
-    // succeeds, the model call runs, and the budget event sink sees
-    // Reserved + Reconciled.
-    let conversation = runtime.new_conversation().await.expect("conversation");
-    let reply = tokio::time::timeout(
-        Duration::from_secs(3),
-        runtime.send_user_message(&conversation, "approved retry"),
-    )
-    .await
-    .expect("retry send finishes")
-    .expect("retry send succeeds");
-    assert_eq!(reply.status, ironclaw_turns::TurnStatus::Completed);
-    assert_eq!(
-        gateway.call_count(),
-        1,
-        "retry should issue exactly one model call"
-    );
+    let gate_id = pump_until_pause(&runtime, &gateway).await;
+    // A real, parseable budget gate id was surfaced (not a placeholder).
+    assert_ne!(gate_id, BudgetGateId::from_uuid(uuid::Uuid::nil()));
 
     runtime.shutdown().await.expect("shutdown");
 }
 
-/// F4: pause → user cancels → retry still fails the same way.
+/// Regression for the invented-gate-id bug: when the cascade pauses, the
+/// accountant emits `BudgetEvent::GateOpened` with the *real* `BudgetGateId`
+/// it just persisted. The broadcast must carry that same id the paused run
+/// surfaces in its `gate_ref`, so a subscriber can resolve the gate it was
+/// notified about — asserted here through the public broadcast subscription
+/// and the blocked-outcome gate ref, no gate-store peek.
 #[tokio::test]
-async fn f4_cancel_keeps_budget_blocked_on_retry() {
-    let root = tempfile::tempdir().unwrap();
-    let (runtime, gateway) =
-        build_runtime_with_pause_inducing_setup("f4", root.path().to_path_buf()).await;
-    let (gate_id, gate_scope) = pump_until_pending_gate(&runtime, &gateway).await;
-
-    let store = runtime.budget_gate_store().expect("gate store");
-    let canceller = ironclaw_host_api::UserId::new("f4-canceller").unwrap();
-    let resolved = store
-        .resolve(
-            &gate_scope,
-            gate_id,
-            BudgetGateOutcome::Cancel { by: canceller },
-            chrono::Utc::now(),
-        )
-        .expect("resolve cancel");
-    assert!(matches!(
-        resolved.status,
-        BudgetGateStatus::Cancelled { .. }
-    ));
-
-    // Applying a cancel is a no-op on the governor (the limit stays
-    // tight); calling the helper just confirms it doesn't panic.
-    runtime
-        .apply_resolved_budget_gate(&gate_scope, gate_id)
-        .expect("apply resolved gate (cancel is a no-op)");
-
-    // Retry — the same pause threshold fires, gateway still untouched.
-    let conversation = runtime.new_conversation().await.expect("conversation");
-    let retry = tokio::time::timeout(
-        Duration::from_secs(3),
-        runtime.send_user_message_until_gate(&conversation, "retry after cancel"),
-    )
-    .await
-    .expect("retry send finishes")
-    .expect("retry should return blocked gate outcome");
-    assert_budget_blocked_outcome(retry);
-    assert_eq!(
-        gateway.call_count(),
-        0,
-        "cancellation must NOT unblock the budget; gateway stays untouched"
-    );
-
-    runtime.shutdown().await.expect("shutdown");
-}
-
-/// F5: pause → no user action → admin expires stale gates → terminal
-/// state is `Expired`; retry remains blocked exactly like F4.
-#[tokio::test]
-async fn f5_expiry_marks_gate_terminal_and_keeps_budget_blocked() {
-    let root = tempfile::tempdir().unwrap();
-    let (runtime, gateway) =
-        build_runtime_with_pause_inducing_setup("f5", root.path().to_path_buf()).await;
-    let (gate_id, gate_scope) = pump_until_pending_gate(&runtime, &gateway).await;
-
-    let store = runtime.budget_gate_store().expect("gate store");
-    // Expire every pending gate whose `expires_at` is at or before
-    // 365 days in the future — covers the default 24h expiry window
-    // without us having to sleep or inject a clock.
-    let cutoff = chrono::Utc::now() + chrono::Duration::days(365);
-    let expired = store
-        .expire_pending_older_than(&gate_scope, cutoff)
-        .expect("expire pending");
-    assert_eq!(expired.len(), 1, "exactly one gate should have expired");
-    assert!(matches!(
-        expired[0].status,
-        BudgetGateStatus::Expired { .. }
-    ));
-    assert_eq!(expired[0].id, gate_id);
-
-    // Confirm the expired gate is no longer pending — before doing
-    // a retry that would itself open a fresh gate.
-    let pending_after_expiry = store.list_pending(&gate_scope).expect("list pending");
-    assert!(
-        pending_after_expiry.iter().all(|g| g.id != gate_id),
-        "the expired gate must drop out of the pending list — got {pending_after_expiry:?}"
-    );
-
-    // Retry — same as cancel, the budget is still tight.
-    let conversation = runtime.new_conversation().await.expect("conversation");
-    let retry = tokio::time::timeout(
-        Duration::from_secs(3),
-        runtime.send_user_message_until_gate(&conversation, "retry after expiry"),
-    )
-    .await
-    .expect("retry send finishes")
-    .expect("retry should return blocked gate outcome");
-    assert_budget_blocked_outcome(retry);
-    assert_eq!(
-        gateway.call_count(),
-        0,
-        "expired gate must NOT unblock the budget; gateway stays untouched"
-    );
-
-    runtime.shutdown().await.expect("shutdown");
-}
-
-/// Regression for the invented-gate-id bug: when the cascade pauses,
-/// the accountant emits `BudgetEvent::GateOpened` with the *real*
-/// `BudgetGateId` it just persisted in the gate store. The broadcast
-/// sink must see that real id (not a phantom freshly minted at
-/// projection time), so subscribers can resolve the gate they were
-/// notified about.
-#[tokio::test]
-async fn gate_opened_event_carries_id_that_matches_persisted_gate() {
+async fn gate_opened_event_id_matches_blocked_outcome_gate_ref() {
     let root = tempfile::tempdir().unwrap();
     let (runtime, gateway) =
         build_runtime_with_pause_inducing_setup("gate-id", root.path().to_path_buf()).await;
@@ -378,20 +215,9 @@ async fn gate_opened_event_carries_id_that_matches_persisted_gate() {
         .expect("broadcast sink");
     let mut subscriber = broadcast.subscribe();
 
-    let (_real_id, gate_scope) = pump_until_pending_gate(&runtime, &gateway).await;
+    let blocked_gate_id = pump_until_pause(&runtime, &gateway).await;
 
-    // The pending gate's id (from the store).
-    let store = runtime.budget_gate_store().expect("gate store");
-    let pending = wait_for_pending_gate_count(
-        store.as_ref(),
-        &gate_scope,
-        1,
-        "exactly one pending gate after pause",
-    )
-    .await;
-    let persisted_id = pending[0].id;
-
-    // Drain the broadcast and find the GateOpened event.
+    // Drain the broadcast and find the GateOpened event's id.
     let mut received_gate_id = None;
     while let Ok(Ok(event)) =
         tokio::time::timeout(Duration::from_millis(200), subscriber.recv()).await
@@ -403,53 +229,30 @@ async fn gate_opened_event_carries_id_that_matches_persisted_gate() {
     }
     let received = received_gate_id.expect("GateOpened reached the broadcast");
     assert_eq!(
-        received, persisted_id,
-        "the GateOpened event's gate_id must match the gate persisted in the store"
+        received, blocked_gate_id,
+        "the GateOpened event's gate_id must match the gate id the paused run surfaced"
     );
 
     runtime.shutdown().await.expect("shutdown");
 }
 
-/// Bonus: opening a gate is idempotent on the same run — repeated
-/// approval-required errors don't pile up duplicate pending gates.
-///
-/// Today the accountant rejects a second concurrent reservation for the
-/// same `TurnRunId`, so the second send_user_message that pauses lands
-/// in a *fresh* run — and therefore SHOULD produce a new gate. This
-/// test documents that shape: two failed sends produce two pending
-/// gates (one per run), which is the expected behavior because each
-/// run is a separate user-visible attempt that may want its own
-/// approval decision.
+/// Two distinct paused runs (each a fresh conversation/run) produce two
+/// distinct budget gates. The accountant rejects a second concurrent
+/// reservation for the same `TurnRunId`, so each user-visible attempt gets its
+/// own gate. Asserted through the distinct gate refs each blocked outcome
+/// surfaces, rather than counting rows in the gate store.
 #[tokio::test]
-async fn pause_in_distinct_runs_produces_distinct_pending_gates() {
+async fn pause_in_distinct_runs_produces_distinct_gates() {
     let root = tempfile::tempdir().unwrap();
     let (runtime, gateway) =
         build_runtime_with_pause_inducing_setup("dup", root.path().to_path_buf()).await;
 
-    // First send → first gate.
-    let (_gate_a, gate_scope) = pump_until_pending_gate(&runtime, &gateway).await;
-
-    // Second send (fresh conversation, fresh run) → second gate.
-    let conversation = runtime.new_conversation().await.expect("conversation");
-    let second = tokio::time::timeout(
-        Duration::from_secs(3),
-        runtime.send_user_message_until_gate(&conversation, "second"),
-    )
-    .await
-    .expect("send finishes")
-    .expect("second send should return blocked gate outcome");
-    assert_budget_blocked_outcome(second);
-
-    let store = runtime.budget_gate_store().expect("gate store");
-    let pending = wait_for_pending_gate_count(
-        store.as_ref(),
-        &gate_scope,
-        2,
-        "two distinct paused runs must produce two pending gates",
-    )
-    .await;
-    assert_eq!(pending.len(), 2);
-    let _ = Decimal::ZERO; // keep the rust_decimal import live across compile shapes
+    let gate_a = pump_until_pause(&runtime, &gateway).await;
+    let gate_b = pump_until_pause(&runtime, &gateway).await;
+    assert_ne!(
+        gate_a, gate_b,
+        "two distinct paused runs must open two distinct budget gates"
+    );
 
     runtime.shutdown().await.expect("shutdown");
 }

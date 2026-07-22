@@ -25,9 +25,13 @@ async fn filesystem_outbound_state_store_persists_across_reopen() {
     let store = services
         .local_dev_outbound_preferences_for_test()
         .expect("local-dev outbound_preferences wired");
-    let storage_root = services
-        .local_dev_storage_root_for_test()
-        .expect("local-dev storage root");
+    // The runtime canonicalizes the local-dev storage root at build time
+    // (`canonicalize_local_dev_path` == `std::fs::canonicalize`), so reproduce
+    // the exact on-disk path the store was opened over from this test's own
+    // input path rather than reaching for a removed runtime accessor. The
+    // build already created (and canonicalized) this directory.
+    let storage_root = std::fs::canonicalize(dir.path().join("local-dev"))
+        .expect("canonicalize local-dev storage root");
 
     let tenant = ironclaw_host_api::TenantId::new("w6-outbound-tenant").unwrap();
     let user = ironclaw_host_api::UserId::new("w6-outbound-user").unwrap();
