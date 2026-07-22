@@ -2015,18 +2015,11 @@ async fn byte_state_fork_recovers_to_model_snapshot() {
 /// it deterministically (identically to the never-crashed reference model),
 /// with any cause preserved.
 ///
-/// NOTE on the literal coordinator ask ("recover_expired_leases returns the run
-/// to a *claimable* state; never Failed"): the shared turn engine does NOT
-/// re-queue an expired lease — the store`s `recover_expired_leases`
-/// terminates the abandoned run as `Failed(lease_expired)` (a
-/// resumable-checkpointed run keeps its checkpoint and is retryable; a
-/// checkpoint-less one does not — see the ignored reproducer below). That is
-/// pre-existing engine semantics, identical in the direct authority and the row
-/// store, and is unaffected by whether a crash occurred. This suite's charge is
-/// row-store *crash-consistency*, so the assertion here is the defensible one:
-/// the crash neither loses the run nor diverges its recovered outcome from the
-/// model. The lifecycle question (should lease expiry be terminal at all under
-/// #6284?) is captured, reproducibly, in the ignored test below.
+/// The crash itself preserves the durable `Running` state. A later lease-recovery
+/// pass resolves both the row store and its reference model identically. The
+/// caller-level tests below separately prove the two current #6284 outcomes:
+/// checkpointless work is requeued while its reclaim budget remains, and it
+/// terminal-fails with `crash_retry_exhausted` once that bound is reached.
 #[tokio::test]
 async fn crash_mid_run_recovers_identically_to_model_and_preserves_cause() {
     let backend = Arc::new(FaultBackend::new(InMemoryBackend::new()));
