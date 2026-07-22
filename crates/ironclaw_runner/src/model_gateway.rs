@@ -39,13 +39,13 @@ use ironclaw_turns::run_profile::LoopModelUsage;
 use ironclaw_turns::{
     ModelInvalidOutputDetailReason as InvalidOutputReason, TurnId, TurnRunId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InstructionMaterializationStore, InstructionSafetyContext, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPort, LoopModelProgressSink,
-        LoopModelRequest, LoopModelResponse, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopSafeSummary, ModelProfileId, PromptMode, ProviderToolCall,
-        ProviderToolDefinition, RegisterProviderToolCallRequest, sanitize_model_visible_text,
+        AgentLoopHostError, AgentLoopHostErrorKind, EphemeralInstructionMaterializationStore,
+        HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink, InstructionMaterializationStore,
+        InstructionSafetyContext, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
+        LoopModelPort, LoopModelProgressSink, LoopModelRequest, LoopModelResponse,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId,
+        PromptMode, ProviderToolCall, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        sanitize_model_visible_text,
     },
 };
 use tracing::debug;
@@ -245,7 +245,7 @@ where
         progress_sink: Option<Arc<dyn LoopModelProgressSink>>,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
-            Arc::new(InMemoryInstructionMaterializationStore::default());
+            Arc::new(EphemeralInstructionMaterializationStore::default());
         let context_window_cache = Arc::new(ThreadContextWindowCache::default());
         self.issue_host_prompt_bundle(
             &request.context,

@@ -15,10 +15,10 @@ use ironclaw_threads::SessionThreadService;
 use ironclaw_trust::TrustDecision;
 use ironclaw_turns::ExternalToolCatalog;
 use ironclaw_turns::run_profile::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation, CapabilityCallCandidate,
-    CapabilityInvocation, LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext,
-    ProviderToolCall, ProviderToolCallCapabilityIds, ProviderToolDefinition,
-    RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate, LoopCapabilityPort,
+    LoopHostMilestoneSink, LoopRequest, LoopRequestBatch, LoopRunContext, ProviderToolCall,
+    ProviderToolCallCapabilityIds, ProviderToolDefinition, RegisterProviderToolCallRequest,
+    VisibleCapabilityRequest, VisibleCapabilitySurface,
 };
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -441,7 +441,7 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.current_or_refresh()
             .await?
@@ -451,7 +451,7 @@ impl LoopCapabilityPort for RefreshingCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.current_or_refresh()
             .await?

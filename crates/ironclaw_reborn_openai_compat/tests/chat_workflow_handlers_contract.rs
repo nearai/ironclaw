@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+mod support;
+
 use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
@@ -14,10 +16,9 @@ use ironclaw_product_adapters::{
     ProjectionReadRequest, ProtocolAuthEvidence, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_reborn_openai_compat::{
-    InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
-    OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
-    OpenAiChatCompletionsWorkflow, OpenAiChatFinishReason, OpenAiChatToolCall,
-    OpenAiChatToolCallFunction, OpenAiChatToolKind, OpenAiCompatActorScope,
+    OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
+    OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow, OpenAiChatFinishReason,
+    OpenAiChatToolCall, OpenAiChatToolCallFunction, OpenAiChatToolKind, OpenAiCompatActorScope,
     OpenAiCompatAuthenticatedCaller, OpenAiCompatErrorKind, OpenAiCompatHttpError,
     OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs, OpenAiCompatProductActionRef,
     OpenAiCompatProjectionRef, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
@@ -27,6 +28,7 @@ use ironclaw_reborn_openai_compat::{
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::{Value, json};
+use support::in_memory_openai_compat_ref_store;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -181,7 +183,7 @@ async fn chat_completion_rejects_oversized_raw_body_before_fingerprint_or_workfl
     let workflow = Arc::new(FakeProductWorkflow::new());
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticChatProjectionReader::text("unused")),
     );
     let oversized = "x".repeat(4 * 1024 * 1024 + 1);
@@ -420,7 +422,7 @@ async fn chat_completion_idempotency_retries_after_busy_without_500() {
 #[tokio::test]
 async fn chat_completion_replayed_pending_ref_submits_and_records_accepted_ack() {
     let workflow = Arc::new(FixedAckWorkflow::new(accepted_ack()));
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
         ref_store.clone(),
@@ -837,7 +839,7 @@ async fn wired_chat_completion_requires_authenticated_caller_before_product_work
     let workflow = Arc::new(FakeProductWorkflow::new());
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticChatProjectionReader::text("unused")),
     );
     let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(
@@ -945,7 +947,7 @@ async fn chat_completion_wait_timeout_returns_retryable_error_without_resubmitti
     workflow.program_projection_read_resolution(sample_projection_read_request());
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(NeverChatProjectionReader),
     )
     .with_wait_timeout(Duration::from_millis(1));
@@ -977,7 +979,7 @@ async fn projection_reader_is_not_called_when_product_workflow_read_resolution_f
     ));
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         projection_reader.clone(),
     );
     let router = openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(
@@ -1202,7 +1204,7 @@ fn test_router_with_workflow(
 ) -> axum::Router {
     let service = OpenAiChatCompletionsWorkflow::new(
         workflow,
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         projection_reader,
     );
     openai_compat_router_with_state(OpenAiCompatRouterState::with_chat_completions(Arc::new(

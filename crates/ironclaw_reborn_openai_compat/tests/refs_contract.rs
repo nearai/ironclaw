@@ -1,14 +1,18 @@
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_reborn_openai_compat::{
-    InMemoryOpenAiCompatRefStore, OpenAiChatCompletionId, OpenAiCompatActorScope,
-    OpenAiCompatBindInternalRefs, OpenAiCompatHttpError, OpenAiCompatIdempotencyKey,
-    OpenAiCompatInternalRefs, OpenAiCompatProductActionRef, OpenAiCompatProjectionRef,
-    OpenAiCompatPublicId, OpenAiCompatRefLookup, OpenAiCompatRefOperation,
-    OpenAiCompatRefReservation, OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore,
-    OpenAiCompatRequestFingerprint, OpenAiCompatResourceBinding, OpenAiCompatRouteSurface,
-    OpenAiCompatTurnRunRef, OpenAiResponseId,
+    OpenAiChatCompletionId, OpenAiCompatActorScope, OpenAiCompatBindInternalRefs,
+    OpenAiCompatHttpError, OpenAiCompatIdempotencyKey, OpenAiCompatInternalRefs,
+    OpenAiCompatProductActionRef, OpenAiCompatProjectionRef, OpenAiCompatPublicId,
+    OpenAiCompatRefLookup, OpenAiCompatRefOperation, OpenAiCompatRefReservation,
+    OpenAiCompatRefReservationOutcome, OpenAiCompatRefStore, OpenAiCompatRequestFingerprint,
+    OpenAiCompatResourceBinding, OpenAiCompatRouteSurface, OpenAiCompatTurnRunRef,
+    OpenAiResponseId,
 };
 use serde_json::json;
+
+mod support;
+
+use support::in_memory_openai_compat_ref_store;
 
 #[test]
 fn public_refs_are_typed_opaque_and_serde_validated() {
@@ -120,7 +124,7 @@ fn ref_mapping_deserialization_revalidates_nested_refs() {
 
 #[tokio::test]
 async fn idempotency_key_replays_same_fingerprint_and_conflicts_on_different_body() {
-    let store = InMemoryOpenAiCompatRefStore::new();
+    let store = in_memory_openai_compat_ref_store();
     let owner = actor_scope("alice");
     let key = OpenAiCompatIdempotencyKey::new("client-key-1").expect("key");
     let first_fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(br#"{"input":"a"}"#);
@@ -178,12 +182,12 @@ async fn idempotency_key_replays_same_fingerprint_and_conflicts_on_different_bod
 
 #[tokio::test]
 async fn absent_idempotency_key_creates_new_public_ref_each_time() {
-    let store = InMemoryOpenAiCompatRefStore::new();
+    let store = in_memory_openai_compat_ref_store();
     let owner = actor_scope("alice");
     let fingerprint = OpenAiCompatRequestFingerprint::from_body_bytes(br#"{"input":"a"}"#);
 
     let first = reserve_created(
-        &store,
+        store.as_ref(),
         owner.clone(),
         OpenAiCompatRouteSurface::ChatCompletions,
         fingerprint.clone(),
@@ -191,7 +195,7 @@ async fn absent_idempotency_key_creates_new_public_ref_each_time() {
     )
     .await;
     let second = reserve_created(
-        &store,
+        store.as_ref(),
         owner,
         OpenAiCompatRouteSurface::ChatCompletions,
         fingerprint,
@@ -209,11 +213,11 @@ async fn absent_idempotency_key_creates_new_public_ref_each_time() {
 
 #[tokio::test]
 async fn lookup_and_cancel_authorization_do_not_leak_cross_actor_existence() {
-    let store = InMemoryOpenAiCompatRefStore::new();
+    let store = in_memory_openai_compat_ref_store();
     let alice = actor_scope("alice");
     let bob = actor_scope("bob");
     let mapping = reserve_created(
-        &store,
+        store.as_ref(),
         alice.clone(),
         OpenAiCompatRouteSurface::ResponsesApi,
         OpenAiCompatRequestFingerprint::from_body_bytes(br#"{"input":"a"}"#),
@@ -283,10 +287,10 @@ async fn lookup_and_cancel_authorization_do_not_leak_cross_actor_existence() {
 
 #[tokio::test]
 async fn generated_public_ref_does_not_embed_internal_refs() {
-    let store = InMemoryOpenAiCompatRefStore::new();
+    let store = in_memory_openai_compat_ref_store();
     let owner = actor_scope("alice");
     let mapping = reserve_created(
-        &store,
+        store.as_ref(),
         owner.clone(),
         OpenAiCompatRouteSurface::ResponsesV1,
         OpenAiCompatRequestFingerprint::from_body_bytes(br#"{"input":"a"}"#),
@@ -311,7 +315,7 @@ async fn generated_public_ref_does_not_embed_internal_refs() {
 }
 
 async fn reserve_created(
-    store: &InMemoryOpenAiCompatRefStore,
+    store: &dyn OpenAiCompatRefStore,
     owner: OpenAiCompatActorScope,
     surface: OpenAiCompatRouteSurface,
     request_fingerprint: OpenAiCompatRequestFingerprint,

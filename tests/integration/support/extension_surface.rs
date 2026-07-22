@@ -165,25 +165,9 @@ pub const BUNDLED_EXTENSION_CAPABILITY_IDS: &[&str] = &[
     "google-slides.format_paragraph",
     "google-slides.replace_shapes_with_image",
     "google-slides.batch_update",
-    "nearai.web_search",
-    "notion.notion-search",
-    "notion.notion-fetch",
-    "notion.notion-create-pages",
-    "notion.notion-update-page",
-    "notion.notion-move-pages",
-    "notion.notion-duplicate-page",
-    "notion.notion-create-database",
-    "notion.notion-update-data-source",
-    "notion.notion-create-view",
-    "notion.notion-update-view",
-    "notion.notion-query-data-sources",
-    "notion.notion-query-database-view",
-    "notion.notion-create-comment",
-    "notion.notion-get-comments",
-    "notion.notion-get-teams",
-    "notion.notion-get-users",
-    "notion.notion-get-user",
-    "notion.notion-get-self",
+    // `nearai` and `notion` are hosted-MCP packages: their v3 manifests
+    // declare no static tools (the former v2 placeholder tools became live
+    // discovery), so they contribute nothing to this static grant list.
 ];
 
 /// Bundled first-party extension asset directories under
@@ -207,7 +191,7 @@ const BUNDLED_EXTENSION_MANIFEST_ASSET_DIRS: &[&str] = &[
 /// Real capability ids declared by every non-github bundled first-party
 /// extension's production `manifest.toml` asset — parsed the same way
 /// `github::capability_ids()` parses github's
-/// (`ExtensionManifest::parse_with_host_api_contracts` over the actual
+/// (`ExtensionManifest::parse` over the actual
 /// shipped asset file), so this is production truth, not a second
 /// hand-transcribed test-only id list like `BUNDLED_EXTENSION_CAPABILITY_IDS`
 /// above.
@@ -218,12 +202,16 @@ pub fn bundled_extension_manifest_capability_ids()
         let asset_root = repo_root()
             .join("crates/ironclaw_first_party_extensions/assets")
             .join(dir_name);
-        let manifest = ironclaw_extensions::ExtensionManifest::parse_with_host_api_contracts(
-            &std::fs::read_to_string(asset_root.join("manifest.toml"))?,
+        // Parse through the single record entry point (the bundled assets
+        // are manifest v3 documents since the first-party rewrite).
+        let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+            std::fs::read_to_string(asset_root.join("manifest.toml"))?,
             ironclaw_extensions::ManifestSource::HostBundled,
             &ironclaw_host_runtime::default_host_port_catalog()?,
+            None,
             &ironclaw_host_runtime::default_host_api_contract_registry()?,
         )?;
+        let manifest = ironclaw_extensions::ExtensionManifest::try_from(record.manifest().clone())?;
         // The manifest's OWN `id` (not the asset directory name) must match
         // the `ExtensionPackage` root's last segment — they differ for
         // `nearai-mcp`/`notion-mcp` (manifest id `nearai`/`notion`).

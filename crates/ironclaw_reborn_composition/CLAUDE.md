@@ -22,19 +22,19 @@
   handler must claim the scoped flow/state/provider through `AuthFlowManager`
   before exchanging provider material through `AuthProviderClient`, then
   complete the flow and emit typed continuations.
-- Raw PKCE verifiers for setup-path OAuth flows live in the injected
-  `SecretStore` under a per-flow handle (`product-auth-setup-pkce-{flow_id}`),
-  written by `RebornProductAuthServices::start_setup_oauth_flow` with
-  TTL = the flow's `expires_at`, and read back once via `lease_once`/`consume`.
-  `ironclaw_auth` durable records still store hashes only. This mirrors the
-  blocked-turn gate driver (`oauth_gate.rs`), so setup callbacks are
-  restart- and replica-safe: the verifier survives anywhere the secret store
-  does. Do not reintroduce a process-local verifier cache — a bounded
-  route-local cache strands a LIVE flow's verifier on eviction or restart, and
-  the callback then fails `unknown_or_expired_flow` on a good flow.
-  The verifier write belongs at the shared start seam, before `create_flow`,
-  so a failed secret write fails the start (fail-closed) rather than minting a
-  flow whose callback can never complete.
+- Setup-lane OAuth PKCE verifiers are durable (#6169 port):
+  `start_setup_oauth_flow` writes the raw verifier to the injected
+  `SecretStore` under `product-auth-setup-pkce-{flow_id}` (TTL = the flow's
+  `expires_at`) BEFORE `create_flow`; the callback read is one-shot
+  (`lease_once`/`consume`, setup handle first, blocked-turn gate store as
+  fallback — mirroring `oauth_gate.rs`); terminal callback outcomes discard
+  the durable copy, and `cleanup_credentials_for_lifecycle` eagerly drops
+  verifiers for `SecretCleanupReport::canceled_flows`. The serve routes'
+  bounded process-local verifier cache is a same-process fast path only —
+  never treat it as the source of truth; restart/replica safety is pinned by
+  `vendor_oauth_callback_completes_after_route_state_restart`. Early
+  defensive cache evictions (unknown flow, cross-vendor path) must NOT
+  discard the durable copy — the legitimate callback may still need it.
 - Manual-token setup routes should call
   `RebornProductAuthServices::request_manual_token_setup` for the typed
   challenge and `RebornProductAuthServices::submit_manual_token` with a
@@ -203,9 +203,10 @@ which request belongs to which descriptor.
 
 Slack host-beta normal personal setup is extension-card driven: the user
 installs the Slack extension, clicks Configure, and the card starts the
-`slack_personal` product-auth OAuth flow. The successful callback binds the
-Slack `authed_user.id` to the authenticated Reborn user through the host-owned
-identity binding store. Slack personal setup is OAuth-only; the old browser
+provider-`slack` product-auth OAuth flow (the retired `slack_personal`
+provider id survives only in the one-time forward data migration). The
+successful callback binds the Slack `authed_user.id` to the authenticated
+Reborn user through the host-owned identity binding store. Slack personal setup is OAuth-only; the old browser
 manual-code redeem route and Slack command flow are not mounted.
 
 When Slack host-beta channel routing is configured, `webui_v2_app` also mounts
@@ -281,7 +282,7 @@ Rationale:
   atomically by the exchange route. Composition also emits
   `Referrer-Policy: no-referrer` as defense in depth.
 - **Logout actually revokes.** `POST /auth/logout` calls
-  `SessionStore::revoke`; the regression in
+  `SignedTokenSessionStore::revoke`; the regression in
   `crates/ironclaw_webui/tests/session_round_trip.rs`
   locks that a post-revoke bearer fails on `/api/webchat/v2/threads`.
 
@@ -396,6 +397,13 @@ at most once per 75 ms, and any non-text milestone flushes the pending value
 before that milestone is projected. Reasoning, capability, and lifecycle
 milestones remain ordered and uncoalesced. The in-memory source still records
 the latest projection for replay when no browser subscriber is active.
+
+The opaque WebUI projection cursor stamps its process-local live position with
+the projection-services epoch. On an epoch mismatch, resume preserves durable
+runtime and turn positions but clears the volatile live position so a browser
+cursor retained across a deployment cannot suppress the restarted process's
+interim updates. This is enforced by
+`WebuiRuntimeProjectionStream::runtime_subscription` in `src/projection.rs`.
 
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —

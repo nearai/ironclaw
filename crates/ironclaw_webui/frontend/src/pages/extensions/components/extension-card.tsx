@@ -4,10 +4,13 @@ import { Badge } from "../../../design-system/badge";
 import { Button } from "../../../design-system/button";
 import { Icon } from "../../../design-system/icons";
 import {
-  KIND_LABELS,
+  RUNTIME_LABELS,
   STATE_TONES,
   STATE_LABELS,
-  isChannelExtensionKind,
+  hasChannelSurface,
+  primaryAuthAccount,
+  authAccountNeedsReconnect,
+  authAccountReasonLabelKey,
 } from "../lib/extensions-schema";
 import { extensionLifecycleState, primaryExtensionAction } from "../lib/extension-actions";
 
@@ -113,7 +116,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const state = extensionLifecycleState(ext);
   const tone = STATE_TONES[state] || "muted";
   const label = translatedKnownLabel(t, "extensions.state", state, STATE_LABELS);
-  const kindLabel = translatedKnownLabel(t, "extensions.kind", ext.kind, KIND_LABELS);
+  const kindLabel = translatedKnownLabel(t, "extensions.runtime", ext.runtime, RUNTIME_LABELS);
   const displayName = ext.display_name || packageId(ext);
   const canManage = Boolean(ext.package_ref);
   const tools = ext.tools || [];
@@ -129,20 +132,31 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   const configurePayload = {
     packageRef: ext.package_ref,
     displayName,
-    kind: ext.kind,
+    surfaces: ext.surfaces,
     active: ext.active,
     authenticated: ext.authenticated,
     needs_setup: ext.needs_setup,
-    activationStatus: ext.activation_status,
+    installationState: ext.installation_state,
     onboardingState: ext.onboarding_state,
   };
 
+  // The caller's primary vendor account (§6.3 state + typed last_error). An
+  // expired account, or a disconnected account carrying a typed last_error
+  // (revoked grant, missing credential, failed/expired prior attempt), needs
+  // re-authentication rather than a first-time Connect — so the affordance
+  // and the notice key off it.
+  const channelAccount = hasChannelSurface(ext) ? primaryAuthAccount(ext) : null;
+  const needsReconnect = hasChannelSurface(ext) && authAccountNeedsReconnect(ext);
+
   // Connectable channels are configured by pairing (Connect/Reconnect), not by
-  // an operator credential form (Configure/Reconfigure). Pick the label by kind.
-  const configureLabel = isChannelExtensionKind(ext.kind)
-    ? ext.authenticated
-      ? t("extensions.reconnect")
-      : t("extensions.connect")
+  // an operator credential form (Configure/Reconfigure). Pick the label by kind,
+  // and by whether a connected account has expired.
+  const configureLabel = hasChannelSurface(ext)
+    ? needsReconnect
+      ? t("extensions.reconnectExpired")
+      : ext.authenticated
+        ? t("extensions.reconnect")
+        : t("extensions.connect")
     : ext.authenticated
       ? t("extensions.reconfigure")
       : t("extensions.configure");
@@ -178,7 +192,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   if (
     canManage &&
     primaryAction !== "configure" &&
-    isChannelExtensionKind(ext.kind) &&
+    hasChannelSurface(ext) &&
     (state === "setup_required" || state === "failed")
   ) {
     overflowActions.push({
@@ -190,7 +204,7 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
   }
   if (
     canManage &&
-    isChannelExtensionKind(ext.kind) &&
+    hasChannelSurface(ext) &&
     !hasOverflowConfigureAction &&
     (state === "active" || state === "ready" || state === "pairing_required" || state === "pairing")
   ) {
@@ -238,12 +252,26 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
       {ext.description && (<p className={DESC}>{ext.description}</p>)}
 
+      {/* `activation_error` is present iff `installation_state === "failed"`
+          (a terminal, non-auth activation failure — §6.1); gating on the
+          field's own presence renders the redacted reason whenever the wire
+          sends one, independent of which axis wins the onboarding/
+          installation state-badge above. */}
       {ext.activation_error &&
       (
         <div
           className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-danger-text)_36%,var(--v2-panel-border))] bg-[var(--v2-danger-soft)] px-3 py-1.5 text-xs text-[var(--v2-danger-text)]"
         >
           {ext.activation_error}
+        </div>
+      )}
+
+      {needsReconnect &&
+      (
+        <div
+          className="mt-2 rounded-[10px] border border-[color-mix(in_srgb,var(--v2-warning-text)_36%,var(--v2-panel-border))] bg-[var(--v2-warning-soft)] px-3 py-1.5 text-xs text-[var(--v2-warning-text)]"
+        >
+          {t(authAccountReasonLabelKey(channelAccount))}
         </div>
       )}
 
@@ -288,11 +316,11 @@ export function ExtensionCard({ ext, onActivate, onConfigure, onRemove, isBusy }
 
 export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = undefined }) {
   const t = useT();
-  const kindLabel = translatedKnownLabel(t, "extensions.kind", entry.kind, KIND_LABELS);
+  const kindLabel = translatedKnownLabel(t, "extensions.runtime", entry.runtime, RUNTIME_LABELS);
   const displayName = entry.display_name || packageId(entry);
   const canInstall = Boolean(entry.package_ref && onInstall);
   const configureAfterInstall = Boolean(
-    entry.needs_setup || entry.has_auth || isChannelExtensionKind(entry.kind)
+    entry.needs_setup || entry.has_auth || hasChannelSurface(entry)
   );
   const keywords = entry.keywords || [];
   const [kwOpen, setKwOpen] = React.useState(false);
@@ -349,7 +377,7 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
               onInstall({
                 packageRef: entry.package_ref,
                 displayName,
-                kind: entry.kind,
+                surfaces: entry.surfaces,
                 configureAfterInstall,
               })}
             disabled={isBusy}

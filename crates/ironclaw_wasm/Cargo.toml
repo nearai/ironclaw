@@ -19,7 +19,7 @@ wasmtime-wasi = { workspace = true }
 
 [dev-dependencies]
 async-trait = "0.1"
-ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
+ironclaw_dispatcher = { path = "../ironclaw_dispatcher", features = ["test-support"] }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }

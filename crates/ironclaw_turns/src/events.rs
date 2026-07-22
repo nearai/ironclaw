@@ -539,8 +539,8 @@ pub(crate) fn project_turn_events(
 mod tests {
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        AgentId, ExtensionId, ProjectId, RuntimeCredentialAccountProviderId,
-        RuntimeCredentialAuthRequirement, TenantId, ThreadId, UserId,
+        AgentId, ExtensionId, ProjectId, RuntimeCredentialAuthRequirement, TenantId, ThreadId,
+        UserId, VendorId,
     };
 
     use crate::{
@@ -578,7 +578,7 @@ mod tests {
                 gate_kind: TurnBlockedGateKind::Approval,
                 activity_id: None,
                 credential_requirements: vec![RuntimeCredentialAuthRequirement {
-                    provider: RuntimeCredentialAccountProviderId::new("github").expect("provider"),
+                    provider: VendorId::new("github").expect("provider"),
                     setup: Default::default(),
                     requester_extension: ExtensionId::new("github").expect("extension"),
                     provider_scopes: vec!["repo".to_string()],

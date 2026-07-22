@@ -72,12 +72,14 @@ async fn triggers_group_e2e() {
     //   - gate raise/approve/deny/resume: `triggered_gate_group` below
     //   - one-shot fire -> Completed: `trigger_poller_e2e.rs` + `repository_contract.rs`
     //   - reply persists in trigger's own thread: `reborn_integration_triggered_submit.rs`
-    //   - push leg (trigger -> Slack outbound delivery): `slack_host_beta.rs`
+    //   - push leg (trigger -> channel outbound delivery): the generic
+    //     channel-host e2e suite (`channel_host/e2e_tests.rs`, triggered
+    //     scenarios incl. the generic post-submit hook)
     //
     // Still BLOCKED at int tier: the PUSH half. `deliver_triggered_run` is a
     // private fn reachable only via a detached `tokio::spawn` hook, not wired
-    // into any harness turn lifecycle — covered instead by `slack_delivery.rs`'s
-    // own `#[cfg(test)]` module + `outbound_delivery_contract.rs`.
+    // into any harness turn lifecycle — covered instead by the composition
+    // channel-host e2e triggered scenarios + `outbound_delivery_contract.rs`.
 
     // C-DENYEDGE row 4: a scheduled-trigger fire must not be able to create
     // its own follow-up trigger. Uses THIS group's `triggers()` capability

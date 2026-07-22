@@ -13,8 +13,8 @@ use super::wasm_blocking::{
 use super::wasm_diagnostics::{log_wasm_guest_error, log_wasm_runtime_error};
 use super::{
     CapabilityId, DispatchError, PreparedWitTool, ResourceGovernor, ResourceReservationId,
-    ResourceUsage, RootFilesystem, RuntimeAdapterRequest, RuntimeAdapterResult,
-    RuntimeDispatchErrorKind, WasmError, WitToolHost, WitToolRuntime,
+    ResourceUsage, RootFilesystem, RuntimeAdapterResult, RuntimeDispatchErrorKind,
+    RuntimeLaneRequest, WasmError, WitToolHost, WitToolRuntime,
 };
 use ironclaw_host_api::ResourceReceipt;
 
@@ -160,7 +160,7 @@ pub(super) async fn execute_prepared_wasm<G>(
     runtime: WitToolRuntime,
     prepared: Arc<PreparedWitTool>,
     host: WitToolHost,
-    request: RuntimeAdapterRequest<'_, impl RootFilesystem, G>,
+    request: RuntimeLaneRequest<'_, impl RootFilesystem, G>,
 ) -> Result<RuntimeAdapterResult, DispatchError>
 where
     G: ResourceGovernor,
@@ -432,7 +432,7 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use ironclaw_host_api::{ReservationStatus, ResourceEstimate};
+    use ironclaw_host_api::{ReservationStatus, ResourceEstimate, ResourceReservation};
     use ironclaw_resources::{
         AccountSnapshot, ReservationOutcome, ResourceAccount, ResourceError, ResourceLimits,
     };
@@ -503,6 +503,15 @@ mod tests {
         ) -> Result<ResourceReceipt, ResourceError> {
             self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
             Ok(Self::receipt(reservation_id, ReservationStatus::Reconciled))
+        }
+
+        fn validate_reservation(
+            &self,
+            _reservation: &ResourceReservation,
+        ) -> Result<(), ResourceError> {
+            Err(ResourceError::Storage {
+                reason: "validate_reservation unused in guard unit tests".to_string(),
+            })
         }
 
         fn release(

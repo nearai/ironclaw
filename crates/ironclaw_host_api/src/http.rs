@@ -139,6 +139,15 @@ pub enum RuntimeCredentialTarget {
     PathPlaceholder {
         placeholder: String,
     },
+    /// Insert the resolved secret as a JSON string at the RFC 6901 pointer in
+    /// the request's JSON body (e.g. a vendor webhook-registration call whose
+    /// API takes the shared secret as a body field). The host parses the
+    /// body, inserts the value at the pointer, and re-serializes; a non-JSON
+    /// body, a missing parent object, or an already-present field fails the
+    /// request closed.
+    BodyJsonPointer {
+        pointer: String,
+    },
 }
 
 pub fn valid_http_field_name(name: &str) -> bool {
@@ -188,6 +197,9 @@ impl RuntimeCredentialTarget {
             Self::PathPlaceholder { placeholder } => {
                 validate_runtime_credential_path_placeholder(placeholder)?;
             }
+            Self::BodyJsonPointer { pointer } => {
+                validate_runtime_credential_body_pointer(pointer)?;
+            }
         }
         Ok(())
     }
@@ -214,6 +226,20 @@ fn validate_runtime_credential_path_placeholder(placeholder: &str) -> Result<(),
         return Err(HostApiError::invalid_runtime_credential_target(
             "path_placeholder",
             "must be a non-empty unreserved path segment other than . or ..",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_credential_body_pointer(pointer: &str) -> Result<(), HostApiError> {
+    if pointer.is_empty()
+        || !pointer.starts_with('/')
+        || pointer.contains('\0')
+        || pointer.chars().any(char::is_control)
+    {
+        return Err(HostApiError::invalid_runtime_credential_target(
+            "body_json_pointer",
+            "must be a non-empty RFC 6901 pointer starting with '/' without control characters",
         ));
     }
     Ok(())

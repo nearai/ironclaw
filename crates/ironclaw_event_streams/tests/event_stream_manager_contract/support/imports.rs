@@ -15,7 +15,7 @@ use ironclaw_event_streams::{
     ProjectionStreamAdmissionPolicy, ProjectionStreamAdmissionRequest, ProjectionStreamError,
     ProjectionStreamItem, ProjectionStreamLimits, ProjectionSubscribeRequest, ProjectionTarget,
     ProjectionUpdateSource, ProjectionViewClass, PushCandidatesForUpdateRequest,
-    SubscriberCapabilities, keep_alive_item,
+    SubscriberCapabilities, ThreadLiveProjectionItem, ThreadLiveProjectionUpdate, keep_alive_item,
 };
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{
@@ -33,7 +33,7 @@ use ironclaw_outbound::{
     ProjectionUpdateRef, ThreadNotificationPolicy, ThreadNotificationTarget,
     UpdateDeliveryStatusRequest,
 };
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
+use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use tokio::{
     sync::Barrier,
     time::{Duration, timeout},

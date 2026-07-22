@@ -47,6 +47,48 @@ async fn in_memory_process_store_starts_capability_process_record() {
 }
 
 #[tokio::test]
+async fn process_store_round_trips_authorized_continuation_on_start_reload() {
+    let store = in_memory_process_store();
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let estimate = ResourceEstimate::default().set_concurrency_slots(1);
+    let reservation_id = ResourceReservationId::new();
+    let reservation = ResourceReservation {
+        id: reservation_id,
+        scope: scope.clone(),
+        estimate: estimate.clone(),
+    };
+    let continuation = ProcessAuthorizedContinuation {
+        invocation: ProcessAuthorizedInvocation {
+            activity_id: ActivityId::new(),
+            capability: CapabilityId::new("echo.say").unwrap(),
+            scope: scope.clone(),
+            actor: Actor::Sealed(UserId::new("sealed-user").unwrap()),
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            estimate: estimate.clone(),
+            correlation_id: CorrelationId::new(),
+            process_id,
+            parent_process_id: None,
+        },
+        lane: RuntimeLane::Wasm,
+        mounts: Some(MountView::default()),
+        resource_reservation: Some(reservation),
+    };
+    let mut start = process_start_with_estimate(process_id, invocation_id, scope.clone(), estimate);
+    start.resource_reservation_id = Some(reservation_id);
+    start.authorized_continuation = Some(continuation.clone());
+
+    let record = store.start(start).await.unwrap();
+    assert_eq!(record.resource_reservation_id, Some(reservation_id));
+    assert_eq!(record.authorized_continuation, Some(continuation.clone()));
+
+    let reloaded = store.get(&scope, process_id).await.unwrap().unwrap();
+    assert_eq!(reloaded.resource_reservation_id, Some(reservation_id));
+    assert_eq!(reloaded.authorized_continuation, Some(continuation));
+}
+
+#[tokio::test]
 async fn in_memory_process_store_rejects_duplicate_process_id_in_same_resource_scope() {
     let store = in_memory_process_store();
     let invocation_id = InvocationId::new();
@@ -1807,6 +1849,7 @@ async fn assert_unowned_process_reservation_rejected(transition: UnownedTransiti
         mounts: MountView::default(),
         estimated_resources: estimate,
         resource_reservation_id: Some(forged_reservation.id),
+        authorized_continuation: None,
         status: ProcessStatus::Running,
         error_kind: None,
     });
@@ -1890,6 +1933,7 @@ impl ProcessStore for ForgedProcessStore {
             mounts: start.mounts,
             estimated_resources: start.estimated_resources,
             resource_reservation_id: start.resource_reservation_id,
+            authorized_continuation: start.authorized_continuation,
             error_kind: None,
         };
         self.insert(record.clone());
@@ -2053,6 +2097,10 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         self.inner.reconcile(reservation_id, actual)
     }
 
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        self.inner.validate_reservation(reservation)
+    }
+
     fn release(
         &self,
         reservation_id: ResourceReservationId,
@@ -2108,6 +2156,10 @@ impl ResourceGovernor for ReconcileFailingGovernor {
         Err(ResourceError::UnknownReservation { id: reservation_id })
     }
 
+    fn validate_reservation(&self, reservation: &ResourceReservation) -> Result<(), ResourceError> {
+        self.inner.validate_reservation(reservation)
+    }
+
     fn release(
         &self,
         reservation_id: ResourceReservationId,
@@ -2158,6 +2210,7 @@ impl ProcessStore for ReservationDroppingStore {
             mounts: start.mounts,
             estimated_resources: start.estimated_resources,
             resource_reservation_id: None,
+            authorized_continuation: start.authorized_continuation,
             error_kind: None,
         })
     }
@@ -2448,6 +2501,7 @@ fn process_record(
         mounts: start.mounts,
         estimated_resources: start.estimated_resources,
         resource_reservation_id: start.resource_reservation_id,
+        authorized_continuation: start.authorized_continuation,
         error_kind: None,
     }
 }
@@ -2500,6 +2554,7 @@ fn process_start_with_estimate(
         mounts: MountView::default(),
         estimated_resources,
         resource_reservation_id: None,
+        authorized_continuation: None,
         input: serde_json::json!({"message": "runtime payload"}),
     }
 }

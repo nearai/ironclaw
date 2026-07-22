@@ -10,7 +10,7 @@ use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind,
+    RuntimeFailureKind,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy, InvalidationBus,
@@ -46,7 +46,7 @@ async fn production_runtime_uses_host_policy_decision_instead_of_request_claims(
     )
     .with_trust_policy(Arc::new(privileged_local_manifest_policy()));
 
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         execution_context_with_dispatch_grant(TrustClass::Sandbox),
         capability_id(),
         ResourceEstimate::default(),
@@ -85,7 +85,7 @@ async fn trust_downgrade_denies_future_invocation_before_dispatch_side_effects()
     .with_trust_policy(Arc::clone(&policy));
 
     let trusted_input = trust_input_for_registry(&registry);
-    let first = RuntimeCapabilityRequest::new(
+    let first = (
         execution_context_with_dispatch_grant(TrustClass::Sandbox),
         capability_id(),
         ResourceEstimate::default(),
@@ -114,7 +114,7 @@ async fn trust_downgrade_denies_future_invocation_before_dispatch_side_effects()
         )
         .unwrap();
 
-    let second = RuntimeCapabilityRequest::new(
+    let second = (
         execution_context_with_dispatch_grant(TrustClass::FirstParty),
         capability_id(),
         ResourceEstimate::default(),
@@ -176,6 +176,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -225,7 +226,7 @@ fn execution_context_with_dispatch_grant(trust: TrustClass) -> ExecutionContext 
             max_invocations: None,
         },
     });
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -233,7 +234,9 @@ fn execution_context_with_dispatch_grant(trust: TrustClass) -> ExecutionContext 
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn capability_id() -> CapabilityId {
@@ -266,3 +269,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

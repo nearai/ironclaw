@@ -13,6 +13,12 @@ publish = false
 [package.metadata.ironclaw]
 layer = "kernel"
 
+[features]
+# Exposes filesystem-backed in-memory test constructors to integration tests and
+# downstream harnesses. Off by default so production builds do not carry test
+# helpers.
+test-support = []
+
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
@@ -48,6 +54,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 
 [dev-dependencies]
+ironclaw_runner = { path = ".", features = ["test-support"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
 chrono = "0.4"
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0", features = ["test-support"] }

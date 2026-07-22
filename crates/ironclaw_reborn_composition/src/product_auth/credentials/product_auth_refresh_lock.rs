@@ -1,12 +1,14 @@
-//! Deployment-wide leader-lock for the background credential keepalive worker.
+//! Deployment-wide leader-lock for the engine-owned credential keepalive
+//! sweep (`ironclaw_auth::keepalive`).
 //!
 //! # Leader-lock model
 //!
-//! Only ONE process per deployment should sweep all Google credential accounts
-//! and refresh idle tokens per tick. This module provides a utility the worker
-//! uses to elect a single leader per tick:
+//! Only ONE process per deployment should sweep credential accounts and
+//! refresh idle tokens per tick. This module provides the composition-side
+//! [`ironclaw_auth::KeepaliveLeaderLock`] implementation the sweep uses to
+//! elect a single leader per tick:
 //!
-//! - **Postgres path**: the worker calls [`CredentialRefreshLeaderLock::run_as_leader`]
+//! - **Postgres path**: the sweep calls [`CredentialRefreshLeaderLock::run_as_leader`]
 //!   each tick. That call opens a transaction and tries
 //!   `pg_try_advisory_xact_lock` using a single fixed deployment-wide key. If
 //!   the lock is already held by another process, the current process is not the
@@ -14,7 +16,7 @@
 //!   lock is acquired, the sweep runs inside the transaction, which is then
 //!   committed (releasing the lock) and [`LeaderOutcome::Ran`] is returned. A
 //!   single connection is held only for the duration of the sweep; because the
-//!   worker ticks at ~6 h the connection cost is negligible.
+//!   sweep ticks at ~6 h the connection cost is negligible.
 //!
 //!   The lock is **transaction-level**, not session-level, on purpose: a
 //!   transaction-level advisory lock is released automatically when the
@@ -25,6 +27,10 @@
 //! - **libsql / single-process path** (`pool = None`): this process is
 //!   trivially the only process, so the sweep always runs. No connection is
 //!   held.
+//!
+//! The sweep itself — recipe-threshold selection, refresh, scheduling — is
+//! engine-owned (`ironclaw_auth::keepalive`); composition contributes only
+//! this deployment-topology-aware election.
 //!
 //! # Two-layer concurrency ownership
 //!
@@ -70,28 +76,21 @@ use tracing::debug;
 const KEEPALIVE_LOCK_KEY: (i32, i32) = (0x4B45_4550i32, 0x414C_4956i32); // "KEEP", "ALIV"
 
 // ---------------------------------------------------------------------------
-// Public outcome type
+// Public outcome type — shared with the engine sweep
 // ---------------------------------------------------------------------------
 
-/// Outcome of [`CredentialRefreshLeaderLock::run_as_leader`].
-pub(crate) enum LeaderOutcome<T> {
-    /// Another process holds the leader lock; sweep was skipped.
-    ///
-    /// Only constructed when a Postgres pool is supplied. Local-dev/libSQL
-    /// callers pass `None` and are always the leader.
-    NotLeader,
-    /// This process was the leader; the sweep ran and returned `result`.
-    Ran(T),
-}
+pub(crate) use ironclaw_auth::LeaderOutcome;
 
 // ---------------------------------------------------------------------------
 // Leader-lock utility
 // ---------------------------------------------------------------------------
 
-/// Deployment-wide leader-lock for the background credential keepalive worker.
+/// Deployment-wide leader-lock for the engine-owned credential keepalive
+/// sweep.
 ///
-/// Constructed by the composition root (`runtime.rs`) and threaded into the
-/// worker's [`crate::product_auth::credentials::credential_refresh_worker::CredentialRefreshWorkerDeps`].
+/// Constructed by the composition root and threaded into the sweep's
+/// [`ironclaw_auth::KeepaliveSweepDeps`] as its
+/// [`ironclaw_auth::KeepaliveLeaderLock`].
 ///
 /// The Postgres pool is intentionally `Option`: `None` on the libsql /
 /// local-dev path means this process is trivially the leader (single writer by
@@ -131,6 +130,13 @@ impl CredentialRefreshLeaderLock {
         }
         // No pool (libsql / local-dev): trivially the leader.
         LeaderOutcome::Ran(sweep().await)
+    }
+}
+
+#[async_trait::async_trait]
+impl ironclaw_auth::KeepaliveLeaderLock for CredentialRefreshLeaderLock {
+    async fn run_as_leader(&self, sweep: ironclaw_auth::KeepaliveSweepFuture) -> LeaderOutcome<()> {
+        CredentialRefreshLeaderLock::run_as_leader(self, move || sweep).await
     }
 }
 

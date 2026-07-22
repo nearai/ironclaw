@@ -10,10 +10,17 @@ use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 
-#[derive(Debug, Clone)]
+/// Request-keyed scripted response: consulted before the FIFO/default lanes
+/// so vendor-shaped fixtures (Slack `chat.postMessage` vs Telegram
+/// `sendMessage`) can answer by URL regardless of call order.
+pub(crate) type VendorResponseRouter =
+    dyn Fn(&NetworkHttpRequest) -> Option<(u16, Vec<u8>)> + Send + Sync;
+
+#[derive(Clone)]
 pub(crate) struct RecordingNetworkHttpEgress {
     default_body: Vec<u8>,
     scripted_responses: Arc<Mutex<VecDeque<ScriptedNetworkResponse>>>,
+    vendor_router: Option<Arc<VendorResponseRouter>>,
     requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
 }
 
@@ -23,13 +30,30 @@ enum ScriptedNetworkResponse {
     Complete { status: u16, body: Vec<u8> },
 }
 
+impl std::fmt::Debug for RecordingNetworkHttpEgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordingNetworkHttpEgress")
+            .field("recorded_requests", &self.requests.lock().unwrap().len())
+            .field("has_vendor_router", &self.vendor_router.is_some())
+            .finish()
+    }
+}
+
 impl RecordingNetworkHttpEgress {
     pub(crate) fn with_body(body: Vec<u8>) -> Self {
         Self {
             default_body: body,
             scripted_responses: Arc::new(Mutex::new(VecDeque::new())),
+            vendor_router: None,
             requests: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Attach a request-keyed vendor router, consulted before the FIFO
+    /// queues and the fixed default body.
+    pub(crate) fn with_vendor_router(mut self, router: Arc<VendorResponseRouter>) -> Self {
+        self.vendor_router = Some(router);
+        self
     }
 
     pub(crate) fn requests(&self) -> Vec<NetworkHttpRequest> {
@@ -63,11 +87,20 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
         request: NetworkHttpRequest,
     ) -> Result<NetworkHttpResponse, NetworkHttpError> {
         let request_bytes = request.body.len() as u64;
+        let routed = self
+            .vendor_router
+            .as_ref()
+            .and_then(|router| router(&request));
         self.requests.lock().unwrap().push(request);
-        let (status, body) = match self.scripted_responses.lock().unwrap().pop_front() {
-            Some(ScriptedNetworkResponse::Status(status)) => (status, self.default_body.clone()),
-            Some(ScriptedNetworkResponse::Complete { status, body }) => (status, body),
-            None => (200, self.default_body.clone()),
+        let (status, body) = match routed {
+            Some((status, body)) => (status, body),
+            None => match self.scripted_responses.lock().unwrap().pop_front() {
+                Some(ScriptedNetworkResponse::Status(status)) => {
+                    (status, self.default_body.clone())
+                }
+                Some(ScriptedNetworkResponse::Complete { status, body }) => (status, body),
+                None => (200, self.default_body.clone()),
+            },
         };
         Ok(NetworkHttpResponse {
             status,

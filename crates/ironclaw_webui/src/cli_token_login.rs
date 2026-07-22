@@ -5,7 +5,7 @@
 //!
 //! Flow (mirrors `auth::routes::callback_handler`):
 //! - `GET /login?token=...`: verify via [`crate::EnvBearerAuthenticator`],
-//!   mint a bearer via [`SessionStore`], redirect to
+//!   mint a bearer via [`SignedTokenSessionStore`], redirect to
 //!   `<redirect_after>?login_ticket=<ticket>` (same convention as OAuth).
 //! - `POST /auth/session/exchange`: consumes the ticket, returns
 //!   `{ "token": "..." }` — byte-for-byte the same contract as
@@ -44,7 +44,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::WebuiAuthenticator;
-use crate::session::SessionStore;
+use crate::signed_session_login::SignedTokenSessionStore;
 
 /// Matches the OAuth callback's default so the SPA lands in the same
 /// place regardless of which flow authenticated it.
@@ -83,7 +83,7 @@ pub struct CliTokenLoginConfig {
     /// [`crate::signed_session_store`] built from the same operator
     /// secret + tenant as the CLI's admin bearer minter, so the bearer
     /// validates anywhere that store is reconstructed.
-    pub session_store: Arc<dyn SessionStore>,
+    pub session_store: Arc<SignedTokenSessionStore>,
     /// Session lifetime for the minted bearer. Defaults to 30 days.
     pub session_lifetime: ChronoDuration,
     /// Path the SPA lands on after the ticket is placed in the
@@ -95,7 +95,7 @@ impl CliTokenLoginConfig {
     pub fn new(
         tenant_id: TenantId,
         authenticator: Arc<dyn WebuiAuthenticator>,
-        session_store: Arc<dyn SessionStore>,
+        session_store: Arc<SignedTokenSessionStore>,
     ) -> Self {
         Self {
             tenant_id,
@@ -121,7 +121,7 @@ impl CliTokenLoginConfig {
 struct RouterState {
     tenant_id: TenantId,
     authenticator: Arc<dyn WebuiAuthenticator>,
-    session_store: Arc<dyn SessionStore>,
+    session_store: Arc<SignedTokenSessionStore>,
     session_lifetime: ChronoDuration,
     redirect_after: String,
     tickets: LoginTicketStore,

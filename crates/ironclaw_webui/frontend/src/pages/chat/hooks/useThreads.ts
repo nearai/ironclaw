@@ -12,7 +12,7 @@ import { removeThreadList, upsertThreadInCache } from "../lib/thread-cache";
 export function useThreads() {
   // No polling: the sidebar is kept current by local cache writes after
   // create/send and by invalidating after delete. The v2 deployment has no
-  // out-of-band thread producers (no Telegram channel, no background routine)
+  // out-of-band thread producers (no external channel, no background routine)
   // in this binary. The fork's 5s poll was inherited from a v1 multi-channel
   // context that doesn't apply here.
   const query = useQuery({

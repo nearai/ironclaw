@@ -99,12 +99,12 @@ use ironclaw_turns::{
     TurnError, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStateStore,
     TurnStatus,
     run_profile::{
-        AgentLoopHostError, CapabilityBatchInvocation, CapabilityDescriptorView,
-        CapabilityInputRef, CapabilityInvocation, CapabilitySurfaceVersion,
+        AgentLoopHostError, CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceVersion,
         InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCapabilityPort,
         LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopHostMilestoneKind,
-        LoopModelPort, LoopModelRequest, LoopPromptPort, LoopRunContext, LoopTranscriptPort,
-        RunScopedHookMilestoneSink, VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        LoopModelPort, LoopModelRequest, LoopPromptPort, LoopRequest, LoopRequestBatch,
+        LoopRunContext, LoopTranscriptPort, RunScopedHookMilestoneSink, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, resolution,
     },
     runner::ClaimedTurnRun,
 };
@@ -218,7 +218,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations
             .lock()
@@ -239,7 +239,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
@@ -294,7 +294,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations
             .lock()
@@ -315,7 +315,7 @@ impl LoopCapabilityPort for ProviderAwareCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::with_capacity(request.invocations.len());
         for invocation in request.invocations {
@@ -1215,11 +1215,8 @@ fn event_log_subscription(
         .with_batch_limit(16)
 }
 
-fn invocation(
-    surface_version: &CapabilitySurfaceVersion,
-    capability_id: &str,
-) -> CapabilityInvocation {
-    CapabilityInvocation {
+fn invocation(surface_version: &CapabilitySurfaceVersion, capability_id: &str) -> LoopRequest {
+    LoopRequest {
         activity_id: ironclaw_turns::CapabilityActivityId::new(),
         surface_version: surface_version.clone(),
         capability_id: CapabilityId::new(capability_id).expect("capability id literal is valid"),

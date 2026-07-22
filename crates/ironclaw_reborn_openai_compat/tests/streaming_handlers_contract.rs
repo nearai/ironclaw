@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod support;
+
 use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
@@ -15,17 +17,17 @@ use ironclaw_product_adapters::{
     ProjectionSubscriptionRequest, ProtocolAuthEvidence,
 };
 use ironclaw_reborn_openai_compat::{
-    InMemoryOpenAiCompatRefStore, OpenAiChatCompletionProjection,
-    OpenAiChatCompletionProjectionReader, OpenAiChatCompletionProjectionRequest,
-    OpenAiChatCompletionsWorkflow, OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope,
-    OpenAiCompatAuthenticatedCaller, OpenAiCompatHttpError, OpenAiCompatProjectionStreamer,
-    OpenAiCompatRouterState, OpenAiResponseId, OpenAiResponseObject,
-    OpenAiResponseProjectionStreamRequest, OpenAiResponseReadRequest, OpenAiResponseStatus,
-    OpenAiResponseWaitRequest, OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow,
-    openai_compat_router_with_state,
+    OpenAiChatCompletionProjection, OpenAiChatCompletionProjectionReader,
+    OpenAiChatCompletionProjectionRequest, OpenAiChatCompletionsWorkflow,
+    OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
+    OpenAiCompatHttpError, OpenAiCompatProjectionStreamer, OpenAiCompatRouterState,
+    OpenAiResponseId, OpenAiResponseObject, OpenAiResponseProjectionStreamRequest,
+    OpenAiResponseReadRequest, OpenAiResponseStatus, OpenAiResponseWaitRequest,
+    OpenAiResponsesProjectionReader, OpenAiResponsesWorkflow, openai_compat_router_with_state,
 };
 use ironclaw_turns::{AcceptedMessageRef, ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::json;
+use support::in_memory_openai_compat_ref_store;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -729,7 +731,7 @@ fn router_with_options(
     workflow: Arc<dyn ProductWorkflow>,
     wait_timeout: Duration,
 ) -> axum::Router {
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let mut chat = OpenAiChatCompletionsWorkflow::new(
         workflow.clone(),
         ref_store.clone(),

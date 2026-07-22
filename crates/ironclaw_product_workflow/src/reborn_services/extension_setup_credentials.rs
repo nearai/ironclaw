@@ -63,26 +63,34 @@ pub(super) async fn project(
     Ok(secrets)
 }
 
+/// Parse the setup submit payload (`secrets` + `fields` maps). Shared by the
+/// credential-submission path below and the channel-config routing in
+/// `lifecycle_setup`, so the wire shape is decoded exactly once.
+pub(super) fn parse_submit_payload(
+    request: WebUiSetupExtensionRequest,
+) -> Result<SetupSubmitPayload, RebornServicesError> {
+    let payload = request
+        .payload
+        .ok_or_else(|| validation_error("payload", WebUiInboundValidationCode::MissingField))?;
+    serde_json::from_value::<SetupSubmitPayload>(payload)
+        .map_err(|_| validation_error("payload", WebUiInboundValidationCode::InvalidValue))
+}
+
 pub(super) async fn submit_manual_tokens(
     extension_credentials: Option<&dyn ExtensionCredentialSetupService>,
     scope: AuthProductScope,
     extension_id: &ExtensionId,
     requirements: &[LifecycleExtensionCredentialRequirement],
-    request: WebUiSetupExtensionRequest,
+    secrets: BTreeMap<String, String>,
 ) -> Result<(), RebornServicesError> {
     let service =
         extension_credentials.ok_or_else(|| RebornServicesError::service_unavailable(true))?;
-    let payload = request
-        .payload
-        .ok_or_else(|| validation_error("payload", WebUiInboundValidationCode::MissingField))?;
-    let submit = serde_json::from_value::<SetupSubmitPayload>(payload)
-        .map_err(|_| validation_error("payload", WebUiInboundValidationCode::InvalidValue))?;
     let by_name = requirements
         .iter()
         .map(|requirement| (requirement.name.as_str(), requirement))
         .collect::<HashMap<_, _>>();
 
-    for submitted_name in submit.secrets.keys() {
+    for submitted_name in secrets.keys() {
         let Some(requirement) = by_name.get(submitted_name.as_str()) else {
             return Err(validation_error(
                 "secrets",
@@ -111,7 +119,7 @@ pub(super) async fn submit_manual_tokens(
             scope.clone(),
             extension_id,
             requirement,
-            submit.secrets.get(&requirement.name),
+            secrets.get(&requirement.name),
         )
         .await?;
     }
@@ -199,10 +207,14 @@ fn credential_label(
     }
 }
 
+/// The decoded setup submit payload: credential/channel secret values by
+/// name plus non-secret channel-config field values by handle.
 #[derive(Debug, Default, Deserialize)]
-struct SetupSubmitPayload {
+pub(super) struct SetupSubmitPayload {
     #[serde(default)]
-    secrets: BTreeMap<String, String>,
+    pub(super) secrets: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(super) fields: BTreeMap<String, String>,
 }
 
 #[cfg(test)]
@@ -326,10 +338,12 @@ mod tests {
             test_scope(),
             &extension_id,
             &[manual_requirement()],
-            WebUiSetupExtensionRequest {
+            parse_submit_payload(WebUiSetupExtensionRequest {
                 action: Some("submit".to_string()),
                 payload: Some(serde_json::json!({ "secrets": {} })),
-            },
+            })
+            .expect("payload parses")
+            .secrets,
         )
         .await
         .expect_err("submit should surface credential status outages");

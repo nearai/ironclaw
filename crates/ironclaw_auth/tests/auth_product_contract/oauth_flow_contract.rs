@@ -18,56 +18,6 @@ async fn oauth_flow_state_machine_conformance_holds_for_in_memory_fake() {
     .await;
 }
 
-async fn completed_oauth_flow_with_continuation(
-    services: &InMemoryAuthProductServices,
-    owner: &AuthProductScope,
-    continuation: AuthContinuationRef,
-) -> ironclaw_auth::AuthFlowRecord {
-    let flow = services
-        .create_flow(NewAuthFlow {
-            id: None,
-            scope: owner.clone(),
-            kind: AuthFlowKind::IntegrationCredential,
-            provider: provider(),
-            challenge: AuthChallenge::OAuthUrl {
-                authorization_url: authorization_url("https://provider.example/oauth"),
-                expires_at: Utc::now() + Duration::minutes(5),
-            },
-            continuation,
-            update_binding: None,
-            opaque_state_hash: Some(state_hash("state-hash")),
-            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
-            expires_at: Utc::now() + Duration::minutes(5),
-        })
-        .await
-        .expect("OAuth flow");
-
-    services
-        .complete_oauth_callback(
-            owner,
-            OAuthCallbackInput {
-                flow_id: flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: Box::new(OAuthProviderExchange {
-                        provider: provider(),
-                        account_label: label("work github"),
-                        authorization_code_hash: code_hash("code-hash"),
-                        pkce_verifier_hash: pkce_hash("pkce-hash"),
-                        access_secret: SecretHandle::new(format!("github-access-{}", flow.id))
-                            .expect("access handle"),
-                        refresh_secret: None,
-                        scopes: Vec::new(),
-                        account_id: None,
-                        provider_identity: None,
-                    }),
-                },
-            },
-        )
-        .await
-        .expect("OAuth completion")
-}
-
 #[tokio::test]
 async fn continuation_side_effect_failure_terminalizes_only_the_expected_completion() {
     let services = InMemoryAuthProductServices::new();
@@ -97,27 +47,13 @@ async fn continuation_side_effect_failure_terminalizes_only_the_expected_complet
         .await
         .expect("OAuth completion");
 
-    let claimed = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("continuation claim");
+    // Re-expressed from main's claim/settle continuation-dispatch shape onto
+    // this branch's equivalent hardening (`fail_completed_continuation` —
+    // PR body "Auth = ours"): one call terminalizes the completed flow whose
+    // continuation side effects failed, and a second call cannot overwrite
+    // the terminal state.
     let failed = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claimed.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
+        .fail_completed_continuation(&owner, completed.id, AuthErrorCode::BackendUnavailable)
         .await
         .expect("terminal continuation failure");
     assert_eq!(failed.status, AuthFlowStatus::Failed);
@@ -125,191 +61,10 @@ async fn continuation_side_effect_failure_terminalizes_only_the_expected_complet
     assert!(failed.continuation_emitted_at.is_none());
 
     let stale = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: claimed.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::TerminalFailure {
-                    error: AuthErrorCode::BackendUnavailable,
-                },
-            },
-        )
+        .fail_completed_continuation(&owner, completed.id, AuthErrorCode::BackendUnavailable)
         .await
         .expect_err("stale failure cannot overwrite terminal state");
     assert_eq!(stale, AuthProductError::FlowAlreadyTerminal);
-}
-
-#[tokio::test]
-async fn concurrent_continuation_dispatch_claims_have_exactly_one_active_owner() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let completed = completed_oauth_flow_with_continuation(
-        &services,
-        &owner,
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
-        },
-    )
-    .await;
-    let first_claimed_at = Utc::now();
-    let second_claimed_at = first_claimed_at + Duration::milliseconds(1);
-
-    let (first, second) = tokio::join!(
-        services.claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: first_claimed_at,
-            },
-        ),
-        services.claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: second_claimed_at,
-            },
-        )
-    );
-
-    let (winner, loser_claimed_at, loser_error) = match (first, second) {
-        (Ok(winner), Err(error)) => (winner, second_claimed_at, error),
-        (Err(error), Ok(winner)) => (winner, first_claimed_at, error),
-        (first, second) => panic!(
-            "exactly one concurrent claim must own dispatch; first={first:?}, second={second:?}"
-        ),
-    };
-    assert_eq!(loser_error, AuthProductError::BackendUnavailable);
-    assert_eq!(winner.status, AuthFlowStatus::Completing);
-
-    let stale_loser = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: loser_claimed_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
-                    emitted_at: winner.updated_at + Duration::milliseconds(1),
-                },
-            },
-        )
-        .await
-        .expect_err("a blocked claimant cannot settle another owner's claim");
-    assert_eq!(stale_loser, AuthProductError::FlowAlreadyTerminal);
-
-    let settled = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: winner.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
-                    emitted_at: winner.updated_at + Duration::milliseconds(1),
-                },
-            },
-        )
-        .await
-        .expect("the active claim owner settles dispatch");
-    assert_eq!(settled.status, AuthFlowStatus::Completed);
-    assert!(settled.continuation_emitted_at.is_some());
-}
-
-#[tokio::test]
-async fn stale_continuation_dispatch_claim_can_be_reclaimed_and_fences_old_owner() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let completed = completed_oauth_flow_with_continuation(
-        &services,
-        &owner,
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
-        },
-    )
-    .await;
-    let first = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect("first continuation claim");
-    let reclaimed_at = first.updated_at
-        + Duration::seconds(ironclaw_auth::AUTH_CONTINUATION_DISPATCH_LEASE_SECONDS);
-    let reclaimed = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: reclaimed_at,
-            },
-        )
-        .await
-        .expect("stale continuation claim is reclaimable");
-    assert_eq!(reclaimed.status, AuthFlowStatus::Completing);
-    assert_eq!(reclaimed.updated_at, reclaimed_at);
-
-    let stale_settlement = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: first.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
-                    emitted_at: reclaimed_at + Duration::milliseconds(1),
-                },
-            },
-        )
-        .await
-        .expect_err("the reclaimed lease fences the old owner");
-    assert_eq!(stale_settlement, AuthProductError::FlowAlreadyTerminal);
-
-    let settled = services
-        .settle_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchSettlementInput {
-                flow_id: completed.id,
-                expected_claimed_at: reclaimed.updated_at,
-                outcome: ironclaw_auth::AuthContinuationDispatchOutcome::Dispatched {
-                    emitted_at: reclaimed_at + Duration::milliseconds(1),
-                },
-            },
-        )
-        .await
-        .expect("reclaiming owner settles dispatch");
-    assert_eq!(settled.status, AuthFlowStatus::Completed);
-}
-
-#[tokio::test]
-async fn non_lifecycle_continuation_dispatch_claim_is_rejected_without_mutation() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let completed =
-        completed_oauth_flow_with_continuation(&services, &owner, AuthContinuationRef::SetupOnly)
-            .await;
-
-    let error = services
-        .claim_continuation_dispatch(
-            &owner,
-            ironclaw_auth::AuthContinuationDispatchClaimInput {
-                flow_id: completed.id,
-                claimed_at: Utc::now(),
-            },
-        )
-        .await
-        .expect_err("only lifecycle activation may claim exclusive dispatch");
-    assert_eq!(error, AuthProductError::FlowAlreadyTerminal);
-
-    let persisted = services
-        .get_flow(&owner, completed.id)
-        .await
-        .expect("flow lookup")
-        .expect("completed flow remains");
-    assert_eq!(persisted.status, AuthFlowStatus::Completed);
-    assert_eq!(persisted.updated_at, completed.updated_at);
-    assert!(persisted.continuation_emitted_at.is_none());
 }
 
 #[tokio::test]

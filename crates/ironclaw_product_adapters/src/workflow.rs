@@ -73,25 +73,4 @@ pub trait ProductWorkflow: Send + Sync {
             ),
         })
     }
-
-    /// Compatibility wrapper for existing callers. New adapter/API wiring should
-    /// call [`Self::submit_inbound`] explicitly.
-    async fn accept_inbound(
-        &self,
-        envelope: ProductInboundEnvelope,
-    ) -> Result<ProductInboundAck, ProductAdapterError> {
-        self.submit_inbound(envelope).await
-    }
-
-    /// Compatibility wrapper for legacy adapter-level subscription callers. New
-    /// code should pass typed projection input to [`Self::subscribe_projection`].
-    async fn resolve_projection_subscription(
-        &self,
-        envelope: ProductInboundEnvelope,
-    ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-        self.subscribe_projection(ProductProjectionSubscribeInput::from_inbound_envelope(
-            &envelope,
-        )?)
-        .await
-    }
 }

@@ -24,13 +24,13 @@ use ironclaw_turns::{
     SourceBindingRef, SubmitChildRunRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
     TurnError, TurnErrorCategory, TurnRunId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityDeniedReasonKind, CapabilityDescriptorView,
-        CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation, ConcurrencyHint,
-        LoopCapabilityPort, LoopRunContext, LoopSafeSummary, ProviderToolCall,
-        ProviderToolCallCapabilityIds, ProviderToolCallReplay, ProviderToolDefinition,
-        RegisterProviderToolCallRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        resolution, sanitize_model_visible_text,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityCallCandidate,
+        CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailureKind,
+        CapabilityInputRef, ConcurrencyHint, LoopCapabilityPort, LoopRequest, LoopRequestBatch,
+        LoopRunContext, LoopSafeSummary, ProviderToolCall, ProviderToolCallCapabilityIds,
+        ProviderToolCallReplay, ProviderToolDefinition, RegisterProviderToolCallRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -695,7 +695,7 @@ impl SubagentSpawnCapabilityPort {
 
     async fn handle_spawn_with_gate(
         &self,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
         args: SpawnSubagentArgs,
         gate_override: Option<GateRef>,
     ) -> Result<Resolution, AgentLoopHostError> {
@@ -706,7 +706,7 @@ impl SubagentSpawnCapabilityPort {
 
     async fn handle_spawn_with_gate_recording(
         &self,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
         args: SpawnSubagentArgs,
         gate_override: Option<GateRef>,
         compensation: &mut SpawnCompensationState,
@@ -801,7 +801,7 @@ impl SubagentSpawnCapabilityPort {
 
     async fn authorize_spawn(
         &self,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
     ) -> Result<Option<Resolution>, AgentLoopHostError> {
         let mut spawn_authorizations = self.spawn_authorizations.lock().map_err(|_| {
             AgentLoopHostError::new(
@@ -860,7 +860,7 @@ impl SubagentSpawnCapabilityPort {
         args: SpawnSubagentArgs,
         ctx: SpawnContext,
         actor: TurnActor,
-        invocation: &CapabilityInvocation,
+        invocation: &LoopRequest,
         compensation: &mut SpawnCompensationState,
     ) -> Result<Resolution, AgentLoopHostError> {
         let SpawnContext {
@@ -1163,7 +1163,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         if self.is_spawn(&request.capability_id) {
             let args = self
@@ -1181,7 +1181,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions: Vec<Resolution> = Vec::with_capacity(request.invocations.len());
         let mut batch_compensations = Vec::new();
@@ -1295,7 +1295,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
             }
             let inner = self
                 .inner
-                .invoke_capability_batch(CapabilityBatchInvocation {
+                .invoke_capability_batch(LoopRequestBatch {
                     invocations: request.invocations[start..index].to_vec(),
                     stop_on_first_suspension: request.stop_on_first_suspension,
                 })
@@ -1536,3 +1536,4 @@ fn mode_label(mode: SpawnSubagentMode) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+// arch-exempt: large_file, subagent port migration remains centralized, plan #6175

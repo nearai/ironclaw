@@ -10,11 +10,14 @@
 //!
 //! ## What [`Invocation`] replaces
 //!
-//! Today a single capability call is re-wrapped through ~5 near-identical request
-//! shapes across the crate graph (§1.1): `CapabilityInvocation` (`ironclaw_turns`),
-//! `RuntimeCapabilityRequest` (`ironclaw_host_runtime`), `CapabilityInvocationRequest`
-//! (`ironclaw_capabilities`), [`crate::CapabilityDispatchRequest`] (this crate), and
-//! `RuntimeAdapterRequest` (`ironclaw_dispatcher`). The field-level diff shows only
+//! The retired path re-wrapped a single capability call through ~5
+//! near-identical request shapes across the crate graph (§1.1):
+//! `CapabilityInvocation` (`ironclaw_turns`), `RuntimeCapabilityRequest`
+//! (`ironclaw_host_runtime`), `CapabilityInvocationRequest`
+//! (`ironclaw_capabilities`) and `RuntimeAdapterRequest` (`ironclaw_dispatcher`).
+//! The live names are `LoopRequest`, runtime tuple parts, direct
+//! `CapabilityHost` parameters, and the private runtime-lane request.
+//! The field-level diff shows only
 //! **three** genuinely distinct states; the rest is duplication forced by the
 //! dependency DAG plus dead transitional fields. `Invocation` is the middle state —
 //! *the host-side payload, resolved at the membrane* — and lives here, the bottom
@@ -134,9 +137,8 @@ impl Actor {
 /// [`crate::Authorized`] witness, never on the request. `Invocation` is the
 /// pre-auth input; [`crate::Authorized`] is the post-auth witness.
 ///
-/// Like [`crate::CapabilityDispatchRequest`], this is an in-process payload
-/// (`input` is arbitrary JSON, not `Eq`), so it derives `PartialEq` but not `Eq`
-/// and is not itself a wire type.
+/// This is an in-process payload (`input` is arbitrary JSON, not `Eq`), so it
+/// derives `PartialEq` but not `Eq` and is not itself a wire type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Invocation {
     /// Idempotency identity of this invocation (§11.3). Stable across retries.

@@ -24,11 +24,24 @@ use std::sync::{Mutex, MutexGuard};
 
 use async_trait::async_trait;
 
-use crate::dispatch::{
-    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, DispatchError,
+use crate::dispatch::{CapabilityDispatchResult, CapabilityDispatcher, DispatchError};
+use crate::{
+    Actor, Authorized, Invocation, InvocationOrigin, MountView, ResourceReservation, RunId,
+    RuntimeLane, Timestamp, UserId,
 };
 
-type ResponderFn = dyn Fn(&CapabilityDispatchRequest, usize) -> Result<CapabilityDispatchResult, DispatchError>
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuthorizedDispatchRecord {
+    pub authenticated_actor_user_id: Option<UserId>,
+    pub run_id: Option<RunId>,
+    pub mounts: Option<MountView>,
+    pub invocation: Invocation,
+    pub lane: RuntimeLane,
+    pub resource_reservation: Option<ResourceReservation>,
+    pub deadline: Timestamp,
+}
+
+type ResponderFn = dyn Fn(&AuthorizedDispatchRecord, usize) -> Result<CapabilityDispatchResult, DispatchError>
     + Send
     + Sync;
 
@@ -41,7 +54,7 @@ type ResponderFn = dyn Fn(&CapabilityDispatchRequest, usize) -> Result<Capabilit
 /// Recording is always on, so a test asserts on [`Self::recorded`] /
 /// [`Self::call_count`] regardless of the response mode.
 pub struct TestDispatcher {
-    calls: Mutex<Vec<CapabilityDispatchRequest>>,
+    calls: Mutex<Vec<AuthorizedDispatchRecord>>,
     responder: Box<ResponderFn>,
 }
 
@@ -58,7 +71,7 @@ impl TestDispatcher {
     /// `f(&request, zero_based_call_index)`.
     pub fn responding<F>(f: F) -> Self
     where
-        F: Fn(&CapabilityDispatchRequest, usize) -> Result<CapabilityDispatchResult, DispatchError>
+        F: Fn(&AuthorizedDispatchRecord, usize) -> Result<CapabilityDispatchResult, DispatchError>
             + Send
             + Sync
             + 'static,
@@ -80,7 +93,7 @@ impl TestDispatcher {
     pub fn auth_required() -> Self {
         Self::responding(|request, _| {
             Err(DispatchError::AuthRequired {
-                capability: request.capability_id.clone(),
+                capability: request.invocation.capability.clone(),
                 required_secrets: Vec::new(),
                 credential_requirements: Vec::new(),
             })
@@ -103,7 +116,7 @@ impl TestDispatcher {
     }
 
     /// Every request dispatched so far, in call order.
-    pub fn recorded(&self) -> Vec<CapabilityDispatchRequest> {
+    pub fn recorded(&self) -> Vec<AuthorizedDispatchRecord> {
         self.lock().clone()
     }
 
@@ -113,11 +126,11 @@ impl TestDispatcher {
     }
 
     /// The most recent dispatched request, if any.
-    pub fn last_request(&self) -> Option<CapabilityDispatchRequest> {
+    pub fn last_request(&self) -> Option<AuthorizedDispatchRecord> {
         self.lock().last().cloned()
     }
 
-    fn lock(&self) -> MutexGuard<'_, Vec<CapabilityDispatchRequest>> {
+    fn lock(&self) -> MutexGuard<'_, Vec<AuthorizedDispatchRecord>> {
         self.calls
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -128,34 +141,75 @@ impl TestDispatcher {
 impl CapabilityDispatcher for TestDispatcher {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        authorized: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let deadline = authorized.deadline();
+        let record = match authorized.into_parts(chrono::Utc::now()) {
+            Ok((invocation, lane, mounts, resource_reservation)) => {
+                let authenticated_actor_user_id = match &invocation.actor {
+                    Actor::Sealed(user_id) => Some(user_id.clone()),
+                    Actor::System => None,
+                };
+                let run_id = match invocation.origin {
+                    InvocationOrigin::LoopRun(run_id) if invocation.process_id.is_none() => {
+                        Some(run_id)
+                    }
+                    _ => None,
+                };
+                AuthorizedDispatchRecord {
+                    authenticated_actor_user_id,
+                    run_id,
+                    mounts,
+                    invocation,
+                    lane,
+                    resource_reservation,
+                    deadline,
+                }
+            }
+            Err(authorized) => {
+                let capability = authorized.invocation().capability.clone();
+                let _ = authorized.abort();
+                return Err(DispatchError::AuthorizationExpired { capability });
+            }
+        };
         let index = {
             let mut calls = self.lock();
-            calls.push(request.clone());
+            calls.push(record.clone());
             calls.len() - 1
         };
-        (self.responder)(&request, index)
+        (self.responder)(&record, index)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CapabilityId, ResourceEstimate, ResourceScope};
+    use crate::{
+        ActivityId, Actor, CapabilityId, CorrelationId, InvocationOrigin, ProductKind,
+        ResourceEstimate, ResourceScope,
+    };
     use serde_json::json;
 
-    fn request(cap: &str) -> CapabilityDispatchRequest {
-        CapabilityDispatchRequest {
-            capability_id: CapabilityId::new(cap).unwrap(),
-            scope: ResourceScope::system(),
-            authenticated_actor_user_id: None,
-            run_id: None,
-            estimate: ResourceEstimate::default(),
-            mounts: None,
-            resource_reservation: None,
-            input: json!({}),
-        }
+    fn request(cap: &str) -> Authorized {
+        let capability = CapabilityId::new(cap).unwrap();
+        Authorized::seal_for_test(
+            Invocation {
+                activity_id: ActivityId::new(),
+                capability,
+                input: json!({}),
+                scope: ResourceScope::system(),
+                actor: Actor::System,
+                origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+                estimate: ResourceEstimate::default(),
+                correlation_id: CorrelationId::new(),
+                process_id: None,
+                parent_process_id: None,
+            },
+            RuntimeLane::FirstParty,
+            MountView::default(),
+            None,
+            chrono::DateTime::<chrono::Utc>::MAX_UTC,
+        )
     }
 
     fn auth_required_err(cap: &str) -> DispatchError {
@@ -178,9 +232,12 @@ mod tests {
 
         assert_eq!(d.call_count(), 2);
         let recorded = d.recorded();
-        assert_eq!(recorded[0].capability_id.as_str(), "test.a");
-        assert_eq!(recorded[1].capability_id.as_str(), "test.b");
-        assert_eq!(d.last_request().unwrap().capability_id.as_str(), "test.b");
+        assert_eq!(recorded[0].invocation.capability.as_str(), "test.a");
+        assert_eq!(recorded[1].invocation.capability.as_str(), "test.b");
+        assert_eq!(
+            d.last_request().unwrap().invocation.capability.as_str(),
+            "test.b"
+        );
     }
 
     #[tokio::test]
@@ -224,9 +281,9 @@ mod tests {
     async fn responding_can_branch_on_request_and_call_index() {
         let d = TestDispatcher::responding(|req, idx| {
             // Fail only the first call for capability "first".
-            if idx == 0 && req.capability_id.as_str() == "test.first" {
+            if idx == 0 && req.invocation.capability.as_str() == "test.first" {
                 Err(DispatchError::AuthRequired {
-                    capability: req.capability_id.clone(),
+                    capability: req.invocation.capability.clone(),
                     required_secrets: Vec::new(),
                     credential_requirements: Vec::new(),
                 })

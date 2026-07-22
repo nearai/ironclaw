@@ -38,6 +38,9 @@ dotenvy = "0.15"
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
+ironclaw_extension_host = { path = "../ironclaw_extension_host", version = "0.1.0" }
+ironclaw_slack_extension = { path = "../ironclaw_slack_extension", version = "0.1.0" }
+ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension", version = "0.1.0" }
 ironclaw_webui = { path = "../ironclaw_webui", version = "0.1.0" }
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }

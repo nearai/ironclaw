@@ -1,9 +1,19 @@
-pub use ironclaw_product_workflow::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
-};
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::facade::RebornAutomationProductFacade;
+pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
+pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
+pub use extension_host::channel_identity::{
+    ChannelIdentityBindingConfig, channel_identity_binding_hook_factory,
+};
+pub use extension_host::extension_ingress::{
+    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
+    ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
+    InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
+};
+pub use extension_host::extension_ingress::{
+    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
+};
 pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
@@ -14,23 +24,34 @@ pub use extension_host::gsuite::{
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
+#[cfg(feature = "test-support")]
+pub use factory::ChannelHostAssemblyTestWiring;
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
-#[cfg(feature = "migration-support")]
-pub use factory::extension_installation_store_for_migration;
 pub use factory::local_dev_db_path;
 pub use factory::open_local_dev_secret_store;
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
-pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
-pub use ironclaw_auth::GoogleOAuthRouteConfig;
+pub use input::{
+    ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
+};
 pub use ironclaw_auth::OAuthRedirectUri;
+pub use ironclaw_host_api::{
+    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+};
+pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
+pub use ironclaw_product_workflow::PreferenceTargetCodec;
 pub use ironclaw_product_workflow::{
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    RebornChannelConnectStrategy,
+};
+pub use ironclaw_product_workflow::{
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
 pub use ironclaw_runtime_policy::{
@@ -81,10 +102,7 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-pub use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
-pub use ironclaw_channel_host::identity::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError,
-};
+pub use product_auth::api::auth::RebornAuthContinuationDispatcher;
 pub use product_auth::api::auth::{
     RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
     RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
@@ -92,11 +110,16 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
     RebornProductAuthServices,
 };
-pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 pub use product_auth::serve::{
     ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
 };
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
+pub use provider_identity::{
+    ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
+    RebornUserIdentityLookupError, installation_scoped_provider_user_id,
+};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
@@ -117,58 +140,14 @@ pub use runtime::{
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
 pub use runtime_input::{
-    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
-    DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
+    KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
     TriggerFireAccessError, TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings,
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use slack::slack_actor_identity::{
-    SlackUserIdentityActorResolver, slack_user_identity_provider_user_id,
-};
-pub use slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, SlackChannelRouteAdminRouteMount,
-    WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
-    WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH, slack_channel_route_admin_route_mount,
-};
-pub use slack::slack_connectable_channel::{
-    SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
-};
-pub use webui::facade::build_webui_services_with_slack_and_telegram_host_mounts;
-pub use ironclaw_channel_delivery::{
-    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
-};
-pub use ironclaw_channel_delivery::{
-    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
-};
-pub use ironclaw_telegram_extension::channel_routes::{
-    WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
-};
-pub use slack::slack_egress::{
-    SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
-    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
-};
-pub use slack::slack_host_beta::{
-    SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaLegacySetup, SlackHostBetaMounts,
-    SlackHostBetaRuntimeConfig, build_slack_events_route_mount,
-    build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
-    build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
-};
-pub use slack::slack_serve;
-pub use slack::slack_serve::{
-    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
-    slack_events_route_mount,
-};
-pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
-pub use telegram::telegram_host_beta::{
-    TelegramHostBuildError, TelegramHostMounts, TelegramHostRuntimeConfig,
-    build_telegram_host_runtime_mounts,
-};
 pub use web_access::register_bundled_web_access_first_party_handlers;
-pub use webui::facade::build_webui_services_with_telegram_host_mounts;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 pub use webui::route_mounts::{
     ProtectedRouteMount, PublicRouteDrain, PublicRouteDrains, PublicRouteMount,

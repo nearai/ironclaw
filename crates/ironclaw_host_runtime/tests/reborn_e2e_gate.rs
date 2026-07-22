@@ -24,8 +24,8 @@ use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfacePolicy, CapabilitySurfaceVersion, HostRuntime,
-    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeStatusRequest, SurfaceKind,
+    HostRuntimeServices, RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeStatusRequest,
+    SurfaceKind,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -111,7 +111,7 @@ async fn reborn_e2e_gate_invokes_script_through_host_runtime_with_status_events_
         "host_path_sentinel": "/private/tmp/reborn-e2e-gate"
     });
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default().set_output_bytes(4096),
@@ -207,7 +207,7 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
         approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id).await;
 
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -242,7 +242,7 @@ async fn reborn_e2e_gate_blocks_for_approval_resumes_once_and_rejects_replay() {
     );
 
     let replay = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -285,7 +285,7 @@ async fn reborn_e2e_gate_fails_unsupported_obligations_before_runtime_events_or_
     let invocation_id = context.invocation_id;
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -339,7 +339,7 @@ async fn reborn_e2e_gate_redacts_runtime_output_before_public_result() {
     let leaked = format!("Bearer {leaked_header}.{leaked_payload}.{leaked_signature}");
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -401,7 +401,7 @@ async fn reborn_e2e_gate_sanitizes_runtime_backend_failure_before_public_surface
     let backend_secret = "BACKEND_PROVIDER_ERROR_SECRET_3067 /private/tmp/backend-path sk-live";
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -500,7 +500,7 @@ async fn reborn_e2e_gate_blocks_oversized_runtime_output_before_publication() {
     let forbidden = "OUTPUT_LIMIT_SENTINEL_MUST_NOT_LEAK";
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -695,7 +695,7 @@ async fn block_for_approval(
     input: serde_json::Value,
 ) -> ironclaw_host_runtime::RuntimeApprovalGate {
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -882,6 +882,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -889,7 +890,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
 fn execution_context_with_dispatch_grant() -> ExecutionContext {
     let mut grants = CapabilitySet::default();
     grants.grants.push(dispatch_grant());
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Script,
@@ -897,11 +898,13 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn execution_context_without_grants() -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Script,
@@ -909,7 +912,9 @@ fn execution_context_without_grants() -> ExecutionContext {
         CapabilitySet::default(),
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn dispatch_grant() -> CapabilityGrant {
@@ -1032,3 +1037,14 @@ effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}

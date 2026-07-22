@@ -34,7 +34,6 @@ mod extension_host;
 mod factory;
 mod google_oauth_secret_store;
 mod input;
-mod lifecycle_auth_continuation;
 mod llm_admin;
 mod local_dev_authorization;
 mod local_dev_mounts;
@@ -44,12 +43,7 @@ mod product_auth;
 mod production_runtime_policy;
 mod profile_approval_authorization;
 mod projection;
-mod slack;
-mod telegram;
-pub use ironclaw_product_workflow::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller,
-};
-mod delivered_gate_routing;
+mod provider_identity;
 mod readiness;
 mod root;
 mod runtime;
@@ -65,7 +59,20 @@ mod webui;
 
 pub use admin_token::AdminApiTokenMinter;
 pub use automation::facade::RebornAutomationProductFacade;
+pub use automation::trigger_poller::PostSubmitDeliveryHook;
 pub use error::RebornBuildError;
+pub use extension_host::channel_host::{ChannelHostIdentity, GenericChannelHostAssembly};
+pub use extension_host::channel_identity::{
+    ChannelIdentityBindingConfig, channel_identity_binding_hook_factory,
+};
+pub use extension_host::extension_ingress::{
+    ChannelInboundSinkConfig, ChannelIngressDrain, ChannelIngressRegistration,
+    ExtensionIngressParts, ExtensionIngressRegistry, GenericChannelInboundSink,
+    InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
+};
+pub use extension_host::extension_ingress::{
+    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
+};
 pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,
     execute_reborn_extension_lifecycle_command, render_reborn_extension_lifecycle_response,
@@ -76,18 +83,19 @@ pub use extension_host::gsuite::{
 pub use extension_host::skill_listing::{RebornSkillListError, list_reborn_local_skills};
 #[cfg(feature = "test-support")]
 pub use factory::AttachmentTestSupport;
+#[cfg(feature = "test-support")]
+pub use factory::ChannelHostAssemblyTestWiring;
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
-#[cfg(feature = "migration-support")]
-pub use factory::extension_installation_store_for_migration;
 pub use factory::local_dev_db_path;
 pub use factory::open_local_dev_secret_store;
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
 pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
-pub use input::{OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding};
-pub use ironclaw_auth::GoogleOAuthRouteConfig;
+pub use input::{
+    ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
+};
 /// OAuth redirect-URI newtype re-exported so the `ironclaw_reborn_cli` binary
 /// can name it without a direct `ironclaw_auth` dependency. Its
 /// `runtime/mod.rs` parses `IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`
@@ -98,10 +106,22 @@ pub use ironclaw_auth::GoogleOAuthRouteConfig;
 /// the composition-facade set, so adding `ironclaw_auth` there would fail that
 /// test — the type must travel through this facade instead.
 pub use ironclaw_auth::OAuthRedirectUri;
+pub use ironclaw_host_api::{
+    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, VendorId,
+};
+/// Channel-adapter and codec contracts re-exported for the assembling
+/// binary's [`ChannelExtensionBinding`] construction.
+pub use ironclaw_product_adapters::{ChannelAdapter, NormalizedInboundMessage};
+pub use ironclaw_product_workflow::PreferenceTargetCodec;
 pub use ironclaw_product_workflow::{
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePhase, LifecycleProductPayload,
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    RebornChannelConnectStrategy,
+};
+pub use ironclaw_product_workflow::{
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleProductPayload,
     LifecycleProductResponse, LifecycleSearchExtensionSummary,
 };
+pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
 // Re-exported for `ironclaw_reborn_cli` (`runtime/mod.rs` turn-failure display):
 // the CLI consumes composition as its facade and must not grow a direct
@@ -162,14 +182,10 @@ pub use observability::operator_logs::{
     OperatorLogLayer, capture_tracing_log, operator_log_buffer,
 };
 pub use observability::trajectory_observer::RebornTrajectoryObserver;
-// The continuation-dispatch port lives in ironclaw_channel_host so channel
-// host crates can hold it without a composition dependency; composition's
-// facade re-exports it for its own downstream consumers (root test suites,
-// the CLI) alongside the product-auth service surface that produces it.
-pub use ironclaw_channel_host::auth_continuation::RebornAuthContinuationDispatcher;
-pub use ironclaw_channel_host::identity::{
-    RebornUserIdentityLookup, RebornUserIdentityLookupError,
-};
+// Composition's facade re-exports the continuation dispatcher for its own
+// downstream consumers (root test suites, the CLI) alongside the
+// product-auth service surface that produces it.
+pub use product_auth::api::auth::RebornAuthContinuationDispatcher;
 pub use product_auth::api::auth::{
     RebornAuthProductError, RebornCredentialLifecycleError, RebornManualTokenChallenge,
     RebornManualTokenError, RebornManualTokenSetupRequest, RebornManualTokenSubmitRequest,
@@ -177,7 +193,6 @@ pub use product_auth::api::auth::{
     RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServicePorts,
     RebornProductAuthServices,
 };
-pub use product_auth::serve::SlackPersonalOAuthBindingConfig;
 // Product-auth WebUI route-mount builders, exposed so the host-owned
 // `ironclaw_webui::webui_v2_app` (moved up from this crate) can
 // compose the Reborn-native product-auth surface into the WebChat v2 router.
@@ -185,6 +200,12 @@ pub use product_auth::serve::{
     ProductAuthRouteMount, ProductAuthRouteState, product_auth_route_mount,
 };
 pub use production_runtime_policy::RebornProductionRuntimePolicy;
+pub use provider_identity::{
+    ProviderIdentityActorResolver, RebornIdentityProviderId, RebornIdentityProviderUserId,
+    RebornUserIdentityBinding, RebornUserIdentityBindingDeleteStore,
+    RebornUserIdentityBindingError, RebornUserIdentityBindingStore, RebornUserIdentityLookup,
+    RebornUserIdentityLookupError, installation_scoped_provider_user_id,
+};
 pub use readiness::{
     RebornFacadeReadiness, RebornReadiness, RebornReadinessDiagnostic,
     RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
@@ -205,62 +226,14 @@ pub use runtime::{
     RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
 };
 pub use runtime_input::{
-    CredentialRefreshSettings, DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
-    DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
+    DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,
+    KeepaliveSweepSettings, PollSettings, RebornRuntimeIdentity, RebornRuntimeInput,
     TriggerFireAccessCheck, TriggerFireAccessChecker, TriggerFireAccessDecision,
     TriggerFireAccessError, TriggerFireAccessGrant, TriggerFireAccessPolicy, TriggerPollerSettings,
     TurnRunnerSettings,
 };
 pub use runtime_input::{RebornProviderFactory, ResolvedRebornLlm};
-pub use slack::slack_actor_identity::{
-    SlackUserIdentityActorResolver, slack_user_identity_provider_user_id,
-};
-pub use slack::slack_channel_routes::{
-    SlackChannelRouteAdminRouteConfig, SlackChannelRouteAdminRouteMount,
-    WEBUI_V2_CHANNELS_SLACK_ALLOWED_PATH, WEBUI_V2_CHANNELS_SLACK_ROUTES_PATH,
-    WEBUI_V2_CHANNELS_SLACK_SUBJECTS_PATH, slack_channel_route_admin_route_mount,
-};
-pub use slack::slack_connectable_channel::{
-    SlackOperatorRouteVisibility, build_webui_services_with_slack_host_beta_mounts,
-};
-pub use webui::facade::build_webui_services_with_slack_and_telegram_host_mounts;
-// Exported under either channel-host feature: the delivery observer and the
-// triggered-run driver are adapter-generic machinery in
-// `ironclaw_channel_delivery`; each channel host injects its own
-// adapter/egress/sink plus a `ChannelDeliveryProtocol`.
-pub use ironclaw_channel_delivery::{
-    FinalReplyDeliveryObserver, FinalReplyDeliveryServices, FinalReplyDeliverySettings,
-};
-pub use ironclaw_channel_delivery::{
-    NoopPostSubmitDeliveryHook, PostSubmitDeliveryHook, TriggeredRunDeliveryDriver,
-};
-pub use ironclaw_telegram_extension::channel_routes::{
-    WEBUI_V2_CHANNELS_TELEGRAM_PAIRING_PATH, WEBUI_V2_CHANNELS_TELEGRAM_SETUP_PATH,
-};
-pub use slack::slack_egress::{
-    SlackEgressCredential, SlackEgressCredentialError, SlackEgressCredentialProvider,
-    SlackProtocolHttpEgress, StaticSlackEgressCredentialProvider,
-};
-pub use slack::slack_host_beta::{
-    SlackHostBetaBuildError, SlackHostBetaChannelRoute, SlackHostBetaConfig,
-    SlackHostBetaConfigInput, SlackHostBetaLegacySetup, SlackHostBetaMounts,
-    SlackHostBetaRuntimeConfig, build_slack_events_route_mount,
-    build_slack_events_route_mount_with_actor_user_resolver, build_slack_host_beta_mounts,
-    build_slack_host_beta_runtime_mounts, build_triggered_run_delivery_hook,
-};
-pub use slack::slack_serve;
-pub use slack::slack_serve::{
-    SLACK_EVENTS_PATH, SlackEventsRouteState, SlackEventsWebhookDispatcher,
-    SlackInstallationSelector, SlackTeamId, slack_events_route_descriptors,
-    slack_events_route_mount,
-};
-pub use slack::slack_setup::SlackPersonalSetupServiceSlot;
-pub use telegram::telegram_host_beta::{
-    TelegramHostBuildError, TelegramHostMounts, TelegramHostRuntimeConfig,
-    build_telegram_host_runtime_mounts,
-};
 pub use web_access::register_bundled_web_access_first_party_handlers;
-pub use webui::facade::build_webui_services_with_telegram_host_mounts;
 pub use webui::facade::{RebornWebuiBundle, build_webui_services};
 // Host-supplied route-mount vocabulary shared with composition's own route
 // builders (nearai login, OpenAI-compat) and the host-owned gateway assembly
@@ -424,8 +397,7 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ProcessBackendKind;
 use ironclaw_host_api::{
-    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SYSTEM_RESERVED_ID,
-    VirtualPath,
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, VirtualPath,
 };
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
 use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
@@ -461,6 +433,7 @@ pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
 /// two tenants sharing one underlying [`RootFilesystem`] cannot collide
 /// on identically-shaped paths.
 const PER_USER_ALIASES: &[&str] = &[
+    "/product-results",
     "/processes",
     "/secrets",
     "/authorization",
@@ -503,8 +476,8 @@ pub fn invocation_mount_view(
     )
 }
 
-fn resource_scope_path_segment(value: &str) -> &str {
-    if value == SYSTEM_RESERVED_ID {
+pub(crate) fn resource_scope_path_segment(value: &str) -> &str {
+    if value == ironclaw_host_api::SYSTEM_RESERVED_ID {
         "__system__"
     } else {
         value
@@ -516,7 +489,7 @@ fn invocation_mount_view_for_segments(
     user_id: &str,
 ) -> Result<MountView, ironclaw_host_api::HostApiError> {
     let tenant_user_prefix = format!("/tenants/{tenant_id}/users/{user_id}");
-    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
+    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 3);
     for alias in PER_USER_ALIASES {
         let target = format!("{tenant_user_prefix}{alias}");
         grants.push(MountGrant::new(
@@ -546,9 +519,11 @@ fn invocation_mount_view_for_segments(
         MountPermissions::read_write_list_delete(),
     ));
     grants.push(MountGrant::new(
-        MountAlias::new("/tenant-shared/slack-channel-routes")?,
-        VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-channel-routes"))?,
-        MountPermissions::read_only(),
+        MountAlias::new("/extension-admin-configuration")?,
+        VirtualPath::new(format!(
+            "/tenants/{tenant_id}/shared/extension-admin-configuration"
+        ))?,
+        MountPermissions::read_write_list_delete(),
     ));
     for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
         grants.push(MountGrant::new(
@@ -558,93 +533,6 @@ fn invocation_mount_view_for_segments(
         ));
     }
     MountView::new(grants)
-}
-
-pub(crate) fn slack_host_state_mount_view(
-    scope: &ResourceScope,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let tenant_id = resource_scope_path_segment(scope.tenant_id.as_str());
-    MountView::new(vec![
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/slack-personal-binding")?,
-            VirtualPath::new(format!(
-                "/tenants/{tenant_id}/shared/slack-personal-binding"
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/slack-channel-routes")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-channel-routes"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/slack-setup")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-setup"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/engine/product_workflow/idempotency")?,
-            VirtualPath::new(format!(
-                "/tenants/{tenant_id}/shared/slack-product-workflow/idempotency"
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        // Durable Slack conversation-binding store: RebornFilesystemConversationServices
-        // persists `/conversations/state.json`. Without this alias the ScopedFilesystem
-        // cannot resolve that path, the conversation store fails to open, and every
-        // inbound Slack event (e.g. a DM to the bot) is dropped with a 503.
-        MountGrant::new(
-            MountAlias::new("/conversations")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/slack-conversations"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-    ])
-}
-
-pub(crate) fn telegram_host_state_mount_view(
-    scope: &ResourceScope,
-) -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let tenant_id = resource_scope_path_segment(scope.tenant_id.as_str());
-    MountView::new(vec![
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/telegram-setup")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-setup"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/telegram-pairing")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-pairing"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/telegram-binding")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-binding"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/tenant-shared/telegram-dm-targets")?,
-            VirtualPath::new(format!("/tenants/{tenant_id}/shared/telegram-dm-targets"))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        MountGrant::new(
-            MountAlias::new("/engine/product_workflow/idempotency")?,
-            VirtualPath::new(format!(
-                "/tenants/{tenant_id}/shared/telegram-product-workflow/idempotency"
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-        // Durable Telegram conversation-binding store: RebornFilesystemConversationServices
-        // persists `/conversations/state.json`. Without this alias the ScopedFilesystem
-        // cannot resolve that path, the conversation store fails to open, and every
-        // inbound Telegram update (e.g. a DM to the bot) is dropped with a 503.
-        MountGrant::new(
-            MountAlias::new("/conversations")?,
-            VirtualPath::new(format!(
-                "/tenants/{tenant_id}/shared/telegram-conversations"
-            ))?,
-            MountPermissions::read_write_list_delete(),
-        ),
-    ])
 }
 
 /// Wrap `root` in a tenant-aware [`ScopedFilesystem`] whose resolver is
@@ -862,137 +750,21 @@ mod mount_view_tests {
     }
 
     #[test]
-    fn invocation_mount_view_exposes_slack_channel_routes_read_only() {
+    fn invocation_mount_view_routes_admin_configuration_to_tenant_shared_storage() {
         let scope = sample_scope();
         let view = invocation_mount_view(&scope).unwrap();
-        let (resolved, grant) = view
-            .resolve_with_grant(
-                &ScopedPath::new("/tenant-shared/slack-channel-routes/install/team/route.json")
+        let resolved = view
+            .resolve(
+                &ScopedPath::new("/extension-admin-configuration/groups/extension.slack.json")
                     .unwrap(),
             )
             .unwrap();
         assert_eq!(
             resolved.as_str(),
             &format!(
-                "/tenants/{}/shared/slack-channel-routes/install/team/route.json",
-                scope.tenant_id.as_str()
-            )
-        );
-        assert_eq!(grant.alias.as_str(), "/tenant-shared/slack-channel-routes");
-        assert_eq!(grant.permissions, MountPermissions::read_only());
-    }
-
-    #[test]
-    fn slack_host_state_mount_view_grants_delete_only_to_slack_state_roots() {
-        let scope = sample_scope();
-        let view = slack_host_state_mount_view(&scope).unwrap();
-        for (alias, path, target) in [
-            (
-                "/tenant-shared/slack-channel-routes",
-                "/tenant-shared/slack-channel-routes/install/team/route.json",
-                "slack-channel-routes/install/team/route.json",
+                "/tenants/{}/shared/extension-admin-configuration/groups/extension.slack.json",
+                scope.tenant_id.as_str(),
             ),
-            (
-                "/tenant-shared/slack-setup",
-                "/tenant-shared/slack-setup/installation.json",
-                "slack-setup/installation.json",
-            ),
-            (
-                "/engine/product_workflow/idempotency",
-                "/engine/product_workflow/idempotency/actions/action.json",
-                "slack-product-workflow/idempotency/actions/action.json",
-            ),
-            // Regression: the durable conversation-binding store persists
-            // `/conversations/state.json`; without this alias every inbound Slack
-            // event (e.g. a DM to the bot) fails to open the store and is dropped.
-            (
-                "/conversations",
-                "/conversations/state.json",
-                "slack-conversations/state.json",
-            ),
-        ] {
-            let (resolved, grant) = view
-                .resolve_with_grant(&ScopedPath::new(path).unwrap())
-                .unwrap();
-            assert_eq!(
-                resolved.as_str(),
-                &format!("/tenants/{}/shared/{target}", scope.tenant_id.as_str())
-            );
-            assert_eq!(grant.alias.as_str(), alias);
-            assert_eq!(
-                grant.permissions,
-                MountPermissions::read_write_list_delete()
-            );
-        }
-        // /outbound is no longer in the slack-host-state mount; outbound state is
-        // served via the composition-owned per-user scoped filesystem instead.
-        assert!(
-            view.resolve(&ScopedPath::new("/outbound/deliveries/delivery.json").unwrap())
-                .is_err(),
-            "/outbound must not resolve through the slack-host-state mount after store unification"
-        );
-        assert!(
-            view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn telegram_host_state_mount_view_grants_delete_only_to_telegram_state_roots() {
-        let scope = sample_scope();
-        let view = telegram_host_state_mount_view(&scope).unwrap();
-        for (alias, path, target) in [
-            (
-                "/tenant-shared/telegram-setup",
-                "/tenant-shared/telegram-setup/installation.json",
-                "telegram-setup/installation.json",
-            ),
-            (
-                "/tenant-shared/telegram-pairing",
-                "/tenant-shared/telegram-pairing/codes/code.json",
-                "telegram-pairing/codes/code.json",
-            ),
-            (
-                "/tenant-shared/telegram-binding",
-                "/tenant-shared/telegram-binding/identities/identity.json",
-                "telegram-binding/identities/identity.json",
-            ),
-            (
-                "/tenant-shared/telegram-dm-targets",
-                "/tenant-shared/telegram-dm-targets/target.json",
-                "telegram-dm-targets/target.json",
-            ),
-            (
-                "/engine/product_workflow/idempotency",
-                "/engine/product_workflow/idempotency/actions/action.json",
-                "telegram-product-workflow/idempotency/actions/action.json",
-            ),
-            // Regression: the durable conversation-binding store persists
-            // `/conversations/state.json`; without this alias every inbound Telegram
-            // update (e.g. a DM to the bot) fails to open the store and is dropped.
-            (
-                "/conversations",
-                "/conversations/state.json",
-                "telegram-conversations/state.json",
-            ),
-        ] {
-            let (resolved, grant) = view
-                .resolve_with_grant(&ScopedPath::new(path).unwrap())
-                .unwrap();
-            assert_eq!(
-                resolved.as_str(),
-                &format!("/tenants/{}/shared/{target}", scope.tenant_id.as_str())
-            );
-            assert_eq!(grant.alias.as_str(), alias);
-            assert_eq!(
-                grant.permissions,
-                MountPermissions::read_write_list_delete()
-            );
-        }
-        assert!(
-            view.resolve(&ScopedPath::new("/tenant-shared/other.json").unwrap())
-                .is_err(),
-            "non-telegram tenant-shared paths must not resolve through the telegram host-state mount"
         );
     }
 
@@ -1134,10 +906,10 @@ mod two_tenant_isolation_tests {
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
-            tenant_id: TenantId::new(tenant).unwrap(),
-            user_id: UserId::new(user).unwrap(),
+            tenant_id: TenantId::new(tenant).unwrap(), // safety: fixed-valid test fixture
+            user_id: UserId::new(user).unwrap(),       // safety: fixed-valid test fixture
             agent_id: Some(AgentId::new("github").unwrap()),
-            project_id: Some(ProjectId::new("default").unwrap()),
+            project_id: Some(ProjectId::new("default").unwrap()), // safety: fixed-valid test fixture
             mission_id: None,
             thread_id: None,
             invocation_id: InvocationId::new(),
@@ -1210,10 +982,10 @@ mod gate_record_production_mount_tests {
 
     fn scope(tenant: &str, user: &str) -> ResourceScope {
         ResourceScope {
-            tenant_id: TenantId::new(tenant).unwrap(),
-            user_id: UserId::new(user).unwrap(),
+            tenant_id: TenantId::new(tenant).unwrap(), // safety: fixed-valid test fixture
+            user_id: UserId::new(user).unwrap(),       // safety: fixed-valid test fixture
             agent_id: None,
-            project_id: Some(ProjectId::new("default").unwrap()),
+            project_id: Some(ProjectId::new("default").unwrap()), // safety: fixed-valid test fixture
             mission_id: None,
             thread_id: None,
             invocation_id: InvocationId::new(),
@@ -1225,7 +997,7 @@ mod gate_record_production_mount_tests {
         let scoped = wrap_scoped(Arc::new(InMemoryBackend::new()));
         let store = FilesystemGateRecordStore::new(scoped);
         let record = GateRecord::Approval {
-            summary: SafeSummary::new("awaiting decision").unwrap(),
+            summary: SafeSummary::new("awaiting decision").unwrap(), // safety: fixed-valid test fixture
         };
         let gate_ref = GateRef::new();
         let scope_a = scope("tenant_a", "alice");
@@ -1235,11 +1007,11 @@ mod gate_record_production_mount_tests {
         store
             .save(scope_a.clone(), gate_ref, record.clone())
             .await
-            .unwrap();
-        assert_eq!(store.load(&scope_a, gate_ref).await.unwrap(), Some(record));
+            .unwrap(); // safety: test assertion on an in-memory store
+        assert_eq!(store.load(&scope_a, gate_ref).await.unwrap(), Some(record)); // safety: test assertion
 
         // Structural tenant isolation: same ref, different tenant → unknown.
         let scope_b = scope("tenant_b", "bob");
-        assert_eq!(store.load(&scope_b, gate_ref).await.unwrap(), None);
+        assert_eq!(store.load(&scope_b, gate_ref).await.unwrap(), None); // safety: test assertion
     }
 }

@@ -17,11 +17,11 @@ use ironclaw_conversations::{AdapterInstallationId, AdapterKind, ExternalActorRe
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountView, NetworkPolicy, Principal,
-    ProviderToolName, ResourceEstimate, RuntimeKind, TenantId, TrustClass, UserId,
+    ProviderToolName, ResourceEstimate, RunId, RuntimeKind, TenantId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_PAUSE_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_PAUSE_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID, TRIGGER_RESUME_CAPABILITY_ID,
 };
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
@@ -481,7 +481,7 @@ async fn invoke_trigger_create(runtime: &RebornRuntime, input: Value) -> Value {
         .as_deref()
         .expect("runtime exposes host runtime");
     let outcome = host_runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             trigger_management_execution_context(),
             CapabilityId::new(TRIGGER_CREATE_CAPABILITY_ID).expect("capability id"),
             ResourceEstimate::default(),
@@ -534,6 +534,7 @@ fn trigger_management_execution_context() -> ExecutionContext {
     context.resource_scope.tenant_id = tenant_id;
     context.resource_scope.agent_id = Some(agent_id);
     context.resource_scope.project_id = None;
+    context.run_id = Some(RunId::new());
     context
 }
 
@@ -1550,3 +1551,4 @@ async fn scheduled_trigger_denies_mutators_with_tool_disclosure(
         all_triggers[0]
     );
 }
+// arch-exempt: large_file, trigger poller end-to-end coverage remains centralized, plan #6175

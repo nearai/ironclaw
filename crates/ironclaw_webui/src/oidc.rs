@@ -9,9 +9,8 @@
 //!
 //! - **Not** a full OIDC client — there is no authorization-code
 //!   exchange, no PKCE, no token endpoint, no refresh handling. Those
-//!   live in whatever sign-in path the host binary owns (it then
-//!   typically mints a Reborn session via the `SessionStore` from
-//!   [`crate::session`]).
+//!   live in whatever sign-in path the host binary owns (it can then
+//!   mint a Reborn session via [`crate::signed_session_store`]).
 //! - **Not** an audience-discovery layer — the host config names a
 //!   fixed `audience` and `issuer`, and JWTs not matching both are
 //!   rejected.

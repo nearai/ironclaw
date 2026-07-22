@@ -1932,19 +1932,11 @@ the final child `TurnRunId` before the goal row is written.
 //! `subagent/goal_store.rs` — subagent goal store contract.
 //!
 //! Holds the parent-injected goal for a child run, keyed by the child's
-//! `TurnRunId`. Bounded: a hard entry cap with eviction of the oldest entry.
-//! A `get` miss is an error, never an empty goal (design §6 goal durability:
-//! a miss "fails the child run loudly").
-
-use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+//! scoped owner and `TurnRunId`. Durable: backed by the runner-owned scoped
+//! filesystem store. A `get` miss is an error, never an empty goal (design §6
+//! goal durability: a miss "fails the child run loudly").
 
 use ironclaw_turns::TurnRunId;
-
-/// Hard cap on stored goals. Eviction is oldest-first when the cap is reached.
-/// Sized well above any plausible concurrent in-flight subagent count; an
-/// eviction under normal load indicates a leak and is logged at `debug`.
-const MAX_GOAL_ENTRIES: usize = 4096;
 
 /// Maximum byte length of a stored goal payload. A larger payload is rejected
 /// at `put` time — the goal is model-generated and must not be unbounded.
@@ -1997,128 +1989,11 @@ pub trait SubagentGoalStore: Send + Sync {
     async fn delete_goal(&self, run_id: TurnRunId) -> Result<(), SubagentGoalStoreError>;
 }
 
-/// Production goal store. Backs `SubagentGoalStore` with the same DB substrate
-/// that persists turn-state records, so a child goal survives process restart.
-///
-/// Implementation note: add the goal row/table beside turn persistence for both
-/// libSQL and PostgreSQL, or add a typed extension table to the existing
-/// turn-state DB adapter. Do not hide this behind a generic filesystem mount.
-pub struct DbBackedSubagentGoalStore {
-    // Concrete backend handle added by the implementer.
-}
-
-/// Bounded, in-process, fail-loud subagent goal store for unit tests and local
-/// harnesses only. This implementation is not restart-durable and must be
-/// marked `NonDurable` in production-readiness checks.
-///
-/// Thread-safe (`Mutex`). The `insertion_order` deque tracks FIFO eviction
-/// order so the cap is enforced in O(1) amortized.
-pub struct BoundedSubagentGoalStore {
-    inner: Mutex<GoalStoreInner>,
-}
-
-struct GoalStoreInner {
-    goals: HashMap<TurnRunId, SubagentGoal>,
-    insertion_order: VecDeque<TurnRunId>,
-}
-
-impl BoundedSubagentGoalStore {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(GoalStoreInner {
-                goals: HashMap::new(),
-                insertion_order: VecDeque::new(),
-            }),
-        }
-    }
-
-    /// Store the goal for a child run.
-    ///
-    /// - Rejects a payload over `MAX_GOAL_BYTES` (`PayloadTooLarge`).
-    /// - Rejects a re-insert of an existing key (`DuplicateKey`) — child run
-    ///   ids are unique per spawn, so a duplicate is a bug, not a refresh.
-    /// - When at `MAX_GOAL_ENTRIES`, evicts the oldest entry first.
-    pub fn put(
-        &self,
-        run_id: TurnRunId,
-        goal: SubagentGoal,
-    ) -> Result<(), SubagentGoalStoreError> {
-        let bytes = goal.byte_len();
-        if bytes > MAX_GOAL_BYTES {
-            return Err(SubagentGoalStoreError::PayloadTooLarge {
-                bytes,
-                max: MAX_GOAL_BYTES,
-            });
-        }
-        let mut inner = lock(&self.inner);
-        if inner.goals.contains_key(&run_id) {
-            return Err(SubagentGoalStoreError::DuplicateKey { run_id });
-        }
-        if inner.goals.len() >= MAX_GOAL_ENTRIES {
-            // Evict oldest. The loop drains stale order entries whose key was
-            // already removed by a prior `take`.
-            while let Some(oldest) = inner.insertion_order.pop_front() {
-                if inner.goals.remove(&oldest).is_some() {
-                    tracing::debug!(
-                        evicted_run_id = %oldest,
-                        "subagent goal store at capacity; evicted oldest goal"
-                    );
-                    break;
-                }
-            }
-        }
-        inner.goals.insert(run_id, goal);
-        inner.insertion_order.push_back(run_id);
-        Ok(())
-    }
-
-    /// Fetch the goal for a child run. A miss is a hard error — the caller
-    /// (P2.B prompt composition) must fail the child run, never proceed with an
-    /// empty `## Task`.
-    pub fn get(&self, run_id: TurnRunId) -> Result<SubagentGoal, SubagentGoalStoreError> {
-        let inner = lock(&self.inner);
-        inner
-            .goals
-            .get(&run_id)
-            .cloned()
-            .ok_or(SubagentGoalStoreError::NotFound { run_id })
-    }
-}
-
-impl Default for BoundedSubagentGoalStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl SubagentGoalStore for BoundedSubagentGoalStore {
-    async fn put_goal(
-        &self,
-        run_id: TurnRunId,
-        goal: SubagentGoal,
-    ) -> Result<(), SubagentGoalStoreError> {
-        self.put(run_id, goal)
-    }
-
-    async fn get_goal(&self, run_id: TurnRunId) -> Result<SubagentGoal, SubagentGoalStoreError> {
-        self.get(run_id)
-    }
-
-    async fn delete_goal(&self, run_id: TurnRunId) -> Result<(), SubagentGoalStoreError> {
-        let mut inner = lock(&self.inner);
-        inner.goals.remove(&run_id);
-        Ok(())
-    }
-}
-
-fn lock(inner: &Mutex<GoalStoreInner>) -> std::sync::MutexGuard<'_, GoalStoreInner> {
-    // The store holds no `LLM data` — only an in-flight goal. A poisoned mutex
-    // is recoverable here; mirror the `InMemoryTurnStateStore` pattern.
-    match inner.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
+/// Production goal store. Backs `SubagentGoalStore` with a scoped filesystem
+/// mount owned by runner/composition wiring, so a child goal survives process
+/// restart without a bespoke in-process cache.
+pub struct FilesystemSubagentGoalStore<F> {
+    // Concrete scoped filesystem handle supplied by the implementer.
 }
 ```
 
@@ -2126,16 +2001,13 @@ Design decisions:
 - **`get` borrows-and-clones, does not remove.** README §6 says `put`/`get`;
   it does not say `get` consumes. A child may need its goal more than once
   (e.g. recovery re-materialisation), and a process restart must be able to
-  re-read it from the DB-backed implementation. Eviction is by cap in the
-  in-memory test implementation, not by read. (If Phase 2 finds it genuinely
-  needs a one-shot `take`, add it then — but the contract here is non-consuming
-  `get_goal`.)
+  re-read it from the filesystem-backed implementation. (If Phase 2 finds it
+  genuinely needs a one-shot `take`, add it then — but the contract here is
+  non-consuming `get_goal`.)
 - **`DuplicateKey` is an error.** Child `TurnRunId`s are freshly minted per
   spawn; a duplicate `put` means a wiring bug — fail loud.
-- `tracing::debug!` for eviction, never `info!`/`warn!` (project rule: `info!`
-  corrupts the REPL/TUI; background subagent paths must use `debug!`).
-- The store is `Send + Sync` (`Mutex` + `Send` contents) so Phase 2 can wrap it
-  in `Arc` and share it with the capability port and the prompt port.
+- The store is `Send + Sync` so Phase 2 can wrap it in `Arc` and share it with
+  the capability port and the prompt port.
 
 ### 3.5 `lib.rs` + `subagent/mod.rs` wiring
 
@@ -2186,14 +2058,13 @@ In `subagent/goal_store.rs` `#[cfg(test)] mod tests`:
 4. **`put_rejects_duplicate_key`** — `put_goal` twice for the same `run_id` → second
    call `Err(DuplicateKey { .. })`.
 
-5. **`bounded_store_evicts_oldest`** — insert `MAX_GOAL_ENTRIES + 1` goals;
-   assert the very first inserted key is now a `get` miss (`NotFound`), the
-   second-inserted and the last-inserted keys are still present. Confirms FIFO
-   eviction and the cap.
+5. **`filesystem_store_keys_goals_by_scope_and_run_id`** — write the same
+   `TurnRunId` under distinct owner scopes and assert lookups are isolated by
+   scope and run id.
 
-6. **`bounded_store_stays_at_cap`** — after inserting `MAX_GOAL_ENTRIES + N`
-   entries, assert the live entry count never exceeds `MAX_GOAL_ENTRIES` (expose
-   a `#[cfg(test)] fn len(&self)` or assert via successful/missed `get`s).
+6. **`filesystem_goal_store_reopens_over_same_backend`** — write through one
+   filesystem-backed store, construct a second store over the same backend, and
+   assert the goal is still readable.
 
 7. **`goal_store_is_send_sync`** — `fn assert_send_sync<T: Send + Sync>(){}`;
    `assert_send_sync::<Arc<dyn SubagentGoalStore>>()` — Phase 2 shares it via
@@ -2310,11 +2181,10 @@ with whichever of A/B is chosen.
   contain **no `{{placeholder}}`-style templating** and read as a static system
   prompt. The goal injection is a *separate user message* (Phase 2); a templated
   direction file would reopen the prompt-injection hole the design closes.
-- The goal-store cap (`MAX_GOAL_ENTRIES`) and payload cap (`MAX_GOAL_BYTES`) are
-  proposed numbers — confirm with the design owner. Too small a cap silently
-  evicts a live in-flight subagent's goal, which P2.B then turns into a loud
-  child-run failure (acceptable fail-loud behavior, but undesirable under normal
-  load — hence the `debug!` log on eviction as an early-warning signal).
+- The goal-store payload cap (`MAX_GOAL_BYTES`) is a proposed number — confirm
+  with the design owner. Too small a payload cap fails a live in-flight
+  subagent's goal at spawn time; that is acceptable fail-loud behavior but
+  undesirable under normal load.
 - `thiserror` must be added to `ironclaw_runner/Cargo.toml` (§3.5) or
   `SubagentGoalStoreError` will not compile.
 
