@@ -30,24 +30,24 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
-    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW,
-    LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
-    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
-    OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductSurface,
-    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
-    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
-    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
+    LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
+    ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
@@ -875,6 +875,19 @@ impl RebornServicesApi for StubServices {
                 .expect("extension registry payload"),
                 next_cursor: None,
             }),
+            id if id == EXTENSION_SETUP_VIEW.id => {
+                let package_id = query.params["package_id"]
+                    .as_str()
+                    .expect("extension setup package_id param");
+                let package_ref =
+                    LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id)
+                        .expect("extension setup package ref");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(extension_setup_response(package_ref))
+                        .expect("extension setup payload"),
+                    next_cursor: None,
+                })
+            }
             id if id == SKILLS_VIEW.id => Ok(RebornViewPage {
                 payload: serde_json::to_value(RebornSkillListResponse {
                     skills: Vec::new(),
@@ -1324,15 +1337,7 @@ impl RebornServicesApi for StubServices {
         package_ref: LifecyclePackageRef,
         _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-        Ok(RebornSetupExtensionResponse {
-            package_ref,
-            phase: InstallationState::Unsupported,
-            blockers: Vec::new(),
-            payload: None,
-            secrets: Vec::new(),
-            fields: Vec::new(),
-            onboarding: None,
-        })
+        Ok(extension_setup_response(package_ref))
     }
 
     async fn upsert_llm_provider(
@@ -1457,6 +1462,18 @@ fn extension_action_response(message: &str) -> RebornExtensionActionResponse {
         awaiting_token: None,
         instructions: None,
         onboarding_state: None,
+        onboarding: None,
+    }
+}
+
+fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
+    RebornSetupExtensionResponse {
+        package_ref,
+        phase: InstallationState::Unsupported,
+        blockers: Vec::new(),
+        payload: None,
+        secrets: Vec::new(),
+        fields: Vec::new(),
         onboarding: None,
     }
 }
@@ -4784,7 +4801,7 @@ async fn activate_and_remove_extension_decode_path_package_id_to_lifecycle_paths
 }
 
 #[tokio::test]
-async fn get_extension_setup_dispatches_package_ref_to_facade() {
+async fn get_extension_setup_queries_product_surface_view() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -4804,6 +4821,15 @@ async fn get_extension_setup_dispatches_package_ref_to_facade() {
     assert_eq!(body["package_ref"]["id"], "telegram");
     assert_eq!(body["package_ref"]["kind"], "extension");
     assert_eq!(body["phase"], "unsupported");
+
+    let queries = services.view_queries.lock().expect("lock");
+    assert!(
+        queries
+            .iter()
+            .any(|query| query.view_id == EXTENSION_SETUP_VIEW.id
+                && query.params == serde_json::json!({ "package_id": "telegram" })),
+        "GET setup must read through the ProductSurface extension_setup view: {queries:?}",
+    );
 }
 
 // The path segment must become a lifecycle package ref at the

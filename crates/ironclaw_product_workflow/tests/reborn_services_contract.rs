@@ -42,7 +42,7 @@ use ironclaw_product_workflow::{
     ApprovalInteractionDecision, ApprovalInteractionScope, ApprovalInteractionService,
     AuthInteractionDecision, AuthInteractionService, AutomationListRequest, AutomationName,
     AutomationProductFacade, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
-    ChannelConnectionRequirement, CodexLoginStart, EXTENSIONS_VIEW,
+    ChannelConnectionRequirement, CodexLoginStart, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FilesystemBrowseReader, FsMount, InboundAttachmentLander,
     InboundAttachmentReader, LLM_CONFIG_VIEW, LOGS_VIEW, LifecycleChannelDirections,
@@ -89,19 +89,20 @@ use ironclaw_product_workflow::{
     RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
     RebornServiceLifecycleState, RebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornViewQuery, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
-    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductFacade,
-    StaticOperatorStatusService, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
-    TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
+    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewQuery, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
+    SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -5215,6 +5216,34 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
 }
 
 #[tokio::test]
+async fn extension_setup_is_available_as_product_view() {
+    let lifecycle_facade = Arc::new(RecordingLifecycleFacade::new());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_facade(lifecycle_facade.clone());
+
+    let response = query_extension_setup(&services, caller(), "github")
+        .await
+        .expect("extension setup view response");
+
+    assert_eq!(
+        response.package_ref,
+        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+            .expect("valid package ref")
+    );
+    assert_eq!(response.phase, InstallationState::Unsupported);
+    assert_eq!(
+        lifecycle_facade.package_refs(),
+        vec![
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
+                .expect("valid package ref")
+        ]
+    );
+}
+
+#[tokio::test]
 async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -9608,6 +9637,24 @@ async fn query_extensions<S: RebornServicesApi + ?Sized>(
             RebornViewQuery {
                 view_id: EXTENSIONS_VIEW.id.to_string(),
                 params: json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
+async fn query_extension_setup<S: RebornServicesApi + ?Sized>(
+    services: &S,
+    caller: WebUiAuthenticatedCaller,
+    package_id: &str,
+) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: EXTENSION_SETUP_VIEW.id.to_string(),
+                params: json!({ "package_id": package_id }),
                 cursor: None,
             },
         )

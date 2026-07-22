@@ -125,6 +125,7 @@ use ironclaw_approvals::{
     ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
+pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
 pub use llm_config::{
     ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
@@ -3930,6 +3931,17 @@ where
                 let response =
                     extensions::list_extension_registry(self.lifecycle_facade.as_ref(), caller)
                         .await?;
+                views::view_page(response)
+            }
+            id if id == EXTENSION_SETUP_VIEW.id => {
+                let response = lifecycle_setup::setup_extension_view(
+                    self.lifecycle_facade.as_ref(),
+                    self.extension_credentials.as_deref(),
+                    self.channel_config_facade.as_deref(),
+                    caller,
+                    query.params,
+                )
+                .await?;
                 views::view_page(response)
             }
             id if id == SKILLS_VIEW.id => {

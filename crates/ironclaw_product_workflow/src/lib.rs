@@ -182,7 +182,7 @@ pub use reborn_services::{
     AdminUserRole, AdminUserSecretMeta, AdminUserService, AdminUserStatus, AutomationListRequest,
     AutomationProductFacade, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
     CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
-    EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID, EXTENSIONS_VIEW,
+    EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FilesystemBrowseReader, FsMount, InboundAttachmentLander,
     InboundAttachmentReader, LLM_CONFIG_VIEW, LOGS_VIEW, LlmActiveSelection, LlmConfigService,

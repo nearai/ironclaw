@@ -29,12 +29,12 @@ use futures::stream::Stream;
 use ironclaw_product_workflow::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW, CodexLoginStart,
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
-    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW,
-    LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
+    LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
+    OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
     OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductOutboundEnvelope,
     ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
     RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
@@ -2117,10 +2117,19 @@ pub async fn get_extension_setup(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let response = state
+    let page = state
         .services()
-        .setup_extension(caller, package_ref, WebUiSetupExtensionRequest::default())
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: EXTENSION_SETUP_VIEW.id.to_string(),
+                params: serde_json::json!({ "package_id": package_ref.id.as_str() }),
+                cursor: None,
+            },
+        )
         .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 

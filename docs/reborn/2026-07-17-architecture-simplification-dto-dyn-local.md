@@ -72,7 +72,10 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   product capability. Extension install/remove/activate now use lifecycle
   capability invocations from the WebUI ProductSurface path; activation keeps a
   query read-back for active state and maps auth-blocked outcomes onto the
-  existing extension onboarding response shape.
+  existing extension onboarding response shape. Extension setup read now uses
+  the descriptor-backed `extension_setup` ProductSurface view; setup submit and
+  zip import remain explicit follow-ups because they need setup/upload-specific
+  capability shapes.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -2375,8 +2378,10 @@ loop-facing capability result and every result mirror is deleted.
   directly from the WebUI ProductSurface path; activation now invokes
   `builtin.extension_activate`, reads back `EXTENSIONS_VIEW` for active state
   after success, and maps auth-blocked outcomes onto the existing extension
-  onboarding response shape. Import/setup remain explicit follow-ups because
-  they need upload/setup-specific API capability shapes. The migrated legacy
+  onboarding response shape. Extension setup read now flows through the
+  descriptor-backed `extension_setup` view; zip import and setup submit remain
+  explicit follow-ups because they need upload/setup-specific API capability
+  shapes. The migrated legacy
   `RebornServicesApi` methods were removed from the ratchet allowlist. This is
   the migration pattern for product mutations: authenticated product gesture ->
   `ProductSurface::invoke` -> descriptor-declared first-party handler ->
