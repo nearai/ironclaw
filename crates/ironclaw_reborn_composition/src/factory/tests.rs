@@ -1502,12 +1502,27 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         services.runtime_store_graph(),
         Some(RebornRuntimeStoreGraph::Production(_))
     ));
-    let graph = match production_runtime {
-        RebornProductionRuntimeServices::LibSql(graph) => graph,
-        RebornProductionRuntimeServices::Postgres(_) => {
-            panic!("expected libsql production runtime")
-        }
-    };
+    let graph = production_runtime.store_graph();
+    let mounted_roots: Vec<String> = graph
+        .filesystem
+        .mounts()
+        .await
+        .expect("production composite mounts")
+        .into_iter()
+        .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        mounted_roots,
+        vec![
+            "/events",
+            "/memory",
+            "/projects",
+            "/system/extensions",
+            "/system/settings",
+            "/system/skills",
+            "/tenants",
+        ]
+    );
     let scope = ironclaw_turns::TurnScope::new_with_owner(
         tenant,
         Some(agent),
@@ -1614,12 +1629,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    let graph = match production_runtime {
-        RebornProductionRuntimeServices::LibSql(graph) => graph,
-        RebornProductionRuntimeServices::Postgres(_) => {
-            panic!("expected libsql production runtime")
-        }
-    };
+    let graph = production_runtime.store_graph();
     let default_path =
         VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/rows/v1/deltas/log")
             .expect("default turn-state row delta log path");

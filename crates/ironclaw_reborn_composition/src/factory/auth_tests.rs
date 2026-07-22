@@ -418,10 +418,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    let graph = match production_runtime {
-        RebornProductionRuntimeServices::LibSql(graph) => graph,
-        RebornProductionRuntimeServices::Postgres(_) => panic!("expected libsql runtime"),
-    };
+    let graph = production_runtime.store_graph();
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let first_scope = turn_scope();
     let second_scope = TurnScope::new_with_owner(

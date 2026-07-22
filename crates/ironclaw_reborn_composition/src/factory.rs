@@ -1008,9 +1008,8 @@ pub(crate) struct RebornRuntimeSubstrate {
     pub(crate) shared_extension_registry: Option<Arc<SharedExtensionRegistry>>,
 }
 
-pub(crate) enum RebornProductionRuntimeServices {
-    LibSql(Arc<RebornProductionRuntimeStoreGraph<LibSqlRootFilesystem>>),
-    Postgres(Arc<RebornProductionRuntimeStoreGraph<PostgresRootFilesystem>>),
+pub(crate) struct RebornProductionRuntimeServices {
+    graph: Arc<RebornProductionRuntimeStoreGraph>,
 }
 
 /// Runtime store graph selected by [`DeploymentConfig`](crate::deployment::DeploymentConfig).
@@ -1139,15 +1138,15 @@ where
     )
 }
 
-pub(crate) struct RebornProductionRuntimeStoreGraph<F>
-where
-    F: RootFilesystem + 'static,
-{
-    pub(crate) scoped_filesystem: Arc<ScopedFilesystem<F>>,
+pub(crate) struct RebornProductionRuntimeStoreGraph {
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) filesystem: Arc<CompositeRootFilesystem>,
+    pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     /// Registry used by the production host runtime for extension descriptors.
     #[allow(dead_code)]
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
-    pub(crate) turn_state: Arc<FilesystemTurnStateRowStore<F>>,
+    pub(crate) turn_state: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
@@ -1172,14 +1171,19 @@ where
 }
 
 impl RebornProductionRuntimeServices {
+    fn new(graph: Arc<RebornProductionRuntimeStoreGraph>) -> Self {
+        Self { graph }
+    }
+
+    pub(crate) fn store_graph(&self) -> &Arc<RebornProductionRuntimeStoreGraph> {
+        &self.graph
+    }
+
     /// Returns the trigger repository from whichever production store graph is
     /// active. Backs the WebUI automations facade for production profiles
     /// (libSQL / Postgres) where `local_runtime` is None.
     pub(crate) fn trigger_repository(&self) -> Arc<dyn TriggerRepository> {
-        match self {
-            Self::LibSql(graph) => Arc::clone(&graph.trigger_repository),
-            Self::Postgres(graph) => Arc::clone(&graph.trigger_repository),
-        }
+        Arc::clone(&self.graph.trigger_repository)
     }
 
     /// Turn-state snapshot source from the active production store graph.
@@ -1189,10 +1193,7 @@ impl RebornProductionRuntimeServices {
     pub(crate) fn turn_run_snapshot_source(
         &self,
     ) -> Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource> {
-        match self {
-            Self::LibSql(graph) => Arc::clone(&graph.turn_state) as _,
-            Self::Postgres(graph) => Arc::clone(&graph.turn_state) as _,
-        }
+        Arc::clone(&self.graph.turn_state) as _
     }
 
     pub(crate) fn reborn_user_directory(
@@ -1202,22 +1203,13 @@ impl RebornProductionRuntimeServices {
         agent_id: ironclaw_host_api::AgentId,
         project_id: Option<ironclaw_host_api::ProjectId>,
     ) -> Arc<dyn ironclaw_reborn_identity::RebornUserDirectory> {
-        match self {
-            Self::LibSql(graph) => filesystem_reborn_identity_store(
-                Arc::clone(&graph.scoped_filesystem),
-                tenant_id,
-                actor_user_id,
-                agent_id,
-                project_id,
-            ),
-            Self::Postgres(graph) => filesystem_reborn_identity_store(
-                Arc::clone(&graph.scoped_filesystem),
-                tenant_id,
-                actor_user_id,
-                agent_id,
-                project_id,
-            ),
-        }
+        filesystem_reborn_identity_store(
+            Arc::clone(&self.graph.scoped_filesystem),
+            tenant_id,
+            actor_user_id,
+            agent_id,
+            project_id,
+        )
     }
 
     pub(crate) fn reborn_identity_resolver(
@@ -1227,45 +1219,27 @@ impl RebornProductionRuntimeServices {
         agent_id: ironclaw_host_api::AgentId,
         project_id: Option<ironclaw_host_api::ProjectId>,
     ) -> Arc<dyn ironclaw_reborn_identity::RebornIdentityResolver> {
-        match self {
-            Self::LibSql(graph) => filesystem_reborn_identity_store(
-                Arc::clone(&graph.scoped_filesystem),
-                tenant_id,
-                actor_user_id,
-                agent_id,
-                project_id,
-            ),
-            Self::Postgres(graph) => filesystem_reborn_identity_store(
-                Arc::clone(&graph.scoped_filesystem),
-                tenant_id,
-                actor_user_id,
-                agent_id,
-                project_id,
-            ),
-        }
+        filesystem_reborn_identity_store(
+            Arc::clone(&self.graph.scoped_filesystem),
+            tenant_id,
+            actor_user_id,
+            agent_id,
+            project_id,
+        )
     }
 
     pub(crate) fn admin_secret_provisioner(
         &self,
     ) -> Arc<dyn crate::admin_secrets::AdminSecretProvisioner> {
-        match self {
-            Self::LibSql(graph) => Arc::clone(&graph.admin_secret_provisioner),
-            Self::Postgres(graph) => Arc::clone(&graph.admin_secret_provisioner),
-        }
+        Arc::clone(&self.graph.admin_secret_provisioner)
     }
 
     pub(crate) fn project_service(&self) -> Arc<dyn ProjectService> {
-        match self {
-            Self::LibSql(graph) => Arc::clone(&graph.project_service),
-            Self::Postgres(graph) => Arc::clone(&graph.project_service),
-        }
+        Arc::clone(&self.graph.project_service)
     }
 
     pub(crate) fn trigger_conversation_services(&self) -> RebornFilesystemConversationServices {
-        match self {
-            Self::LibSql(graph) => graph.trigger_conversation_services.clone(),
-            Self::Postgres(graph) => graph.trigger_conversation_services.clone(),
-        }
+        self.graph.trigger_conversation_services.clone()
     }
 }
 
@@ -3268,6 +3242,45 @@ where
     Ok(())
 }
 
+fn production_database_root_filesystem<F>(
+    backend: Arc<F>,
+    backend_id: &str,
+) -> Result<Arc<CompositeRootFilesystem>, RebornBuildError>
+where
+    F: RootFilesystem + 'static,
+{
+    let mut root = CompositeRootFilesystem::new();
+    for virtual_root in [
+        "/tenants",
+        "/events",
+        "/memory",
+        "/projects",
+        "/system/extensions",
+        "/system/settings",
+        "/system/skills",
+    ] {
+        let mount_id = format!(
+            "{backend_id}-{}",
+            virtual_root
+                .trim_start_matches('/')
+                .replace(['/', '.'], "-")
+        );
+        root.mount(
+            local_dev_mount_descriptor(
+                virtual_root,
+                &mount_id,
+                BackendKind::DatabaseFilesystem,
+                StorageClass::StructuredRecords,
+                ContentKind::StructuredRecord,
+                IndexPolicy::BackendDefined,
+                backend.capabilities(),
+            )?,
+            Arc::clone(&backend),
+        )?;
+    }
+    Ok(Arc::new(root))
+}
+
 fn mount_local_dev_project_roots(
     root: &mut CompositeRootFilesystem,
     local: Arc<DiskFilesystem>,
@@ -4762,26 +4775,20 @@ async fn resolve_explicit_or_keychain_master_key(
     }
 }
 
-struct ProductionStoreBundle<F>
-where
-    F: RootFilesystem + 'static,
-{
-    filesystem: Arc<F>,
-    scoped_filesystem: Arc<ScopedFilesystem<F>>,
-    resource_governor: FilesystemResourceGovernor<F>,
-    leases: Arc<FilesystemCapabilityLeaseStore<F>>,
-    persistent_approval_policies: Arc<FilesystemPersistentApprovalPolicyStore<F>>,
-    secret_credentials: FilesystemSecretCredentialStores<F>,
+struct ProductionStoreBundle {
+    filesystem: Arc<CompositeRootFilesystem>,
+    scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+    resource_governor: ComposedResourceGovernor,
+    leases: Arc<ComposedCapabilityLeaseStore>,
+    persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
+    secret_credentials: FilesystemSecretCredentialStores<CompositeRootFilesystem>,
     event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
 }
 
-impl<F> ProductionStoreBundle<F>
-where
-    F: RootFilesystem + 'static,
-{
+impl ProductionStoreBundle {
     async fn new(
-        filesystem: Arc<F>,
-        resource_governor: FilesystemResourceGovernor<F>,
+        filesystem: Arc<CompositeRootFilesystem>,
+        resource_governor: ComposedResourceGovernor,
         secret_master_key: ironclaw_secrets::SecretMaterial,
         event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
     ) -> Result<Self, RebornBuildError> {
@@ -4843,21 +4850,15 @@ fn production_skill_management_mount_view(
     ])
 }
 
-async fn build_backend_production<F>(
+async fn build_backend_production(
     context: RebornProductionBuildContext,
-    stores: ProductionStoreBundle<F>,
+    stores: ProductionStoreBundle,
     trigger_repository: Arc<dyn TriggerRepository>,
-    production_runtime_services: impl FnOnce(
-        Arc<RebornProductionRuntimeStoreGraph<F>>,
-    ) -> RebornProductionRuntimeServices,
     // Leader lock for the background credential keepalive worker. The worker
     // uses this to elect one process per tick as the sweep leader. `None`
     // pool → always-leader (libsql / single-process). Stays private.
     leader_lock: crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock,
-) -> Result<RebornServices, RebornBuildError>
-where
-    F: RootFilesystem + 'static,
-{
+) -> Result<RebornServices, RebornBuildError> {
     let RebornProductionBuildContext {
         profile,
         wiring_config,
@@ -4970,6 +4971,8 @@ where
                 reason: format!("trigger conversation services unavailable: {error}"),
             })?;
     let production_runtime_graph = Arc::new(RebornProductionRuntimeStoreGraph {
+        #[cfg(any(test, feature = "test-support"))]
+        filesystem: Arc::clone(&stores.filesystem),
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         extension_registry: Arc::clone(&extension_registry),
         turn_state: Arc::clone(&turn_state),
@@ -4985,7 +4988,7 @@ where
         project_service,
         trigger_conversation_services,
     });
-    let production_runtime = production_runtime_services(production_runtime_graph);
+    let production_runtime = RebornProductionRuntimeServices::new(production_runtime_graph);
     // Same store-backed lookup the WebUI automations panel builds via
     // `RebornProductionRuntimeServices::turn_run_snapshot_source` (#5886).
     let trigger_active_run_lookup: Arc<dyn TriggerActiveRunLookup> = Arc::new(
@@ -5168,8 +5171,8 @@ async fn build_libsql_production(
     use ironclaw_filesystem::LibSqlRootFilesystem;
 
     ensure_libsql_resource_governor_authority_for_build(process_local_resource_governor_singleton)?;
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
-    filesystem.run_migrations().await?;
+    let database_filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
+    database_filesystem.run_migrations().await?;
     let trigger_repository = Arc::new(ironclaw_triggers::LibSqlTriggerRepository::new(db));
     trigger_repository
         .run_migrations()
@@ -5177,6 +5180,8 @@ async fn build_libsql_production(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("libSQL trigger repository migrations failed: {error}"),
         })?;
+    let filesystem =
+        production_database_root_filesystem(database_filesystem, "production-libsql-reborn-state")?;
     let resource_governor =
         FilesystemResourceGovernor::new(crate::wrap_scoped(Arc::clone(&filesystem)));
     let stores = ProductionStoreBundle::new(
@@ -5194,7 +5199,6 @@ async fn build_libsql_production(
         context,
         stores,
         trigger_repository,
-        RebornProductionRuntimeServices::LibSql,
         crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(None),
     )
     .await
@@ -5218,8 +5222,8 @@ async fn build_postgres_production(
     // sweep serialization.
     // This clone stays PRIVATE — it is never exposed through any public facade.
     let pool_for_refresh_lock = pool.clone();
-    let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
-    filesystem.run_migrations().await?;
+    let database_filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
+    database_filesystem.run_migrations().await?;
     let trigger_repository = Arc::new(ironclaw_triggers::PostgresTriggerRepository::new(
         pool.clone(),
     ));
@@ -5229,6 +5233,10 @@ async fn build_postgres_production(
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("PostgreSQL trigger repository migrations failed: {error}"),
         })?;
+    let filesystem = production_database_root_filesystem(
+        database_filesystem,
+        "production-postgres-reborn-state",
+    )?;
     let resource_governor =
         FilesystemResourceGovernor::new(crate::wrap_scoped(Arc::clone(&filesystem)));
     let stores = ProductionStoreBundle::new(
@@ -5243,7 +5251,6 @@ async fn build_postgres_production(
         context,
         stores,
         trigger_repository,
-        RebornProductionRuntimeServices::Postgres,
         crate::product_auth::credentials::product_auth_refresh_lock::CredentialRefreshLeaderLock::new(Some(
             pool_for_refresh_lock,
         )),

@@ -296,12 +296,9 @@ fn local_runtime_parts(
     }
 }
 
-fn production_runtime_parts<F>(
-    graph: &Arc<crate::factory::RebornProductionRuntimeStoreGraph<F>>,
-) -> RuntimeStoreParts<'static>
-where
-    F: RootFilesystem + 'static,
-{
+fn production_runtime_parts(
+    graph: &Arc<crate::factory::RebornProductionRuntimeStoreGraph>,
+) -> RuntimeStoreParts<'static> {
     let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
         &graph.scoped_filesystem,
     ))) as Arc<dyn RuntimeSubagentGoalStore>;
@@ -350,14 +347,7 @@ fn runtime_store_parts(
             local_runtime_parts(local_runtime)
         }
         crate::factory::RebornRuntimeStoreGraph::Production(production_runtime) => {
-            match production_runtime {
-                crate::factory::RebornProductionRuntimeServices::LibSql(graph) => {
-                    production_runtime_parts(graph)
-                }
-                crate::factory::RebornProductionRuntimeServices::Postgres(graph) => {
-                    production_runtime_parts(graph)
-                }
-            }
+            production_runtime_parts(production_runtime.store_graph())
         }
     }
 }
