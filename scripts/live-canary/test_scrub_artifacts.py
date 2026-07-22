@@ -128,6 +128,78 @@ class ScrubArtifactsTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertFalse(unsafe.exists())
 
+    def test_strict_scrub_prunes_only_managed_bundled_skill_snapshots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            skills_root = (
+                root
+                / "lane"
+                / "reborn-home"
+                / "case-a"
+                / "local-dev"
+                / "system"
+                / "skills"
+            )
+            bundled = skills_root / "local-test"
+            bundled.mkdir(parents=True)
+            (bundled / ".ironclaw-reborn-bundled.json").write_text(
+                json.dumps(
+                    {
+                        "owner": "ironclaw_reborn_composition_bundled_skill",
+                        "format": 1,
+                        "content_hash": "fixture-hash",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (bundled / "SKILL.md").write_text(
+                "docker run -e NEARAI_API_KEY=dummy ironclaw-test\n",
+                encoding="utf-8",
+            )
+            unmanaged = skills_root / "operator-skill"
+            unmanaged.mkdir()
+            (unmanaged / "SKILL.md").write_text(
+                "operator-owned diagnostic context\n",
+                encoding="utf-8",
+            )
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 0, result.stdout)
+            self.assertFalse(bundled.exists())
+            self.assertTrue((unmanaged / "SKILL.md").exists())
+
+    def test_strict_scrub_still_rejects_secret_outside_bundled_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            bundled = (
+                root
+                / "lane"
+                / "reborn-home"
+                / "case-a"
+                / "local-dev"
+                / "system"
+                / "skills"
+                / "local-test"
+            )
+            bundled.mkdir(parents=True)
+            (bundled / ".ironclaw-reborn-bundled.json").write_text(
+                '{"owner": "ironclaw_reborn_composition_bundled_skill"}',
+                encoding="utf-8",
+            )
+            (bundled / "SKILL.md").write_text(
+                "NEARAI_API_KEY=dummy\n",
+                encoding="utf-8",
+            )
+            unsafe = root / "operator-state.txt"
+            unsafe.write_text("api_key: live-secret-value\n", encoding="utf-8")
+
+            result = self.run_scrub(root, strict=True)
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertFalse(bundled.exists())
+            self.assertFalse(unsafe.exists())
+
     def test_non_strict_scrub_is_report_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

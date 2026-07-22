@@ -144,6 +144,11 @@ Artifacts are written under:
 artifacts/live-canary/<lane>/<provider>/<timestamp>/
 ```
 
+Before upload, strict scrubbing removes only marker-owned copies of bundled
+system skills from staged Reborn homes. Those files are reproducible from the
+tested commit; unmanaged system skills and all other run-specific artifacts
+remain present and are scanned for secret material.
+
 ## Secrets And Account Material
 
 Public live LLM lane secrets and variables are documented in

@@ -7,11 +7,37 @@ set -euo pipefail
 
 ARTIFACT_DIR="${1:-${RUN_DIR:-artifacts/live-canary}}"
 STRICT_ARTIFACT_SCRUB="${STRICT_ARTIFACT_SCRUB:-false}"
+BUNDLED_SKILL_MARKER=".ironclaw-reborn-bundled.json"
+BUNDLED_SKILL_OWNER="ironclaw_reborn_composition_bundled_skill"
 
 if [[ ! -d "${ARTIFACT_DIR}" ]]; then
   echo "Artifact directory does not exist: ${ARTIFACT_DIR}" >&2
   exit 2
 fi
+
+# Reborn live QA copies each case's full home into the artifact staging tree.
+# System skills carrying this marker are byte-for-byte runtime installations of
+# source-controlled bundles, so retaining them adds no run-specific evidence.
+# Some bundles intentionally contain dummy credential examples, which strict
+# scanning must not mistake for leaked live material. Remove only directories
+# with Ironclaw's managed-bundle marker; unmanaged/operator system skills remain
+# in the artifact tree and are scanned normally.
+while IFS= read -r -d '' marker; do
+  if ! grep -qE "\"owner\"[[:space:]]*:[[:space:]]*\"${BUNDLED_SKILL_OWNER}\"" "${marker}"; then
+    continue
+  fi
+  skill_dir="$(dirname "${marker}")"
+  case "${skill_dir}" in
+    "${ARTIFACT_DIR}"/*/reborn-home/*/local-dev/system/skills/*|\
+    "${ARTIFACT_DIR}"/reborn-home/*/local-dev/system/skills/*)
+      rm -rf -- "${skill_dir}"
+      ;;
+  esac
+done < <(
+  find "${ARTIFACT_DIR}" -type f \
+    -path '*/reborn-home/*/local-dev/system/skills/*/.ironclaw-reborn-bundled.json' \
+    -print0
+)
 
 patterns=(
   'bearer[[:space:]]+[A-Za-z0-9._~+/=-]+'
