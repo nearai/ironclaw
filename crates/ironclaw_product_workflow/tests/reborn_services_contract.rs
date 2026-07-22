@@ -44,7 +44,7 @@ use ironclaw_product_workflow::{
     AutomationProductFacade, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
     ChannelConnectionRequirement, CodexLoginStart, ExtensionCredentialSetupService,
     ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
-    FsMount, InboundAttachmentLander, InboundAttachmentReader, LOGS_VIEW,
+    FsMount, InboundAttachmentLander, InboundAttachmentReader, LLM_CONFIG_VIEW, LOGS_VIEW,
     LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
@@ -9997,6 +9997,44 @@ async fn operator_command_plane_reads_are_available_as_product_views() {
     assert_eq!(status.area.as_str(), "status");
     assert_eq!(status.status, RebornOperatorSurfaceStatus::Available);
     assert!(status.operator_status.is_some());
+}
+
+#[tokio::test]
+async fn llm_config_snapshot_is_available_as_product_view() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    llm_config.use_active_snapshot("openai", "gpt-5-mini");
+    let services = services_with_setup_llm_config(llm_config.clone());
+    let snapshot_caller = caller_for_user_with_project("user-llm", Some("project-llm"));
+
+    let page = services
+        .query(
+            snapshot_caller.clone(),
+            RebornViewQuery {
+                view_id: LLM_CONFIG_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("llm config view");
+    let snapshot: LlmConfigSnapshot =
+        serde_json::from_value(page.payload).expect("llm config payload");
+
+    assert_eq!(
+        snapshot
+            .active
+            .as_ref()
+            .map(|active| active.provider_id.as_str()),
+        Some("openai")
+    );
+    assert_eq!(
+        snapshot
+            .active
+            .as_ref()
+            .and_then(|active| active.model.as_deref()),
+        Some("gpt-5-mini")
+    );
+    assert_eq!(llm_config.snapshot_callers(), vec![snapshot_caller]);
 }
 
 #[tokio::test]

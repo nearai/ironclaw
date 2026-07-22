@@ -19,7 +19,13 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 use super::error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
+use super::{ProductCapabilityInvoker, RebornServices, RebornViewDescriptor, RebornViewProvider};
 use crate::WebUiAuthenticatedCaller;
+
+pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "llm_config",
+    paginated: false,
+};
 
 /// Read-only port exposing the runtime's current active/default model id.
 ///
@@ -337,4 +343,21 @@ pub(super) fn llm_config_unavailable() -> RebornServicesError {
         503,
         false,
     )
+}
+
+impl<I, V> RebornServices<I, V>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
+    pub(super) async fn build_llm_config_view(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config_unavailable)?;
+        service.snapshot(caller).await.map_err(map_llm_config_error)
+    }
 }

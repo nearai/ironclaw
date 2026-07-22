@@ -122,7 +122,7 @@ use ironclaw_approvals::{
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use llm_config::{
-    ActiveModelReader, CodexLoginStart, LlmActiveSelection, LlmConfigService,
+    ActiveModelReader, CodexLoginStart, LLM_CONFIG_VIEW, LlmActiveSelection, LlmConfigService,
     LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, SetActiveLlmRequest,
@@ -4143,6 +4143,16 @@ where
                     next_cursor,
                 })
             }
+            id if id == LLM_CONFIG_VIEW.id => {
+                operator_command_views::parse_empty_operator_view_params(query.params)?;
+                let response = self.build_llm_config_view(caller).await?;
+                let payload =
+                    serde_json::to_value(response).map_err(RebornServicesError::internal_from)?;
+                Ok(RebornViewPage {
+                    payload,
+                    next_cursor: None,
+                })
+            }
             id if id == RUN_ARTIFACT_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(RebornServicesError::internal_from)?;
@@ -5211,14 +5221,17 @@ where
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let service = self
-            .llm_config
-            .as_ref()
-            .ok_or_else(llm_config::llm_config_unavailable)?;
-        service
-            .snapshot(caller)
-            .await
-            .map_err(llm_config::map_llm_config_error)
+        let page = self
+            .query(
+                caller,
+                RebornViewQuery {
+                    view_id: LLM_CONFIG_VIEW.id.to_string(),
+                    params: serde_json::json!({}),
+                    cursor: None,
+                },
+            )
+            .await?;
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
     }
 
     async fn upsert_llm_provider(
