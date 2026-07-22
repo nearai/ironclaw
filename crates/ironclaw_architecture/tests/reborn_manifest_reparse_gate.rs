@@ -60,7 +60,7 @@ const ALLOWLIST: &[(&str, usize, ReparseCategory, &str)] = &[
     ),
     (
         "crates/ironclaw_reborn_composition/src/extension_host/available_extensions.rs",
-        4,
+        3,
         ReparseCategory::BundledAsset,
         "bundled first-party package + filesystem-root catalog compile",
     ),
