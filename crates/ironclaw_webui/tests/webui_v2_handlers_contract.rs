@@ -40,22 +40,23 @@ use ironclaw_product_workflow::{
     LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
     LlmProviderView, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
     OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductSurface,
-    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
-    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
+    ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -875,19 +876,41 @@ impl RebornServicesApi for StubServices {
                     next_cursor: None,
                 })
             }
-            id if id == OPERATOR_SETUP_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornOperatorSetupResponse {
-                    area: RebornOperatorArea::Setup,
-                    status: RebornOperatorSetupStatus::Incomplete,
-                    message: "setup incomplete".to_string(),
-                    active_provider_id: None,
-                    active_model: None,
-                    steps: Vec::new(),
-                    diagnostics: Vec::new(),
+            id if id == OPERATOR_SETUP_VIEW.id => {
+                let setup_input = self
+                    .invoke_calls
+                    .lock()
+                    .expect("lock")
+                    .iter()
+                    .rev()
+                    .find(|(capability, _, _)| {
+                        capability.as_str() == OPERATOR_SETUP_RUN_CAPABILITY_ID
+                    })
+                    .map(|(_, input, _)| input.clone());
+                let active_provider_id = setup_input
+                    .as_ref()
+                    .and_then(|input| input.get("provider_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                let active_model = setup_input
+                    .as_ref()
+                    .and_then(|input| input.get("model"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornOperatorSetupResponse {
+                        area: RebornOperatorArea::Setup,
+                        status: RebornOperatorSetupStatus::Incomplete,
+                        message: "setup incomplete".to_string(),
+                        active_provider_id,
+                        active_model,
+                        steps: Vec::new(),
+                        diagnostics: Vec::new(),
+                    })
+                    .expect("operator setup payload"),
+                    next_cursor: None,
                 })
-                .expect("operator setup payload"),
-                next_cursor: None,
-            }),
+            }
             id if id == OPERATOR_DIAGNOSTICS_VIEW.id => Ok(RebornViewPage {
                 payload: serde_json::to_value(operator_config_diagnostic_command_plane_response(
                     RebornOperatorArea::Diagnostics,
@@ -3456,6 +3479,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = router
         .clone()
         .oneshot(
@@ -3553,18 +3577,19 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
 
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        services
-            .run_operator_setup_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        [(
-            Some("openai".to_string()),
-            Some("gpt-5-mini".to_string()),
-            false,
-            true
-        )]
+        invoke_calls[0].0,
+        CapabilityId::new(OPERATOR_SETUP_RUN_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({
+            "provider_id": "openai",
+            "model": "gpt-5-mini",
+            "webui_access_token": "webui-secret"
+        })
     );
     assert_eq!(
         *services.list_operator_config_calls.lock().expect("lock"),
@@ -3651,13 +3676,7 @@ async fn operator_config_routes_require_operator_capability() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
-    assert!(
-        services
-            .run_operator_setup_calls
-            .lock()
-            .expect("lock")
-            .is_empty()
-    );
+    assert!(services.invoke_calls.lock().expect("lock").is_empty());
 }
 
 #[tokio::test]
@@ -6532,6 +6551,7 @@ async fn operator_setup_accepts_secret_request_without_echoing_values() {
         },
     );
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = router
         .oneshot(
             Request::builder()
@@ -6554,18 +6574,21 @@ async fn operator_setup_accepts_secret_request_without_echoing_values() {
     assert!(!rendered.contains("sk-secret-value"));
     assert!(!rendered.contains("webui-secret-value"));
 
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        services
-            .run_operator_setup_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        [(
-            Some("openai".to_string()),
-            Some("gpt-5-mini".to_string()),
-            true,
-            true,
-        )]
+        invoke_calls[0].0,
+        CapabilityId::new(OPERATOR_SETUP_RUN_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({
+            "provider_id": "openai",
+            "adapter": "open_ai_completions",
+            "model": "gpt-5-mini",
+            "api_key": "sk-secret-value",
+            "webui_access_token": "webui-secret-value"
+        })
     );
 }
 

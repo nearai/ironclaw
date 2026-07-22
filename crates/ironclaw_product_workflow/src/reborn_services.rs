@@ -214,6 +214,9 @@ pub const OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID: &str =
     "builtin.operator_config_set_tool_permission";
 pub const OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID);
+pub const OPERATOR_SETUP_RUN_CAPABILITY_ID: &str = "builtin.operator_setup_run";
+pub const OPERATOR_SETUP_RUN_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(OPERATOR_SETUP_RUN_CAPABILITY_ID);
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID);
@@ -1170,7 +1173,7 @@ fn operator_config_capability_forbidden() -> RebornServicesError {
     RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
 }
 
-fn operator_config_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+fn api_capability_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
         Resolution::Done(outcome) => match outcome.verdict.error_kind() {
@@ -1182,7 +1185,7 @@ fn operator_config_mutation_succeeded(resolution: Resolution) -> Result<(), Rebo
                 Err(RebornServicesError::service_unavailable(true))
             }
             _ => Err(RebornServicesError::internal_from(
-                "operator config capability returned a non-success result",
+                "API capability returned a non-success result",
             )),
         },
         Resolution::Denied(_) => Err(operator_config_capability_forbidden()),
@@ -2749,6 +2752,96 @@ where
         }))
     }
 
+    async fn invoke_operator_setup_run(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        input: serde_json::Value,
+    ) -> Result<(), RebornServicesError> {
+        let request: RebornOperatorSetupRequest =
+            serde_json::from_value(input).map_err(|_| operator_setup_validation_error("input"))?;
+        self.apply_operator_setup_request(caller, request).await
+    }
+
+    async fn apply_operator_setup_request(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorSetupRequest,
+    ) -> Result<(), RebornServicesError> {
+        if self.llm_config.is_none() {
+            return Err(llm_config::llm_config_unavailable());
+        }
+
+        if request.model.is_some() && request.provider_id.is_none() {
+            return Err(operator_setup_validation_error("model"));
+        }
+        if request.provider_id.is_none()
+            && (request.adapter.is_some()
+                || request.base_url.is_some()
+                || request.api_key.is_some())
+        {
+            return Err(operator_setup_validation_error("provider_id"));
+        }
+        if request.base_url.is_some() && request.adapter.is_none() {
+            return Err(operator_setup_validation_error("base_url"));
+        }
+        if request.api_key.is_some() && request.adapter.is_none() {
+            return Err(operator_setup_validation_error("api_key"));
+        }
+        validate_llm_base_url(request.base_url.as_deref())?;
+        let profile_id = validate_operator_setup_profile_id(request.profile_id.as_deref())?;
+        let webui_access_token_updated =
+            validate_operator_setup_webui_access_token(request.webui_access_token.as_ref())?;
+        reject_unwired_operator_setup_host_mutation(profile_id, webui_access_token_updated)?;
+
+        match (request.provider_id, request.adapter) {
+            (Some(provider_id), Some(adapter)) => {
+                let mut input = serde_json::Map::new();
+                input.insert("id".to_string(), serde_json::json!(provider_id));
+                input.insert("adapter".to_string(), serde_json::json!(adapter));
+                input.insert("set_active".to_string(), serde_json::json!(true));
+                if let Some(base_url) = request.base_url {
+                    input.insert("base_url".to_string(), serde_json::json!(base_url));
+                }
+                if let Some(model) = request.model {
+                    input.insert("default_model".to_string(), serde_json::json!(model));
+                    input.insert("model".to_string(), serde_json::json!(model));
+                }
+                if let Some(api_key) = request.api_key {
+                    input.insert(
+                        "api_key".to_string(),
+                        serde_json::json!(api_key.expose_secret()),
+                    );
+                }
+                let resolution = self
+                    .invoke(
+                        caller.clone(),
+                        LLM_PROVIDER_UPSERT_CAPABILITY.capability_id()?,
+                        serde_json::Value::Object(input),
+                        ActivityId::new(),
+                    )
+                    .await?;
+                api_capability_mutation_succeeded(resolution)?;
+            }
+            (Some(provider_id), None) => {
+                let resolution = self
+                    .invoke(
+                        caller,
+                        LLM_ACTIVE_SET_CAPABILITY.capability_id()?,
+                        serde_json::json!({
+                            "provider_id": provider_id,
+                            "model": request.model,
+                        }),
+                        ActivityId::new(),
+                    )
+                    .await?;
+                api_capability_mutation_succeeded(resolution)?;
+            }
+            (None, _) => {}
+        }
+
+        Ok(())
+    }
+
     async fn build_automations_view(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3047,6 +3140,10 @@ where
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
+        if capability.as_str() == OPERATOR_SETUP_RUN_CAPABILITY_ID {
+            self.invoke_operator_setup_run(caller, input).await?;
+            return self.api_capability_success(activity_id, "operator setup updated");
+        }
         if capability.as_str() == LLM_PROVIDER_UPSERT_CAPABILITY_ID {
             self.invoke_llm_provider_upsert(caller, input).await?;
             return self.api_capability_success(activity_id, "llm provider updated");
@@ -3342,74 +3439,9 @@ where
         caller: WebUiAuthenticatedCaller,
         request: RebornOperatorSetupRequest,
     ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        let Some(llm_config) = &self.llm_config else {
-            return Err(llm_config::llm_config_unavailable());
-        };
-
-        if request.model.is_some() && request.provider_id.is_none() {
-            return Err(operator_setup_validation_error("model"));
-        }
-        if request.provider_id.is_none()
-            && (request.adapter.is_some()
-                || request.base_url.is_some()
-                || request.api_key.is_some())
-        {
-            return Err(operator_setup_validation_error("provider_id"));
-        }
-        if request.base_url.is_some() && request.adapter.is_none() {
-            return Err(operator_setup_validation_error("base_url"));
-        }
-        if request.api_key.is_some() && request.adapter.is_none() {
-            return Err(operator_setup_validation_error("api_key"));
-        }
-        validate_llm_base_url(request.base_url.as_deref())?;
-        let profile_id = validate_operator_setup_profile_id(request.profile_id.as_deref())?;
-        let webui_access_token_updated =
-            validate_operator_setup_webui_access_token(request.webui_access_token.as_ref())?;
-        reject_unwired_operator_setup_host_mutation(profile_id, webui_access_token_updated)?;
-        let host_state = OperatorSetupHostState {
-            profile_id: None,
-            webui_access_token_updated: false,
-        };
-
-        let snapshot = match (request.provider_id, request.adapter) {
-            (Some(provider_id), Some(adapter)) => llm_config
-                .upsert_provider(
-                    caller,
-                    UpsertLlmProviderRequest {
-                        id: provider_id,
-                        name: None,
-                        adapter,
-                        base_url: request.base_url,
-                        default_model: request.model.clone(),
-                        api_key: request.api_key,
-                        set_active: true,
-                        model: request.model,
-                    },
-                )
-                .await
-                .map_err(llm_config::map_llm_config_error)?,
-            (Some(provider_id), None) => llm_config
-                .set_active(
-                    caller,
-                    SetActiveLlmRequest {
-                        provider_id,
-                        model: request.model,
-                    },
-                )
-                .await
-                .map_err(llm_config::map_llm_config_error)?,
-            (None, _) => llm_config
-                .snapshot(caller)
-                .await
-                .map_err(llm_config::map_llm_config_error)?,
-        };
-
-        Ok(setup_response_from_llm_snapshot(
-            snapshot,
-            Vec::new(),
-            host_state,
-        ))
+        self.apply_operator_setup_request(caller.clone(), request)
+            .await?;
+        self.build_operator_setup_view(caller).await
     }
 
     async fn set_operator_config_key(
@@ -3435,7 +3467,7 @@ where
                     ActivityId::new(),
                 )
                 .await?;
-            operator_config_mutation_succeeded(resolution)?;
+            api_capability_mutation_succeeded(resolution)?;
             return self
                 .build_operator_config_key_view(caller, serde_json::json!({ "key": key }))
                 .await;
@@ -3457,7 +3489,7 @@ where
                     ActivityId::new(),
                 )
                 .await?;
-            operator_config_mutation_succeeded(resolution)?;
+            api_capability_mutation_succeeded(resolution)?;
             self.build_operator_config_key_view(caller, serde_json::json!({ "key": key }))
                 .await
         }
