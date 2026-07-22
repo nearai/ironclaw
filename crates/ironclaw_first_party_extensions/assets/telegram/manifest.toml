@@ -60,6 +60,17 @@ scheme = "https"
 host = "api.telegram.org"
 methods = ["post"]
 credential_handle = "telegram_bot_token"
+paths = [
+  "/bot{telegram_bot_token}/setWebhook",
+  "/bot{telegram_bot_token}/deleteWebhook",
+  "/bot{telegram_bot_token}/sendMessage",
+  "/bot{telegram_bot_token}/deleteMessage",
+  "/bot{telegram_bot_token}/getFile",
+  "/bot{telegram_bot_token}/sendDocument",
+]
+# sendDocument carries one canonical 5 MiB file plus bounded multipart fields.
+request_body_limit_bytes = 5308416
+response_body_limit_bytes = 65536
 # The Bot API carries the token in the URL path (`/bot<token>/method`); the
 # adapter writes the `{telegram_bot_token}` placeholder and the host
 # substitutes the secret — token bytes never reach the adapter.
@@ -72,6 +83,19 @@ injection = { type = "path_placeholder", placeholder = "telegram_bot_token" }
 body_credentials = [
   { handle = "telegram_webhook_secret", pointer = "/secret_token" },
 ]
+
+# Telegram's getFile result returns a provider-relative suffix. The adapter
+# validates that suffix before composing it under this single declared prefix;
+# downloads use GET and cannot carry a request body.
+[[channel.egress]]
+scheme = "https"
+host = "api.telegram.org"
+methods = ["get"]
+credential_handle = "telegram_bot_token"
+path_prefixes = ["/file/bot{telegram_bot_token}/"]
+request_body_limit_bytes = 0
+response_body_limit_bytes = 5242880
+injection = { type = "path_placeholder", placeholder = "telegram_bot_token" }
 
 [channel.presentation]
 supports_markdown = false

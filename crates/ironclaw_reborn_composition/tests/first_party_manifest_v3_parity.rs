@@ -425,6 +425,49 @@ fn slack_v3_still_declares_the_channel_surface() {
 }
 
 #[test]
+fn telegram_v3_declares_only_the_bot_api_and_bounded_file_transfer_paths() {
+    let v3 = parse(&live_asset("telegram"));
+    let channel = v3
+        .resolved()
+        .channel
+        .as_ref()
+        .expect("telegram manifest must declare its channel");
+    assert_eq!(channel.egress.len(), 2);
+
+    let post = channel
+        .egress
+        .iter()
+        .find(|target| target.methods == [ironclaw_host_api::NetworkMethod::Post])
+        .expect("bounded Bot API POST target");
+    assert_eq!(post.host, "api.telegram.org");
+    assert_eq!(
+        post.paths,
+        [
+            "/bot{telegram_bot_token}/setWebhook",
+            "/bot{telegram_bot_token}/deleteWebhook",
+            "/bot{telegram_bot_token}/sendMessage",
+            "/bot{telegram_bot_token}/deleteMessage",
+            "/bot{telegram_bot_token}/getFile",
+            "/bot{telegram_bot_token}/sendDocument",
+        ]
+    );
+    assert_eq!(
+        post.request_body_limit_bytes,
+        Some(5 * 1024 * 1024 + 64 * 1024)
+    );
+    assert_eq!(post.response_body_limit_bytes, Some(64 * 1024));
+
+    let download = channel
+        .egress
+        .iter()
+        .find(|target| target.methods == [ironclaw_host_api::NetworkMethod::Get])
+        .expect("bounded Telegram file GET target");
+    assert_eq!(download.path_prefixes, ["/file/bot{telegram_bot_token}/"]);
+    assert_eq!(download.request_body_limit_bytes, Some(0));
+    assert_eq!(download.response_body_limit_bytes, Some(5 * 1024 * 1024));
+}
+
+#[test]
 fn notion_mcp_v3_declares_the_ceiling() {
     assert_hosted_mcp_projection("notion-mcp", "notion");
 }

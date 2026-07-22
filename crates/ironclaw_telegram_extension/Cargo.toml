@@ -23,6 +23,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # moved to dev-deps because it is only referenced from the integration
 # contract test crate, not from the adapter library itself.
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+ironclaw_attachments = { path = "../ironclaw_attachments", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
 ironclaw_telegram_v2_adapter = { path = "../ironclaw_telegram_v2_adapter", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }

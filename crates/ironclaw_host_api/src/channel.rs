@@ -192,6 +192,24 @@ impl ChannelDescriptor {
                 }
                 seen_body_handles.push(body_credential.handle.as_str());
             }
+            for path in egress.paths.iter().chain(&egress.path_prefixes) {
+                if !valid_egress_path_constraint(path, egress.injection.as_ref()) {
+                    return Err(ChannelDescriptorError::InvalidEgressConstraint {
+                        host: egress.host.clone(),
+                    });
+                }
+            }
+            if egress
+                .request_body_limit_bytes
+                .is_some_and(|limit| limit > MAX_CHANNEL_EGRESS_TRANSFER_BYTES)
+                || egress
+                    .response_body_limit_bytes
+                    .is_some_and(|limit| limit == 0 || limit > MAX_CHANNEL_EGRESS_TRANSFER_BYTES)
+            {
+                return Err(ChannelDescriptorError::InvalidEgressConstraint {
+                    host: egress.host.clone(),
+                });
+            }
         }
         Ok(())
     }
@@ -265,6 +283,57 @@ pub struct ChannelEgressDescriptor {
     /// means no body credential may be injected for this target.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub body_credentials: Vec<ChannelBodyCredentialDescriptor>,
+    /// Exact URL paths this target permits. Empty preserves the legacy
+    /// host+method-only policy; first-party manifests should declare paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// URL path prefixes this target permits for provider-generated suffixes
+    /// such as file download paths. Prefix matching is explicit and distinct
+    /// from exact [`Self::paths`] matching.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_prefixes: Vec<String>,
+    /// Maximum request body size for this target. `None` preserves the
+    /// pre-v3-declaration behavior; declared limits are enforced before I/O.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_limit_bytes: Option<u64>,
+    /// Maximum response body size for this target. The channel host also
+    /// clamps declarations to its global safety ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_limit_bytes: Option<u64>,
+}
+
+/// Maximum request or response body bound a channel manifest may request.
+/// This is an authority ceiling, not the default; each target may declare a
+/// narrower value.
+pub const MAX_CHANNEL_EGRESS_TRANSFER_BYTES: u64 = 10 * 1024 * 1024;
+
+fn valid_egress_path_constraint(
+    path: &str,
+    injection: Option<&crate::RuntimeCredentialTarget>,
+) -> bool {
+    if path.is_empty()
+        || path.len() > 2_048
+        || !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains("://")
+        || path.contains(['?', '#', '\\', '%'])
+        || path.chars().any(|character| character.is_control())
+        || path.split('/').any(|segment| matches!(segment, "." | ".."))
+        || !path.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '/' | '.' | '_' | '-' | '{' | '}')
+        })
+    {
+        return false;
+    }
+    match injection {
+        Some(crate::RuntimeCredentialTarget::PathPlaceholder { placeholder }) => {
+            let marker = format!("{{{placeholder}}}");
+            let without_marker = path.replace(&marker, "");
+            !without_marker.contains(['{', '}'])
+        }
+        _ => !path.contains(['{', '}']),
+    }
 }
 
 /// One declared body-credential binding on a channel egress target.
@@ -316,6 +385,8 @@ pub enum ChannelDescriptorError {
     InvalidEgressInjection { host: String },
     #[error("egress host `{host}` must be a literal, non-empty host (no wildcards)")]
     WildcardOrEmptyEgressHost { host: String },
+    #[error("egress target `{host}` declares an invalid path or transfer bound")]
+    InvalidEgressConstraint { host: String },
 }
 
 #[cfg(test)]
@@ -477,6 +548,46 @@ max_message_chars = 40000
             channel.validate().unwrap_err(),
             ChannelDescriptorError::WildcardOrEmptyEgressHost { .. }
         ));
+    }
+
+    #[test]
+    fn egress_paths_and_transfer_bounds_parse_and_validate() {
+        let toml = documented_channel_toml().replace(
+            "credential_handle = \"vendor_bot_token\"",
+            "credential_handle = \"vendor_bot_token\"\ninjection = { type = \"path_placeholder\", placeholder = \"token\" }\npaths = [\"/bot{token}/getFile\"]\npath_prefixes = [\"/file/bot{token}/\"]\nrequest_body_limit_bytes = 65536\nresponse_body_limit_bytes = 5242880",
+        );
+        let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+        channel.validate().unwrap();
+        let target = &channel.egress[0];
+        assert_eq!(target.paths, vec!["/bot{token}/getFile"]);
+        assert_eq!(target.path_prefixes, vec!["/file/bot{token}/"]);
+        assert_eq!(target.request_body_limit_bytes, Some(65_536));
+        assert_eq!(target.response_body_limit_bytes, Some(5 * 1024 * 1024));
+    }
+
+    #[test]
+    fn malformed_egress_paths_and_transfer_bounds_fail_closed() {
+        for declaration in [
+            "paths = [\"https://evil.example/file\"]",
+            "paths = [\"/a/../secret\"]",
+            "path_prefixes = [\"//evil.example/\"]",
+            "path_prefixes = [\"/file\\\\escape\"]",
+            "request_body_limit_bytes = 10485761",
+            "response_body_limit_bytes = 10485761",
+        ] {
+            let toml = documented_channel_toml().replace(
+                "credential_handle = \"vendor_bot_token\"",
+                &format!("credential_handle = \"vendor_bot_token\"\n{declaration}"),
+            );
+            let channel: ChannelDescriptor = toml::from_str(&toml).unwrap();
+            assert!(
+                matches!(
+                    channel.validate().unwrap_err(),
+                    ChannelDescriptorError::InvalidEgressConstraint { .. }
+                ),
+                "expected rejection for {declaration}"
+            );
+        }
     }
 
     #[test]

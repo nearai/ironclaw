@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+mod attachment_transfer;
 mod channel;
 
 pub use channel::{
