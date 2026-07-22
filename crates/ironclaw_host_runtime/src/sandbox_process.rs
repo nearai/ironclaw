@@ -35,6 +35,7 @@ mod container_identity;
 mod mounts;
 mod network_allowlist;
 mod reaper;
+mod registry;
 mod scope_key;
 pub mod shell_limits;
 mod user_key;
@@ -49,6 +50,7 @@ pub use network_allowlist::{
     sandbox_extra_allowed_domains, sandbox_network_policy,
 };
 pub use reaper::{ReapSummary, SandboxReaper, SandboxReaperConfig};
+pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
 pub use shell_limits::{
     SHELL_OUTPUT_LIMIT_DEFAULT_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES, SHELL_TIMEOUT_DEFAULT_SECS,
