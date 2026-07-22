@@ -59,10 +59,11 @@ use ironclaw_product_workflow::{
     ConversationBindingService, DeliveryCoordinator, DeliveryRetryPolicy, InboundAttachmentLander,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, NoReplyContext, PendingApprovalInteractionView,
-    ProductWorkflowError, RebornServicesError, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding, RunDeliveryServices,
-    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
+    ProductWorkflowError, ProjectFilesystemReader, ProjectFsEntry, ProjectFsError, ProjectFsStat,
+    RebornServicesError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
+    ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest, WorkspaceFile,
 };
 use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_slack_extension::{
@@ -118,6 +119,35 @@ const INSTALLATION: &str = "install_alpha";
 const TEAM: &str = "T-A";
 const SLACK_USER: &str = "U123";
 const CHANNEL: &str = "D123";
+
+struct NoProjectFilesystem;
+
+#[async_trait]
+impl ProjectFilesystemReader for NoProjectFilesystem {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<WorkspaceFile, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+}
 const SLACK_SIGNATURE_HEADER: &str = "X-Slack-Signature";
 const SLACK_TIMESTAMP_HEADER: &str = "X-Slack-Request-Timestamp";
 const SECRET: &str = "topsecret";
@@ -452,6 +482,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             outbound_store,
             route_store: Arc::clone(&route_store),
             communication_preferences: preferences,
+            project_filesystem: Arc::new(NoProjectFilesystem),
             approval_context: None,
             blocked_auth_prompts: options.auth_challenges.map(|provider| {
                 Arc::new(ProductAuthBlockedAuthPromptSource::new(Some(provider)))
@@ -1248,6 +1279,7 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         // route is what the inbound approve resolves against.
         route_store: harness.route_store.clone(),
         communication_preferences: preferences,
+        project_filesystem: Arc::new(NoProjectFilesystem),
         coordinator: Arc::clone(&fixture.delivery_coordinator),
         extension_id: "slack".to_string(),
         fallback_notice_scope: test_fallback_notice_scope(),
@@ -1524,6 +1556,7 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         outbound_store,
         route_store: route_store.clone(),
         communication_preferences: preferences,
+        project_filesystem: Arc::new(NoProjectFilesystem),
         coordinator: Arc::clone(&fixture.delivery_coordinator),
         extension_id: "slack".to_string(),
         fallback_notice_scope: test_fallback_notice_scope(),
@@ -1656,6 +1689,7 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
         outbound_store,
         route_store: route_store.clone(),
         communication_preferences: preferences,
+        project_filesystem: Arc::new(NoProjectFilesystem),
         coordinator: Arc::clone(&fixture.delivery_coordinator),
         extension_id: "slack".to_string(),
         fallback_notice_scope: test_fallback_notice_scope(),

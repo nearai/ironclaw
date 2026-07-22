@@ -72,8 +72,9 @@ use ironclaw_product_adapters::{
     UserMessagePayload, VerifiedInbound,
 };
 use ironclaw_product_workflow::{
-    ChannelConnectionNoticePolicy, ConversationBindingService, ResolveBindingRequest,
-    RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
+    ChannelConnectionNoticePolicy, ConversationBindingService, ProjectFilesystemReader,
+    ProjectFsEntry, ProjectFsError, ProjectFsStat, ResolveBindingRequest, RunDeliveryObserver,
+    RunDeliveryServices, RunDeliverySettings, WorkspaceFile,
 };
 use ironclaw_reborn_composition::{
     ChannelHostAssemblyTestWiring, ChannelHostIdentity, ChannelInboundSinkConfig,
@@ -81,6 +82,7 @@ use ironclaw_reborn_composition::{
     GenericChannelInboundSink, PostAdmissionObserver, RebornServices, StaticIngressSecrets,
     VerifiedEvidenceMint, extension_ingress_route_mount,
 };
+use ironclaw_threads::ThreadScope;
 use ironclaw_turns::TurnScope;
 use reborn_support::builder::{RebornIntegrationHarness, StorageMode};
 use reborn_support::group::RebornIntegrationGroup;
@@ -104,6 +106,35 @@ const TELEGRAM_INSTALLATION: &str = "telegram";
 const TELEGRAM_WEBHOOK_SECRET: &str = "itest-telegram-webhook-secret";
 const TELEGRAM_BOT_TOKEN: &str = "123456:itest-telegram-token";
 const TELEGRAM_REPLY: &str = "Here is the coordinated Telegram reply.";
+
+struct NoProjectFilesystem;
+
+#[async_trait::async_trait]
+impl ProjectFilesystemReader for NoProjectFilesystem {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<WorkspaceFile, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+}
 
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -265,6 +296,7 @@ fn delivery_run_services(
         outbound_store,
         route_store,
         communication_preferences,
+        project_filesystem: Arc::new(NoProjectFilesystem),
         coordinator,
         extension_id: extension_id.to_string(),
         fallback_notice_scope,

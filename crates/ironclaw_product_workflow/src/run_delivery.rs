@@ -42,6 +42,7 @@ use ironclaw_turns::{
 
 use crate::auth_prompt::{BlockedAuthFlowCanceller, BlockedAuthPromptRequest};
 
+use crate::ProjectFilesystemReader;
 use crate::delivery_coordinator::{
     CoordinatedDeliveryError, CoordinatedDeliveryOutcome, DeliveryCoordinator, DeliveryIntent,
     NoticeDeliveryRequest,
@@ -142,6 +143,10 @@ pub struct RunDeliveryServices {
     pub outbound_store: Arc<dyn OutboundStateStore>,
     pub route_store: Arc<dyn DeliveredGateRouteStore>,
     pub communication_preferences: Arc<dyn CommunicationPreferenceRepository>,
+    /// Canonical project-scoped reader used to materialize assistant-authored
+    /// `/workspace/...` references only after outbound policy approves the
+    /// delivery.
+    pub project_filesystem: Arc<dyn ProjectFilesystemReader>,
     /// The coordinator every send goes through (OUT-1: none bypasses).
     pub coordinator: Arc<DeliveryCoordinator>,
     /// The channel extension whose surface these components serve (the

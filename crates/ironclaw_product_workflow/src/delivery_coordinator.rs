@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ironclaw_attachments::{DEFAULT_ATTACHMENT_BUDGETS, extract_workspace_attachment_paths};
 use ironclaw_host_api::RestrictedEgress;
 use ironclaw_outbound::{
     CommunicationPreferenceRepository, DeliveryFailureKind, OutboundDeliveryAttempt,
@@ -36,6 +37,7 @@ use ironclaw_product_adapters::{
     ChannelAdapter, ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
     PartDeliveryOutcome,
 };
+use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{TurnRunId, TurnScope};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -45,6 +47,7 @@ use crate::ProductWorkflowError;
 use crate::outbound_delivery::{
     ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata,
 };
+use crate::{ProjectFilesystemReader, ProjectFsError};
 
 /// The nine semantic intents (§5.4). Emitters express *what* is being
 /// communicated; the coordinator decides targeting, persistence, and retry.
@@ -159,6 +162,9 @@ pub struct CoordinatedDeliveryRequest<'a> {
     pub require_direct_message_target: bool,
     /// The extension whose channel carries this delivery.
     pub extension_id: &'a str,
+    /// Canonical project-filesystem authority scope for resolving transient
+    /// `/workspace/...` references in final/triggered assistant text.
+    pub thread_scope: &'a ThreadScope,
 }
 
 /// One notice-class delivery request (§5.4: `Working`, `Cleanup`,
@@ -220,6 +226,10 @@ pub enum CoordinatedDeliveryError {
     IntentClassMismatch { intent: DeliveryIntent },
     #[error("notice request is invalid: {reason}")]
     InvalidNotice { reason: String },
+    #[error("workspace attachment could not be read")]
+    WorkspaceAttachmentRead(#[source] ProjectFsError),
+    #[error("workspace attachments exceed the delivery budget")]
+    WorkspaceAttachmentBudgetExceeded,
 }
 
 /// Retry policy for retryable per-part outcomes (bounded, jitter-free by
@@ -339,6 +349,7 @@ impl DeliveryCoordinator {
         outbound_policy: &OutboundPolicyService<'_>,
         communication_preferences: &dyn CommunicationPreferenceRepository,
         target_resolver: &dyn ProductOutboundTargetResolver,
+        project_filesystem: &dyn ProjectFilesystemReader,
         request: CoordinatedDeliveryRequest<'_>,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         if !request.intent.runs_outbound_policy() {
@@ -385,6 +396,8 @@ impl DeliveryCoordinator {
                 request.thread_anchor,
                 request.require_direct_message_target,
                 request.extension_id,
+                project_filesystem,
+                request.thread_scope,
             )
             .await;
         self.in_flight
@@ -482,8 +495,10 @@ impl DeliveryCoordinator {
         thread_anchor: Option<String>,
         require_direct_message: bool,
         extension_id: &str,
+        project_filesystem: &dyn ProjectFilesystemReader,
+        thread_scope: &ThreadScope,
     ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
-        let _ = (intent, outbound_policy);
+        let _ = outbound_policy;
         // 2. Resolve the trusted conversation metadata for the sealed target.
         let metadata: VerifiedProductOutboundTargetMetadata = match target_resolver
             .resolve_product_outbound_target_metadata(&target, require_direct_message)
@@ -498,6 +513,22 @@ impl DeliveryCoordinator {
                 return Err(CoordinatedDeliveryError::Workflow(error));
             }
         };
+
+        let parts =
+            match materialize_workspace_file_parts(intent, parts, project_filesystem, thread_scope)
+                .await
+            {
+                Ok(parts) => parts,
+                Err(error) => {
+                    self.mark_terminal(
+                        &attempt,
+                        OutboundDeliveryStatus::Failed,
+                        Some(DeliveryFailureKind::Rejected),
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
 
         self.drive_resolved(
             attempt,
@@ -692,6 +723,65 @@ impl DeliveryCoordinator {
             );
         }
     }
+}
+
+async fn materialize_workspace_file_parts(
+    intent: DeliveryIntent,
+    mut parts: Vec<OutboundPart>,
+    project_filesystem: &dyn ProjectFilesystemReader,
+    thread_scope: &ThreadScope,
+) -> Result<Vec<OutboundPart>, CoordinatedDeliveryError> {
+    if !matches!(
+        intent,
+        DeliveryIntent::FinalReply | DeliveryIntent::TriggeredDelivery
+    ) {
+        return Ok(parts);
+    }
+
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    for part in &parts {
+        if let OutboundPart::Text(text) = part {
+            for path in extract_workspace_attachment_paths(text) {
+                if seen.insert(path.clone()) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    if paths.is_empty() {
+        return Ok(parts);
+    }
+    if paths.len() > DEFAULT_ATTACHMENT_BUDGETS.max_count {
+        return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
+    }
+
+    let mut total_bytes = 0usize;
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let file = project_filesystem
+            .read_file(thread_scope, &path)
+            .await
+            .map_err(CoordinatedDeliveryError::WorkspaceAttachmentRead)?;
+        if file.path.as_str() != path {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentRead(
+                ProjectFsError::Internal,
+            ));
+        }
+        let file_bytes = file.bytes.len();
+        if file_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
+        }
+        total_bytes = total_bytes
+            .checked_add(file_bytes)
+            .ok_or(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded)?;
+        if total_bytes > DEFAULT_ATTACHMENT_BUDGETS.max_total_bytes {
+            return Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded);
+        }
+        files.push(OutboundPart::File(file));
+    }
+    parts.extend(files);
+    Ok(parts)
 }
 
 /// Synthetic reply-target ref naming a notice's source conversation. Hashed:

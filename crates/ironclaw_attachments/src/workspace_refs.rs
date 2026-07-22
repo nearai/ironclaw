@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use ironclaw_host_api::ScopedPath;
+
 const WORKSPACE_PREFIX: &str = "/workspace/";
 
 /// Extract workspace file references using the same recognition rules as the
@@ -34,6 +36,10 @@ pub fn extract_workspace_attachment_paths(content: &str) -> Vec<String> {
             .map(|(offset, character)| offset + character.len_utf8())
             .last()
             .map_or(start, |length| start + length);
+        if !has_workspace_right_boundary(&visible, token_end) {
+            search_from = start.saturating_add(WORKSPACE_PREFIX.len());
+            continue;
+        }
         let Some(token) = visible.get(start..token_end) else {
             break;
         };
@@ -59,9 +65,16 @@ fn has_workspace_left_boundary(content: &str, start: usize) -> bool {
             !character.is_alphanumeric()
                 && !matches!(
                     character,
-                    '/' | ':' | '?' | '=' | '&' | '%' | '#' | '_' | '-'
+                    '/' | ':' | '?' | '=' | '&' | '%' | '#' | '_' | '-' | '.'
                 )
         })
+}
+
+fn has_workspace_right_boundary(content: &str, end: usize) -> bool {
+    content
+        .get(end..)
+        .and_then(|suffix| suffix.chars().next())
+        .is_none_or(|character| !matches!(character, '?' | '#' | '%' | '&' | '='))
 }
 
 fn is_workspace_token_character(character: char) -> bool {
@@ -77,7 +90,10 @@ fn longest_file_prefix(token: &str) -> Option<&str> {
         let candidate = token.get(..end)?;
         let filename = candidate.rsplit('/').next()?;
         let (_, extension) = filename.rsplit_once('.')?;
-        if !extension.is_empty() && extension.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        if !extension.is_empty()
+            && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            && ScopedPath::new(candidate).is_ok_and(|path| path.as_str() == candidate)
+        {
             return Some(candidate);
         }
     }
@@ -157,6 +173,16 @@ mod tests {
                 "The local copy is /workspace/report.pdf, '/workspace/report.pdf', or [download it](/workspace/report.pdf)."
             ),
             vec!["/workspace/report.pdf"]
+        );
+    }
+
+    #[test]
+    fn ignores_traversal_encoded_and_relative_url_lookalikes() {
+        assert!(
+            extract_workspace_attachment_paths(
+                "No /workspace/../secret.txt, ./workspace/relative.pdf, /workspace/report.pdf?download=1, /workspace/report.pdf#preview, or /workspace/report.pdf%2Fother."
+            )
+            .is_empty()
         );
     }
 }

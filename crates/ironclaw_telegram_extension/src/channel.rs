@@ -180,6 +180,13 @@ impl ChannelAdapter for TelegramChannelAdapter {
                         }
                     }
                 }
+                OutboundPart::File(_) => {
+                    parts.push(PartDeliveryOutcome::Permanent {
+                        reason: "telegram file delivery is not enabled for this adapter"
+                            .to_string(),
+                    });
+                    break 'parts;
+                }
                 OutboundPart::Retract { vendor_message_ref } => {
                     let outcome = match vendor_message_ref.parse::<i64>() {
                         Ok(message_id) => {

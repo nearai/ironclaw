@@ -105,6 +105,12 @@ impl ChannelAdapter for SlackChannelAdapter {
                         }
                     }
                 }
+                OutboundPart::File(_) => {
+                    parts.push(PartDeliveryOutcome::Permanent {
+                        reason: "slack file delivery is not enabled for this adapter".to_string(),
+                    });
+                    break 'parts;
+                }
                 OutboundPart::Retract { vendor_message_ref } => {
                     let outcome =
                         delete_slack_message(egress, &credential, &channel, vendor_message_ref)

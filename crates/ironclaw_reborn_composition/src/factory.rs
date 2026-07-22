@@ -725,12 +725,18 @@ impl RebornServices {
         let workflow_state = Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::clone(
             &local_runtime.extension_filesystem,
         )));
+        let workspace_filesystem = self.read_write_workspace_filesystem()?;
+        let project_filesystem: Arc<dyn ironclaw_product_workflow::ProjectFilesystemReader> =
+            Arc::new(crate::support::fs::ProjectScopedFilesystemReader::new(
+                Arc::clone(&workspace_filesystem),
+            ));
         let delivery = self.delivery_coordinator.clone().map(|coordinator| {
             crate::extension_host::channel_host::ChannelHostDeliveryDeps {
                 coordinator,
                 outbound_store: Arc::clone(&local_runtime.outbound_state),
                 route_store: Arc::clone(&local_runtime.delivered_gate_routes),
                 communication_preferences: Arc::clone(&local_runtime.outbound_preferences),
+                project_filesystem: Arc::clone(&project_filesystem),
                 approval_context,
                 blocked_auth_prompts,
                 auth_flow_cancel,
@@ -738,7 +744,7 @@ impl RebornServices {
             }
         });
         let inbound_attachments = Arc::new(crate::support::fs::ProjectScopedAttachmentLander::new(
-            self.read_write_workspace_filesystem()?,
+            workspace_filesystem,
         ));
 
         let identity_lookup = local_runtime

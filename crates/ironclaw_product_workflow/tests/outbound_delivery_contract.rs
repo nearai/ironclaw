@@ -4,8 +4,9 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_attachments::DEFAULT_ATTACHMENT_BUDGETS;
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, ScopedPath, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationDeliveryIntent, CommunicationDeliveryResolutionRequest, CommunicationModality,
     CommunicationPreferenceKey, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
@@ -18,8 +19,10 @@ use ironclaw_outbound::{
 };
 use ironclaw_product_adapters::{ExternalActorRef, ExternalConversationRef};
 use ironclaw_product_workflow::{
-    ProductOutboundTargetResolver, ProductWorkflowError, VerifiedProductOutboundTargetMetadata,
+    ProductOutboundTargetResolver, ProductWorkflowError, ProjectFilesystemReader, ProjectFsEntry,
+    ProjectFsError, ProjectFsStat, VerifiedProductOutboundTargetMetadata, WorkspaceFile,
 };
+use ironclaw_threads::ThreadScope;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 
 #[derive(Default)]
@@ -162,6 +165,16 @@ fn scope() -> TurnScope {
         ThreadId::new("thread-product-outbound").expect("valid thread"),
         Some(UserId::new("user-product-outbound").expect("valid user")),
     )
+}
+
+fn project_thread_scope() -> ThreadScope {
+    ThreadScope {
+        tenant_id: TenantId::new("tenant-product-outbound").expect("valid tenant"),
+        agent_id: AgentId::new("agent-product-outbound").expect("valid agent"),
+        project_id: Some(ProjectId::new("project-product-outbound").expect("valid project")),
+        owner_user_id: Some(UserId::new("user-product-outbound").expect("valid user")),
+        mission_id: None,
+    }
 }
 
 fn actor() -> TurnActor {
@@ -362,6 +375,101 @@ impl DeliveryReplyContextSource for FixedReplyContext {
     }
 }
 
+struct NoProjectFilesystem;
+
+#[async_trait]
+impl ProjectFilesystemReader for NoProjectFilesystem {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<WorkspaceFile, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+}
+
+static NO_PROJECT_FILESYSTEM: NoProjectFilesystem = NoProjectFilesystem;
+
+#[derive(Default)]
+struct ScriptedProjectFilesystem {
+    results: Mutex<HashMap<String, Result<WorkspaceFile, ProjectFsError>>>,
+    reads: Mutex<Vec<String>>,
+}
+
+impl ScriptedProjectFilesystem {
+    fn insert_file(&self, path: &str, size: usize) {
+        self.results.lock().expect("results").insert(
+            path.to_string(),
+            Ok(WorkspaceFile {
+                path: ScopedPath::new(path).expect("scoped path"),
+                filename: path.rsplit('/').next().map(str::to_string),
+                mime_type: "application/octet-stream".to_string(),
+                bytes: vec![b'x'; size],
+            }),
+        );
+    }
+
+    fn insert_error(&self, path: &str, error: ProjectFsError) {
+        self.results
+            .lock()
+            .expect("results")
+            .insert(path.to_string(), Err(error));
+    }
+
+    fn read_count(&self) -> usize {
+        self.reads.lock().expect("reads").len()
+    }
+}
+
+#[async_trait]
+impl ProjectFilesystemReader for ScriptedProjectFilesystem {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Err(ProjectFsError::NotADirectory)
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ThreadScope,
+        path: &str,
+    ) -> Result<WorkspaceFile, ProjectFsError> {
+        self.reads.lock().expect("reads").push(path.to_string());
+        self.results
+            .lock()
+            .expect("results")
+            .get(path)
+            .cloned()
+            .unwrap_or(Err(ProjectFsError::NotFound))
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+}
+
 fn sent(reference: &str) -> PartDeliveryOutcome {
     PartDeliveryOutcome::Sent {
         vendor_message_ref: Some(reference.to_string()),
@@ -419,7 +527,11 @@ impl ProductOutboundTargetResolver for DmRequiringTargetResolver {
     }
 }
 
-fn coordinated_final_reply(scope: TurnScope, extension_id: &str) -> CoordinatedDeliveryRequest<'_> {
+fn coordinated_final_reply<'a>(
+    scope: TurnScope,
+    extension_id: &'a str,
+    thread_scope: &'a ThreadScope,
+) -> CoordinatedDeliveryRequest<'a> {
     CoordinatedDeliveryRequest {
         intent: DeliveryIntent::FinalReply,
         delivery: delivery_request(scope),
@@ -429,7 +541,49 @@ fn coordinated_final_reply(scope: TurnScope, extension_id: &str) -> CoordinatedD
         thread_anchor: Some("thread-1".to_string()),
         require_direct_message_target: false,
         extension_id,
+        thread_scope,
     }
+}
+
+async fn coordinate_workspace_reply(
+    project_filesystem: &dyn ProjectFilesystemReader,
+    text: &str,
+    reports: Vec<Result<DeliveryReport, ChannelError>>,
+) -> (
+    Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError>,
+    Arc<ScriptedChannelAdapter>,
+    Arc<FilesystemOutboundStateStore<InMemoryBackend>>,
+    TurnScope,
+) {
+    let scope = scope();
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let validator = FakeReplyTargetBindingValidator::default();
+    validator.allow(validated_reply_target());
+    let preferences = FakePreferenceRepository::default();
+    seed_preference(&preferences, &scope);
+    let resolver = FakeProductOutboundTargetResolver;
+    let policy = configured_policy(&store, &validator);
+    let adapter = Arc::new(ScriptedChannelAdapter::new(
+        Arc::clone(&store),
+        scope.clone(),
+        reports,
+    ));
+    let coordinator = coordinator_over(&store, &adapter);
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
+    request.parts = vec![ironclaw_product_adapters::OutboundPart::Text(
+        text.to_string(),
+    )];
+    let result = coordinator
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            project_filesystem,
+            request,
+        )
+        .await;
+    (result, adapter, store, scope)
 }
 
 #[tokio::test]
@@ -456,7 +610,8 @@ async fn coordinator_persists_sending_before_the_adapter_delivers() {
             &policy,
             &preferences,
             &resolver,
-            coordinated_final_reply(scope.clone(), "vendorx"),
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
         )
         .await
         .expect("delivery drives");
@@ -529,6 +684,7 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
     ));
     let coordinator = coordinator_over(&store, &adapter);
 
+    let thread_scope = project_thread_scope();
     let request = CoordinatedDeliveryRequest {
         intent: DeliveryIntent::FinalReply,
         delivery: delivery_request(scope.clone()),
@@ -538,9 +694,16 @@ async fn coordinator_require_direct_message_rejects_non_dm_target_without_egress
         thread_anchor: Some("thread-1".to_string()),
         require_direct_message_target: true,
         extension_id: "vendorx",
+        thread_scope: &thread_scope,
     };
     let error = coordinator
-        .deliver(&policy, &preferences, &resolver, request)
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            request,
+        )
         .await
         .expect_err("require_direct_message=true against a non-DM target must reject");
     assert!(
@@ -597,7 +760,8 @@ async fn coordinator_rejected_policy_decision_does_not_reach_the_adapter() {
             &policy,
             &preferences,
             &resolver,
-            coordinated_final_reply(scope.clone(), "vendorx"),
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
         )
         .await
         .expect("a policy rejection is a delivery outcome, not a coordinator error");
@@ -641,7 +805,8 @@ async fn coordinator_retries_fully_retryable_reports_then_delivers() {
             &policy,
             &preferences,
             &resolver,
-            coordinated_final_reply(scope.clone(), "vendorx"),
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
         )
         .await
         .expect("delivery drives");
@@ -682,7 +847,8 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
             &policy,
             &preferences,
             &resolver,
-            coordinated_final_reply(scope.clone(), "vendorx"),
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
         )
         .await
         .expect("delivery drives");
@@ -702,6 +868,121 @@ async fn coordinator_partial_multipart_failure_is_terminal_without_retry() {
         attempts[0].status,
         ironclaw_outbound::OutboundDeliveryStatus::Failed
     );
+}
+
+#[tokio::test]
+async fn coordinator_workspace_file_partial_send_is_terminal_without_retry() {
+    let files = ScriptedProjectFilesystem::default();
+    files.insert_file("/workspace/report.pdf", 3);
+    let (outcome, adapter, store, scope) = coordinate_workspace_reply(
+        &files,
+        "report: /workspace/report.pdf",
+        vec![Ok(DeliveryReport {
+            parts: vec![sent("ts-text"), retryable_part()],
+        })],
+    )
+    .await;
+
+    assert!(matches!(
+        outcome.expect("delivery outcome"),
+        CoordinatedDeliveryOutcome::Failed {
+            failure_kind: ironclaw_outbound::DeliveryFailureKind::Rejected,
+            ..
+        }
+    ));
+    assert_eq!(
+        adapter.deliver_calls(),
+        1,
+        "file part is never blindly retried"
+    );
+    assert!(matches!(
+        &adapter.envelopes()[0].parts[1],
+        ironclaw_product_adapters::OutboundPart::File(file)
+            if file.path.as_str() == "/workspace/report.pdf"
+    ));
+    let attempts = store.list_delivery_attempts(scope).await.expect("attempts");
+    assert_eq!(
+        attempts[0].status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed
+    );
+}
+
+#[tokio::test]
+async fn coordinator_fails_closed_when_workspace_file_is_missing_or_denied() {
+    for (path, expected) in [
+        ("/workspace/missing.pdf", ProjectFsError::NotFound),
+        ("/workspace/secret.pdf", ProjectFsError::Denied),
+    ] {
+        let files = ScriptedProjectFilesystem::default();
+        files.insert_error(path, expected.clone());
+        let (outcome, adapter, store, scope) =
+            coordinate_workspace_reply(&files, &format!("attachment: {path}"), Vec::new()).await;
+
+        assert!(matches!(
+            outcome,
+            Err(CoordinatedDeliveryError::WorkspaceAttachmentRead(error)) if error == expected
+        ));
+        assert_eq!(
+            adapter.deliver_calls(),
+            0,
+            "adapter must not see partial files"
+        );
+        let attempts = store.list_delivery_attempts(scope).await.expect("attempts");
+        assert_eq!(
+            attempts[0].status,
+            ironclaw_outbound::OutboundDeliveryStatus::Failed
+        );
+    }
+}
+
+#[tokio::test]
+async fn coordinator_enforces_workspace_file_count_per_file_and_total_budgets() {
+    let too_many = (0..=DEFAULT_ATTACHMENT_BUDGETS.max_count)
+        .map(|index| format!("/workspace/file-{index}.txt"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let files = ScriptedProjectFilesystem::default();
+    let (outcome, adapter, _, _) = coordinate_workspace_reply(&files, &too_many, Vec::new()).await;
+    assert!(matches!(
+        outcome,
+        Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded)
+    ));
+    assert_eq!(files.read_count(), 0, "count is rejected before any read");
+    assert_eq!(adapter.deliver_calls(), 0);
+
+    let files = ScriptedProjectFilesystem::default();
+    files.insert_file(
+        "/workspace/oversize.bin",
+        DEFAULT_ATTACHMENT_BUDGETS.max_file_bytes + 1,
+    );
+    let (outcome, adapter, _, _) =
+        coordinate_workspace_reply(&files, "attachment: /workspace/oversize.bin", Vec::new()).await;
+    assert!(matches!(
+        outcome,
+        Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded)
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
+
+    let files = ScriptedProjectFilesystem::default();
+    let each = 4 * 1024 * 1024;
+    for path in [
+        "/workspace/one.bin",
+        "/workspace/two.bin",
+        "/workspace/three.bin",
+    ] {
+        files.insert_file(path, each);
+    }
+    let (outcome, adapter, _, _) = coordinate_workspace_reply(
+        &files,
+        "/workspace/one.bin /workspace/two.bin /workspace/three.bin",
+        Vec::new(),
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        Err(CoordinatedDeliveryError::WorkspaceAttachmentBudgetExceeded)
+    ));
+    assert_eq!(adapter.deliver_calls(), 0);
 }
 
 #[tokio::test]
@@ -727,7 +1008,8 @@ async fn coordinator_recovery_marks_interrupted_sending_attempts_unknown() {
             &policy,
             &preferences,
             &resolver,
-            coordinated_final_reply(scope.clone(), "vendorx"),
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
         )
         .await
         .expect("delivery drives");
@@ -789,7 +1071,8 @@ async fn coordinator_fails_closed_when_the_channel_is_unavailable() {
             &policy,
             &preferences,
             &resolver,
-            coordinated_final_reply(scope.clone(), "vendorx"),
+            &NO_PROJECT_FILESYSTEM,
+            coordinated_final_reply(scope.clone(), "vendorx", &project_thread_scope()),
         )
         .await
         .expect_err("unavailable channel fails closed");
@@ -948,10 +1231,17 @@ async fn coordinator_deliver_rejects_notice_class_intents() {
     ));
     let coordinator = coordinator_over(&store, &adapter);
 
-    let mut request = coordinated_final_reply(scope.clone(), "vendorx");
+    let thread_scope = project_thread_scope();
+    let mut request = coordinated_final_reply(scope.clone(), "vendorx", &thread_scope);
     request.intent = DeliveryIntent::Working;
     let error = coordinator
-        .deliver(&policy, &preferences, &resolver, request)
+        .deliver(
+            &policy,
+            &preferences,
+            &resolver,
+            &NO_PROJECT_FILESYSTEM,
+            request,
+        )
         .await
         .expect_err("notice-class intents must use the notice path");
     assert!(matches!(

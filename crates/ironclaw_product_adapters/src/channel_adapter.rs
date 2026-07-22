@@ -15,7 +15,7 @@
 
 use async_trait::async_trait;
 
-use ironclaw_attachments::InboundAttachment;
+use ironclaw_attachments::{InboundAttachment, WorkspaceFile};
 use ironclaw_host_api::RestrictedEgress;
 
 use crate::external::{
@@ -188,6 +188,10 @@ pub struct OutboundTarget {
 #[derive(Debug, Clone)]
 pub enum OutboundPart {
     Text(String),
+    /// A project-workspace file materialized immediately before adapter
+    /// delivery. Raw bytes are transient: this part is never persisted in a
+    /// delivery attempt, event, projection, or transcript.
+    File(WorkspaceFile),
     /// Remove an earlier delivery in the target conversation (the `Cleanup`
     /// intent, e.g. deleting a working indicator). `vendor_message_ref` is
     /// the reference a previous [`PartDeliveryOutcome::Sent`] returned; the

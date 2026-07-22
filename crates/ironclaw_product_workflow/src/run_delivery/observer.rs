@@ -452,9 +452,9 @@ impl RunDeliveryObserver {
             let delivered_messages = self
                 .deliver_run_notification(
                     &envelope,
+                    &thread_scope,
                     &scope,
                     &actor,
-                    run_id,
                     &actionable_state,
                     notification,
                 )
@@ -689,12 +689,13 @@ impl RunDeliveryObserver {
     async fn deliver_run_notification(
         &self,
         envelope: &ProductInboundEnvelope,
+        thread_scope: &ironclaw_threads::ThreadScope,
         scope: &TurnScope,
         actor: &TurnActor,
-        run_id: TurnRunId,
         state: &TurnRunState,
         notification: ActionableNotification,
     ) -> Result<Vec<DeliveredChannelMessage>, RunDeliveryError> {
+        let run_id = state.run_id;
         let reply_target = state.reply_target_binding_ref.clone();
         let target_authority = ObservedReplyTargetAuthority {
             scope: scope.clone(),
@@ -738,6 +739,7 @@ impl RunDeliveryObserver {
                 &outbound_policy,
                 self.services.communication_preferences.as_ref(),
                 &target_authority,
+                self.services.project_filesystem.as_ref(),
                 CoordinatedDeliveryRequest {
                     intent: notification.intent,
                     delivery,
@@ -745,6 +747,7 @@ impl RunDeliveryObserver {
                     thread_anchor: None,
                     require_direct_message_target: false,
                     extension_id: &self.services.extension_id,
+                    thread_scope,
                 },
             )
             .await?;
