@@ -18,8 +18,8 @@ use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    AgentId, CapabilityId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId,
-    UserId,
+    ActivityId, AgentId, CapabilityId, ExtensionId, InstallationState, InvocationId, ProjectId,
+    Resolution, RuntimeKind, TenantId, ThreadId, UserId,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -28,24 +28,22 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    FsMount, LOGS_VIEW, LifecyclePackageRef, LifecyclePhase, LlmActiveSelection, LlmConfigSnapshot,
+    FsMount, LOGS_VIEW, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_LOGS_VIEW,
     ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
     RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
     RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornConnectableChannelInfo, RebornConnectableChannelListResponse, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
-    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -255,6 +253,7 @@ struct StubServices {
     stall_global_auto_approve: Mutex<bool>,
     next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
     view_queries: Mutex<Vec<RebornViewQuery>>,
+    invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -280,8 +279,6 @@ struct StubServices {
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
     next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
-    list_connectable_channels_calls: Mutex<usize>,
-    next_list_connectable_channels_error: Mutex<Option<RebornServicesError>>,
     get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
@@ -361,13 +358,6 @@ impl StubServices {
     fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
         *self
             .next_set_outbound_preferences_error
-            .lock()
-            .expect("lock") = Some(error);
-    }
-
-    fn fail_list_connectable_channels(&self, error: RebornServicesError) {
-        *self
-            .next_list_connectable_channels_error
             .lock()
             .expect("lock") = Some(error);
     }
@@ -621,6 +611,20 @@ impl RebornServicesApi for StubServices {
             summary_artifacts: Vec::new(),
             next_cursor: None,
         })
+    }
+
+    async fn invoke(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        self.invoke_calls
+            .lock()
+            .expect("lock")
+            .push((capability, input, activity_id));
+        Err(service_unavailable_error(false))
     }
 
     async fn query(
@@ -1124,37 +1128,6 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn list_connectable_channels(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornConnectableChannelListResponse, RebornServicesError> {
-        *self.list_connectable_channels_calls.lock().expect("lock") += 1;
-        if let Some(error) = self
-            .next_list_connectable_channels_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(error);
-        }
-        Ok(RebornConnectableChannelListResponse {
-            channels: vec![RebornConnectableChannelInfo {
-                channel: "telegram".to_string(),
-                display_name: "Telegram".to_string(),
-                strategy: RebornChannelConnectStrategy::InboundProofCode,
-                action: RebornChannelConnectAction {
-                    title: "Telegram account connection".to_string(),
-                    instructions: "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes.".to_string(),
-                    input_placeholder: "Enter Telegram pairing code...".to_string(),
-                    submit_label: "Connect".to_string(),
-                    success_message: "Telegram account connected.".to_string(),
-                    error_message: "Invalid or expired Telegram pairing code. Message the bot to get a new one.".to_string(),
-                },
-                command_aliases: vec!["telegram".to_string()],
-            }],
-        })
-    }
-
     async fn get_operator_setup(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1455,7 +1428,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
             package_ref,
-            phase: LifecyclePhase::UnsupportedOrLegacy,
+            phase: InstallationState::Unsupported,
             blockers: Vec::new(),
             payload: None,
             secrets: Vec::new(),
@@ -3226,43 +3199,6 @@ async fn list_outbound_delivery_targets_dispatches_through_facade() {
 }
 
 #[tokio::test]
-async fn list_connectable_channels_dispatches_through_facade() {
-    let services = Arc::new(StubServices::default());
-    let router = router_with(services.clone());
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/channels/connectable")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_json(response).await;
-    assert_eq!(body["channels"][0]["channel"], "telegram");
-    assert_eq!(body["channels"][0]["strategy"], "inbound_proof_code");
-    assert_eq!(
-        body["channels"][0]["action"]["instructions"],
-        "Message the Telegram bot to get a code, then paste it here. Codes expire in 10 minutes."
-    );
-    assert_eq!(
-        body["channels"][0]["action"]["error_message"],
-        "Invalid or expired Telegram pairing code. Message the bot to get a new one."
-    );
-    assert_eq!(
-        *services
-            .list_connectable_channels_calls
-            .lock()
-            .expect("lock"),
-        1
-    );
-}
-
-#[tokio::test]
 async fn get_session_returns_caller_identity_and_capabilities() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
@@ -4139,6 +4075,60 @@ async fn logs_reject_ambiguous_tail_follow_modes() {
     assert!(services.query_logs_calls.lock().expect("lock").is_empty());
 }
 
+/// The operator configuration PUT is an ingress adapter over the canonical
+/// product mutation conduit. It must not call an admin store or vendor handler
+/// directly, and the untrusted wire idempotency key must be consumed at ingress
+/// rather than forwarded as capability input authority.
+#[tokio::test]
+async fn admin_configuration_put_dispatches_through_generic_invoke() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with_capabilities(
+        services.clone(),
+        WebUiV2Capabilities {
+            operator_webui_config: true,
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/operator/extension-configuration/extension.slack")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "values": [{"handle": "slack_team_id", "value": "T-ONE"}],
+                        "expected_revision": 7,
+                        "idempotency_key": "opaque-client-retry-key",
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let calls = services.invoke_calls.lock().expect("lock");
+
+    assert_eq!(
+        (status, calls.len()),
+        (StatusCode::SERVICE_UNAVAILABLE, 1),
+        "the route must reach generic invoke and preserve its failure status"
+    );
+    let (capability, input, _activity_id) = &calls[0];
+    assert!(
+        !capability.as_str().contains("slack"),
+        "the mutation capability must be extension-generic: {capability}"
+    );
+    assert_eq!(input["group_id"], "extension.slack");
+    assert_eq!(input["expected_revision"], 7);
+    assert_eq!(input["values"][0]["handle"], "slack_team_id");
+    assert!(
+        input.get("idempotency_key").is_none(),
+        "the authorized invocation scope, not untrusted input, owns idempotency: {input}"
+    );
+}
+
 #[tokio::test]
 async fn operator_config_key_routes_dispatch_path_and_body() {
     let services = Arc::new(StubServices::default());
@@ -4337,37 +4327,6 @@ async fn operator_config_set_failure_does_not_echo_secret_value() {
     let rendered = serde_json::to_string(&body).expect("render body");
     assert_eq!(body["kind"], "service_unavailable");
     assert!(!rendered.contains("sk-secret-value"));
-}
-
-#[tokio::test]
-async fn list_connectable_channels_error_maps_to_http_status() {
-    let services = Arc::new(StubServices::default());
-    services.fail_list_connectable_channels(RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
-        status_code: 503,
-        retryable: true,
-        field: None,
-        validation_code: None,
-    });
-    let router = router_with(services);
-
-    let response = router
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/webchat/v2/channels/connectable")
-                .body(Body::empty())
-                .expect("request"),
-        )
-        .await
-        .expect("oneshot");
-
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = read_json(response).await;
-    assert_eq!(body["error"], "unavailable");
-    assert_eq!(body["kind"], "service_unavailable");
-    assert_eq!(body["retryable"], true);
 }
 
 #[tokio::test]
@@ -4651,7 +4610,7 @@ async fn get_extension_setup_dispatches_package_ref_to_facade() {
     let body = read_json(response).await;
     assert_eq!(body["package_ref"]["id"], "telegram");
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert_eq!(body["phase"], "unsupported");
 }
 
 // The path segment must become a lifecycle package ref at the
@@ -4681,7 +4640,7 @@ async fn setup_extension_dispatches_package_ref_to_facade() {
         "facade must echo the package id from the path",
     );
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported_or_legacy");
+    assert_eq!(body["phase"], "unsupported");
     assert!(
         body.get("status").is_none(),
         "setup_extension must not expose legacy status aliases: {body}"
@@ -4982,6 +4941,153 @@ fn url_encode(value: &str) -> String {
         }
     }
     out
+}
+
+// A browser tab reuses one connection_id while navigating between threads.
+// The replacement must cancel the prior response even when a proxy has not
+// propagated the browser's close yet; otherwise stale streams consume the
+// per-caller cap and the new thread remains disconnected until refresh.
+#[tokio::test]
+async fn stream_events_same_connection_id_supersedes_stale_stream() {
+    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut first = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("first tcp");
+    first
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-a/events?connection_id=browser-tab&connection_generation=1 HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("first request");
+    let mut first_headers = [0_u8; 512];
+    let first_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        first.read(&mut first_headers),
+    )
+    .await
+    .expect("first headers within timeout")
+    .expect("first headers");
+    assert!(
+        std::str::from_utf8(&first_headers[..first_read])
+            .expect("first headers utf8")
+            .starts_with("HTTP/1.1 200"),
+        "first stream must be admitted"
+    );
+
+    let mut replacement = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("replacement tcp");
+    replacement
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-b/events?connection_id=browser-tab&connection_generation=2 HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("replacement request");
+    let mut replacement_headers = [0_u8; 512];
+    let replacement_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        replacement.read(&mut replacement_headers),
+    )
+    .await
+    .expect("replacement headers within timeout")
+    .expect("replacement headers");
+    assert!(
+        std::str::from_utf8(&replacement_headers[..replacement_read])
+            .expect("replacement headers utf8")
+            .starts_with("HTTP/1.1 200"),
+        "same-tab replacement must bypass its own stale slot"
+    );
+
+    let first_closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut buffer = [0_u8; 512];
+        loop {
+            if first.read(&mut buffer).await.expect("read first stream") == 0 {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(
+        first_closed.is_ok(),
+        "superseded stream must close promptly instead of retaining a slot"
+    );
+
+    let mut late_stale = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("late stale tcp");
+    late_stale
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-a/events?connection_id=browser-tab&connection_generation=1 HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("late stale request");
+    let mut stale_headers = [0_u8; 512];
+    let stale_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        late_stale.read(&mut stale_headers),
+    )
+    .await
+    .expect("stale response within timeout")
+    .expect("stale response");
+    assert!(
+        std::str::from_utf8(&stale_headers[..stale_read])
+            .expect("stale response utf8")
+            .starts_with("HTTP/1.1 204"),
+        "a delayed older route request must stop without replacing the current stream"
+    );
+
+    let mut different_tab = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("different-tab tcp");
+    different_tab
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-c/events?connection_id=other-tab HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("different-tab request");
+    let mut rejected_headers = [0_u8; 512];
+    let rejected_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        different_tab.read(&mut rejected_headers),
+    )
+    .await
+    .expect("rejection headers within timeout")
+    .expect("rejection headers");
+    assert!(
+        std::str::from_utf8(&rejected_headers[..rejected_read])
+            .expect("rejection headers utf8")
+            .starts_with("HTTP/1.1 429"),
+        "a distinct tab must still respect the per-caller cap"
+    );
+
+    drop(replacement);
+    serve_handle.abort();
 }
 
 // Regression for the WS-shares-SSE-pool review (Medium): the WS
@@ -5689,21 +5795,23 @@ async fn stream_events_uses_subscription_when_facade_supports_it() {
 
     let mut body = response.into_body();
     let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
-        parse_sse_events(buf).len() >= 2
+        parse_sse_events(buf).len() >= 3
     })
     .await;
     drop(body);
 
     let events = parse_sse_events(&bytes);
     assert!(
-        events.len() >= 2,
+        events.len() >= 3,
         "subscription events must reach SSE without facade polling; got {events:?}; raw: {}",
         String::from_utf8_lossy(&bytes)
     );
     let cursor_a_json =
         serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
-    assert_eq!(events[0].event.as_deref(), Some("projection_update"));
-    assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
+    assert_eq!(events[0].event.as_deref(), Some("keep_alive"));
+    assert_eq!(events[0].data.as_deref(), Some(r#"{"type":"keep_alive"}"#));
+    assert_eq!(events[1].event.as_deref(), Some("projection_update"));
+    assert_eq!(events[1].id.as_deref(), Some(cursor_a_json.as_str()));
 
     assert_eq!(
         services.stream_events_calls.lock().expect("lock").len(),
@@ -6156,7 +6264,7 @@ async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
 
     let mut text_frames: Vec<String> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline && text_frames.len() < 2 {
+    while std::time::Instant::now() < deadline && text_frames.len() < 3 {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         match tokio::time::timeout(remaining, ws.next()).await {
             Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
@@ -6170,19 +6278,22 @@ async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
     serve_handle.abort();
 
     assert!(
-        text_frames.len() >= 2,
-        "expected subscription projection frames; got {} text frame(s): {:?}",
+        text_frames.len() >= 3,
+        "expected readiness + subscription projection frames; got {} text frame(s): {:?}",
         text_frames.len(),
         text_frames,
     );
 
-    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
+    let ready_json: Value = serde_json::from_str(&text_frames[0]).expect("ready frame parses");
+    assert_eq!(ready_json, serde_json::json!({ "type": "keep_alive" }));
+
+    let envelope_a_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope a parses");
     let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
     assert_eq!(
         envelope_a_json, expected_a,
-        "first WS frame must carry the first subscription envelope",
+        "first projection WS frame must carry the first subscription envelope",
     );
-    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
+    let envelope_b_json: Value = serde_json::from_str(&text_frames[2]).expect("envelope b parses");
     let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
     assert_eq!(
         envelope_b_json, expected_b,

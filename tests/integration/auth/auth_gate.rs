@@ -26,7 +26,18 @@ mod reborn_support;
 #[path = "../../support/mod.rs"]
 mod support;
 
-use ironclaw_turns::{GateRef, TurnStatus};
+use ironclaw_auth::{
+    AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowKind, AuthFlowOutcome,
+    AuthFlowRecord, AuthFlowState, AuthGateRef, AuthProductScope, AuthProviderId, AuthSurface,
+    NewAuthFlow, OAuthAuthorizationUrl, OpaqueStateHash, TurnRunRef,
+};
+use ironclaw_host_api::{InvocationId, ResourceScope};
+use ironclaw_product_adapters::{AuthResolutionResult, ProductInboundAck};
+use ironclaw_reborn_composition::{
+    RebornAuthResolutionDispatcher, RebornOAuthCallbackOutcome, RebornOAuthCallbackRequest,
+    RebornProductAuthServices,
+};
+use ironclaw_turns::{GateRef, TurnRunId, TurnStatus};
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::builder::RebornIntegrationHarness;
 use reborn_support::group::RebornIntegrationGroup;
@@ -92,9 +103,277 @@ async fn github_auth_gate_denied_resume_completes_without_loop() {
         .expect("the deny short-circuit's planner summary was persisted");
 }
 
-/// A failed or expired OAuth flow releases the exact auth gate with an error
-/// disposition. That disposition must terminate the parked invocation as a
-/// model-visible authentication failure instead of re-dispatching the same
+/// User journey: an explicit in-channel `auth deny` is a user abort, not a
+/// provider-page denial. It flows through the real product interaction seam,
+/// resolves the durable auth flow as `UserAborted`, and cancels only the run
+/// parked on the exact gate reference.
+#[tokio::test]
+async fn explicit_user_abort_cancels_the_exact_blocked_auth_run() {
+    let group = RebornIntegrationGroup::builder()
+        .with_real_gate_dispatch_services()
+        .live_auth_and_approval()
+        .await
+        .expect("auth-gate group with real interaction services builds");
+    let harness = group
+        .thread("conv-auth-gate-user-abort")
+        .script([RebornScriptedReply::tool_call(
+            "github.get_repo",
+            serde_json::json!({"owner": "octocat", "repo": "hello-world"}),
+        )])
+        .build()
+        .await
+        .expect("thread builds");
+
+    let (run_id, approval_gate_ref) = harness
+        .submit_turn_until_blocked("look up a repository")
+        .await
+        .expect("run first blocks on its capability approval");
+    harness
+        .approve_gate(run_id, &approval_gate_ref)
+        .await
+        .expect("approving the action advances the same run");
+    let auth_state = harness
+        .wait_for_status(run_id, TurnStatus::BlockedAuth)
+        .await
+        .expect("the approved run reaches its credential gate");
+    let gate_ref = auth_state
+        .gate_ref
+        .expect("blocked-auth state carries the exact gate ref");
+    let product_auth = harness
+        .product_auth_for_test()
+        .expect("group carries its composed product-auth services");
+    let flow = create_open_gate_oauth_flow(
+        &harness,
+        product_auth.as_ref(),
+        run_id,
+        &gate_ref,
+        "github",
+        0x3c,
+    )
+    .await;
+    let ack = harness
+        .submit_auth_resolution(&gate_ref, AuthResolutionResult::Denied)
+        .await
+        .expect("the explicit user abort reaches the real auth interaction service");
+    assert!(
+        matches!(ack, ProductInboundAck::Accepted { .. }),
+        "the durable auth-abort input must be acknowledged: {ack:?}"
+    );
+
+    harness
+        .wait_for_status(run_id, TurnStatus::Cancelled)
+        .await
+        .expect("the exact blocked run is canceled rather than left parked");
+    let durable = product_auth
+        .flow_manager()
+        .get_flow(&flow.scope, flow.id)
+        .await
+        .expect("durable flow read succeeds")
+        .expect("user-aborted flow remains readable");
+    assert_eq!(
+        durable.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
+    harness
+        .assert_network_egress_count(0)
+        .await
+        .expect("aborting before dispatch must not invoke the provider");
+}
+
+/// User journey: canceling on the provider page is a provider denial. The
+/// durable resolution releases only the exact parked gate with a denied
+/// disposition; replaying the same terminal event after the gate has moved is
+/// an idempotent no-op.
+#[tokio::test]
+async fn provider_popup_denial_releases_exact_gate_and_duplicate_is_noop() {
+    let group = RebornIntegrationGroup::extension_lifecycle_google_oauth_configured()
+        .await
+        .expect("OAuth-configured extension group builds");
+    let harness = group
+        .thread("conv-auth-gate-provider-denial")
+        .script([
+            RebornScriptedReply::tool_call(
+                "builtin.extension_install",
+                serde_json::json!({"extension_id": "google-calendar"}),
+            ),
+            RebornScriptedReply::tool_call(
+                "builtin.extension_activate",
+                serde_json::json!({"extension_id": "google-calendar"}),
+            ),
+            RebornScriptedReply::text("authorization was denied at the provider"),
+        ])
+        .build()
+        .await
+        .expect("thread builds");
+
+    let (run_id, gate_ref) = harness
+        .submit_turn_until_auth_blocked("install and connect Google Calendar")
+        .await
+        .expect("run blocks on an auth gate");
+    harness
+        .wait_for_status(run_id, TurnStatus::BlockedAuth)
+        .await
+        .expect("the same run remains parked while its popup is open");
+    let product_auth = harness
+        .product_auth_for_test()
+        .expect("group carries its composed product-auth services");
+    // The adjacent configured-URL journey proves manifest + administrator
+    // configuration -> production AuthEngine URL generation. This journey
+    // starts at the popup callback boundary: seed the durable Open flow that
+    // the prompt renderer would have created, then drive the real callback,
+    // durable resolution dispatch, exact-gate resume, and replay path.
+    let flow = create_open_gate_oauth_flow(
+        &harness,
+        product_auth.as_ref(),
+        run_id,
+        &gate_ref,
+        "google",
+        0x4d,
+    )
+    .await;
+    assert!(
+        matches!(
+            flow.challenge.as_ref(),
+            Some(AuthChallenge::OAuthUrl { .. })
+        ),
+        "the user journey must exercise a real OAuth popup flow: {flow:?}"
+    );
+    // This integration group executes turns in its shared coordinator. Clone
+    // the production callback bundle with the same exact-gate dispatcher the
+    // binary composes, aimed at that coordinator; every durable auth port
+    // remains the original composed instance.
+    let callback_services =
+        product_auth
+            .as_ref()
+            .clone()
+            .with_resolution_dispatcher(std::sync::Arc::new(
+                ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher::new(
+                    harness.turn_coordinator_for_test(),
+                ),
+            )
+                as std::sync::Arc<dyn RebornAuthResolutionDispatcher>);
+    let callback_scope = flow.scope.clone();
+    let callback_flow_id = flow.id;
+    let state_hash = flow
+        .opaque_state_hash
+        .clone()
+        .expect("Open popup flow persists its state hash");
+    let denial = callback_services
+        .handle_oauth_callback(RebornOAuthCallbackRequest {
+            scope: callback_scope.clone(),
+            flow_id: callback_flow_id,
+            opaque_state_hash: state_hash.clone(),
+            outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+        })
+        .await
+        .expect_err("provider denial is the route-visible terminal result");
+    assert_eq!(denial.code, AuthErrorCode::ProviderDenied);
+
+    harness
+        .wait_for_status(run_id, TurnStatus::Completed)
+        .await
+        .expect("provider denial completes without re-blocking");
+    harness
+        .assert_network_egress_count(0)
+        .await
+        .expect("provider denial before dispatch must not invoke the provider");
+    harness
+        .assert_tool_error_summary_contains("auth gate denied by user")
+        .await
+        .expect("the provider denial is visible to the model as a denied gate");
+
+    let durable = product_auth
+        .flow_manager()
+        .get_flow(&flow.scope, flow.id)
+        .await
+        .expect("durable flow read succeeds")
+        .expect("provider-denied flow remains readable");
+    assert_eq!(
+        durable.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
+    );
+    assert!(
+        durable.resolution_delivered_at.is_some(),
+        "exact-gate resolution must be durably marked delivered"
+    );
+
+    let duplicate = callback_services
+        .handle_oauth_callback(RebornOAuthCallbackRequest {
+            scope: callback_scope,
+            flow_id: callback_flow_id,
+            opaque_state_hash: state_hash,
+            outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+        })
+        .await
+        .expect_err("a replay reports the same provider denial");
+    assert_eq!(duplicate.code, AuthErrorCode::ProviderDenied);
+    harness
+        .wait_for_status(run_id, TurnStatus::Completed)
+        .await
+        .expect("duplicate callback delivery is an idempotent no-op");
+}
+
+/// Seed the durable popup-flow precondition around one exact blocked gate.
+/// URL generation itself is covered by `oauth_popup_journeys`; auth-gate
+/// journeys use this helper to stay focused on resolution and run recovery.
+async fn create_open_gate_oauth_flow(
+    harness: &RebornIntegrationHarness,
+    product_auth: &RebornProductAuthServices,
+    run_id: TurnRunId,
+    gate_ref: &GateRef,
+    provider: &str,
+    state_fill: u8,
+) -> AuthFlowRecord {
+    let owner_user_id = harness
+        .turn_scope
+        .explicit_owner_user_id()
+        .cloned()
+        .expect("integration thread has an explicit owner");
+    let scope = AuthProductScope::new(
+        ResourceScope {
+            tenant_id: harness.turn_scope.tenant_id.clone(),
+            user_id: owner_user_id,
+            agent_id: harness.turn_scope.agent_id.clone(),
+            project_id: harness.turn_scope.project_id.clone(),
+            mission_id: None,
+            thread_id: Some(harness.turn_scope.thread_id.clone()),
+            invocation_id: InvocationId::new(),
+        },
+        AuthSurface::Callback,
+    );
+    let state_hash =
+        OpaqueStateHash::new(format!("{state_fill:02x}").repeat(32)).expect("valid state hash");
+    let expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+    product_auth
+        .flow_manager()
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope,
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: AuthProviderId::new(provider).expect("valid provider"),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new(
+                    "https://provider.example.test/oauth/authorize",
+                )
+                .expect("valid authorization URL"),
+                expires_at,
+            },
+            continuation: AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).expect("valid turn run ref"),
+                gate_ref: AuthGateRef::new(gate_ref.as_str()).expect("valid auth gate ref"),
+            },
+            update_binding: None,
+            opaque_state_hash: Some(state_hash),
+            pkce_verifier_hash: None,
+            expires_at,
+        })
+        .await
+        .expect("the blocked gate has a durable Open OAuth flow")
+}
+
+/// A failed or expired OAuth flow releases the exact auth gate. Auth retains
+/// the precise terminal outcome, while the rollback-safe turn resume uses the
+/// existing terminal disposition and must not re-dispatch the same
 /// missing-credential call into a fresh auth gate.
 #[tokio::test]
 async fn github_auth_gate_error_resume_completes_without_reblocking() {
@@ -133,9 +412,9 @@ async fn github_auth_gate_error_resume_completes_without_reblocking() {
         .await
         .expect("failed auth resume must not re-dispatch the parked capability");
     harness
-        .assert_tool_error_summary_contains("auth flow failed or expired")
+        .assert_tool_error_summary_contains("auth gate denied by user")
         .await
-        .expect("the auth failure is persisted for model recovery");
+        .expect("the terminal no-credential outcome is persisted for model recovery");
 }
 
 /// W4-AUTHGATE-WIRE (flagship): a GitHub capability with a valid credential
@@ -190,8 +469,7 @@ async fn runtime_401_after_injection_populates_provider_credential_requirement()
     let requirement = &state.credential_requirements[0];
     assert_eq!(
         requirement.provider,
-        ironclaw_host_api::RuntimeCredentialAccountProviderId::new("github")
-            .expect("valid provider id"),
+        ironclaw_host_api::VendorId::new("github").expect("valid provider id"),
         "provider must be populated so AuthPromptView.provider is non-null"
     );
     assert_eq!(

@@ -13,7 +13,7 @@
 //!
 //! `web_access_extension_package()` mirrors `github.rs`'s
 //! `extension_registry()`: reads the REAL production manifest off disk via
-//! `ExtensionManifest::parse_with_host_api_contracts` rather than hand-
+//! `ExtensionManifest::parse` rather than hand-
 //! authoring a synthetic one. Schema `$ref`s resolve later against the real
 //! schema files mounted at `/system/extensions/web-access`.
 //!
@@ -55,17 +55,21 @@ pub(super) const WEB_ACCESS_PROVIDER_ID: &str = "web-access";
 /// Build the `ExtensionPackage` for the real `web-access` provider by parsing
 /// its production manifest off disk, mirroring `github.rs`'s
 /// `extension_registry()` construction 1:1 via
-/// `ExtensionManifest::parse_with_host_api_contracts` and
+/// `ExtensionManifest::parse` and
 /// `ExtensionPackage::from_manifest`. The two capability manifests,
 /// `web-access.search` and `web-access.get_content`, and their real JSON
 /// Schema refs come from the manifest itself — no hand-authored schema.
 pub(super) fn web_access_extension_package() -> HarnessResult<ExtensionPackage> {
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
-        &std::fs::read_to_string(asset_root().join("manifest.toml"))?,
+    // Parse through the single record entry point (the bundled assets are
+    // manifest v3 documents since the first-party rewrite).
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+        std::fs::read_to_string(asset_root().join("manifest.toml"))?,
         ManifestSource::HostBundled,
         &default_host_port_catalog()?,
+        None,
         &default_host_api_contract_registry()?,
     )?;
+    let manifest = ExtensionManifest::try_from(record.manifest().clone())?;
     Ok(ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new(format!("/system/extensions/{WEB_ACCESS_PROVIDER_ID}"))?,

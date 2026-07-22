@@ -1,4 +1,3 @@
-// arch-exempt: large_file, in-memory auth backend contract coverage, plan #5905
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 
@@ -17,21 +16,20 @@ use crate::{
     CredentialOwnership, CredentialRecoveryProjection, CredentialRecoveryReason,
     CredentialRecoveryRequest, CredentialRefreshReport, CredentialRefreshRequest,
     CredentialSelectionInput, CredentialSetupService, ManualTokenCompletionInput,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthCompletionCompensationOutcome,
-    OAuthCompletionCompensationRequest, OAuthExchangeCleanupRequest, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
-    OAuthProviderRefreshRequest, ProviderCallbackOutcome, SecretCleanupAction,
-    SecretCleanupQuarantine, SecretCleanupQuarantineReason, SecretCleanupReport,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult, Timestamp,
-    TurnGateAuthFlowQuery, binding_scope_owns_account,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaim,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OAuthProviderExchangeContext,
+    OAuthProviderRefresh, OAuthProviderRefreshRequest, ProviderCallbackOutcome,
+    SecretCleanupAction, SecretCleanupQuarantine, SecretCleanupQuarantineReason,
+    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult, Timestamp, TurnGateAuthFlowQuery, binding_scope_owns_account,
     cleanup::SecretCleanupAction::Deactivate,
     domain::{
-        PreparedCallbackFlow, account_is_authorized_for_requester, prepare_callback_flow,
-        recovery_projection_for_single_account, recovery_projection_for_unconfigured_accounts,
-        resolved_account_id, update_account_from_exchange, update_account_from_request,
-        validate_account_update_target, validate_bound_account_update_target,
-        validate_bound_update_authority, validate_callback_claim,
+        PreparedCallbackFlow, account_is_authorized_for_requester, apply_callback_claim,
+        prepare_callback_flow, recovery_projection_for_single_account,
+        recovery_projection_for_unconfigured_accounts, resolved_account_id,
+        update_account_from_exchange, update_account_from_request, validate_account_update_target,
+        validate_bound_account_update_target, validate_bound_update_authority,
         validate_credential_status_transition, validate_flow_update_binding,
         validate_manual_token_flow, validate_manual_token_update_binding,
         validate_new_credential_account, validate_refresh_target, validate_selection_flow,
@@ -240,7 +238,6 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             provider: request.provider,
             challenge: Some(request.challenge),
             continuation: request.continuation,
-            credential_secret_fingerprint: None,
             update_binding: request.update_binding,
             opaque_state_hash: request.opaque_state_hash,
             pkce_verifier_hash: request.pkce_verifier_hash,
@@ -273,20 +270,14 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         &self,
         scope: &crate::AuthProductScope,
         request: OAuthCallbackClaimRequest,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
+    ) -> Result<OAuthCallbackClaim, AuthProductError> {
         let now = Utc::now();
         let mut state = self.lock_state();
         let record = state
             .flows
             .get_mut(&request.flow_id)
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        validate_callback_claim(record, scope, &request, now)?;
-        if matches!(record.state, AuthFlowState::Resolved(_)) {
-            return Ok(record.clone());
-        }
-        record.state = AuthFlowState::Processing;
-        record.updated_at = now;
-        Ok(record.clone())
+        apply_callback_claim(record, scope, &request, now)
     }
 
     async fn complete_oauth_callback(
@@ -325,12 +316,6 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         };
 
         let account_id = resolve_callback_account(&mut state, callback, &exchange, now)?;
-        let account_fingerprint = state
-            .accounts
-            .get(&account_id)
-            .ok_or(AuthProductError::BackendUnavailable)?
-            .secret_fingerprint();
-
         let record = state
             .flows
             .get_mut(&input.flow_id)
@@ -338,7 +323,6 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         record.state = AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id });
         record.authorization_code_hash = Some(exchange.authorization_code_hash);
         record.pkce_verifier_hash = Some(exchange.pkce_verifier_hash);
-        record.credential_secret_fingerprint = Some(account_fingerprint);
         record.updated_at = now;
         let completed = record.clone();
         state.continuations.push(AuthResolved {
@@ -1118,108 +1102,6 @@ impl AuthProviderClient for InMemoryAuthProductServices {
 
 #[async_trait]
 impl SecretCleanupService for InMemoryAuthProductServices {
-    async fn retain_oauth_exchange_for_cleanup(
-        &self,
-        request: OAuthExchangeCleanupRequest,
-    ) -> Result<CredentialAccountId, AuthProductError> {
-        let account_id = CredentialAccountId::from_uuid(request.flow_id.as_uuid());
-        let mut state = self.lock_state();
-        if let Some(existing) = state.accounts.get(&account_id) {
-            if existing.status == CredentialAccountStatus::Revoked
-                && existing.provider == request.exchange.provider
-                && CredentialAccountOwnerScope::from_scope(&request.scope).matches(existing)
-                && existing.access_secret.as_ref() == Some(&request.exchange.access_secret)
-                && existing.refresh_secret == request.exchange.refresh_secret
-            {
-                return Ok(account_id);
-            }
-            return Err(AuthProductError::BackendConflict);
-        }
-        let now = Utc::now();
-        state.accounts.insert(
-            account_id,
-            CredentialAccount {
-                id: account_id,
-                scope: request.scope,
-                provider: request.exchange.provider,
-                label: request.exchange.account_label,
-                status: CredentialAccountStatus::Revoked,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(request.exchange.access_secret),
-                refresh_secret: request.exchange.refresh_secret,
-                scopes: Vec::new(),
-                provider_identity: None,
-                created_at: now,
-                updated_at: now,
-            },
-        );
-        Ok(account_id)
-    }
-
-    async fn compensate_oauth_completion(
-        &self,
-        request: OAuthCompletionCompensationRequest,
-    ) -> Result<OAuthCompletionCompensationOutcome, AuthProductError> {
-        let mut state = self.lock_state();
-        let flow = state
-            .flows
-            .get(&request.flow_id)
-            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        if !scope_matches(&request.scope, &flow.scope)
-            || !matches!(
-                flow.continuation,
-                AuthContinuationRef::LifecycleActivation { .. }
-            )
-            || flow.provider != request.provider
-            || resolved_account_id(flow) != Some(request.credential_account_id)
-            || flow.credential_secret_fingerprint
-                != Some(request.expected_secret_fingerprint.clone())
-        {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-        let owner = CredentialAccountOwnerScope::from_scope(&request.scope.to_credential_owner());
-        let Some(account) = state.accounts.get(&request.credential_account_id) else {
-            let flow = state
-                .flows
-                .get_mut(&request.flow_id)
-                .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-            flow.credential_secret_fingerprint = None;
-            flow.updated_at = Utc::now();
-            return Ok(OAuthCompletionCompensationOutcome::AlreadyAbsent);
-        };
-        if !owner.matches(account) || account.provider != request.provider {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-        if account.status != CredentialAccountStatus::Revoked
-            && account.secret_fingerprint() != request.expected_secret_fingerprint
-        {
-            let flow = state
-                .flows
-                .get_mut(&request.flow_id)
-                .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-            flow.credential_secret_fingerprint = None;
-            flow.updated_at = Utc::now();
-            return Ok(OAuthCompletionCompensationOutcome::Superseded);
-        }
-        let account = state
-            .accounts
-            .get_mut(&request.credential_account_id)
-            .ok_or(AuthProductError::CredentialMissing)?;
-        account.status = CredentialAccountStatus::Revoked;
-        account.access_secret = None;
-        account.refresh_secret = None;
-        account.updated_at = Utc::now();
-        let flow = state
-            .flows
-            .get_mut(&request.flow_id)
-            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        flow.credential_secret_fingerprint = None;
-        flow.updated_at = Utc::now();
-        Ok(OAuthCompletionCompensationOutcome::Compensated)
-    }
-
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
@@ -1281,9 +1163,7 @@ impl SecretCleanupService for InMemoryAuthProductServices {
                 report.retained_accounts.push(account.id);
             }
         }
-        if matches!(request.action, SecretCleanupAction::Uninstall)
-            && (request.provider.is_some() || request.lifecycle_package.is_some())
-        {
+        if request.provider.is_some() || request.lifecycle_package.is_some() {
             let owner = &request.scope.resource;
             for flow in state.flows.values_mut().filter(|flow| {
                 let resource = &flow.scope.resource;

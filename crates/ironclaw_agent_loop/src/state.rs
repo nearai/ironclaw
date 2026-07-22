@@ -192,9 +192,11 @@ impl PendingApprovalResume {
 /// `approval_request_id`/`correlation_id` options into a typed all-or-none
 /// value: both sub-fields are present together or neither is.
 ///
-/// When `disposition` is terminal (`Denied` or `Error`), the executor surfaces
-/// a model-visible failure for the parked call and SKIPS re-dispatch; in that
-/// case `resume_token` is unused.
+/// When `disposition` is terminal (`Denied`), the executor surfaces a
+/// model-visible failure for the parked call and SKIPS re-dispatch; in that
+/// case `resume_token` is unused. Auth preserves the precise terminal cause in
+/// its own durable outcome and intentionally collapses no-credential outcomes
+/// onto this rollback-safe turn-layer value.
 ///
 /// Field-name note: each pending-resume type scopes `disposition` to ONE
 /// parked gate (auth or approval), so the short name is unambiguous within

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Hosted MCP discovery:** bound overlong valid tool descriptions at the
+  generic MCP boundary instead of rejecting the provider's entire catalog.
+- **Channel delivery:** keep live source-route observers attached for normal
+  long-running turns so every channel receives the durable final reply.
+- **Automation delivery:** honor each trigger's creator-selected outbound
+  target at fire time instead of silently falling back to the user-wide
+  default.
+- **Channel removal:** revoke caller-owned OAuth or proof-code pairing state
+  through the shared lifecycle before deleting any channel installation, so
+  removing Telegram, Slack, or a future channel unpairs it on every surface.
+
+### Removed
+
+- **Slack compatibility route:** retire the one-release
+  `/webhooks/slack/events` forwarding alias. Slack Event Subscriptions must use
+  `/webhooks/extensions/slack/events`; generic product-auth OAuth callbacks are
+  unchanged.
+
 ## [1.0.0-rc.1] - 2026-07-20
 
 First release candidate of the rearchitected IronClaw, internally called
@@ -81,6 +101,8 @@ The itemized changes since 0.29.1 follow.
 
 ### Fixed
 
+- *(reborn)* OAuth setup flows survive service restarts and replica hand-offs: the setup-lane PKCE verifier is stored durably per flow (secret store, flow-scoped TTL) instead of only process-locally, terminal callback outcomes discard it, and lifecycle cleanup drops verifiers for canceled flows eagerly.
+- *(reborn)* `ironclaw serve` rejects populated legacy `[slack]` setup fields at startup with a pointer to the WebUI extensions page instead of silently ignoring them (`[slack].enabled` alone stays tolerated).
 - *(reborn)* route Rig-backed model calls through provider streaming for WebUI v2 runs, cover delayed/broken/cancelled/transient mock LLM behavior in served E2E tests, and verify failed runs can retry after a transient checkpoint-state outage, including failures before the first checkpoint.
 - *(reborn)* activating an extension whose OAuth provider was never configured on the instance now fails immediately with the exact `ironclaw config set` commands and restart step, instead of parking an unresolvable auth gate ([#6335](https://github.com/nearai/ironclaw/issues/6335)).
 - *(reborn)* host-authored remediation text reaches the model intact again instead of degrading to "capability summary unavailable" ([#6335](https://github.com/nearai/ironclaw/issues/6335)).
@@ -100,6 +122,7 @@ The itemized changes since 0.29.1 follow.
 
 ### Changed
 
+- *(reborn-extensions)* every first-party integration (GitHub, Gmail, Google Calendar/Docs/Drive/Sheets/Slides, Notion, Slack, Telegram, Web Access) now ships as a self-contained module under `ironclaw_first_party_extensions::packages`, carrying its manifest/WASM embeds, onboarding copy, OAuth-setup credential, and host trust effects as opaque bundle data. Composition builds them via `bundled_packages()` and the built-in trust policy iterates the inventory generically — generic host code no longer names a concrete extension for package machinery (P7b, DEL-8 lane A).
 - *(reborn)* move product-neutral channel delivery into its own crate and make the Telegram host own its concrete state, setup-revision workflow, and trigger-delivery behavior while composition remains mount/registration-only ([#6159](https://github.com/nearai/ironclaw/pull/6159)).
 - *(webui-v2)* serve the Reborn WebUI from root-level browser routes, with temporary `/v2` compatibility redirects that preserve deep links and login query parameters; `/api/webchat/v2/*` remains unchanged ([#6142](https://github.com/nearai/ironclaw/issues/6142)).
 - *(reborn)* raise the default agent-loop runaway backstop from 256 to 1,024 iterations and the subagent ceiling from 16 to 256 ([#5959](https://github.com/nearai/ironclaw/pull/5959)).
@@ -107,6 +130,8 @@ The itemized changes since 0.29.1 follow.
 - *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
 - *(channels)* v1 Slack DM policy now defaults to `allowlist` (previously `pairing`); existing installs still configured with `dm_policy=pairing` fall through to `allowlist` as Slack relay pairing is retired ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
 - *(reborn-cli)* **Breaking:** `ironclaw serve` now rejects the legacy `[slack]` config fields (`installation_id`, `team_id`, `api_app_id`, `slack_user_id`, `user_id`, `shared_subject_user_id`, `signing_secret_env`, `bot_token_env`, `channel_routes`). Slack bot credentials and routing are configured from the WebUI channel setup page; per-user identity comes only from Slack OAuth. `[slack].enabled` / `IRONCLAW_REBORN_SLACK_ENABLED` still gate whether the channel mounts ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
+- *(reborn-extensions)* the credential-authority type is now `VendorId` end-to-end (renamed from `ProviderId` / `RuntimeCredentialAccountProviderId`); stored vendor id strings are unchanged and the persisted wire field stays `provider`. Extension manifests adopt schema `reborn.extension_manifest.v3` (explicit `[channel]` and `[auth.<vendor>]` sections); the v2 reader still parses and normalizes old manifests into the same resolved model (P1, MAN-11/MAN-2).
+- *(reborn)* outbound delivery is unified behind a single host-owned delivery coordinator — the sole delivery-state writer; channel adapters render and send through `ChannelAdapter::deliver` with no store access, and there is no direct product send path (P5, OUT-1/OUT-4).
 
 ### CI / Release
 
@@ -114,7 +139,9 @@ The itemized changes since 0.29.1 follow.
 
 ### Removed
 
+- *(reborn)* retire the `ProductAdapter` trait and its `ironclaw_wasm_product_adapters` host-runtime crate as a consolidation; the live external-protocol contract is `ChannelAdapter`, onto which ProductAdapter's conformance and outbound-delivery suites were ported unweakened (P7b, DEL-5). The `*_v2` adapter crates were renamed to `*_extension` (DEL-2).
 - *(channels)* remove the v1 `pairing_approve` builtin tool and the generic `channel_connection_resume` machinery as part of retiring Slack relay pairing; existing Slack pairing users reconnect via OAuth (Telegram/WASM self-service pairing via the pairing endpoints is unaffected) ([#5604](https://github.com/nearai/ironclaw/pull/5604)).
+- *(reborn-auth)* delete the per-vendor auth machinery — the provider-string multiplexor, `HostOAuthProviderSpec` and the per-vendor provider specs, the per-vendor gate providers/registries, and the Slack/Google serve branches — in favor of one recipe-driven `ironclaw_auth::AuthEngine` (`oauth2_code` + `api_key`). All five current vendors (Slack, Google, Notion, GitHub, NEAR AI) are expressed as manifest recipes with no per-vendor code path in the engine and no auth trait in the extension ABI (P3, AUTH-1/AUTH-16).
 
 ## [0.29.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.29.0...ironclaw-v0.29.1) - 2026-06-04
 

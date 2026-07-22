@@ -5,13 +5,11 @@ use std::time::Duration;
 use std::{future::Future, thread};
 
 use anyhow::Context;
-use ironclaw_reborn_composition::OAuthRedirectUri;
-use ironclaw_reborn_composition::SlackPersonalSetupServiceSlot;
 use ironclaw_reborn_composition::TriggerFireAccessPolicy;
 use ironclaw_reborn_composition::host_api::{AgentId, TenantId, UserId};
 use ironclaw_reborn_composition::hosted_single_tenant_runtime_policy;
 use ironclaw_reborn_composition::{
-    CredentialRefreshSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
+    KeepaliveSweepSettings, OAuthClientConfig, OperatorLogLayer, PollSettings, RebornBuildInput,
     RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
     RebornRuntimeProfileOptions, TurnRunnerSettings, build_reborn_runtime,
     local_runtime_build_input_with_options, nearai_mcp_bootstrap_config_from_env,
@@ -24,6 +22,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+mod account_setups;
+mod native_extensions;
 // Crate-wide process-env lock lives here (see test_env.rs). `pub(crate)` so
 // non-runtime env-mutating tests (e.g. commands::serve_sso) serialize against
 // the same mutex — all unit tests link into one binary, so a second, separate
@@ -416,8 +416,9 @@ pub(crate) fn build_runtime_input(
         .map(|b| b.inner)
 }
 
-/// Build [`CredentialRefreshSettings`] for the proactive Google OAuth keepalive
-/// worker.
+/// Build [`KeepaliveSweepSettings`] for the engine-owned credential keepalive
+/// sweep (vendors opt in by declaring `refresh.keepalive_idle_seconds` in
+/// their auth recipe).
 ///
 /// Enabled by default on the local `serve` surface (so refresh tokens stay warm
 /// for long-running deployments) and disabled for every other caller, mirroring
@@ -426,11 +427,11 @@ pub(crate) fn build_runtime_input(
 /// present-but-blank value falls through to the caller default.
 fn credential_refresh_settings(
     caller: RuntimeInputCaller,
-) -> anyhow::Result<CredentialRefreshSettings> {
+) -> anyhow::Result<KeepaliveSweepSettings> {
     let base = if caller == RuntimeInputCaller::Serve {
-        CredentialRefreshSettings::enabled()
+        KeepaliveSweepSettings::enabled()
     } else {
-        CredentialRefreshSettings::default()
+        KeepaliveSweepSettings::default()
     };
     apply_credential_refresh_override(base, std::env::var("IRONCLAW_CREDENTIAL_REFRESH_ENABLED"))
 }
@@ -439,9 +440,9 @@ fn credential_refresh_settings(
 /// settings value. Pure (env lookup is passed in) so the override semantics are
 /// unit-testable without mutating process-global environment state.
 fn apply_credential_refresh_override(
-    mut settings: CredentialRefreshSettings,
+    mut settings: KeepaliveSweepSettings,
     raw: Result<String, std::env::VarError>,
-) -> anyhow::Result<CredentialRefreshSettings> {
+) -> anyhow::Result<KeepaliveSweepSettings> {
     match raw {
         Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
             "" => {}
@@ -536,10 +537,18 @@ pub(crate) fn build_runtime_input_with_options(
     options: RuntimeInputOptions,
 ) -> anyhow::Result<BuiltRuntimeInput> {
     let runtime_services = build_services_input_with_options(config, caller, options)?;
-    let slack_personal_lazy_slot = runtime_services.slack_personal_lazy_slot.clone();
+
+    // The binary assembles the native extension factory registry and the
+    // channel-adapter bindings (DEL-7's target shape); composition receives
+    // them as input and never links a concrete extension crate.
+    let services_input = runtime_services
+        .services_input
+        .with_native_extension_factories(native_extensions::bundled_native_extension_factories())
+        .with_channel_extension_bindings(native_extensions::bundled_channel_extension_bindings())
+        .with_account_setup_descriptors(account_setups::bundled_account_setup_descriptors());
 
     #[allow(unused_mut)]
-    let mut runtime_input = RebornRuntimeInput::from_services(runtime_services.services_input)
+    let mut runtime_input = RebornRuntimeInput::from_services(services_input)
         .with_runner_settings(runner_settings(runtime_services.config_file.as_ref())?)
         .with_trigger_poller_settings(trigger_poller_settings(
             runtime_services.config_file.as_ref(),
@@ -573,7 +582,13 @@ pub(crate) fn build_runtime_input_with_options(
                     base_url = %llm.base_url().unwrap_or_default(),
                     "resolved LLM selection for Reborn runtime"
                 );
-                runtime_input = runtime_input.with_resolved_llm(llm);
+                // Opt-in LLM trace recording (`IRONCLAW_RECORD_TRACE`). The
+                // serve/run turn provider is built via `wrap_swappable_gateway`,
+                // which never wires `RecordingLlm` itself; this seam attaches the
+                // recorder factory over the gateway's swappable provider so the
+                // live QA lane can harvest replayable per-case traces. No-op when
+                // the env var is unset (production default).
+                runtime_input = runtime_input.with_resolved_llm(llm.with_env_trace_recording());
             }
             None => {
                 tracing::warn!(
@@ -588,19 +603,16 @@ pub(crate) fn build_runtime_input_with_options(
 
     Ok(BuiltRuntimeInput {
         inner: runtime_input,
-        slack_personal_lazy_slot,
     })
 }
 
 pub(crate) struct RuntimeServicesInput {
     pub(crate) services_input: RebornBuildInput,
-    pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
     config_file: Option<ironclaw_reborn_config::RebornConfigFile>,
 }
 
 pub(crate) struct BuiltRuntimeInput {
     pub(crate) inner: RebornRuntimeInput,
-    pub(crate) slack_personal_lazy_slot: Option<SlackPersonalSetupServiceSlot>,
 }
 
 #[derive(Clone, Debug)]
@@ -648,16 +660,8 @@ pub(crate) fn build_services_input_with_options(
         hosted_domain_hint: _hosted_domain_hint,
     }) = resolve_google_oauth_config_from_env(config, config_file.as_ref())?
     {
-        services_input = services_input.with_google_oauth_backend(client);
+        services_input = services_input.with_vendor_oauth_client("google", client);
     }
-    let slack_personal_lazy_slot =
-        if let Some(redirect_uri) = resolve_slack_personal_oauth_redirect_uri_from_env()? {
-            let slot = SlackPersonalSetupServiceSlot::new(redirect_uri);
-            services_input = services_input.with_slack_personal_oauth_lazy(slot.clone());
-            Some(slot)
-        } else {
-            None
-        };
     let identity = runtime_identity(config_file.as_ref());
     let tenant_id = TenantId::new(identity.tenant_id).context("invalid runtime tenant identity")?;
     let agent_id = AgentId::new(identity.agent_id).context("invalid runtime agent identity")?;
@@ -665,7 +669,6 @@ pub(crate) fn build_services_input_with_options(
 
     Ok(RuntimeServicesInput {
         services_input,
-        slack_personal_lazy_slot,
         config_file,
     })
 }
@@ -810,44 +813,18 @@ fn google_oauth_client_secret_from_store(
     })
 }
 
-pub(crate) fn resolve_slack_personal_oauth_redirect_uri_from_env()
--> anyhow::Result<Option<OAuthRedirectUri>> {
-    resolve_slack_personal_oauth_redirect_uri(optional_nonempty_env)
-}
-
-fn resolve_slack_personal_oauth_redirect_uri(
-    mut lookup: impl FnMut(&str) -> Option<String>,
-) -> anyhow::Result<Option<OAuthRedirectUri>> {
-    let Some(raw) = lookup("IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI") else {
-        return Ok(None);
-    };
-    let uri = OAuthRedirectUri::new(raw)
-        .context("invalid IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI")?;
-    Ok(Some(uri))
-}
-
 /// Outcome of resolving Google OAuth config from env, the `[google]`
-/// config.toml section, and the encrypted client-secret store (merged by
-/// [`resolve_google_oauth_config_state_merged`]). Distinguishes "nothing set
-/// at all" from "asymmetrically partial" (`client_id` present without
-/// `redirect_uri`, or vice versa) so callers can log/report specifically —
-/// both degrade to no active Google OAuth backend rather than a boot
-/// failure. `client_secret` is intentionally NOT part of the asymmetry: a
-/// missing secret alone still yields `Configured` (public-client PKCE).
+/// config.toml section, and the encrypted client-secret store. Partial public
+/// configuration disables the backend without failing boot; the client secret
+/// is optional because Google OAuth supports public-client PKCE.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GoogleOAuthConfigState {
-    /// No Google OAuth vars/config present at all — silent, not a
-    /// misconfiguration.
     Unconfigured,
-    /// `client_id` is present without `redirect_uri`.
     MissingRedirectUri,
-    /// `redirect_uri` is present without `client_id`.
     MissingClientId,
 }
 
 impl GoogleOAuthConfigState {
-    /// Convert the closed missing-field state to an operator-facing config
-    /// key only at the CLI rendering boundary.
     pub(crate) fn missing_config_key(&self) -> Option<&'static str> {
         match self {
             Self::Unconfigured => None,
@@ -857,23 +834,12 @@ impl GoogleOAuthConfigState {
     }
 }
 
-/// Either a fully resolved Google OAuth backend config, or a
-/// [`GoogleOAuthConfigState`] explaining why one wasn't built.
 #[derive(Debug, Clone)]
 pub(crate) enum GoogleOAuthResolution {
     Configured(ResolvedGoogleOAuthConfig),
     Disabled(GoogleOAuthConfigState),
 }
 
-/// Env-only resolver — the pure lookup-closure testing seam predating the
-/// `[google]` config.toml / secret-store merge. Delegates to
-/// [`resolve_google_oauth_config_state_merged`] with no config/store input,
-/// which is mathematically identical to the old env-only "nothing set at
-/// all" check (each merged field collapses to exactly the
-/// reborn-prefixed-or-legacy env pair when `config_google` and
-/// `store_client_secret` are both `None`). Kept as a separate, still-pure
-/// entry point so existing env-wins test coverage keeps compiling and
-/// passing unchanged.
 #[cfg(test)]
 fn resolve_google_oauth_config_state(
     lookup: impl FnMut(&str) -> Option<String>,
@@ -881,20 +847,6 @@ fn resolve_google_oauth_config_state(
     resolve_google_oauth_config_state_merged(lookup, None, None)
 }
 
-/// Resolve Google OAuth backend config state with precedence **env (wins) ->
-/// `[google]` config.toml, field by field**; `client_secret` additionally
-/// falls back to the encrypted secret store when neither env var carries it.
-/// `hosted_domain_hint` follows the same env -> config precedence as
-/// `client_id`/`redirect_uri`.
-///
-/// Pure: `env_lookup` is an injected closure and `store_client_secret` is a
-/// pre-fetched value rather than this function doing its own I/O — the same
-/// PURE lookup-closure testing seam the pre-merge env-only tests already
-/// relied on, now widened to cover the config-file and secret-store inputs
-/// too without giving this function a runtime dependency. The boot caller
-/// reads config plus stored secret material; the status caller reads config
-/// but deliberately supplies no stored secret because an optional PKCE client
-/// secret cannot affect its public-field diagnosis.
 #[cfg(test)]
 fn resolve_google_oauth_config_state_merged(
     env_lookup: impl FnMut(&str) -> Option<String>,
@@ -956,9 +908,6 @@ impl GoogleOAuthEnvInputs {
     }
 }
 
-/// Classify only the two public fields that determine whether Google OAuth is
-/// disabled. `None` means both are present; an optional client secret cannot
-/// change this result because public-client PKCE remains valid without one.
 fn resolve_google_oauth_public_config_state(
     env: &GoogleOAuthEnvInputs,
     config_google: Option<&ironclaw_reborn_config::GoogleSection>,
@@ -991,7 +940,6 @@ fn resolve_google_oauth_config_state_from_inputs(
     config_google: Option<&ironclaw_reborn_config::GoogleSection>,
     store_client_secret: Option<SecretString>,
 ) -> anyhow::Result<GoogleOAuthResolution> {
-    // env (wins) -> [google] config.toml, field by field.
     let client_id = env
         .reborn_client_id
         .or(env.legacy_client_id)
@@ -1044,10 +992,6 @@ fn resolve_google_oauth_config_state_from_inputs(
             ));
         }
         (None, None) => {
-            // Neither client_id nor redirect_uri set, but some other
-            // Google var/field (client_secret / hosted_domain_hint) is —
-            // treat as unconfigured rather than partial: those two
-            // fields alone don't signal OAuth setup intent.
             return Ok(GoogleOAuthResolution::Disabled(
                 GoogleOAuthConfigState::Unconfigured,
             ));
@@ -1463,7 +1407,7 @@ mod tests {
 
     use ironclaw_reborn_composition::TriggerFireAccessPolicy;
     use ironclaw_reborn_composition::{
-        CredentialRefreshSettings, RebornCompositionProfile, TurnStatus,
+        KeepaliveSweepSettings, RebornCompositionProfile, TurnStatus,
         test_support::assistant_reply_without_text_for_test,
     };
     use ironclaw_reborn_config::RebornBootConfig;
@@ -1477,8 +1421,7 @@ mod tests {
         build_runtime_input_with_options, no_assistant_text_message, protect_reborn_log_filter,
         resolve_google_oauth_config, resolve_google_oauth_config_state,
         resolve_google_oauth_config_state_merged,
-        resolve_google_oauth_config_state_with_store_loader,
-        resolve_slack_personal_oauth_redirect_uri, runner_settings,
+        resolve_google_oauth_config_state_with_store_loader, runner_settings,
     };
     use ironclaw_reborn_config::GoogleSection;
     // Only the hosted-volume tests consume this.
@@ -1860,6 +1803,45 @@ mod tests {
     }
 
     #[test]
+    fn serve_runtime_input_attaches_trace_recorder_from_environment() {
+        let _lock = lock_runtime_env();
+        let _guards = clear_runner_env();
+        let (_enabled, _interval) = clear_trigger_poller_env();
+        let _api_key = EnvGuard::set("NEARAI_API_KEY", "test-api-key");
+        let _record_trace = EnvGuard::set("IRONCLAW_RECORD_TRACE", "1");
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[llm.default]
+provider_id = "nearai"
+model = "deepseek-ai/DeepSeek-V4-Flash"
+api_key_env = "NEARAI_API_KEY"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Serve).expect("runtime input");
+        let resolved = runtime_input.llm.expect("resolved LLM");
+
+        assert!(
+            resolved.has_provider_factory(),
+            "serve must attach the recording decorator at the caller seam"
+        );
+    }
+
+    #[test]
     fn runner_env_cap_blank_value_is_fatal() {
         // Strict-presence semantics apply to cap vars, not just worker_count:
         // a set-but-blank slot must be rejected rather than silently ignored.
@@ -1950,14 +1932,14 @@ mod tests {
     fn credential_refresh_override_keeps_caller_default_without_env() {
         // Serve base is enabled; absent env leaves it enabled.
         let serve = apply_credential_refresh_override(
-            CredentialRefreshSettings::enabled(),
+            KeepaliveSweepSettings::enabled(),
             Err(std::env::VarError::NotPresent),
         )
         .expect("absent env is valid");
         assert!(serve.enabled, "Serve default stays on when env unset");
         // Non-Serve base is disabled; absent env leaves it disabled.
         let other = apply_credential_refresh_override(
-            CredentialRefreshSettings::default(),
+            KeepaliveSweepSettings::default(),
             Err(std::env::VarError::NotPresent),
         )
         .expect("absent env is valid");
@@ -1968,7 +1950,7 @@ mod tests {
     fn credential_refresh_override_kill_switch_disables() {
         for raw in ["0", "false", "FALSE", " 0 "] {
             let out = apply_credential_refresh_override(
-                CredentialRefreshSettings::enabled(),
+                KeepaliveSweepSettings::enabled(),
                 Ok(raw.to_string()),
             )
             .expect("valid kill-switch value");
@@ -1980,7 +1962,7 @@ mod tests {
     fn credential_refresh_override_force_on_enables() {
         for raw in ["1", "true", "TRUE", " true "] {
             let out = apply_credential_refresh_override(
-                CredentialRefreshSettings::default(),
+                KeepaliveSweepSettings::default(),
                 Ok(raw.to_string()),
             )
             .expect("valid force-on value");
@@ -1991,7 +1973,7 @@ mod tests {
     #[test]
     fn credential_refresh_override_blank_falls_through_to_base() {
         let out = apply_credential_refresh_override(
-            CredentialRefreshSettings::enabled(),
+            KeepaliveSweepSettings::enabled(),
             Ok("   ".to_string()),
         )
         .expect("blank value is valid");
@@ -2001,7 +1983,7 @@ mod tests {
     #[test]
     fn credential_refresh_override_invalid_value_is_error() {
         let result = apply_credential_refresh_override(
-            CredentialRefreshSettings::default(),
+            KeepaliveSweepSettings::default(),
             Ok("maybe".to_string()),
         );
         assert!(result.is_err(), "invalid value must be a hard error");
@@ -3408,59 +3390,7 @@ poll_interval_secs = 15
     }
 
     #[test]
-    fn resolve_slack_personal_oauth_redirect_uri_returns_none_when_unset() {
-        let uri = resolve_slack_personal_oauth_redirect_uri(|_| None)
-            .expect("empty env should not fail setup");
-        assert!(uri.is_none());
-    }
-
-    #[test]
-    fn resolve_slack_personal_oauth_redirect_uri_returns_uri_when_set() {
-        const REDIRECT_URI: &str =
-            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/slack_personal/callback";
-        let vars = HashMap::from([(
-            "IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI",
-            REDIRECT_URI,
-        )]);
-        let uri =
-            resolve_slack_personal_oauth_redirect_uri(|name| vars.get(name).map(|v| v.to_string()))
-                .expect("valid redirect URI resolves")
-                .expect("URI present when var is set");
-        assert_eq!(uri.as_str(), REDIRECT_URI);
-    }
-
-    #[test]
-    fn resolve_google_oauth_config_reports_disabled_when_client_id_present_but_redirect_uri_missing()
-     {
-        let vars = HashMap::from([(
-            "IRONCLAW_REBORN_GOOGLE_CLIENT_ID",
-            "reborn-client.apps.googleusercontent.com",
-        )]);
-
-        let config =
-            resolve_google_oauth_config(|name| vars.get(name).map(|value| value.to_string()))
-                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
-        assert!(
-            config.is_none(),
-            "client_id-without-redirect_uri must not build an active OAuth backend"
-        );
-
-        let state =
-            resolve_google_oauth_config_state(|name| vars.get(name).map(|value| value.to_string()))
-                .expect("asymmetric partial Google OAuth config must degrade, not fail boot");
-        match state {
-            GoogleOAuthResolution::Disabled(disabled) => {
-                assert_eq!(disabled, GoogleOAuthConfigState::MissingRedirectUri)
-            }
-            GoogleOAuthResolution::Configured(_) => {
-                panic!("expected Disabled(PartiallyConfigured), got Configured")
-            }
-        }
-    }
-
-    #[test]
-    fn resolve_google_oauth_config_reports_disabled_when_redirect_uri_present_but_client_id_missing()
-     {
+    fn resolve_google_oauth_config_errors_when_client_id_missing() {
         let vars = HashMap::from([(
             "IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI",
             "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",

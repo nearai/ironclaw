@@ -218,7 +218,7 @@ async fn every_supported_legacy_lifecycle_shape_maps_to_one_canonical_state() {
             "completing",
             Some(account_id),
             None,
-            AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
+            AuthFlowState::Processing,
         ),
         (
             "completed",

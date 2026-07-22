@@ -40,16 +40,17 @@ use ironclaw_turns::{
     TurnRunId, TurnScope, TurnStatus, run_profile::LoopHostMilestoneSink,
 };
 use tokio::sync::{broadcast, mpsc};
+use uuid::Uuid;
 
 mod display_preview;
 mod live_progress;
 mod runtime_replay;
 mod turn_events;
-use crate::AuthChallengeProvider;
 use display_preview::{
     CapabilityDisplayPreviewResolution, CapabilityDisplayPreviewSource,
     NoopCapabilityDisplayPreviewSource,
 };
+use ironclaw_product_workflow::AuthChallengeProvider;
 use live_progress::{
     LiveProgressMilestoneSink, LiveSkillActivationObserver, product_items_for_live_update,
 };
@@ -59,6 +60,8 @@ use runtime_replay::{
     DeliveredRuntimePayload, RuntimePayloadCandidate, RuntimePayloadResolution, RuntimePayloads,
     replay_payload_candidates, snapshot_payload_candidates,
 };
+// Only the Slack delivery path (feature-gated) consumes this re-export.
+pub(crate) use turn_events::approval_prompt_context_view;
 use turn_events::{
     FailureExplanationProvider, ModelFailureExplanationProvider, TurnEventBridge, TurnEventDrain,
     TurnEventPayload, turn_status_wire,
@@ -80,6 +83,7 @@ pub(crate) struct RebornProjectionServices {
     event_stream_manager: Arc<EventStreamManager>,
     live_updates: Arc<InMemoryProjectionUpdateSource>,
     live_sequence: Arc<AtomicU64>,
+    live_epoch: Arc<str>,
     turn_event_wake_source: Arc<TurnEventWakeSource>,
     turn_events: TurnEventBridge,
     approval_requests: Option<Arc<dyn ApprovalRequestStore>>,
@@ -157,6 +161,7 @@ impl RebornProjectionServices {
             auth_challenges: self.auth_challenges.clone(),
             display_previews: Arc::clone(&self.display_previews),
             reply_target_binding_ref: self.webui_reply_target_binding_ref.clone(),
+            live_epoch: Arc::clone(&self.live_epoch),
         })
     }
 
@@ -204,6 +209,7 @@ pub(crate) fn build_reborn_projection_services(
     // the same SSE cursor space; per-publisher counters can collide after a
     // durable cursor has advanced.
     let live_sequence = Arc::new(AtomicU64::new(0));
+    let live_epoch: Arc<str> = Arc::from(Uuid::new_v4().to_string());
     let event_stream_manager = Arc::new(EventStreamManager::from_services(
         projection,
         Arc::new(AllowAllProjectionAccessPolicy),
@@ -227,6 +233,7 @@ pub(crate) fn build_reborn_projection_services(
         event_stream_manager,
         live_updates,
         live_sequence,
+        live_epoch,
         turn_event_wake_source: Arc::new(TurnEventWakeSource::new()),
         turn_events: TurnEventBridge::default(),
         approval_requests: None,
@@ -301,6 +308,7 @@ struct WebuiRuntimeProjectionStream {
     auth_challenges: Option<Arc<dyn AuthChallengeProvider>>,
     display_previews: Arc<dyn CapabilityDisplayPreviewSource>,
     reply_target_binding_ref: ReplyTargetBindingRef,
+    live_epoch: Arc<str>,
 }
 
 #[async_trait]
@@ -379,13 +387,26 @@ impl WebuiRuntimeProjectionStream {
         request: &ProjectionSubscriptionRequest,
     ) -> Result<(EventProjectionSubscription, WebuiProjectionCursor), ProductAdapterError> {
         let projection_scope = runtime_projection_scope(&request.actor, &request.scope);
-        let origin_cursor = request
+        let mut origin_cursor = request
             .after_cursor
             .clone()
             .map(|cursor| parse_webui_projection_cursor(cursor.as_str()))
             .transpose()?
             .unwrap_or_default();
         validate_webui_projection_cursor_scope(&origin_cursor, &request.scope, &projection_scope)?;
+        // Live projection updates are process-local and their numeric sequence
+        // restarts from zero with each projection-services bundle. A browser
+        // can retain an otherwise valid composite cursor across a deployment;
+        // carrying that prior process's live floor forward would suppress new
+        // live updates until the restarted counter overtook it. Keep the
+        // durable runtime/turn positions, but rebase only the volatile live
+        // component when the producing process changes.
+        if origin_cursor.live.is_some()
+            && origin_cursor.live_epoch.as_deref() != Some(self.live_epoch.as_ref())
+        {
+            origin_cursor.live = None;
+        }
+        origin_cursor.live_epoch = Some(self.live_epoch.to_string());
         let subscription = self
             .manager
             .subscribe(ProjectionSubscribeRequest {
@@ -1060,6 +1081,8 @@ struct WebuiProjectionCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     live: Option<EventProjectionCursor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    live_epoch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     runtime_item: Option<EventCursor>,
     turn: Option<TurnEventProjectionCursor>,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -1096,6 +1119,7 @@ fn parse_webui_projection_cursor(
     Ok(WebuiProjectionCursor {
         runtime: Some(runtime),
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 0,

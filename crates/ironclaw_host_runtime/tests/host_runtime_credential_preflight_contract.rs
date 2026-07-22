@@ -4,7 +4,7 @@
 //! - `ProductAuthAccount`-source credentials must NOT trip the secret-store
 //!   pre-flight (Fix A regression: false-positive AuthRequired for connected
 //!   product-auth accounts).
-//! - A `RuntimeCapabilityRequest` whose `context.resource_scope` does not match
+//! - A `RuntimeInvocation` whose `context.resource_scope` does not match
 //!   the top-level context fields must be rejected before any secret-store probe
 //!   (Fix B regression: forged-scope presence probe).
 //!
@@ -26,7 +26,7 @@ use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeError, HostRuntimeServices,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityOutcome,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
@@ -62,7 +62,7 @@ effects = ["dispatch_capability", "use_secret"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "google_oauth_token"
 source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.readonly"] } }
 audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }
@@ -93,7 +93,7 @@ effects = ["dispatch_capability", "use_secret"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "script_api_token"
 source = { type = "secret_handle" }
 audience = { scheme = "https", host_pattern = "api.example.com" }
@@ -109,6 +109,7 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .expect("manifest must parse");
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
@@ -202,12 +203,7 @@ async fn product_auth_account_credential_does_not_trip_preflight() {
     let input = json!({"message": "product auth account"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -259,12 +255,7 @@ async fn secret_handle_credential_absent_still_trips_preflight() {
     let input = json!({"message": "needs secret handle"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -334,12 +325,7 @@ async fn tenant_shared_secret_satisfies_credential_preflight() {
     let input = json!({"message": "tenant-shared key present"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -400,12 +386,7 @@ async fn invoke_capability_forged_scope_fails_before_preflight() {
     let input = json!({"message": "forged scope"});
 
     let result = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            forged_context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((forged_context, script_capability_id(), estimate, input))
         .await;
 
     // Must be Err — the context validation must fire before the secret-store probe.
@@ -460,12 +441,7 @@ async fn spawn_capability_forged_scope_fails_before_preflight() {
     let input = json!({"message": "forged scope on spawn"});
 
     let result = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
-            forged_context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .spawn_capability((forged_context, script_capability_id(), estimate, input))
         .await;
 
     match result {
@@ -479,4 +455,15 @@ async fn spawn_capability_forged_scope_fails_before_preflight() {
             panic!("expected Err(InvalidRequest) for forged-scope spawn; got Err({other:?})")
         }
     }
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

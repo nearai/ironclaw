@@ -41,7 +41,7 @@ product surface.
 | `ironclaw_outbound::OutboundResolutionEngine` | Optional internal helper for candidate selection inside `OutboundPolicyService` | Public caller boundary, target validation authority, delivery-attempt records |
 | `ironclaw_conversations` | Ingress identity, source-route binding, reply-target binding semantics | Outbound policy selection, product-specific reply behavior |
 | `ironclaw_event_projections` / `ironclaw_event_streams` | Durable event facts, projection rebuilds, notification/fan-out surfaces | Final outbound target choice, transport send, send authority |
-| `ProductAdapter` implementations and transport glue | Rendering after outbound policy approves a candidate; host-provided transport execution | Communication policy selection, durable delivery state |
+| `ChannelAdapter` implementations and transport glue | Rendering after outbound policy approves a candidate; host-provided transport execution | Communication policy selection, durable delivery state |
 
 The resolver must stay host-owned and deterministic. Product adapters can
 describe capabilities, but they do not get to define the resolver's policy
@@ -131,6 +131,10 @@ pub struct RunNotificationContext {
 pub enum RunNotificationOrigin {
     LiveSourceRoute { source_route: SourceRouteContext },
     Triggered { trigger: TriggerCommunicationContext },
+    TriggeredWithTarget {
+        trigger: TriggerCommunicationContext,
+        target: ReplyTargetBindingRef,
+    },
     TriggeredFromSourceRoute {
         trigger: TriggerCommunicationContext,
         source_route: SourceRouteContext,
@@ -140,10 +144,15 @@ pub enum RunNotificationOrigin {
 ```
 
 `SourceRouteContext` carries the validated reply target for a live inbound
-conversation. `TriggerCommunicationContext` identifies the trigger fire without
-turning that trigger into a communication destination. The trigger reference is
-an outbound-local correlation value; the canonical trigger identity belongs to
-the future `ironclaw_triggers::TriggerId` in PR 9.
+conversation. `TriggeredWithTarget` carries the creator-owned binding resolved
+at fire time from the trigger's durable opaque target id; it routes ordinary
+results without changing the creator's global default. Approval and auth prompts
+continue to use their dedicated preference fields, so an ordinary delivery
+target cannot select an authority-bearing prompt destination.
+`TriggerCommunicationContext` identifies the trigger fire without turning that
+trigger into a communication destination. The trigger reference is an
+outbound-local correlation value; the canonical trigger identity belongs to the
+future `ironclaw_triggers::TriggerId` in PR 9.
 
 `SystemEventReasonCode` is a stable, redacted enum/code. Human-readable backend
 details, raw tool input, prompt material, OAuth state, approval payloads, and

@@ -240,6 +240,26 @@ test("locale packs include automation action failure copy", () => {
   }
 });
 
+test("locale packs include extension setup and OAuth failure copy", () => {
+  const requiredKeys = [
+    "extensions.setupFailed",
+    "extensions.oauthSetupFailed",
+    "extensions.oauthInvalidAuthorizationUrl",
+    "extensions.oauthFailed",
+    "extensions.oauthExpired",
+    "extensions.oauthCanceled",
+    "extensions.oauthTimedOut",
+  ];
+
+  for (const locale of LOCALES) {
+    const pack = loadLocalePack(locale);
+    for (const key of requiredKeys) {
+      assert.equal(typeof pack[key], "string", `${locale} missing ${key}`);
+      assert.notEqual(pack[key].trim(), "", `${locale} ${key} should not be empty`);
+    }
+  }
+});
+
 test("locale packs include admin write-only secret management copy", () => {
   const requiredKeys = [
     "admin.user.secrets.title",

@@ -2358,3 +2358,4 @@ fn resource_failure(stage: &'static str, error: ResourceError) -> OperationFailu
 }
 /// Per-tenant/user row turn-store cache, keyed by scope.
 type RowTurnStoreCache = HashMap<String, Arc<dyn StressTurnStore>>;
+// arch-exempt: large_file, stress user-turn lifecycle remains centralized, plan #6175

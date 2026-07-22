@@ -69,16 +69,13 @@ case "${package}" in
   ironclaw_reborn_openai_compat)
     ;;
   ironclaw_architecture | \
-  ironclaw_channel_delivery | \
   ironclaw_product_adapter_registry | \
   ironclaw_product_context | \
   ironclaw_reborn_config | \
   ironclaw_reborn_identity | \
   ironclaw_reborn_traces | \
-  ironclaw_slack_v2_adapter | \
   ironclaw_telegram_extension | \
-  ironclaw_telegram_v2_adapter | \
-  ironclaw_wasm_product_adapters)
+  ironclaw_telegram_v2_adapter)
     # Already on the allowlist with no feature flags; keep them flag-free now
     # that the default branch derives fallback features for closure crates.
     ;;

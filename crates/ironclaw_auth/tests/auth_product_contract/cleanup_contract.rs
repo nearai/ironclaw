@@ -1,210 +1,6 @@
 use crate::common::*;
 
 #[tokio::test]
-async fn oauth_completion_compensation_preserves_a_newer_account_generation() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let existing = services
-        .create_account(NewCredentialAccount {
-            scope: owner.clone(),
-            provider: provider(),
-            label: label("work github"),
-            status: CredentialAccountStatus::PendingSetup,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("github-old-access").unwrap()),
-            refresh_secret: None,
-            scopes: provider_scopes(&["read:user"]),
-        })
-        .await
-        .expect("existing account");
-    let first_flow = oauth_update_flow(&services, owner.clone(), &existing).await;
-    let first = services
-        .complete_oauth_callback(
-            &owner,
-            OAuthCallbackInput {
-                flow_id: first_flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: Box::new(OAuthProviderExchange {
-                        provider: provider(),
-                        account_label: label("first generation"),
-                        authorization_code_hash: code_hash("first-code"),
-                        pkce_verifier_hash: pkce_hash("pkce-hash"),
-                        access_secret: SecretHandle::new("github-first-access").unwrap(),
-                        refresh_secret: None,
-                        scopes: provider_scopes(&["repo"]),
-                        account_id: Some(existing.id),
-                        provider_identity: None,
-                    }),
-                },
-            },
-        )
-        .await
-        .expect("first callback");
-    let first_fingerprint = first
-        .credential_secret_fingerprint
-        .clone()
-        .expect("first secret fingerprint");
-    let first_account = services
-        .get_account(CredentialAccountLookupRequest::new(
-            owner.clone(),
-            existing.id,
-        ))
-        .await
-        .expect("first lookup")
-        .expect("first account");
-    let second_flow = oauth_update_flow(&services, owner.clone(), &first_account).await;
-    services
-        .complete_oauth_callback(
-            &owner,
-            OAuthCallbackInput {
-                flow_id: second_flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: Box::new(OAuthProviderExchange {
-                        provider: provider(),
-                        account_label: label("second generation"),
-                        authorization_code_hash: code_hash("second-code"),
-                        pkce_verifier_hash: pkce_hash("pkce-hash"),
-                        access_secret: SecretHandle::new("github-second-access").unwrap(),
-                        refresh_secret: None,
-                        scopes: provider_scopes(&["repo"]),
-                        account_id: Some(existing.id),
-                        provider_identity: None,
-                    }),
-                },
-            },
-        )
-        .await
-        .expect("second callback");
-
-    let outcome = services
-        .compensate_oauth_completion(ironclaw_auth::OAuthCompletionCompensationRequest {
-            scope: owner.clone(),
-            flow_id: first.id,
-            provider: first.provider,
-            credential_account_id: existing.id,
-            expected_secret_fingerprint: first_fingerprint,
-        })
-        .await
-        .expect("stale compensation is safe");
-
-    assert_eq!(
-        outcome,
-        ironclaw_auth::OAuthCompletionCompensationOutcome::Superseded
-    );
-    let current = services
-        .get_account(CredentialAccountLookupRequest::new(owner, existing.id))
-        .await
-        .expect("current lookup")
-        .expect("current account");
-    assert_eq!(current.status, CredentialAccountStatus::Configured);
-    assert_eq!(
-        current.access_secret,
-        Some(SecretHandle::new("github-second-access").unwrap())
-    );
-}
-
-#[tokio::test]
-async fn oauth_completion_compensation_ignores_metadata_only_account_updates() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let existing = services
-        .create_account(NewCredentialAccount {
-            scope: owner.clone(),
-            provider: provider(),
-            label: label("work github"),
-            status: CredentialAccountStatus::PendingSetup,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("github-old-access").unwrap()),
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .unwrap();
-    let flow = oauth_update_flow(&services, owner.clone(), &existing).await;
-    let completed = services
-        .complete_oauth_callback(
-            &owner,
-            OAuthCallbackInput {
-                flow_id: flow.id,
-                opaque_state_hash: state_hash("state-hash"),
-                outcome: ProviderCallbackOutcome::Authorized {
-                    exchange: Box::new(OAuthProviderExchange {
-                        provider: provider(),
-                        account_label: label("oauth account"),
-                        authorization_code_hash: code_hash("code-hash"),
-                        pkce_verifier_hash: pkce_hash("pkce-hash"),
-                        access_secret: SecretHandle::new("github-oauth-access").unwrap(),
-                        refresh_secret: None,
-                        scopes: provider_scopes(&["repo"]),
-                        account_id: Some(existing.id),
-                        provider_identity: None,
-                    }),
-                },
-            },
-        )
-        .await
-        .unwrap();
-    let fingerprint = completed
-        .credential_secret_fingerprint
-        .clone()
-        .expect("OAuth fingerprint");
-    let current = services
-        .get_account(CredentialAccountLookupRequest::new(
-            owner.clone(),
-            existing.id,
-        ))
-        .await
-        .unwrap()
-        .unwrap();
-    services
-        .create_or_update_account(CredentialAccountMutation::Update(CredentialAccountUpdate {
-            account_id: current.id,
-            account: NewCredentialAccount {
-                scope: current.scope.clone(),
-                provider: current.provider.clone(),
-                label: label("renamed metadata"),
-                status: current.status,
-                ownership: current.ownership,
-                owner_extension: current.owner_extension.clone(),
-                granted_extensions: current.granted_extensions.clone(),
-                access_secret: current.access_secret.clone(),
-                refresh_secret: current.refresh_secret.clone(),
-                scopes: current.scopes.clone(),
-            },
-        }))
-        .await
-        .unwrap();
-
-    let outcome = services
-        .compensate_oauth_completion(ironclaw_auth::OAuthCompletionCompensationRequest {
-            scope: owner.clone(),
-            flow_id: completed.id,
-            provider: provider(),
-            credential_account_id: existing.id,
-            expected_secret_fingerprint: fingerprint,
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        outcome,
-        ironclaw_auth::OAuthCompletionCompensationOutcome::Compensated
-    );
-    let revoked = services
-        .get_account(CredentialAccountLookupRequest::new(owner, existing.id))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(revoked.status, CredentialAccountStatus::Revoked);
-    assert!(revoked.access_secret.is_none());
-}
-
-#[tokio::test]
 async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");
@@ -709,6 +505,156 @@ async fn cleanup_matches_owner_granularity_and_provider_selected_oauth_accounts(
         !report.revoked_accounts.contains(&other_provider_account.id),
         "an unrelated provider's account must survive extension-keyed cleanup"
     );
+}
+
+/// Cleanup arrives on a callback-shaped scope, not the surface/session used by
+/// the connect popup. Flow selection must therefore use durable credential
+/// ownership rather than full auth-scope equality.
+fn callback_cleanup_scope(user: &str) -> AuthProductScope {
+    let mut cleanup = scope(user);
+    cleanup.surface = AuthSurface::Callback;
+    cleanup.session_id = None;
+    cleanup.resource.invocation_id = InvocationId::new();
+    cleanup
+}
+
+#[tokio::test]
+async fn uninstall_cancels_an_open_provider_flow_and_rejects_its_late_callback() {
+    let services = InMemoryAuthProductServices::new();
+    let flow_scope = scope("cleanup-open");
+    let flow = oauth_flow(&services, flow_scope.clone()).await;
+    assert_eq!(flow.state, AuthFlowState::Open);
+
+    services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: callback_cleanup_scope("cleanup-open"),
+            extension_id: ExtensionId::new("github").expect("extension"),
+            provider: Some(provider()),
+            lifecycle_package: None,
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .expect("cleanup");
+
+    let after = services
+        .get_flow(&flow_scope, flow.id)
+        .await
+        .expect("lookup")
+        .expect("record");
+    assert_eq!(
+        after.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
+    let late = services
+        .claim_oauth_callback(
+            &flow_scope,
+            ironclaw_auth::OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                provider: provider(),
+                pkce_verifier_hash: pkce_hash("pkce-hash"),
+            },
+        )
+        .await
+        .expect_err("a removed flow cannot consume a late callback");
+    assert_eq!(late, AuthProductError::Canceled);
+}
+
+#[tokio::test]
+async fn deactivate_cancels_every_open_provider_flow_kind_and_emits_the_gate_resolution_once() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("cleanup-all-kinds");
+    let expires_at = Utc::now() + Duration::minutes(5);
+    let create = |provider: AuthProviderId, continuation: AuthContinuationRef| {
+        let services = &services;
+        let owner = owner.clone();
+        async move {
+            services
+                .create_flow(NewAuthFlow {
+                    id: None,
+                    scope: owner,
+                    kind: AuthFlowKind::IntegrationCredential,
+                    provider,
+                    challenge: AuthChallenge::OAuthUrl {
+                        authorization_url: authorization_url("https://provider.example/oauth"),
+                        expires_at,
+                    },
+                    continuation,
+                    update_binding: None,
+                    opaque_state_hash: Some(state_hash("cleanup-all-kinds-state")),
+                    pkce_verifier_hash: Some(pkce_hash("cleanup-all-kinds-pkce")),
+                    expires_at,
+                })
+                .await
+                .expect("flow")
+        }
+    };
+    let setup = create(provider(), AuthContinuationRef::SetupOnly).await;
+    let gate = create(
+        provider(),
+        AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new(uuid::Uuid::new_v4().to_string()).expect("turn run ref"),
+            gate_ref: AuthGateRef::new("gate:cleanup-all-kinds").expect("gate ref"),
+        },
+    )
+    .await;
+    let bystander = create(
+        AuthProviderId::new("notion").expect("provider"),
+        AuthContinuationRef::SetupOnly,
+    )
+    .await;
+
+    let request = SecretCleanupRequest {
+        scope: callback_cleanup_scope("cleanup-all-kinds"),
+        extension_id: ExtensionId::new("github").expect("extension"),
+        provider: Some(provider()),
+        lifecycle_package: None,
+        action: SecretCleanupAction::Deactivate,
+    };
+    let report = services
+        .cleanup_for_lifecycle(request.clone())
+        .await
+        .expect("cleanup");
+    assert_eq!(report.auth_resolutions.len(), 1);
+    let resolution = &report.auth_resolutions[0];
+    assert_eq!(resolution.flow_id, gate.id);
+    assert_eq!(resolution.outcome, AuthFlowOutcome::UserAborted);
+
+    let state = |flow_id| {
+        let services = &services;
+        let owner = owner.clone();
+        async move {
+            services
+                .get_flow(&owner, flow_id)
+                .await
+                .expect("lookup")
+                .expect("record")
+                .state
+        }
+    };
+    assert_eq!(
+        state(setup.id).await,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
+    assert_eq!(
+        state(gate.id).await,
+        AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
+    );
+    assert_eq!(state(bystander.id).await, AuthFlowState::Open);
+
+    services
+        .mark_resolution_delivered(
+            &resolution.scope,
+            resolution.flow_id,
+            resolution.resolved_at,
+        )
+        .await
+        .expect("acknowledge resolution");
+    let retry = services
+        .cleanup_for_lifecycle(request)
+        .await
+        .expect("idempotent cleanup");
+    assert!(retry.auth_resolutions.is_empty());
 }
 
 #[tokio::test]

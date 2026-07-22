@@ -93,10 +93,9 @@ impl ProductAuthTurnGateResumeDispatcher {
 
         let resume_disposition = match resolution.outcome {
             AuthFlowOutcome::Authorized { .. } | AuthFlowOutcome::UserAborted => None,
-            AuthFlowOutcome::ProviderDenied => Some(GateResumeDisposition::Denied),
-            AuthFlowOutcome::Expired | AuthFlowOutcome::Failed { .. } => {
-                Some(GateResumeDisposition::Error)
-            }
+            AuthFlowOutcome::ProviderDenied
+            | AuthFlowOutcome::Expired
+            | AuthFlowOutcome::Failed { .. } => Some(GateResumeDisposition::Denied),
         };
 
         match resolution.outcome {

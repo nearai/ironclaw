@@ -19,6 +19,9 @@ async fn auth_flow_uses_open_processing_and_exact_resolved_outcomes() {
         )
         .await
         .expect("callback claim");
+    let OAuthCallbackClaim::Acquired(claimed) = claimed else {
+        panic!("first callback must acquire provider exchange ownership");
+    };
     assert_eq!(claimed.state, AuthFlowState::Processing);
 
     let denied = services
@@ -42,6 +45,37 @@ async fn auth_flow_uses_open_processing_and_exact_resolved_outcomes() {
         resolved.state,
         AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied)
     );
+}
+
+#[tokio::test]
+async fn callback_claim_distinguishes_the_exchange_owner_from_an_inflight_replay() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("claim-ownership");
+    let flow = oauth_flow(&services, owner.clone()).await;
+    let request = ironclaw_auth::OAuthCallbackClaimRequest {
+        flow_id: flow.id,
+        opaque_state_hash: state_hash("state-hash"),
+        provider: provider(),
+        pkce_verifier_hash: pkce_hash("pkce-hash"),
+    };
+
+    let acquired = services
+        .claim_oauth_callback(&owner, request.clone())
+        .await
+        .expect("first callback claim");
+    let replay = services
+        .claim_oauth_callback(&owner, request)
+        .await
+        .expect("inflight callback replay");
+
+    assert!(matches!(
+        acquired,
+        ironclaw_auth::OAuthCallbackClaim::Acquired(_)
+    ));
+    assert!(matches!(
+        replay,
+        ironclaw_auth::OAuthCallbackClaim::Existing(_)
+    ));
 }
 
 #[tokio::test]

@@ -5,8 +5,9 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
-    CapabilityDispatcher, DispatchError, RuntimeAdapterRequest, RuntimeAdapterResult,
-    RuntimeDispatchErrorKind, RuntimeDispatcher, RuntimeExecutor,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, CapabilityDispatcher, DispatchError,
+    ResolvedCapability, RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
+    ToolResolver,
 };
 use ironclaw_extensions::{
     CapabilityVisibility, ExtensionError, ExtensionLifecycleService, ExtensionManifest,
@@ -14,11 +15,11 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, HostPath, MountView, NetworkScheme,
-    NetworkTargetPattern, PermissionMode, ReservationStatus, ResourceEstimate,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialRequirementSource, RuntimeCredentialTarget, RuntimeKind, RuntimeLane,
-    SecretHandle, TenantId, UserId, VirtualPath,
+    ActivityId, Actor, Authorized, CapabilityId, CorrelationId, EffectKind, ExtensionId, HostPath,
+    Invocation, InvocationOrigin, MountView, NetworkScheme, NetworkTargetPattern, PermissionMode,
+    ProcessId, ProductKind, ReservationStatus, ResourceEstimate, ResourceReservationId,
+    ResourceScope, ResourceUsage, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
+    RuntimeKind, RuntimeLane, SecretHandle, TenantId, Timestamp, UserId, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     default_host_api_contract_registry, default_host_port_catalog,
@@ -85,33 +86,56 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
                 .set_max_output_bytes(10_000),
         )
         .unwrap();
-    let adapter = RecordingAdapter::new(RuntimeKind::Script, json!({"message":"script ok"}));
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        Arc::new(discovered),
-        Arc::new(fs),
+    let adapter = Arc::new(RecordingAdapter::new(
+        RuntimeKind::Script,
+        json!({"message":"script ok"}),
         Arc::clone(&governor),
-        adapter.clone(),
-    );
+    ));
+    // The registry-lane resolver's selection semantics are pinned in
+    // `ironclaw_host_runtime::services` tests; this e2e drives the dispatch
+    // flow through a binding scripted from the discovered descriptor.
+    let descriptor = discovered
+        .get_capability(&CapabilityId::new("script.echo").unwrap())
+        .unwrap();
+    let resolver: Arc<dyn ToolResolver> = Arc::new(SingleCapabilityResolver {
+        capability_id: descriptor.id.clone(),
+        resolved: ResolvedCapability {
+            provider: descriptor.provider.clone(),
+            runtime: descriptor.runtime,
+            adapter: Arc::clone(&adapter) as Arc<dyn BoundCapabilityAdapter>,
+        },
+    });
+    let dispatcher = RuntimeDispatcher::from_arcs(resolver, Arc::clone(&governor));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     let reservation_id = reservation.id;
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
 
     let result = dispatch_port
-        .dispatch_json(ironclaw_host_api::CapabilityDispatchRequest {
-            run_id: None,
-            capability_id: CapabilityId::new("script.echo").unwrap(),
-            scope: scope.clone(),
-            authenticated_actor_user_id: None,
-            estimate: estimate.clone(),
-            mounts: None,
-            resource_reservation: Some(reservation),
-            input: json!({"message":"hello"}),
-        })
+        .dispatch_json(Authorized::seal_for_test(
+            Invocation {
+                activity_id: ActivityId::new(),
+                capability: CapabilityId::new("script.echo").unwrap(),
+                input: json!({"message":"hello"}),
+                scope: scope.clone(),
+                actor: Actor::System,
+                origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+                estimate: estimate.clone(),
+                correlation_id: CorrelationId::new(),
+                process_id: Some(ProcessId::new()),
+                parent_process_id: None,
+            },
+            RuntimeLane::Process,
+            MountView::default(),
+            Some(reservation),
+            Timestamp::MAX_UTC,
+        ))
         .await
         .unwrap();
 
     assert_eq!(result.output, json!({"message":"script ok"}));
+    assert_eq!(result.provider, extension_id);
+    assert_eq!(result.runtime, RuntimeKind::Script);
     assert_eq!(result.receipt.id, reservation_id);
     assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
@@ -119,15 +143,13 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
 
     let requests = adapter.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].provider, extension_id);
     assert_eq!(
         requests[0].capability_id,
         CapabilityId::new("script.echo").unwrap()
     );
-    assert_eq!(requests[0].runtime, RuntimeKind::Script);
     assert_eq!(requests[0].scope, scope);
     assert_eq!(requests[0].estimate, estimate);
-    assert_eq!(requests[0].mounts, None);
+    assert_eq!(requests[0].mounts, Some(MountView::default()));
     assert_eq!(requests[0].resource_reservation_id, Some(reservation_id));
     assert_eq!(requests[0].input, json!({"message":"hello"}));
 }
@@ -138,13 +160,17 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     assert!(github_asset_root.join("wasm-src/Cargo.toml").is_file());
 
     let (_storage, fs) = mounted_github_package_fs();
-    let manifest = ExtensionManifest::parse_with_host_api_contracts(
-        &std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
+    // Parse through the single record entry point (the github asset is a
+    // manifest v3 document).
+    let record = ironclaw_extensions::ExtensionManifestRecord::from_toml(
+        std::fs::read_to_string(github_asset_root.join("manifest.toml")).unwrap(),
         ManifestSource::HostBundled,
         &default_host_port_catalog().unwrap(),
+        None,
         &default_host_api_contract_registry().unwrap(),
     )
     .unwrap();
+    let manifest = ExtensionManifest::try_from(record.manifest().clone()).unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/github").unwrap(),
@@ -244,7 +270,13 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
     for (capability_id, expected_effects, expected_permission, expects_github_api_access) in [
         (
             "github.get_repo",
-            vec![EffectKind::Network, EffectKind::UseSecret],
+            // The v3 normalizer adds the dispatch effect uniformly (v2
+            // declared it inconsistently across the github tools).
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+            ],
             PermissionMode::Allow,
             true,
         ),
@@ -292,7 +324,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
             assert_eq!(
                 credential.source,
                 RuntimeCredentialRequirementSource::ProductAuthAccount {
-                    provider: RuntimeCredentialAccountProviderId::new("github").unwrap(),
+                    provider: VendorId::new("github").unwrap(),
                     setup: Default::default(),
                 }
             );
@@ -341,14 +373,9 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         search.descriptor.parameters_schema["properties"]["query"]["type"],
         json!("string")
     );
-    assert_eq!(
-        search.output_schema["title"],
-        json!("GitHub raw API output")
-    );
-    assert_eq!(
-        search.output_schema["type"],
-        json!(["object", "array", "string", "null"])
-    );
+    // Manifest v3 declares no output schema; the hot catalog treats the
+    // output as unconstrained.
+    assert_eq!(search.output_schema, json!({}));
     assert!(
         search
             .prompt_doc
@@ -372,10 +399,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
         get_issue.descriptor.parameters_schema["properties"]["owner"]["not"]["pattern"],
         json!("\\.\\.")
     );
-    assert_eq!(
-        get_issue.output_schema["title"],
-        json!("GitHub raw API output")
-    );
+    assert_eq!(get_issue.output_schema, json!({}));
     assert!(
         get_issue
             .prompt_doc
@@ -401,10 +425,7 @@ async fn github_v2_package_discovers_and_publishes_issue_hot_catalog() {
             EffectKind::ExternalWrite,
         ]
     );
-    assert_eq!(
-        comment_issue.output_schema["title"],
-        json!("GitHub raw API output")
-    );
+    assert_eq!(comment_issue.output_schema, json!({}));
     assert!(comment_issue.prompt_doc.as_deref().is_some_and(|doc| {
         doc.contains("github.comment_issue")
             && doc.contains("external write")
@@ -425,11 +446,15 @@ async fn extension_v2_lifecycle_fails_closed_before_install_for_unknown_required
     .await
     .unwrap_err();
 
+    // The capability-provider contract preserves typed manifest errors
+    // (`HostApiSectionError::Manifest` unwraps back to the precise variant),
+    // so the unknown port surfaces as `UnknownHostPort`, still fail-closed
+    // before install.
     assert!(
         matches!(
             err,
-            ExtensionError::ManifestV2(ManifestV2Error::HostApiSectionRejected { ref reason, .. })
-                if reason.contains("unknown host port 'host.runtime.not_supported'")
+            ExtensionError::ManifestV2(ManifestV2Error::UnknownHostPort { ref port, .. })
+                if port.as_str() == "host.runtime.not_supported"
         ),
         "unexpected error: {err:?}"
     );
@@ -441,14 +466,16 @@ async fn extension_v2_lifecycle_fails_closed_before_install_for_unknown_required
 struct RecordingAdapter {
     runtime: RuntimeKind,
     output: Value,
+    governor: Arc<InMemoryResourceGovernor>,
     requests: Arc<Mutex<Vec<RecordedAdapterRequest>>>,
 }
 
 impl RecordingAdapter {
-    fn new(runtime: RuntimeKind, output: Value) -> Self {
+    fn new(runtime: RuntimeKind, output: Value, governor: Arc<InMemoryResourceGovernor>) -> Self {
         Self {
             runtime,
             output,
+            governor,
             requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -460,9 +487,7 @@ impl RecordingAdapter {
 
 #[derive(Debug, Clone, PartialEq)]
 struct RecordedAdapterRequest {
-    provider: ExtensionId,
     capability_id: CapabilityId,
-    runtime: RuntimeKind,
     scope: ResourceScope,
     estimate: ResourceEstimate,
     mounts: Option<MountView>,
@@ -470,21 +495,25 @@ struct RecordedAdapterRequest {
     input: Value,
 }
 
-#[async_trait]
-impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingAdapter {
-    fn supports_lane(&self, lane: RuntimeLane) -> bool {
-        RuntimeLane::from_runtime_kind(self.runtime) == Some(lane)
-    }
+struct SingleCapabilityResolver {
+    capability_id: CapabilityId,
+    resolved: ResolvedCapability,
+}
 
+impl ToolResolver for SingleCapabilityResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        (capability_id == &self.capability_id).then(|| self.resolved.clone())
+    }
+}
+
+#[async_trait]
+impl BoundCapabilityAdapter for RecordingAdapter {
     async fn dispatch_json(
         &self,
-        _lane: RuntimeLane,
-        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         self.requests.lock().unwrap().push(RecordedAdapterRequest {
-            provider: request.package.id.clone(),
             capability_id: request.capability_id.clone(),
-            runtime: request.descriptor.runtime,
             scope: request.scope.clone(),
             estimate: request.estimate.clone(),
             mounts: request.mounts.clone(),
@@ -504,14 +533,14 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for RecordingAdap
             )));
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
-            None => request
+            None => self
                 .governor
                 .reserve(request.scope, request.estimate)
                 .map_err(|_| {
                     dispatch_error_for_runtime(self.runtime, RuntimeDispatchErrorKind::Resource)
                 })?,
         };
-        let receipt = request
+        let receipt = self
             .governor
             .reconcile(reservation.id, usage.clone())
             .map_err(|_| {

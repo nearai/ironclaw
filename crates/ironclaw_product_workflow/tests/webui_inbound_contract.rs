@@ -298,7 +298,7 @@ fn missing_gate_ref_returns_stable_validation_error() {
         "client_action_id": "gate-1",
         "thread_id": "thread-alpha",
         "run_id": run_id(),
-        "resolution": "denied"
+        "resolution": "declined"
     }))
     .expect("request json");
 
@@ -556,39 +556,37 @@ fn decode_attachments_empty_is_ok() {
     );
 }
 
-/// Wire-stability: both legacy strings ("denied" and "cancelled") must still
-/// deserialize to `WebUiGateResolution::Declined` after the unification.
-/// This guards against accidental serde rename breakage.
+/// The decline vocabulary is exactly one wire string. The retired legacy
+/// strings ("denied", "cancelled") are rejected — the v2 browser has always
+/// been the only producer and it now sends "declined".
 #[test]
-fn legacy_denied_wire_string_deserializes_to_declined() {
+fn declined_is_the_only_decline_wire_string() {
     let request: WebUiResolveGateRequest = serde_json::from_value(json!({
         "client_action_id": "gate-1",
         "thread_id": "thread-alpha",
         "run_id": run_id(),
         "gate_ref": "gate-alpha",
-        "resolution": "denied"
+        "resolution": "declined"
     }))
-    .expect("denied request json");
+    .expect("declined request json");
     let command = request.into_command(caller()).expect("valid command");
     let WebUiInboundCommand::ResolveGate { resolution, .. } = command else {
         panic!("expected resolve-gate command");
     };
     assert_eq!(resolution, WebUiGateResolution::Declined);
-}
 
-#[test]
-fn legacy_cancelled_wire_string_deserializes_to_declined() {
-    let request: WebUiResolveGateRequest = serde_json::from_value(json!({
-        "client_action_id": "gate-1",
-        "thread_id": "thread-alpha",
-        "run_id": run_id(),
-        "gate_ref": "gate-alpha",
-        "resolution": "cancelled"
-    }))
-    .expect("cancelled request json");
-    let command = request.into_command(caller()).expect("valid command");
-    let WebUiInboundCommand::ResolveGate { resolution, .. } = command else {
-        panic!("expected resolve-gate command");
-    };
-    assert_eq!(resolution, WebUiGateResolution::Declined);
+    for retired in ["denied", "cancelled"] {
+        let request: WebUiResolveGateRequest = serde_json::from_value(json!({
+            "client_action_id": "gate-1",
+            "thread_id": "thread-alpha",
+            "run_id": run_id(),
+            "gate_ref": "gate-alpha",
+            "resolution": retired
+        }))
+        .expect("request json parses; resolution validates at into_command");
+        assert!(
+            request.into_command(caller()).is_err(),
+            "retired decline string {retired:?} must be rejected"
+        );
+    }
 }

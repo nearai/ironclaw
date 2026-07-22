@@ -17,8 +17,7 @@ use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
 use ironclaw_host_api::dispatch_test_support::TestDispatcher;
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeCapabilityAuthResumeRequest,
-    RuntimeCapabilityRequest, RuntimeFailureKind,
+    CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime, RuntimeFailureKind,
 };
 use ironclaw_processes::{
     ProcessError, ProcessManager, ProcessRecord, ProcessStart, ProcessStatus,
@@ -71,7 +70,7 @@ async fn default_runtime_uses_persistent_policy_as_dispatch_authority() {
     .with_persistent_approval_policies(policy_store);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -164,7 +163,7 @@ async fn default_runtime_uses_persistent_policy_as_auth_resume_authority() {
     // Auth-resume carries approval_request_id = None: there is no approval lease,
     // so the persistent-approval grant is the only authority for the re-dispatch.
     let outcome = runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+        .auth_resume_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -238,7 +237,7 @@ async fn default_runtime_uses_user_grantee_persistent_policy_as_dispatch_authori
     .with_persistent_approval_policies(policy_store);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -313,7 +312,7 @@ async fn default_runtime_uses_threadless_filesystem_policy_after_thread_change()
     .with_persistent_approval_policies(policy_store);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -376,7 +375,7 @@ async fn default_runtime_does_not_replay_tenant_grantee_persistent_policy() {
     .with_persistent_approval_policies(policy_store);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -459,7 +458,7 @@ async fn default_runtime_skips_unusable_persistent_policy_for_later_match() {
     .with_persistent_approval_policies(policy_store);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -502,7 +501,7 @@ async fn default_runtime_falls_back_when_persistent_policy_lookup_fails() {
     .with_persistent_approval_policies(policies);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -565,7 +564,7 @@ async fn default_runtime_reuses_persistent_policy_for_manifest_ask() {
     .with_persistent_approval_policies(policy_store);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -628,7 +627,7 @@ async fn default_runtime_skips_expired_persistent_policy() {
     .with_persistent_approval_policies(policy_store);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -699,7 +698,7 @@ async fn default_runtime_uses_persistent_policy_for_no_project_no_thread_scope()
     .with_persistent_approval_policies(policy_store);
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -767,7 +766,7 @@ async fn default_runtime_uses_persistent_policy_as_spawn_capability_authority() 
     .with_persistent_approval_policies(policy_store);
 
     let outcome = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context,
             capability_id(),
             ResourceEstimate::default(),
@@ -829,6 +828,7 @@ impl ProcessManager for RecordingProcessManager {
             mounts: start.mounts,
             estimated_resources: start.estimated_resources,
             resource_reservation_id: start.resource_reservation_id,
+            authorized_continuation: start.authorized_continuation,
             error_kind: None,
         })
     }
@@ -914,12 +914,13 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
 
 fn execution_context_without_grants() -> ExecutionContext {
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -927,7 +928,9 @@ fn execution_context_without_grants() -> ExecutionContext {
         CapabilitySet::default(),
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn scoped_approval_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -973,4 +976,15 @@ fn capability_id() -> CapabilityId {
 
 fn extension_id() -> ExtensionId {
     ExtensionId::new("echo").unwrap()
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

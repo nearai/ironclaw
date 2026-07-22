@@ -206,9 +206,11 @@ async def kill_reborn_server(proc) -> None:
         await stop_process(proc, sig=signal.SIGKILL, timeout=5)
 
 
-async def enable_reborn_global_auto_approve(base_url: str) -> None:
+async def enable_reborn_global_auto_approve(
+    base_url: str, *, token: str = REBORN_V2_AUTH_TOKEN
+) -> None:
     """Enable the Tools settings global auto-approve switch for this test user."""
-    async with httpx.AsyncClient(headers=reborn_bearer_headers()) as client:
+    async with httpx.AsyncClient(headers=reborn_bearer_headers(token)) as client:
         response = await client.post(
             f"{base_url}/api/webchat/v2/settings/tools",
             json={"enabled": True},
@@ -417,8 +419,8 @@ async def open_reborn_v2_page(page, base_url: str, path: str = "/") -> None:
     await page.wait_for_selector(SEL_V2["chat_composer"], timeout=15000)
 
 
-def reborn_bearer_headers() -> dict[str, str]:
-    return {"Authorization": f"Bearer {REBORN_V2_AUTH_TOKEN}"}
+def reborn_bearer_headers(token: str = REBORN_V2_AUTH_TOKEN) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
 
 
 def client_action_id() -> str:

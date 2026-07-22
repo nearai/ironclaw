@@ -1,129 +1,264 @@
-schema_version = "reborn.extension_manifest.v2"
+schema_version = "reborn.extension_manifest.v3"
 id = "slack"
 name = "Slack"
 version = "0.1.0"
-description = "Act as you in Slack via your own user token (xoxp-): search all your messages, list and read your DMs and group DMs, read channel history, and post as you."
+description = "Slack: DM the assistant via the Slack Events API channel (workspace bot), and act as you via your own user token (xoxp-): search all your messages, list and read your DMs and group DMs, read channel history, and post as you."
 trust = "first_party_requested"
 
 [runtime]
 kind = "wasm"
 module = "wasm/slack_user_tool.wasm"
 
-# Least-privilege scopes: the read-only tools request only read scopes; only
-# send_message requests chat:write. The slack_personal OAuth grant is the union
-# of these (a single account shared by all tools), so a read-only user still
-# grants chat:write while send_message is a default tool. Reducing the grant for
-# read-only users needs a write-opt-in / scope-upgrade re-consent flow — tracked
-# separately (see the follow-up issue referenced on SLACK_PERSONAL_OAUTH_SETUP_SCOPES).
+[admin_configuration]
+group_id = "extension.slack"
+display_name = "Slack deployment configuration"
+description = "Deployment credentials and routing configuration for the Slack channel."
+fields = [
+  { handle = "slack_bot_token", label = "Bot token", secret = true, required = true },
+  { handle = "slack_signing_secret", label = "Signing secret", secret = true, required = true },
+  { handle = "slack_team_id", label = "Workspace (team) ID", secret = false, required = true },
+  { handle = "slack_api_app_id", label = "App ID", secret = false, required = true },
+  { handle = "slack_installation_id", label = "Installation ID", secret = false, required = true },
+  { handle = "slack_bot_user_id", label = "Bot user ID", secret = false, required = true },
+  { handle = "slack_shared_subject_user_id", label = "Shared subject user ID (optional)", secret = false, required = false },
+  { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false, required = true },
+  { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true, required = true },
+  { handle = "slack_allowed_channels", label = "Allowed channels (JSON array of Slack channel IDs)", secret = false, required = false },
+  { handle = "slack_subject_routes", label = "Subject routes (JSON object: channel ID -> subject user ID)", secret = false, required = false },
+]
 
-[[capabilities]]
+# Least-privilege scopes: the read-only tools request only read scopes; only
+# send_message requests chat:write. The slack OAuth grant is the union of
+# these (the [auth.slack] recipe ceiling — a single account shared by all
+# tools), so a read-only user still grants chat:write while send_message is a
+# default tool. Reducing the grant for read-only users needs a write-opt-in /
+# scope-upgrade re-consent flow — tracked separately.
+
+# ---- tool surfaces ---------------------------------------------------------
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.search_messages"
 description = "Search across all messages you can see (your DMs, group DMs, and channels you belong to). This is indexed search: do not use it to answer the single newest message when a conversation is known; call slack.get_conversation_history instead for newest-first history. Matches carry the author's resolved user_display_name, and mentions inside match text are already resolved to @display-names (use display names in user-facing output); threaded hits carry thread_ts (follow up with slack.get_thread_replies). When total exceeds count, fetch more with page. Requires the search:read user scope. Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/search_messages.input.v1.json"
-output_schema_ref = "schemas/slack/raw_output.v1.json"
 prompt_doc_ref = "prompts/slack/search_messages.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.list_conversations"
 description = "List channels, private channels, DMs (im), and group DMs (mpim) visible to you — not only ones you belong to; is_member=true is the authoritative membership signal. Use this to discover DM conversation IDs. DM entries include the raw counterpart user id in their user field for subsequent tool calls or <@U…> mentions, plus the resolved user_display_name for user-facing text. Results page: pass the previous call's next_cursor as cursor until next_cursor is absent. Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/list_conversations.input.v1.json"
-output_schema_ref = "schemas/slack/list_conversations.output.v1.json"
 prompt_doc_ref = "prompts/slack/list_conversations.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.get_conversation_info"
 description = "Retrieve one Slack conversation by its exact conversation ID. Use this whenever the ID is already known instead of scanning slack.list_conversations. For a DM, the returned conversation.user is the raw counterpart user ID and authoritative mention target; conversation.user_display_name is the human-readable name. Raw Slack ids (U…/W…/C…/D…) are for subsequent tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/get_conversation_info.input.v1.json"
-output_schema_ref = "schemas/slack/get_conversation_info.output.v1.json"
 prompt_doc_ref = "prompts/slack/get_conversation_info.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.get_conversation_history"
 description = "Read message history from any channel or DM you can see, identified by its conversation ID. Results are newest-first, at most 999 per call (limit above 999 is clamped; Slack rejects 1000); when has_more is true, fetch older messages by calling again with latest set to the oldest returned ts. Messages include the author's raw user id plus user_display_name and humanized text whose mentions are already resolved to @display-names — use user_display_name and humanized text in user-facing output. Messages with is_current_user=true were written by the connected account (result-level current_user_id): they are the requesting user's own words — attribute them to the requester, not a third party. Thread replies are NOT included — a parent's reply_count > 0 means there is a thread; fetch it with slack.get_thread_replies. Raw Slack ids (U…/W…/C…/D…) are for subsequent tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/get_conversation_history.input.v1.json"
-output_schema_ref = "schemas/slack/get_conversation_history.output.v1.json"
 prompt_doc_ref = "prompts/slack/get_conversation_history.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.get_thread_replies"
 description = "Read the replies of one thread (channel + the parent message's thread_ts). Conversation history only shows thread parents (reply_count), never the replies — use this whenever a thread's content matters. Same output shape as history: resolved user_display_name per message, is_current_user marking, and current_user_id. Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/get_thread_replies.input.v1.json"
-output_schema_ref = "schemas/slack/get_thread_replies.output.v1.json"
 prompt_doc_ref = "prompts/slack/get_thread_replies.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.get_user_info"
 description = "Get information about a Slack user (name, real name); includes presence-relevant profile fields: status text/emoji, timezone, and title. History and DM-list outputs already carry resolved display names; use this for extra fields on a specific user, e.g. before answering whether someone is away or what time it is for them. Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/get_user_info.input.v1.json"
-output_schema_ref = "schemas/slack/get_user_info.output.v1.json"
 prompt_doc_ref = "prompts/slack/get_user_info.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.whoami"
 description = "Resolve who the connected Slack account is: the user id (and display name when resolvable) that search/history/DM results belong to. Call this before answering anything that depends on which messages are the requester's own. Takes no parameters. Raw Slack ids (U…/W…/C…/D…) are for tool calls only — never include one in a reply, not even in parentheses; refer to people and channels by name."
-effects = ["dispatch_capability", "network", "use_secret"]
-runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/whoami.input.v1.json"
-output_schema_ref = "schemas/slack/whoami.output.v1.json"
 prompt_doc_ref = "prompts/slack/whoami.md"
-required_host_ports = ["host.runtime.http_egress"]
 
-[[capabilities]]
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 id = "slack.send_message"
 description = "Send a message as you to a channel or DM; it appears to come from your account and requires the chat:write user scope. Never call this — or instruct a trigger to call it — for that run's own final reply when outbound delivery or delivery_target_id is configured; that result is delivered automatically to the configured outbound delivery target. Do not use this to deliver your reply or a routine/trigger result — it would arrive twice. Use it only when messaging someone else or posting somewhere is itself the requested task. To notify someone in the text, use the mention encoding <@U…> with their real user id (e.g. <@U0123ABCD>); a plain @name does not notify anyone. Never guess a user id or derive one from a channel or DM conversation id. When a DM conversation ID is known, first call slack.get_conversation_info with that exact ID and use the returned conversation's user field as the authoritative real user id. When only a name is known, call slack.list_conversations to discover and match the DM."
-effects = ["dispatch_capability", "network", "use_secret", "external_write"]
-runtime_credentials = [
-  { handle = "slack_user_token", source = { type = "product_auth_account", provider = "slack_personal", setup = { kind = "oauth", scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"] } }, provider_scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"], audience = { scheme = "https", host_pattern = "slack.com" }, target = { type = "header", name = "authorization", prefix = "Bearer " } },
-]
+effects = ["network", "use_secret", "external_write"]
 default_permission = "ask"
 visibility = "model"
 input_schema_ref = "schemas/slack/send_message.input.v1.json"
-output_schema_ref = "schemas/slack/raw_output.v1.json"
 prompt_doc_ref = "prompts/slack/send_message.md"
-required_host_ports = ["host.runtime.http_egress"]
+
+[[tools.credentials]]
+handle = "slack_user_token"
+vendor = "slack"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"]
+audience = { scheme = "https", host = "slack.com" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+# ---- channel surface (at most one per extension) ---------------------------
+
+[channel]
+id = "messages"
+display_name = "Slack messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+
+[channel.ingress]
+route_suffix = "events"
+method = "post"
+body_limit_bytes = 1048576
+
+[channel.ingress.verification]
+kind = "hmac_sha256"
+secret_handle = "slack_signing_secret"
+signature_header = "X-Slack-Signature"
+signature_prefix = "v0="
+signature_encoding = "hex"
+timestamp_header = "X-Slack-Request-Timestamp"
+max_age_seconds = 300
+signed_payload = [
+  { literal = "v0:" },
+  { header = "X-Slack-Request-Timestamp" },
+  { literal = ":" },
+  { body = true },
+]
+
+[channel.config]
+fields = [
+  { handle = "slack_bot_token", label = "Bot token", secret = true },
+  { handle = "slack_signing_secret", label = "Signing secret", secret = true },
+  # Connection-scoping values for the generic post-OAuth identity binding
+  # (handle-suffix convention: *_team_id / *_app_id map onto the proven
+  # identity claims).
+  { handle = "slack_team_id", label = "Workspace (team) ID", secret = false },
+  { handle = "slack_api_app_id", label = "App ID", secret = false },
+  # Operator installation identity + inbound-subject defaults (previously
+  # carried by the retired Slack setup surface).
+  { handle = "slack_installation_id", label = "Installation ID", secret = false },
+  { handle = "slack_bot_user_id", label = "Bot user ID", secret = false },
+  { handle = "slack_shared_subject_user_id", label = "Shared subject user ID (optional)", secret = false },
+  # Deployment OAuth client material for [auth.slack]: the recipe's
+  # client_credentials handles resolve through this channel configuration.
+  { handle = "slack_oauth_client_id", label = "OAuth client ID", secret = false },
+  { handle = "slack_oauth_client_secret", label = "OAuth client secret", secret = true },
+  # Channel admission + routing, JSON-valued:
+  #  - slack_allowed_channels: JSON array of Slack channel IDs, e.g.
+  #    ["C0123ALPHA", "C0456BETA"].
+  #  - slack_subject_routes: JSON object mapping Slack channel ID to the
+  #    subject user id turns in that channel run as, e.g.
+  #    {"C0123ALPHA": "subject-user-1"}.
+  { handle = "slack_allowed_channels", label = "Allowed channels (JSON array of Slack channel IDs)", secret = false },
+  { handle = "slack_subject_routes", label = "Subject routes (JSON object: channel ID -> subject user ID)", secret = false },
+]
+
+[[channel.egress]]
+scheme = "https"
+host = "slack.com"
+methods = ["post"]
+credential_handle = "slack_bot_token"
+
+[channel.presentation]
+supports_markdown = true
+supports_threads = true
+max_message_chars = 40000
+
+# ---- auth surface: recipe data, zero extension code ------------------------
+
+[auth.slack]
+method = "oauth2_code"
+display_name = "Slack account"
+authorization_endpoint = "https://slack.com/oauth/v2/authorize"
+token_endpoint = "https://slack.com/api/oauth.v2.access"
+scope_param = "user_scope"
+pkce = "s256"
+scopes = ["search:read", "channels:history", "groups:history", "im:history", "mpim:history", "channels:read", "groups:read", "im:read", "mpim:read", "users:read", "chat:write"]
+authorize_params_from_config = { team = "slack_team_id" }
+client_credentials = { client_id_handle = "slack_oauth_client_id", client_secret_handle = "slack_oauth_client_secret" }
+
+[auth.slack.token_response]
+access_token = "/authed_user/access_token"
+scope = { path = "/authed_user/scope", missing = "fallback_to_requested" }
+
+[auth.slack.identity]
+account_id = "/authed_user/id"
+team_id = "/team/id"
+enterprise_id = "/enterprise/id"
+app_id = "/app_id"

@@ -12,15 +12,15 @@ pub type TurnTimestamp = DateTime<Utc>;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateResumeDisposition {
-    /// The user explicitly declined the gate (auth OR approval). The executor
-    /// surfaces this to the model as a non-retryable authorization failure rather
-    /// than re-dispatching the gate.
+    /// The gate ended without the requirement being satisfied. The executor
+    /// surfaces this to the model as a non-retryable authorization failure
+    /// rather than re-dispatching the gate.
     ///
-    /// New variants (e.g. `Deferred`) may be added here as needs arise.
+    /// Auth keeps the precise terminal cause in its durable `AuthResolved`
+    /// outcome. The turn layer deliberately collapses provider denial, expiry,
+    /// and failure onto this already-deployed wire value so persisted turn state
+    /// remains safe to read after rollback.
     Denied,
-    /// The auth flow failed or expired. The executor surfaces this as a
-    /// recoverable authentication error instead of retrying the same gate.
-    Error,
 }
 
 impl GateResumeDisposition {
@@ -28,7 +28,6 @@ impl GateResumeDisposition {
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Denied => "denied",
-            Self::Error => "error",
         }
     }
 }
@@ -227,13 +226,11 @@ mod tests {
     }
 
     #[test]
-    fn gate_resume_disposition_error_round_trips() {
-        let disposition = GateResumeDisposition::Error;
-        let json = serde_json::to_string(&disposition).expect("serialize");
-        assert_eq!(disposition.as_str(), "error");
-        assert_eq!(json, "\"error\"");
-        let decoded: GateResumeDisposition = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(disposition, decoded);
+    fn gate_resume_disposition_rejects_new_persisted_variants() {
+        assert!(
+            serde_json::from_str::<GateResumeDisposition>("\"error\"").is_err(),
+            "terminal auth failures must reuse the deployed denied wire value so rollback readers remain compatible"
+        );
     }
 
     #[test]

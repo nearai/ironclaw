@@ -9,8 +9,8 @@ use ironclaw_auth::{
     select_latest_duplicate_user_reusable_account,
 };
 use ironclaw_host_api::{
-    CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
+    CredentialStageError, ExtensionId, ResourceScope, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, VendorId,
 };
 use ironclaw_host_runtime::{
     RuntimeCredentialAccessSecret, RuntimeCredentialAccountRequest,
@@ -574,7 +574,7 @@ impl RuntimeCredentialAccountResolver for ProductAuthRuntimeCredentialResolver {
 
 fn runtime_credential_account_selection_request(
     scope: &ResourceScope,
-    provider: &RuntimeCredentialAccountProviderId,
+    provider: &VendorId,
     setup: RuntimeCredentialAccountSetup,
     provider_scopes: &[String],
     requester_extension: &ExtensionId,

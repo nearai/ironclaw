@@ -131,10 +131,13 @@ the static redirect URI aligned with the provider exchange client.
 product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It looks up
 the exact scoped run and gate carried by `AuthResolved`, then uses the persisted
 run actor for the canonical `TurnCoordinator` transition. `Authorized` resumes
-normally, `ProviderDenied` resumes as denied, `Expired`/`Failed` resume as an
-error, and `UserAborted` cancels that exact blocked-auth run. If the run has
-already left that gate, delivery is an idempotent no-op. The dispatcher does not
-define auth state, credential vocabulary, or generic gate policy. Setup-only,
+normally; `ProviderDenied`, `Expired`, and `Failed` all use the existing
+terminal `Denied` turn disposition so the parked capability cannot re-block and
+older rollback readers can still deserialize persisted turn state. Their exact
+causes remain distinct in the durable `AuthResolved` outcome. `UserAborted`
+cancels that exact blocked-auth run. If the run has already left that gate,
+delivery is an idempotent no-op. The dispatcher does not define auth state,
+credential vocabulary, or generic gate policy. Setup-only,
 lifecycle-activation, and product-action continuations remain explicit cases
 for their owning resolution dispatchers. The provider callback route itself
 never owns those side effects.
@@ -282,11 +285,6 @@ Rules:
   directly activate extensions, resume turns, replay messages, or dispatch work.
 - Repeating a terminal operation returns the durable winning outcome. Competing
   terminal outcomes never overwrite one another.
-- `CredentialSecretFingerprint` values loaded from durable state are exactly 64
-  lowercase hexadecimal characters. Compensation compares that fingerprint
-  before revocation: `compensated` removes only the exact failed generation,
-  `superseded` preserves newer secret material, and `already_absent` is an
-  idempotent converged success. Retryable backend failures retain the journal.
 
 ---
 

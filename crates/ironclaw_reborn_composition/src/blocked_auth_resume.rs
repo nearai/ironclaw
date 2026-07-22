@@ -4,20 +4,19 @@
 //! An OAuth flow's continuation references at most one run
 //! (`TurnGateResume`), or none at all (`SetupOnly`, when the connect started
 //! from the Settings/extensions surface). But the durable outcome of a
-//! completed flow — the credential account plus, for Slack, the identity
-//! binding — satisfies *every* run of that caller currently `BlockedAuth` on
+//! completed flow — the credential account plus any provider identity binding
+//! — satisfies *every* run of that caller currently `BlockedAuth` on
 //! a requirement for the same provider. The retired pairing-code redeem path
 //! had exactly this fan-out (the deleted `channel_connection_resume`
 //! machinery: pair once, all waiting chats continue); this decorator restores
-//! that behavior for OAuth completions, provider-keyed so Google and Slack
-//! personal both benefit.
+//! that behavior for OAuth completions, keyed only by the provider contract.
 //!
 //! Ordering matters: the decorator runs at continuation-dispatch time, which
 //! is strictly after `complete_oauth_callback` committed the credential
 //! account, so resumed runs re-running `extension_activate` find their
 //! requirements satisfied. Fan-out is idempotent per (flow, run), and an
-//! incomplete sweep returns an error so the durable continuation remains
-//! undispatched and can be retried.
+//! incomplete sweep returns an error so the durable resolution remains
+//! undelivered and can be retried.
 //!
 //! Scope safety mirrors the deleted read model: the scan is bounded to the
 //! completed flow's `tenant_id` + explicit owner `user_id`, so this can never
@@ -37,8 +36,8 @@ use ironclaw_turns::{
 };
 use uuid::Uuid;
 
+use crate::product_auth::api::auth::RebornAuthResolutionDispatcher;
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
-use ironclaw_channel_host::auth_continuation::RebornAuthResolutionDispatcher;
 
 /// Source of the durable turn-state snapshot the fan-out scans. Split out so
 /// tests can hand-build snapshots without a filesystem-backed store.
@@ -66,7 +65,7 @@ where
     }
 }
 
-/// Decorates the single-run continuation dispatcher with the caller-wide
+/// Decorates the single-run resolution dispatcher with the caller-wide
 /// blocked-run fan-out described in the module docs.
 pub(crate) struct BlockedAuthResumeFanout {
     inner: Arc<dyn RebornAuthResolutionDispatcher>,
@@ -258,9 +257,8 @@ mod tests {
         CredentialAccountId, TurnRunRef,
     };
     use ironclaw_host_api::{
-        ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountProviderId,
-        RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, TenantId, ThreadId,
-        UserId,
+        ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountSetup,
+        RuntimeCredentialAuthRequirement, TenantId, ThreadId, UserId, VendorId,
     };
     use ironclaw_turns::{
         AcceptedMessageRef, AgentLoopDriverDescriptor, CancelRunRequest, CancelRunResponse,
@@ -361,21 +359,20 @@ mod tests {
     const TENANT: &str = "tenant-fanout";
     const OWNER: &str = "user-alice";
 
-    fn slack_requirement() -> RuntimeCredentialAuthRequirement {
+    fn acme_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("slack_personal")
-                .expect("provider id"),
+            provider: VendorId::new("acme-oauth").expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: ExtensionId::new("slack").expect("extension id"),
+            requester_extension: ExtensionId::new("acme-chat").expect("extension id"),
             provider_scopes: Vec::new(),
         }
     }
 
-    fn google_requirement() -> RuntimeCredentialAuthRequirement {
+    fn other_requirement() -> RuntimeCredentialAuthRequirement {
         RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("google").expect("provider id"),
+            provider: VendorId::new("other-oauth").expect("provider id"),
             setup: RuntimeCredentialAccountSetup::OAuth { scopes: Vec::new() },
-            requester_extension: ExtensionId::new("gmail").expect("extension id"),
+            requester_extension: ExtensionId::new("other-extension").expect("extension id"),
             provider_scopes: Vec::new(),
         }
     }
@@ -545,15 +542,15 @@ mod tests {
 
     #[tokio::test]
     async fn turn_gate_completion_fans_out_to_other_provider_blocked_runs_only() {
-        let primary = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
-        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
+        let primary = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
+        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
         let other_provider =
-            blocked_run(OWNER, TurnRunId::new(), TurnId::new(), google_requirement());
+            blocked_run(OWNER, TurnRunId::new(), TurnId::new(), other_requirement());
         let foreign_user = blocked_run(
             "user-mallory",
             TurnRunId::new(),
             TurnId::new(),
-            slack_requirement(),
+            acme_requirement(),
         );
         let snapshot = TurnPersistenceSnapshot {
             turns: vec![
@@ -574,7 +571,7 @@ mod tests {
 
         fanout
             .dispatch_auth_resolved(event(
-                "slack_personal",
+                "acme-oauth",
                 AuthContinuationRef::TurnGateResume {
                     turn_run_ref: TurnRunRef::new(primary.run_id.to_string())
                         .expect("turn run ref"),
@@ -589,7 +586,7 @@ mod tests {
         assert_eq!(
             resumed.len(),
             1,
-            "exactly the caller's other slack-blocked run resumes"
+            "exactly the caller's other same-provider blocked run resumes"
         );
         assert_eq!(resumed[0].run_id, waiting.run_id);
         assert_eq!(
@@ -600,8 +597,8 @@ mod tests {
 
     #[tokio::test]
     async fn setup_only_completion_resumes_every_provider_blocked_run() {
-        let first = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
-        let second = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
+        let first = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
+        let second = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
         let snapshot = TurnPersistenceSnapshot {
             turns: vec![parent_turn(OWNER, &first), parent_turn(OWNER, &second)],
             runs: vec![first.clone(), second.clone()],
@@ -610,7 +607,7 @@ mod tests {
         let (fanout, coordinator, _inner) = fanout_with(snapshot, false);
 
         fanout
-            .dispatch_auth_resolved(event("slack_personal", AuthContinuationRef::SetupOnly))
+            .dispatch_auth_resolved(event("acme-oauth", AuthContinuationRef::SetupOnly))
             .await
             .expect("dispatch succeeds");
 
@@ -627,7 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_oauth_provider_connection_resumes_matching_blocked_runs_without_fake_auth_ids() {
-        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
+        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
         let snapshot = TurnPersistenceSnapshot {
             turns: vec![parent_turn(OWNER, &waiting)],
             runs: vec![waiting.clone()],
@@ -647,7 +644,7 @@ mod tests {
                     thread_id: None,
                     session_id: None,
                 },
-                AuthProviderId::new("slack_personal").expect("provider"),
+                AuthProviderId::new("acme-oauth").expect("provider"),
             )
             .await
             .expect("dispatch succeeds");
@@ -663,7 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn fan_out_failures_keep_the_continuation_retryable() {
-        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), slack_requirement());
+        let waiting = blocked_run(OWNER, TurnRunId::new(), TurnId::new(), acme_requirement());
         let snapshot = TurnPersistenceSnapshot {
             turns: vec![parent_turn(OWNER, &waiting)],
             runs: vec![waiting],
@@ -672,7 +669,7 @@ mod tests {
         let (fanout, coordinator, inner) = fanout_with(snapshot, true);
 
         let error = fanout
-            .dispatch_auth_resolved(event("slack_personal", AuthContinuationRef::SetupOnly))
+            .dispatch_auth_resolved(event("acme-oauth", AuthContinuationRef::SetupOnly))
             .await
             .expect_err("resume failures must prevent dispatched acknowledgement");
 

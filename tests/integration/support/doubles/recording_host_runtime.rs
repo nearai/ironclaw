@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use ironclaw_host_api::{ApprovalRequestId, ResourceScope};
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeCapabilityResumeRequest, RuntimeStatusRequest,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalResume, RuntimeCapabilityOutcome,
+    RuntimeInvocation, RuntimeStatusRequest,
     VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface,
 };
@@ -36,9 +36,9 @@ impl RecordingHostRuntime {
 impl HostRuntime for RecordingHostRuntime {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let scope = request.context.resource_scope.clone();
+        let scope = request.0.resource_scope.clone();
         let outcome = self.inner.invoke_capability(request).await?;
         if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
             self.pending_approval_scopes
@@ -51,9 +51,9 @@ impl HostRuntime for RecordingHostRuntime {
 
     async fn spawn_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let scope = request.context.resource_scope.clone();
+        let scope = request.0.resource_scope.clone();
         let outcome = self.inner.spawn_capability(request).await?;
         if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
             self.pending_approval_scopes
@@ -66,7 +66,7 @@ impl HostRuntime for RecordingHostRuntime {
 
     async fn resume_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.inner.resume_capability(request).await
     }
@@ -79,9 +79,9 @@ impl HostRuntime for RecordingHostRuntime {
     /// recording because `auth_resume_json` can itself raise an approval gate.
     async fn auth_resume_capability(
         &self,
-        request: ironclaw_host_runtime::RuntimeCapabilityAuthResumeRequest,
+        request: ironclaw_host_runtime::RuntimeAuthResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let scope = request.context.resource_scope.clone();
+        let scope = request.0.resource_scope.clone();
         let outcome = self.inner.auth_resume_capability(request).await?;
         if let RuntimeCapabilityOutcome::ApprovalRequired(gate) = &outcome {
             self.pending_approval_scopes
@@ -94,7 +94,7 @@ impl HostRuntime for RecordingHostRuntime {
 
     async fn resume_spawn_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.inner.resume_spawn_capability(request).await
     }

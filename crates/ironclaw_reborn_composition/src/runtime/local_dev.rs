@@ -1217,10 +1217,10 @@ pub(crate) fn assert_recoverable_failure(
     expected: ironclaw_host_api::FailureKind,
 ) {
     match resolution {
-        ironclaw_host_api::Resolution::Done(outcome) => assert_eq!(
-            outcome.verdict,
-            ironclaw_host_api::ToolVerdict::recoverable_failure(expected)
-        ),
+        ironclaw_host_api::Resolution::Done(outcome) => {
+            let expected_verdict = ironclaw_host_api::ToolVerdict::recoverable_failure(expected);
+            assert_eq!(outcome.verdict, expected_verdict); // safety: test-only assertion helper
+        }
         other => panic!("expected Resolution::Done recoverable failure, got {other:?}"),
     }
 }

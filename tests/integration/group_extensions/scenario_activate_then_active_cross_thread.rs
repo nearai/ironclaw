@@ -38,6 +38,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     installer
         .assert_tool_result_contains("\"installed\":true")
         .await?;
+    installer
+        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .await?;
 
     // ── Thread B: activator (DIFFERENT conversation, SAME shared store) ──────
     let activator = g
@@ -59,6 +62,9 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // outcome cannot satisfy this.
     activator
         .assert_tool_result_contains("\"activated\":true")
+        .await?;
+    activator
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
         .await?;
     // `web-access.search` coming online is the observable proof that activation
     // published the tool surface (mere install does NOT publish capabilities).
@@ -87,6 +93,12 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     // Assert the VALUE so a still-`installed` phase cannot satisfy this.
     viewer
         .assert_tool_result_contains(r#""installation_phase":"active""#)
+        .await?;
+    viewer
+        .assert_model_message_content_contains(r#"\"id\":\"web-access\""#)
+        .await?;
+    viewer
+        .assert_model_message_content_contains(r#"\"installation_phase\":\"active\""#)
         .await?;
 
     // Discriminating guard: a no-op activate would still surface "installed"

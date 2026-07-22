@@ -123,8 +123,7 @@ fn map_auth_error(error: crate::RebornAuthProductError) -> RebornServicesError {
             false,
         ),
         AuthErrorCode::AccountSelectionRequired
-        | AuthErrorCode::ProviderIdentityAlreadyConnected
-        | AuthErrorCode::ConnectionConflict => services_error(
+        | AuthErrorCode::ProviderIdentityAlreadyConnected => services_error(
             RebornServicesErrorCode::Conflict,
             RebornServicesErrorKind::BlockedAuthentication,
             409,

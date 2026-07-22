@@ -2,7 +2,6 @@
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { gatewayStatus } from "../../../lib/api";
-import { listConnectableChannels } from "../../../lib/channel-connect";
 import {
   completionMatchesFlow,
   failureMatchesFlow,
@@ -12,7 +11,7 @@ import {
   subscribeProductAuthOAuthCompletion,
 } from "../../../lib/product-auth-oauth-events";
 import { useT } from "../../../lib/i18n";
-import { isChannelExtensionKind } from "../lib/extensions-schema";
+import { hasChannelSurface } from "../lib/extensions-schema";
 import {
   fetchExtensions,
   fetchExtensionRegistry,
@@ -30,16 +29,21 @@ import {
 
 const OAUTH_SETUP_REFRESH_MS = 2000;
 const OAUTH_SETUP_TIMEOUT_MS = 10 * 60 * 1000;
+const OAUTH_STATUS_ERROR_KEYS = Object.freeze({
+  failed: "extensions.oauthFailed",
+  canceled: "extensions.oauthCanceled",
+  expired: "extensions.oauthExpired",
+});
 
 // OAuth callback constants, HTTPS-auth-URL/popup helpers, and completion
 // parsing/matching are the shared product-auth OAuth event contract — see
 // `lib/product-auth-oauth-events.ts`. This hook keeps only its setup-watcher
 // state machine below.
 
-function authPopupFailureMessage(reason) {
+function authPopupFailureMessage(reason, t) {
   return reason === "popup_blocked"
-    ? "Authorization popup was blocked."
-    : "Authorization URL must use HTTPS.";
+    ? t("authGate.popupBlocked")
+    : t("extensions.oauthInvalidAuthorizationUrl");
 }
 
 function oauthResponseFlowId(response) {
@@ -66,8 +70,8 @@ function extensionListItemIsConfigured(extension) {
   const state =
     extension.onboarding_state ||
     extension.onboardingState ||
-    extension.activation_status ||
-    extension.activationStatus ||
+    extension.installation_state ||
+    extension.installationState ||
     (extension.active ? "active" : null);
   return (state === "active" || state === "ready") && extension.needs_setup !== true;
 }
@@ -118,12 +122,6 @@ export function useExtensions() {
     refetchOnMount: "always",
   });
 
-  const connectableChannelsQuery = useQuery({
-    queryKey: ["connectable-channels"],
-    queryFn: listConnectableChannels,
-    refetchOnMount: "always",
-  });
-
   const refetch = React.useCallback(
     () => Promise.all([extensionsQuery.refetch(), registryQuery.refetch()]),
     [extensionsQuery.refetch, registryQuery.refetch]
@@ -133,7 +131,6 @@ export function useExtensions() {
     queryClient.invalidateQueries({ queryKey: ["extensions"] });
     queryClient.invalidateQueries({ queryKey: ["extension-registry"] });
     queryClient.invalidateQueries({ queryKey: ["gateway-status-extensions"] });
-    queryClient.invalidateQueries({ queryKey: ["connectable-channels"] });
   }, [queryClient]);
 
   const [actionResult, setActionResult] = React.useState(null);
@@ -142,11 +139,11 @@ export function useExtensions() {
 
   const installMutation = useMutation({
     mutationFn: ({ packageRef }) => installExtension(packageRef),
-    onSuccess: (res, { displayName, kind, configureAfterInstall, onNeedsSetup, packageRef }) => {
+    onSuccess: (res, { displayName, surfaces, configureAfterInstall, onNeedsSetup, packageRef }) => {
       if (res.success) {
-        const message = isChannelExtensionKind(kind)
+        const message = hasChannelSurface({ surfaces })
           ? t("extensions.channelInstalledSetup", {
-              name: displayName || t("extensions.kind.channel"),
+              name: displayName || t("extensions.defaultName"),
             })
           : res.message ||
             res.instructions ||
@@ -164,7 +161,7 @@ export function useExtensions() {
         if (installAuthPopup && !installAuthPopup.ok) {
           setActionResult({
             type: "error",
-            message: authPopupFailureMessage(installAuthPopup.reason),
+            message: authPopupFailureMessage(installAuthPopup.reason, t),
           });
         } else if (
           !res.auth_url &&
@@ -174,14 +171,15 @@ export function useExtensions() {
           onNeedsSetup({
             packageRef,
             displayName,
-            // Carry `kind` so the modal can route a connectable channel to the
-            // Connect (pairing) panel — without it the modal can't tell this is
-            // a channel and falls through to "No configuration required".
-            kind,
+            // Carry `surfaces` so the modal can route a channel-surface
+            // extension to the Connect panel — without it the modal can't
+            // tell this is a channel and falls through to "No configuration
+            // required".
+            surfaces,
             // Freshly installed: the caller has not connected/paired yet.
             authenticated: false,
             active: false,
-            activationStatus: "setup_required",
+            installationState: "installed",
             onboardingState: "setup_required",
           });
         }
@@ -214,7 +212,7 @@ export function useExtensions() {
           if (!opened.ok) {
             setActionResult({
               type: "error",
-              message: authPopupFailureMessage(opened.reason),
+              message: authPopupFailureMessage(opened.reason, t),
             });
           }
         }
@@ -225,7 +223,7 @@ export function useExtensions() {
         } else {
           setActionResult({
             type: "error",
-            message: authPopupFailureMessage(opened.reason),
+            message: authPopupFailureMessage(opened.reason, t),
           });
         }
       } else if (res.awaiting_token) {
@@ -263,7 +261,6 @@ export function useExtensions() {
   const status = statusQuery.data || {};
   const extensions = extensionsQuery.data?.extensions || [];
   const registry = registryQuery.data?.entries || [];
-  const connectableChannels = connectableChannelsQuery.data?.channels || [];
   const extensionById = new Map(
     extensions
       .map((extension) => [packageId(extension), extension])
@@ -294,19 +291,14 @@ export function useExtensions() {
       })),
   ].sort(catalogSort);
 
-  const isChannel = (entry) => isChannelExtensionKind(entry.kind);
-  const channels = extensions.filter(isChannel);
-  const mcpServers = extensions.filter((e) => e.kind === "mcp_server");
-  const tools = extensions.filter((e) => !isChannel(e) && e.kind !== "mcp_server");
+  // Views over surfaces (product taxonomy). Runtime never groups: an
+  // MCP-backed tool extension sits beside a wasm one, with its runtime shown
+  // as a badge on the card.
+  const channels = extensions.filter(hasChannelSurface);
+  const tools = extensions.filter((e) => !hasChannelSurface(e));
 
-  const channelRegistry = registry.filter((e) => isChannel(e) && !e.installed);
-  const mcpRegistry = registry.filter((e) => e.kind === "mcp_server" && !e.installed);
-  const toolRegistry = registry.filter(
-    (e) =>
-      e.kind !== "mcp_server" &&
-      !isChannel(e) &&
-      !e.installed
-  );
+  const channelRegistry = registry.filter((e) => hasChannelSurface(e) && !e.installed);
+  const toolRegistry = registry.filter((e) => !hasChannelSurface(e) && !e.installed);
 
   const importMutation = useMutation({
     mutationFn: ({ file }) => importExtension(file),
@@ -333,14 +325,11 @@ export function useExtensions() {
     status,
     extensions,
     channels,
-    mcpServers,
     tools,
     channelRegistry,
-    mcpRegistry,
     toolRegistry,
     registry,
     catalogEntries,
-    connectableChannels,
     isExtensionsLoading: extensionsQuery.isLoading,
     isRegistryLoading: registryQuery.isLoading,
     isLoading,
@@ -379,6 +368,7 @@ export function useExtensionSetup(packageRef) {
 }
 
 export function useSetupSubmit(packageRef, onSuccess) {
+  const t = useT();
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
 
@@ -386,7 +376,7 @@ export function useSetupSubmit(packageRef, onSuccess) {
     mutationFn: ({ secrets, fields }) =>
       submitExtensionSetup(packageRef, secrets, fields).then((res) => {
         if (res.success === false) {
-          throw new Error(res.message || "Setup failed");
+          throw new Error(res.message || t("extensions.setupFailed"));
         }
         return res;
       }),
@@ -399,6 +389,7 @@ export function useSetupSubmit(packageRef, onSuccess) {
 }
 
 export function useOauthSetup(packageRef, { onConfigured } = {}) {
+  const t = useT();
   const queryClient = useQueryClient();
   const packageKey = packageRef?.id || packageRef;
   const watcherRef = React.useRef(null);
@@ -515,7 +506,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
             // status endpoint remains unavailable.
             return false;
           }
-          setAuthError("Authorization failed. Try connecting again.");
+          setAuthError(t("extensions.oauthFailed"));
           stopWatcher();
           refreshSetupState();
           return true;
@@ -541,14 +532,10 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
             const status = result?.status;
             if (status === "completed") {
               complete();
-            } else if (["failed", "canceled", "expired"].includes(status)) {
-              setAuthError(
-                status === "expired"
-                  ? "Authorization expired. Try connecting again."
-                  : status === "canceled"
-                    ? "Authorization was canceled. Try connecting again."
-                    : "Authorization failed. Try connecting again.",
-              );
+            } else {
+              const errorKey = OAUTH_STATUS_ERROR_KEYS[status];
+              if (typeof errorKey !== "string") return;
+              setAuthError(t(errorKey));
               stopWatcher();
               refreshSetupState();
             }
@@ -588,7 +575,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
           if (timedOut) {
             // An abandoned reconnect otherwise ends after 10 minutes with no
             // signal at all — the button was disabled the whole time.
-            setAuthError("Authorization timed out. Try connecting again.");
+            setAuthError(t("extensions.oauthTimedOut"));
           }
           stopWatcher();
           refreshSetupState();
@@ -597,7 +584,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       watcherRef.current = cleanup;
       handleCompletion(readLatestProductAuthOAuthCompletion(browserWindow));
     },
-    [clearWatcher, onConfigured, refreshSetupState, setAuthError, setupIsConfigured]
+    [clearWatcher, onConfigured, refreshSetupState, setAuthError, setupIsConfigured, t]
   );
 
   React.useEffect(() => clearWatcher, [clearWatcher]);
@@ -611,10 +598,10 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
       clearWatcher();
       return startExtensionOauth(packageRef, secret).then((res) => {
         if (res.success === false) {
-          throw new Error(res.message || "OAuth setup failed");
+          throw new Error(res.message || t("extensions.oauthSetupFailed"));
         }
         if (res.authorization_url && !isHttpsAuthUrl(res.authorization_url)) {
-          throw new Error("Authorization URL must use HTTPS.");
+          throw new Error(t("extensions.oauthInvalidAuthorizationUrl"));
         }
         return { res, popup, generation };
       });
@@ -634,7 +621,7 @@ export function useOauthSetup(packageRef, { onConfigured } = {}) {
         const opened = openAuthPopup(res.authorization_url, popup);
         authPopup = opened.popup;
         if (!opened.ok) {
-          throw new Error(authPopupFailureMessage(opened.reason));
+          throw new Error(authPopupFailureMessage(opened.reason, t));
         }
       } else if (popup && !popup.closed) {
         popup.close();

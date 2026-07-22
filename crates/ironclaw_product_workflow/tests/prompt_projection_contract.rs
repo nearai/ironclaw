@@ -3,12 +3,13 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use ironclaw_auth::{AuthProductError, AuthProviderId, OAuthAuthorizationUrl};
 use ironclaw_host_api::{
-    ExtensionId, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, TenantId, ThreadId, UserId,
+    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, TenantId,
+    ThreadId, UserId, VendorId,
 };
-use ironclaw_product_adapters::{AuthPromptChallengeKind, AuthPromptView};
+use ironclaw_product_adapters::AuthPromptChallengeKind;
 use ironclaw_product_workflow::{
-    AuthChallengeProvider, AuthChallengeView, approval_prompt_lookup, enrich_auth_prompt_view,
+    AuthChallengeProvider, AuthChallengeView, BlockedAuthPromptRequest, approval_prompt_lookup,
+    auth_prompt_view_for_blocked_auth,
 };
 use ironclaw_turns::{GateRef, TurnRunId, TurnScope};
 
@@ -72,7 +73,7 @@ async fn auth_prompt_enrichment_accepts_the_owned_view_without_a_crossing_reques
     let scope = turn_scope();
     let owner_user_id = UserId::new("owner-prompt").expect("owner");
     let credential_requirements = vec![RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("github").expect("provider"),
+        provider: VendorId::new("github").expect("provider"),
         setup: RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["repo:read".to_string()],
         },
@@ -82,25 +83,16 @@ async fn auth_prompt_enrichment_accepts_the_owned_view_without_a_crossing_reques
     let challenge = OAuthChallenge {
         captured: Mutex::new(None),
     };
-    let view = AuthPromptView {
-        turn_run_id: run_id,
-        auth_request_ref: "auth:github".to_string(),
-        invocation_id: None,
-        headline: "Authentication required".to_string(),
-        body: "Connect GitHub".to_string(),
-        challenge_kind: None,
-        provider: None,
-        account_label: None,
-        authorization_url: None,
-        expires_at: None,
-        connection: None,
-    };
-
-    let enriched = enrich_auth_prompt_view(
-        view,
-        &owner_user_id,
-        &scope,
-        &credential_requirements,
+    let enriched = auth_prompt_view_for_blocked_auth(
+        BlockedAuthPromptRequest {
+            fallback_owner_user_id: &owner_user_id,
+            scope: &scope,
+            run_id,
+            gate_ref: "auth:github",
+            invocation_id: None,
+            body: "Connect GitHub".to_string(),
+            credential_requirements: &credential_requirements,
+        },
         Some(&challenge),
     )
     .await

@@ -9,3 +9,10 @@ layer = "app"
 
 [dev-dependencies]
 serde_json = "1"
+tempfile = "3"
+# Dev-only: the origin→gate matrix ratchet imports the reviewed Ungated allowlist
+# from its owner (so the pin checks the REAL constant, not a copy) and parses the
+# hand-authored first-party extension manifest assets. Not a production edge —
+# `ironclaw_architecture` ships no runtime code.
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+toml = "1.1"

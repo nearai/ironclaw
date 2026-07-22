@@ -5,9 +5,9 @@
 //! [`InMemoryAuthProductServices`](crate::InMemoryAuthProductServices) fake
 //! (what most consumer tests run against) and the durable
 //! `FilesystemAuthProductServices` in `ironclaw_reborn_composition` (what
-//! production runs). Their VALIDATION core is shared (`domain.rs`'s
-//! `validate_callback_claim` / `prepare_callback_flow`), but each hand-rolls
-//! its orchestration around it — terminal-idempotency sets, expiry
+//! production runs). Their transition core is shared (`domain.rs`'s
+//! `apply_callback_claim` / `prepare_callback_flow`), but each hand-rolls its
+//! orchestration around it — expiry
 //! write-back, account minting — so the suites could drift apart with nothing
 //! failing. Until this module existed their agreement was coincidence, not
 //! contract (found while pinning the #6105 T4 replay arm).
@@ -29,8 +29,8 @@ use chrono::{Duration, Utc};
 use crate::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthFlowManager,
     AuthFlowOutcome, AuthFlowRecord, AuthFlowState, AuthProductError, AuthProductScope,
-    AuthProviderId, AuthorizationCodeHash, CredentialAccountLabel, LifecyclePackageRef,
-    NewAuthFlow, OAuthAuthorizationUrl, OAuthCallbackFailureInput, OAuthCallbackInput,
+    AuthProviderId, AuthorizationCodeHash, CredentialAccountLabel, NewAuthFlow,
+    OAuthAuthorizationUrl, OAuthCallbackClaim, OAuthCallbackFailureInput, OAuthCallbackInput,
     OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash, ProviderCallbackOutcome,
 };
 use ironclaw_host_api::SecretHandle;
@@ -75,21 +75,6 @@ fn new_flow(
         pkce_verifier_hash: Some(pkce_hash(tag)),
         expires_at,
     }
-}
-
-fn new_lifecycle_flow(
-    scope: &AuthProductScope,
-    provider: &AuthProviderId,
-    tag: &str,
-    expires_at: chrono::DateTime<Utc>,
-) -> NewAuthFlow {
-    let mut flow = new_flow(scope, provider, tag, expires_at);
-    let package_ref = match LifecyclePackageRef::new("conformance-extension") {
-        Ok(package_ref) => package_ref,
-        Err(error) => panic!("conformance lifecycle package ref is invalid: {error:?}"),
-    };
-    flow.continuation = AuthContinuationRef::LifecycleActivation { package_ref };
-    flow
 }
 
 fn authorized_outcome(provider: &AuthProviderId, tag: &str) -> ProviderCallbackOutcome {
@@ -146,25 +131,24 @@ pub async fn assert_auth_flow_callback_conformance(
     provider: &AuthProviderId,
 ) {
     completed_flow_claim_idempotent_and_complete_rejects_replay(flows, scope, provider).await;
-    lifecycle_processing_replays_and_uncommitted_failure_rejects(flows, scope, provider).await;
+    processing_replays_and_terminal_failure_rejects(flows, scope, provider).await;
     expired_flow_rejects_and_marks_expired(flows, scope, provider).await;
     canceled_flow_rejects_completion_as_canceled(flows, scope, provider).await;
     unknown_flow_rejects_completion(flows, scope, provider).await;
     state_hash_mismatch_denies_without_burning_the_flow(flows, scope, provider).await;
 }
 
-/// Lifecycle activation preserves its recovery contract: an in-flight claim is
-/// an idempotent replay, while a terminal failure without a committed-secret
-/// fingerprint cannot be replayed as success.
-async fn lifecycle_processing_replays_and_uncommitted_failure_rejects(
+/// An in-flight claim is an idempotent replay for every continuation, while a
+/// terminal callback failure cannot be replayed as success.
+async fn processing_replays_and_terminal_failure_rejects(
     flows: &dyn AuthFlowManager,
     scope: &AuthProductScope,
     provider: &AuthProviderId,
 ) {
-    const CASE: &str = "lifecycle callback claim replay";
-    let processing_tag = "conformance-lifecycle-processing";
+    const CASE: &str = "callback claim replay";
+    let processing_tag = "conformance-processing";
     let processing = flows
-        .create_flow(new_lifecycle_flow(
+        .create_flow(new_flow(
             scope,
             provider,
             processing_tag,
@@ -178,23 +162,29 @@ async fn lifecycle_processing_replays_and_uncommitted_failure_rejects(
         provider: provider.clone(),
         pkce_verifier_hash: pkce_hash(processing_tag),
     };
-    flows
+    let acquired = flows
         .claim_oauth_callback(scope, request.clone())
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] first claim: {error:?}"));
+    if !matches!(acquired, OAuthCallbackClaim::Acquired(_)) {
+        panic!("[{CASE}] first claim must acquire provider exchange ownership");
+    }
     let duplicate = match flows.claim_oauth_callback(scope, request).await {
         Ok(record) => record,
         Err(error) => {
-            panic!("[{CASE}] Processing lifecycle replay must be idempotent: {error:?}")
+            panic!("[{CASE}] Processing replay must be idempotent: {error:?}")
         }
     };
+    let OAuthCallbackClaim::Existing(duplicate) = duplicate else {
+        panic!("[{CASE}] Processing replay must not reacquire provider exchange ownership");
+    };
     if duplicate.state != AuthFlowState::Processing {
-        panic!("[{CASE}] Processing replay must preserve the claimed lifecycle state");
+        panic!("[{CASE}] Processing replay must preserve the claimed state");
     }
 
-    let failed_tag = "conformance-lifecycle-failed";
+    let failed_tag = "conformance-failed";
     let failed = flows
-        .create_flow(new_lifecycle_flow(
+        .create_flow(new_flow(
             scope,
             provider,
             failed_tag,
@@ -224,9 +214,9 @@ async fn lifecycle_processing_replays_and_uncommitted_failure_rejects(
             },
         )
         .await
-        .expect_err("an uncommitted Resolved(Failed) lifecycle flow must reject callback claims");
+        .expect_err("a Resolved(Failed) flow must reject callback claims");
     if failed_claim != AuthProductError::FlowAlreadyTerminal {
-        panic!("[{CASE}] Resolved(Failed) without a fingerprint must reject callback claims");
+        panic!("[{CASE}] Resolved(Failed) must reject callback claims");
     }
 }
 
@@ -264,6 +254,9 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
         )
         .await
         .unwrap_or_else(|error| panic!("[{CASE}] first claim: {error:?}"));
+    let OAuthCallbackClaim::Acquired(claimed) = claimed else {
+        panic!("[{CASE}] first claim must acquire provider exchange ownership");
+    };
     assert_eq!(
         claimed.state,
         AuthFlowState::Processing,
@@ -307,6 +300,9 @@ async fn completed_flow_claim_idempotent_and_complete_rejects_replay(
         .unwrap_or_else(|error| {
             panic!("[{CASE}] a replayed claim on a completed flow must be idempotent: {error:?}")
         });
+    let OAuthCallbackClaim::Existing(reclaimed) = reclaimed else {
+        panic!("[{CASE}] terminal replay must not reacquire provider exchange ownership");
+    };
     assert_eq!(
         reclaimed.state,
         AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),

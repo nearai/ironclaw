@@ -5,8 +5,9 @@ use crate::{
     CredentialAccount, CredentialAccountId, CredentialAccountUpdateBinding, CredentialOwnership,
     CredentialRecoveryKind, CredentialRecoveryProjection, CredentialRecoveryReason,
     CredentialRefreshRequest, CredentialSelectionInput, ManualTokenCompletionInput,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
-    OAuthProviderExchange, Timestamp, flow::credential_status_for_completed_flow, scope_matches,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaim,
+    OAuthCallbackClaimRequest, OAuthProviderExchange, Timestamp,
+    flow::credential_status_for_completed_flow, scope_matches,
 };
 
 pub struct PreparedCallbackFlow {
@@ -42,12 +43,12 @@ pub fn prepare_callback_flow(
     })
 }
 
-pub fn validate_callback_claim(
+pub fn apply_callback_claim(
     record: &mut AuthFlowRecord,
     scope: &crate::AuthProductScope,
     request: &OAuthCallbackClaimRequest,
     now: Timestamp,
-) -> Result<(), AuthProductError> {
+) -> Result<OAuthCallbackClaim, AuthProductError> {
     if !scope_matches(scope, &record.scope) {
         return Err(AuthProductError::CrossScopeDenied);
     }
@@ -68,39 +69,21 @@ pub fn validate_callback_claim(
     {
         return Err(AuthProductError::CrossScopeDenied);
     }
-    if is_idempotent_lifecycle_callback_replay(record) {
-        return Ok(());
-    }
     if let AuthFlowState::Resolved(outcome) = record.state {
         return match outcome {
-            AuthFlowOutcome::Authorized { .. } => Ok(()),
+            AuthFlowOutcome::Authorized { .. } => Ok(OAuthCallbackClaim::Existing(record.clone())),
             _ => Err(error_for_terminal_outcome(outcome)),
         };
     }
     expire_if_needed(record, now)?;
-    if record.state != AuthFlowState::Open {
-        return Err(AuthProductError::FlowAlreadyTerminal);
-    }
-    Ok(())
-}
-
-/// Whether replaying a claimed lifecycle callback is an idempotent recovery.
-/// Lifecycle activation can compensate a committed secret after a crash, so it
-/// preserves the pre-state-collapse replay behavior for `Processing` and for a
-/// failed record that already carries the committed secret fingerprint.
-pub fn is_idempotent_lifecycle_callback_replay(record: &AuthFlowRecord) -> bool {
-    if !matches!(
-        record.continuation,
-        crate::AuthContinuationRef::LifecycleActivation { .. }
-    ) {
-        return false;
-    }
     match record.state {
-        AuthFlowState::Processing => true,
-        AuthFlowState::Resolved(AuthFlowOutcome::Failed { .. }) => {
-            record.credential_secret_fingerprint.is_some()
+        AuthFlowState::Open => {
+            record.state = AuthFlowState::Processing;
+            record.updated_at = now;
+            Ok(OAuthCallbackClaim::Acquired(record.clone()))
         }
-        _ => false,
+        AuthFlowState::Processing => Ok(OAuthCallbackClaim::Existing(record.clone())),
+        AuthFlowState::Resolved(_) => Err(AuthProductError::FlowAlreadyTerminal),
     }
 }
 
@@ -569,65 +552,13 @@ fn recovery_kind_and_reason_for_status(
 mod tests {
     use super::*;
     use crate::{
-        AuthContinuationRef, AuthErrorCode, AuthFlowId, AuthFlowKind, AuthProviderId,
-        CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
-        CredentialSecretFingerprint, LifecyclePackageRef, OAuthAuthorizationCode,
-        OAuthCallbackClaimRequest, OAuthProviderExchange, OAuthProviderIdentity, OpaqueStateHash,
-        PkceVerifierHash, PkceVerifierSecret, ProviderScope,
+        AuthProviderId, CredentialAccountId, CredentialAccountLabel, CredentialAccountStatus,
+        OAuthAuthorizationCode, OAuthProviderExchange, OAuthProviderIdentity, PkceVerifierSecret,
+        ProviderScope,
     };
     use chrono::Utc;
     use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
     use secrecy::SecretString;
-
-    #[test]
-    fn lifecycle_failed_record_with_committed_fingerprint_accepts_callback_claim_replay() {
-        let now = Utc::now();
-        let scope = crate::AuthProductScope::new(
-            ResourceScope::local_default(UserId::new("alice").unwrap(), InvocationId::new())
-                .unwrap(),
-            crate::AuthSurface::Api,
-        );
-        let state_hash = OpaqueStateHash::new("a".repeat(64)).expect("state hash");
-        let pkce_hash = PkceVerifierHash::new("b".repeat(64)).expect("PKCE hash");
-        let mut record = AuthFlowRecord {
-            id: AuthFlowId::new(),
-            scope: scope.clone(),
-            kind: AuthFlowKind::IntegrationCredential,
-            state: AuthFlowState::Resolved(AuthFlowOutcome::Failed {
-                error: AuthErrorCode::TokenExchangeFailed,
-            }),
-            provider: AuthProviderId::new("github").expect("provider"),
-            challenge: None,
-            continuation: AuthContinuationRef::LifecycleActivation {
-                package_ref: LifecyclePackageRef::new("github-extension")
-                    .expect("lifecycle package"),
-            },
-            credential_secret_fingerprint: Some(
-                CredentialSecretFingerprint::new("c".repeat(64)).expect("fingerprint"),
-            ),
-            update_binding: None,
-            opaque_state_hash: Some(state_hash.clone()),
-            pkce_verifier_hash: Some(pkce_hash.clone()),
-            authorization_code_hash: None,
-            resolution_delivered_at: None,
-            created_at: now,
-            updated_at: now,
-            expires_at: now + chrono::Duration::minutes(5),
-        };
-        let request = OAuthCallbackClaimRequest {
-            flow_id: record.id,
-            opaque_state_hash: state_hash,
-            provider: record.provider.clone(),
-            pkce_verifier_hash: pkce_hash,
-        };
-
-        validate_callback_claim(&mut record, &scope, &request, now)
-            .expect("a committed lifecycle callback replay remains idempotent");
-        assert!(matches!(
-            record.state,
-            AuthFlowState::Resolved(AuthFlowOutcome::Failed { .. })
-        ));
-    }
 
     #[test]
     fn update_account_from_exchange_replaces_provider_reported_scopes() {

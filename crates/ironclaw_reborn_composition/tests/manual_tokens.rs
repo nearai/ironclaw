@@ -10,7 +10,7 @@ use ironclaw_auth::{
     CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdateBinding,
     CredentialOwnership, CredentialSelectionInput, CredentialSetupService,
     InMemoryAuthProductServices, ManualTokenCompletionInput, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthAuthorizationUrl, OAuthCallbackClaimRequest,
+    NewCredentialAccount, OAuthAuthorizationUrl, OAuthCallbackClaim, OAuthCallbackClaimRequest,
     OAuthCallbackFailureInput, OAuthCallbackInput, SecretCleanupService, SecretSubmitRequest,
     SecretSubmitResult, Timestamp,
 };
@@ -246,7 +246,7 @@ impl AuthFlowManager for FailingManualTokenFlowManager {
         &self,
         _scope: &AuthProductScope,
         _request: OAuthCallbackClaimRequest,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
+    ) -> Result<OAuthCallbackClaim, AuthProductError> {
         unreachable!("manual-token cleanup tests do not claim OAuth callbacks")
     }
 

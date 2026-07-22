@@ -532,34 +532,16 @@ fn release_ci_compiles_reborn_for_all_supported_targets() {
 }
 
 #[test]
-fn dockerfile_reborn_ships_extension_ownership_migration() {
+fn dockerfile_does_not_package_the_retired_ownership_migration() {
+    // Greenfield reconciliation (owner decision D1): the one-time extension
+    // ownership migration crate is deleted, so the image must not try to
+    // build or ship its binary.
     let dockerfile =
         std::fs::read_to_string(workspace_root().join("Dockerfile")).expect("Dockerfile");
-    let deps_stage = dockerfile
-        .split_once("FROM chef AS deps")
-        .and_then(|(_, stages)| stages.split_once("FROM deps AS builder"))
-        .map(|(stage, _)| stage)
-        .expect("Dockerfile should define a deps stage");
-    let builder_stage = dockerfile
-        .split_once("FROM deps AS builder")
-        .map(|(_, stage)| stage)
-        .expect("Dockerfile should define a builder stage");
-
     assert!(
-        deps_stage.contains("--package ironclaw_reborn_migration")
-            && deps_stage.contains("--recipe-path recipe.json"),
-        "Dockerfile must cache the extension ownership migration dependencies: {dockerfile}"
-    );
-    assert!(
-        builder_stage.contains("--package ironclaw_reborn_migration")
-            && builder_stage.contains("--bin ironclaw-reborn-extension-ownership-migration"),
-        "Dockerfile must build the extension ownership migration binary: {dockerfile}"
-    );
-    assert!(
-        dockerfile.contains(
-            "COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migration /usr/local/bin/ironclaw-reborn-extension-ownership-migration"
-        ),
-        "Dockerfile must copy the extension ownership migration into the runtime image: {dockerfile}"
+        !dockerfile.contains("ironclaw_reborn_migration")
+            && !dockerfile.contains("ironclaw-reborn-extension-ownership-migration"),
+        "Dockerfile must not reference the deleted ownership-migration crate: {dockerfile}"
     );
 }
 
@@ -2352,89 +2334,6 @@ fn serve_resolves_bearer_token_from_reborn_home_webui_token_file() {
     let _ = child.wait();
 }
 
-#[test]
-fn serve_env_slack_enabled_mounts_slack_events_route() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let reborn_home = temp.path().join("reborn-home");
-    let home = temp.path().join("home");
-    std::fs::create_dir_all(&home).expect("home dir");
-    let _serve_port_guard = SERVE_PORT_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let port = unused_local_port();
-
-    let mut child = reborn_command()
-        .args(["serve", "--host", "127.0.0.1", "--port"])
-        .arg(port.to_string())
-        .env("HOME", &home)
-        .env("IRONCLAW_REBORN_HOME", &reborn_home)
-        .env(
-            "IRONCLAW_REBORN_WEBUI_TOKEN",
-            // >=32 bytes: serve now enforces the session-signing entropy
-            // floor unconditionally (it signs admin-minted session tokens
-            // even without SSO).
-            "reborn-smoke-test-token-0123456789abcdef",
-        )
-        .env("IRONCLAW_REBORN_WEBUI_USER_ID", "test-user")
-        .env("IRONCLAW_REBORN_SLACK_ENABLED", "true")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("ironclaw-reborn serve should start");
-    let stderr = child.stderr.take().expect("stderr should be piped");
-    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stderr).lines() {
-            if stderr_tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let mut stderr_text = String::new();
-    loop {
-        if let Some(status) = child.try_wait().expect("serve child status") {
-            panic!("serve exited before binding with {status}; stderr: {stderr_text}");
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("serve did not reach listener banner; stderr: {stderr_text}");
-        }
-        match stderr_rx.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(Ok(line)) => {
-                stderr_text.push_str(&line);
-                stderr_text.push('\n');
-                if stderr_text.contains("ironclaw: WebChat v2 listener") {
-                    break;
-                }
-            }
-            Ok(Err(error)) => panic!("failed to read serve stderr: {error}"),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("serve stderr closed before banner; stderr: {stderr_text}");
-            }
-        }
-    }
-
-    let status_line = match post_slack_events_status_line(port) {
-        Ok(status_line) => status_line,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("{error}");
-        }
-    };
-
-    let _ = child.kill();
-    let _ = child.wait();
-    assert!(
-        !status_line.contains(" 404 "),
-        "env-enabled Slack route should be mounted, got status line: {status_line}"
-    );
-}
-
 /// `true` when `config_text` carries a live (uncommented) `provider_id =`
 /// line — used to assert a de-seeded `config.toml` has no `[llm.default]`
 /// slot. A plain `.contains("provider_id =")` also matches the stub's own
@@ -2494,22 +2393,6 @@ fn http_status_line(port: u16, request: &str, label: &str) -> Result<String, Str
         .read_line(&mut status_line)
         .map_err(|error| format!("read {label} status line failed: {error}"))?;
     Ok(status_line)
-}
-
-fn post_slack_events_status_line(port: u16) -> Result<String, String> {
-    http_status_line(
-        port,
-        concat!(
-            "POST /webhooks/slack/events HTTP/1.1\r\n",
-            "Host: 127.0.0.1\r\n",
-            "Content-Type: application/json\r\n",
-            "Content-Length: 2\r\n",
-            "Connection: close\r\n",
-            "\r\n",
-            "{}"
-        ),
-        "Slack route probe",
-    )
 }
 
 #[test]
@@ -4066,7 +3949,7 @@ fn config_init_with_force_overwrites() {
     assert!(!config_text.contains("partial config"));
     assert!(!providers_text.contains("partial providers"));
     assert!(config_text.contains("api_version = \"ironclaw.runtime/v1\""));
-    assert!(providers_text.contains("\"id\": \"acme-openrouter\""));
+    assert!(providers_text.contains("\"id\": \"example-openrouter\""));
 }
 
 #[test]
@@ -5857,7 +5740,7 @@ fn onboard_with_force_overwrites_existing_files_and_marker() {
     assert!(!providers_text.contains("custom providers"));
     assert!(!marker_text.contains("custom marker"));
     assert!(config_text.contains("api_version = \"ironclaw.runtime/v1\""));
-    assert!(providers_text.contains("\"id\": \"acme-openrouter\""));
+    assert!(providers_text.contains("\"id\": \"example-openrouter\""));
     let marker: serde_json::Value = serde_json::from_str(&marker_text).expect("valid marker JSON");
     assert_eq!(marker["schema_version"], "ironclaw.reborn.onboarding/v1");
 }

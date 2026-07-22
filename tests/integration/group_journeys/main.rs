@@ -49,6 +49,7 @@ mod reborn_support;
 mod support;
 
 mod scenario_auth_deny_then_retry_journey;
+mod scenario_auth_gate_grant_resume;
 mod scenario_auth_then_approval_journey;
 mod scenario_interactive_approval_journey;
 mod scenario_multi_actor_gate_isolation;
@@ -95,6 +96,17 @@ async fn journeys_group_auth_convergence_e2e() {
     report.record(
         "auth_deny_then_retry_journey",
         scenario_auth_deny_then_retry_journey::run(&g_deny).await,
+    );
+
+    // Isolated AUTH-14 / TOOL-5: a credential-only block (auth gate, no approval
+    // in the path) grant-resolved to completion. Fresh group so its seeded
+    // `UserReusable` credential can't leak into the scenarios above.
+    let g_grant = RebornIntegrationGroup::live_auth_and_approval()
+        .await
+        .expect("auth grant-resume group builds");
+    report.record(
+        "auth_gate_grant_resume",
+        scenario_auth_gate_grant_resume::run(&g_grant).await,
     );
     report.assert_all_passed();
 }

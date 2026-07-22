@@ -40,9 +40,9 @@ mod error;
 mod extension_account_setup;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
-// Durable filesystem-backed idempotency ledger. Gated behind `storage` so the
-// facade surface stays free of the `ironclaw_filesystem` dependency unless a
-// consumer opts into a durable backend.
+// Durable filesystem-backed idempotency ledger. The filesystem contract is a
+// base dependency; concrete libSQL/Postgres implementations remain gated.
+mod delivery_coordinator;
 mod filesystem_ledger;
 mod gate_state;
 mod in_memory_ledger;
@@ -52,6 +52,7 @@ mod lifecycle;
 mod outbound_delivery;
 mod policy;
 mod reborn_services;
+mod run_delivery;
 mod webui_inbound;
 mod workflow;
 
@@ -86,7 +87,8 @@ pub use auth_interaction::{
     ResolveAuthInteractionResponse, is_auth_gate_ref,
 };
 pub use auth_prompt::{
-    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, enrich_auth_prompt_view,
+    AuthChallengeProvider, AuthChallengeView, BlockedAuthFlowCanceller, BlockedAuthPromptRequest,
+    auth_prompt_view_for_blocked_auth,
 };
 pub use automation_thread_metadata::{
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, automation_trigger_thread_metadata_json,
@@ -113,8 +115,8 @@ pub use conversation_binding::{
 };
 pub use error::{AuthContinuationRejectionKind, ProductWorkflowError};
 pub use extension_account_setup::{
-    AccountConnectionStatusError, AccountConnectionStatusSource, ExtensionAccountSetupDescriptor,
-    ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
+    AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,
+    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{
@@ -131,26 +133,35 @@ pub use inbound_turn::{
 pub use ironclaw_common::{AutomationName, AutomationNameError, MAX_AUTOMATION_NAME_BYTES};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use lifecycle::{
-    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleCommandKind,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleExtensionSurfaceKind, LifecycleInstallScope,
+    ChannelConnectionRequirement, LifecycleBlockerRef, LifecycleChannelDirections,
+    LifecycleCommandKind, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstallScope,
     LifecycleInstalledExtensionSummary, LifecyclePackageId, LifecyclePackageKind,
-    LifecyclePackageRef, LifecyclePhase, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
-    LifecycleSkillSource, LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleProductSurfaceContext,
+    LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, LifecycleSkillSource,
+    LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
 };
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
-pub use outbound_delivery::{
-    ProductOutboundDeliveryError, ProductOutboundDeliveryOutcome, ProductOutboundDeliveryRequest,
-    ProductOutboundStatusUpdateFailure, ProductOutboundTargetResolver,
-    VerifiedProductOutboundTargetMetadata, prepare_and_render_product_outbound,
+pub use delivery_coordinator::{
+    ChannelDeliveryResolver, CoordinatedDeliveryError, CoordinatedDeliveryOutcome,
+    CoordinatedDeliveryRequest, DeliveryCoordinator, DeliveryIntent, DeliveryReplyContextSource,
+    DeliveryRetryPolicy, NoReplyContext, NoticeDeliveryRequest, ResolvedChannelDelivery,
 };
+pub use outbound_delivery::{ProductOutboundTargetResolver, VerifiedProductOutboundTargetMetadata};
+// The generic run-delivery components (§5.4): channel hosts wire these over
+// the coordinator; vendor residue enters only through the ports.
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
+};
+pub use run_delivery::{
+    ApprovalPromptContextSource, BlockedAuthPromptSource, DeliveredChannelMessage,
+    PreferenceTargetCodec, PreferenceTargetEncodeRequest, RunDeliveryError, RunDeliveryObserver,
+    RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest, triggered_run_delivery_settings,
 };
 // Projection/event types that route handlers need to thread through SSE
 // (parse the resume cursor, render browser-safe event payloads). Re-exported
@@ -164,38 +175,41 @@ pub use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 pub use reborn_services::{
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW,
     AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
     ActiveModelReader, AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord,
     AdminUserRole, AdminUserSecretMeta, AdminUserService, AdminUserStatus, AutomationListRequest,
-    AutomationProductFacade, ChannelConnectionFacade, CodexLoginStart,
-    ConnectableChannelsProductFacade, ExtensionCredentialSetupService,
-    ExtensionCredentialStatusRequest, ExtensionCredentialSubmitRequest, FilesystemBrowseReader,
-    FsMount, InboundAttachmentLander, InboundAttachmentReader, LOGS_VIEW, LlmActiveSelection,
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
+    AutomationProductFacade, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
+    CodexLoginStart, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ExtensionCredentialSubmitRequest, FilesystemBrowseReader, FsMount, InboundAttachmentLander,
+    InboundAttachmentReader, LOGS_VIEW, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiAuthProvider, NearAiLoginRequest, NearAiLoginStart,
     NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_LOGS_VIEW, OperatorLogsService,
     OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
-    ProductAgentBoundCaller, ProjectCaller, ProjectFilesystemReader, ProjectFsEntry,
-    ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
-    ProjectServiceError, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
-    RebornAccountTrace, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
-    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
-    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentBytes, RebornAttachmentRequest,
-    RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornConnectableChannelInfo,
-    RebornConnectableChannelListResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionCredentialSetup, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionOnboardingPayload, RebornExtensionOnboardingState,
-    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupField,
-    RebornExtensionSetupSecret, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
+    ProductAgentBoundCaller, ProductCapabilityInvoker, ProjectCaller, ProjectFilesystemReader,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
+    ProjectService, ProjectServiceError, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
+    RebornAccountBindingSource, RebornAccountLoginLinkResponse, RebornAccountTrace,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminConfigurationField,
+    RebornAdminConfigurationGroup, RebornAdminConfigurationListResponse,
+    RebornAdminConfigurationUse, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse,
+    RebornAdminUserDeletedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
+    RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAuthAccount, RebornAutomationActiveHold,
+    RebornAutomationHoldReason, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
+    RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
+    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
     RebornGetProjectRequest, RebornGetRunStateRequest, RebornGetRunStateResponse,
     RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
@@ -229,14 +243,14 @@ pub use reborn_services::{
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewDescriptor,
-    RebornViewPage, RebornViewQuery, RunArtifactLogs, RunArtifactMessage, RunArtifactRedaction,
-    RunArtifactToolCall, SetActiveLlmRequest, SettingsToolPermissionState, SkillsProductFacade,
-    StaticConnectableChannelsProductFacade, StaticOperatorStatusService, TriggerRunThreadScope,
-    UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
-    UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
-    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
-    normalize_operator_log_context_value,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornVendorAuthAccounts,
+    RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery, RunArtifactLogs,
+    RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall, SetActiveLlmRequest,
+    SettingsToolPermissionState, SkillsProductFacade, StaticOperatorStatusService,
+    TriggerRunThreadScope, UnavailableRebornViewProvider, UnsupportedAutomationProductFacade,
+    UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
+    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
+    UpsertLlmProviderRequest, normalize_operator_log_context_value,
 };
 
 pub use webui_inbound::{

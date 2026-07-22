@@ -13,11 +13,12 @@ subsystems that used to live apart (see `README.md` for the fold-in map):
    from `ironclaw_reborn_composition::webui`) — `webui_v2_app(bundle, config)`
    composes the full `Router` and layers the fixed middleware stack; owns the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   Slack / OpenAI-compat mounts.
+   feature-gated OpenAI-compat mounts.
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`) — `serve_webui_v2` binds the listener and
    runs `axum::serve`; the `Env`/`Session`/`Oidc` authenticators, the
-   `SessionStore`, and the `/auth/*` OAuth login surface that mints sessions.
+   signed-token session store, and the `/auth/*` OAuth login surface that mints
+   sessions.
 
 Composition deliberately stops at the
 `reborn_product_api_crates_do_not_bind_http_ingress` boundary — it returns a
@@ -41,7 +42,7 @@ composition's facade). Enforced by `ironclaw_architecture`
 | `WebUiV2State` | Handler state: the `RebornServicesApi` facade + `SseCapacity` + route options. |
 | `WebUiV2HttpError` / `WebUiV2HttpErrorBody` | The only path handlers return HTTP errors through — keeps the redacted-error vocabulary intact. |
 | `webui_v2_app(bundle, config) -> WebuiV2App` | Compose composition's `RebornWebuiBundle` + a host `WebuiServeConfig` into the full middleware-wrapped `Router` (also `webui_v2_app_with_lifecycle`). |
-| `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth, and the Slack setup/route slots). |
+| `WebuiServeConfig` | Host-owned serve config (tenant, authenticator, default agent/project, public/protected mounts, Google OAuth). |
 | `WebuiAuthenticator` trait / `WebuiAuthentication` | Host-auth vocabulary the bearer middleware resolves each token through. |
 
 Middleware modules (`src/webui_*.rs`) layer in a fixed order —
@@ -55,15 +56,15 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 | `serve_webui_v2(opts)` | Bind a `TcpListener` + run `axum::serve` with graceful shutdown |
 | `RebornWebuiServeOptions` | Owner-supplied input (addr, router, shutdown receiver) |
 | `EnvBearerAuthenticator` | Single-token `WebuiAuthenticator` for the standalone CLI / local dev; accepted tokens map to operator WebUI capabilities |
-| `SessionStore` trait | Pluggable session storage; durable impl is host's; `InMemorySessionStore` for local dev / tests |
-| `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through a `SessionStore`; accepted tokens map to non-operator WebUI capabilities |
+| `SignedTokenSessionStore` | HMAC-signed bearer mint/lookup with a bounded process-local logout denylist |
+| `SessionAuthenticator` | `WebuiAuthenticator` that resolves bearer tokens through `SignedTokenSessionStore` |
 | `OidcAuthenticator` | OIDC bearer-token verifier (JWKS + standard claims); accepted tokens map to non-operator WebUI capabilities |
 | `webui_v2_auth_router(config) -> PublicRouteMount` | OAuth login router + route descriptors. The descriptors travel with the router so composition can fold them into the descriptor-driven per-route rate-limit / body-limit middleware — same machinery the v2 facade and product-auth callback already use, no side door. |
 | `PublicRouteMount` | `{ router, descriptors }` pair handed to `WebuiServeConfig::with_public_route_mount` |
 | `OAuthProvider` trait (in `auth/provider.rs`) | Extension point for per-provider URL / code-exchange logic. Deliberately lives in its own module so each provider does not depend on the others. `GoogleProvider` and `GitHubProvider` ship today. |
 | `GoogleProvider` (in `auth/google.rs`) | Google OIDC provider (scopes `openid email profile`, PKCE S256, optional `hd` hosted-domain restriction). Built from `GoogleOAuthConfig`. |
 | `GitHubProvider` (in `auth/github.rs`) | GitHub OAuth App provider (scopes `read:user user:email`, no PKCE, verified-email preference). Built from `GitHubOAuthConfig`. |
-| `OAuthRouterConfig` | Tenant + `SessionStore` + `UserDirectory` + provider list + base URL |
+| `OAuthRouterConfig` | Tenant + `SignedTokenSessionStore` + `UserDirectory` + provider list + base URL |
 | `UserDirectory` trait | Host-supplied mapping from `(provider, OAuthUserProfile)` to `UserId` |
 | `EmailUserDirectory` | Local-dev default impl (verified email → `UserId`); gated on `test-support` |
 
@@ -90,7 +91,6 @@ closed (`500`) if that layer is missing (locked by
 | `webui.v2.stream_events_ws` | GET | `/api/webchat/v2/threads/{thread_id}/ws` | **WebSocket** | `ProjectionOnly` |
 | `webui.v2.cancel_run` / `retry_run` / `resolve_gate` | POST | `…/runs/{run_id}/…` | — | `TurnCoordinator` |
 | `webui.v2.list/pause/resume/rename/delete_automation` | GET/POST/DELETE | `/api/webchat/v2/automations…` | — | `ProductWorkflow` |
-| `webui.v2.list_connectable_channels` | GET | `/api/webchat/v2/channels/connectable` | — | `ProjectionOnly` |
 | `webui.v2.list/install/import/activate/remove/get_setup/setup_extension` | GET/POST | `/api/webchat/v2/extensions…` | — | `ProjectionOnly` / `ProductWorkflow` |
 | `webui.v2.*_llm_*` | GET/POST | `/api/webchat/v2/llm/…` | — | `ProjectionOnly` / `ProductWorkflow` |
 | `webui.v2.settings.list_tools` / `set_tools_auto_approve` / `set_tool_permission` | GET/POST | `/api/webchat/v2/settings/tools…` | — | `ProjectionOnly` / `ProductWorkflow` |
@@ -134,6 +134,23 @@ route (tenant/user-scoped tool-approval settings), not an operator route.
   (default 3 concurrent; override via `WebUiV2State::with_sse_concurrency_limit`)
   — a caller cannot bypass the cap by mixing SSE and WS. Exhaustion returns
   `429` with `retryable: true`.
+- The SPA also sends a bounded, random `connection_id` that is stable for one
+  loaded browser tab plus a monotonically increasing `connection_generation`
+  for each EventSource it creates. A same-caller, same-id stream supersedes its
+  prior generation without consuming another slot; a delayed older generation
+  receives `204` and cannot cancel the current stream. This prevents
+  proxy-reordered closes/opens during thread navigation from stranding the
+  replacement stream behind the cap; distinct tabs still consume distinct
+  slots.
+- A successful facade subscription emits an application-level `keep_alive`
+  frame immediately after admission. Browser connection state uses that frame
+  as proof that the projection tail is ready instead of waiting for a model
+  delta or the periodic transport keep-alive.
+- `after_cursor` is retained only within one mounted Chat route (including
+  native EventSource retries and visibility recovery). A route/thread remount
+  starts at the projection origin so the server returns durable state plus the
+  compacted current live state; it does not persist process-local live cursors
+  across SPA navigation.
 - Every stream is closed after a max lifetime (5 min) and every `socket.send` /
   drain await is `timeout`-bounded, so a back-pressuring client or a stalled
   facade cannot pin a slot past the budget. Slots are RAII (`SseSlot`), released
@@ -155,9 +172,9 @@ toolchain.
 
 ## Why the OAuth login router lives here
 
-The crate already owns `WebuiAuthenticator` impls, `SessionStore`, and
-the session lifecycle types. The OAuth callback's job is exactly that
-— turn a provider profile into a `SessionStore::create_session` call
+The crate already owns `WebuiAuthenticator` impls, `SignedTokenSessionStore`,
+and the session lifecycle types. The OAuth callback's job is exactly that
+— turn a provider profile into a signed session `create_session` call
 — so the login mint path belongs in the same host-owned crate, not
 behind the product/API seam in `ironclaw_reborn_composition`.
 
@@ -174,7 +191,7 @@ outside bearer auth (the user has no session yet); the
 descriptors fold into the same per-route policy stack the rest of
 the WebChat v2 surface already rides on. That keeps the
 product/API boundary intact: composition never sees provider
-secrets, never speaks to Google, never reads a `SessionStore` row.
+secrets, never speaks to Google, never parses a signed session token.
 
 ## WebChat v2 OAuth login surface (#4116)
 
@@ -188,7 +205,7 @@ Routes mounted by `webui_v2_auth_router`:
 - `GET  /auth/callback/{provider}` — single-use state lookup,
   cross-provider replay guard, code exchange via the matching
   `OAuthProvider`, user resolution via `UserDirectory`, session
-  mint via `SessionStore`, and redirect to
+  mint via `SignedTokenSessionStore`, and redirect to
   `{redirect_after}?login_ticket=<ticket>` (default `/`). The
   ticket is short-lived and single-use; the SPA redeems it over
   same-origin JSON so the bearer never appears in a redirect
@@ -196,9 +213,8 @@ Routes mounted by `webui_v2_auth_router`:
 - `POST /auth/session/exchange` — consume the one-time login ticket
   and return `{ token }`.
 - `POST /auth/logout` — bearer-protected; calls
-  `SessionStore::revoke` and returns `204` on success or when no
-  bearer is present, `500` if revocation fails, so the SPA's local
-  clear stays unconditional without lying about server-side state.
+  `SignedTokenSessionStore::revoke` and returns `204` with or without
+  a bearer, so the SPA's local clear stays unconditional.
 
 ### Provider trait
 
@@ -231,7 +247,7 @@ pub trait OAuthProvider: Send + Sync + 'static {
 - NEAR wallet login does NOT fit OAuth code flow and will get its
   own pair of endpoints (`/auth/near/challenge` +
   `/auth/near/verify`) plus its own sub-module under `auth/near/`.
-  The `SessionStore` + `UserDirectory` + composition seam stay the
+  The signed session store + `UserDirectory` + composition seam stay the
   same.
 
 ### Security invariants
@@ -264,7 +280,7 @@ pub trait OAuthProvider: Send + Sync + 'static {
   (`invalid_state`, `provider_mismatch`, `denied`,
   `unauthorized`, `exchange_failed`, `server_error`,
   `invalid_request`). Provider error bodies, JWT decode messages,
-  and SessionStore errors are logged via `tracing` and never
+  and signed-session errors are logged via `tracing` and never
   echoed back to the client.
 - **Session transport** is one-time login ticket in the callback
   redirect (`?login_ticket=<ticket>`) followed by same-origin
@@ -301,9 +317,6 @@ composition):
   `tests/auth_route_contract.rs` — middleware stack (security headers, body/rate
   limits, bearer auth) over the composed `webui_v2_app`.
 - `tests/serve_loop.rs` — listener bind + graceful shutdown.
-- `tests/slack_host_beta_webui_v2.rs` — Slack channel-route /
-  connectable surfaces composed into `webui_v2_app` (relocated here because
-  `webui_v2_app` lives in this crate).
 
 **Host authentication:**
 

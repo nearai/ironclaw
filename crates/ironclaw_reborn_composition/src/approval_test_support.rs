@@ -1,9 +1,6 @@
 use ironclaw_approvals::{ApprovalResolver, AutoApproveSettingInput, AutoApproveSettingStore};
 use ironclaw_host_api::{Action, CapabilityId, ExecutionContext, Principal, ResourceEstimate};
-use ironclaw_host_runtime::{
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeFailureKind,
-};
+use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeFailureKind};
 use ironclaw_run_state::ApprovalRequestStore;
 
 use crate::builtin_capability_policy::{
@@ -61,7 +58,7 @@ pub(crate) async fn invoke_with_local_dev_approval(
     let capability = CapabilityId::new(capability_id).expect("valid capability id"); // safety: test-only helper in #[cfg(test)] module.
     let estimate = ResourceEstimate::default();
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             capability.clone(),
             estimate.clone(),
@@ -117,7 +114,7 @@ pub(crate) async fn invoke_with_local_dev_approval(
             };
 
             runtime
-                .resume_capability(RuntimeCapabilityResumeRequest::new(
+                .resume_capability((
                     context,
                     gate.approval_request_id,
                     capability,

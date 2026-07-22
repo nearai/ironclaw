@@ -4,11 +4,9 @@ use ironclaw_filesystem::{CasExpectation, RootFilesystem};
 
 use super::FilesystemAuthProductServices;
 use ironclaw_auth::{
-    AuthContinuationRef, AuthFlowManager, AuthFlowOutcome, AuthFlowState, AuthProductError,
-    AuthResolved, CanceledCleanupFlow, CredentialAccountId, CredentialAccountOwnerScope,
-    CredentialAccountStatus, CredentialOwnership, OAuthCompletionCompensationOutcome,
-    OAuthCompletionCompensationRequest, OAuthExchangeCleanupRequest, SecretCleanupAction,
-    SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
+    AuthContinuationRef, AuthFlowManager, AuthFlowState, AuthProductError, AuthResolved,
+    CanceledCleanupFlow, CredentialAccountOwnerScope, CredentialAccountStatus, CredentialOwnership,
+    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 
 #[async_trait]
@@ -16,93 +14,32 @@ impl<F> SecretCleanupService for FilesystemAuthProductServices<F>
 where
     F: RootFilesystem + 'static,
 {
-    async fn retain_oauth_exchange_for_cleanup(
-        &self,
-        request: OAuthExchangeCleanupRequest,
-    ) -> Result<CredentialAccountId, AuthProductError> {
-        let account_id = CredentialAccountId::from_uuid(request.flow_id.as_uuid());
-        self.stage_callback_secret_cleanup(
-            account_id,
-            request.scope,
-            request.exchange.provider,
-            request.exchange.account_label,
-            Some(request.exchange.access_secret),
-            request.exchange.refresh_secret,
-        )
-        .await?;
-        Ok(account_id)
-    }
-
-    async fn compensate_oauth_completion(
-        &self,
-        request: OAuthCompletionCompensationRequest,
-    ) -> Result<OAuthCompletionCompensationOutcome, AuthProductError> {
-        let flow = self
-            .get_flow(&request.scope, request.flow_id)
-            .await?
-            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        if flow.state
-            != AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
-                account_id: request.credential_account_id,
-            })
-            || !matches!(
-                flow.continuation,
-                AuthContinuationRef::LifecycleActivation { .. }
-            )
-            || flow.provider != request.provider
-            || flow.credential_secret_fingerprint
-                != Some(request.expected_secret_fingerprint.clone())
-        {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-
-        let owner = CredentialAccountOwnerScope::from_scope(&request.scope.to_credential_owner());
-        let lock = self.lock_for(format!("account:{}", request.credential_account_id));
-        let _guard = lock.lock().await;
-        let Some((mut account, version)) = self
-            .read_account(&request.scope, request.credential_account_id)
-            .await?
-        else {
-            drop(_guard);
-            self.clear_oauth_compensation_marker(&request).await?;
-            return Ok(OAuthCompletionCompensationOutcome::AlreadyAbsent);
-        };
-        if !owner.matches(&account) || account.provider != request.provider {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-        if account.status != CredentialAccountStatus::Revoked
-            && account.secret_fingerprint() != request.expected_secret_fingerprint
-        {
-            drop(_guard);
-            self.clear_oauth_compensation_marker(&request).await?;
-            return Ok(OAuthCompletionCompensationOutcome::Superseded);
-        }
-
-        let version = if account.status == CredentialAccountStatus::Revoked {
-            version
-        } else {
-            account.status = CredentialAccountStatus::Revoked;
-            account.updated_at = Utc::now();
-            self.write_account(&account, CasExpectation::Version(version))
-                .await?
-        };
-        self.purge_revoked_callback_account(account, version)
-            .await?;
-        drop(_guard);
-        self.clear_oauth_compensation_marker(&request).await?;
-        Ok(OAuthCompletionCompensationOutcome::Compensated)
-    }
-
     async fn cleanup_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
     ) -> Result<SecretCleanupReport, AuthProductError> {
         let mut report = SecretCleanupReport::default();
-        // Cancel first, then scan accounts. Together with callback-side CAS
-        // compensation this closes both interleavings: a callback that wins
-        // before cancellation is found by the account scan, while a callback
-        // that loses after cancellation rolls back its own late account write.
-        if matches!(request.action, SecretCleanupAction::Uninstall) {
+        // A3 · Cancel the provider's pending flows BEFORE enumerating
+        // accounts (RFC 9700 §4.7.1 + RFC 7009 §1). Ordering closes the
+        // callback/removal race: a callback racing this cleanup either loses
+        // — its flow is canceled first, so `complete_oauth_callback` rejects
+        // before writing an account — or wins and completes first, in which
+        // case the account it minted already exists when the scan below runs
+        // and is revoked like any other. Scanning accounts first left a
+        // window where a callback completing between the scan and the flow
+        // cancellation minted a credential that survived removal.
+        //
+        // Owner decision 2026-07-15: cancel on both Deactivate and Uninstall.
+        // Shared-vendor safe by construction — the removal caller only
+        // selects a provider exclusive to the removed extension. Idempotent:
+        // a concurrently terminal flow is skipped, never an error.
+        //
+        // F2 · Any enumerated flow whose `TurnGateResume` continuation was
+        // never acknowledged — freshly canceled here or already terminal — is
+        // reported so the composition layer denies its blocked turn gate
+        // instead of leaving the turn parked. `resolution_delivered_at` makes
+        // the handoff retry-safe across cleanup retries.
+        if request.provider.is_some() || request.lifecycle_package.is_some() {
             let mut flows = Vec::new();
             if let Some(provider) = request.provider.as_ref() {
                 flows.extend(
@@ -110,9 +47,11 @@ where
                         .await?,
                 );
             }
-            // Package-keyed selection is independent of the provider selector:
-            // uninstall passes it even when the provider is shared with (and
-            // therefore retained for) another installed extension.
+            // Package-keyed selection (#6169) is independent of the provider
+            // selector: uninstall passes it even when the provider is shared
+            // with (and therefore retained for) another installed extension,
+            // so the removed extension's own LifecycleActivation flows still
+            // die with it.
             if let Some(package) = request.lifecycle_package.as_ref() {
                 for flow in self
                     .lifecycle_flows_for_owner_package(&request.scope.resource, package)
@@ -128,8 +67,9 @@ where
                     AuthFlowState::Resolved(_) => flow,
                     _ => match self.cancel_flow(&flow.scope, flow.id).await {
                         Ok(canceled) => canceled,
-                        Err(AuthProductError::Canceled) => flow,
-                        Err(AuthProductError::FlowAlreadyTerminal) => flow,
+                        Err(AuthProductError::Canceled)
+                        | Err(AuthProductError::FlowAlreadyTerminal)
+                        | Err(AuthProductError::UnknownOrExpiredFlow) => flow,
                         Err(error) => return Err(error),
                     },
                 };
@@ -138,10 +78,8 @@ where
                         canceled.continuation,
                         AuthContinuationRef::TurnGateResume { .. }
                     )
+                    && let AuthFlowState::Resolved(outcome) = canceled.state
                 {
-                    let AuthFlowState::Resolved(outcome) = canceled.state else {
-                        continue;
-                    };
                     report.auth_resolutions.push(AuthResolved {
                         flow_id: canceled.id,
                         scope: canceled.scope.clone(),
@@ -159,7 +97,6 @@ where
                 });
             }
         }
-
         // Credential-owner granularity, not full scope equality: lifecycle and
         // disconnect callers mint a fresh `invocation_id` (and often arrive
         // from a different thread), so an exact-scope lookup could never find
@@ -191,115 +128,45 @@ where
             if had_grant {
                 report.removed_grants.push(current.id);
             }
-            let should_purge = if owns_extension_account || provider_selected {
+            // Capture handles to purge before mutating the record so we can
+            // delete from SecretStore after the account write.
+            let (purge_access, purge_refresh) = if owns_extension_account || provider_selected {
                 match request.action {
                     SecretCleanupAction::Deactivate => {
                         current.status = CredentialAccountStatus::Inactive;
                         report.retained_accounts.push(current.id);
-                        false
+                        (None, None)
                     }
                     SecretCleanupAction::Uninstall => {
+                        let access = current.access_secret.take();
+                        let refresh = current.refresh_secret.take();
                         if current.status != CredentialAccountStatus::Revoked {
                             current.status = CredentialAccountStatus::Revoked;
                             report.revoked_accounts.push(current.id);
                         }
-                        true
+                        (access, refresh)
                     }
                 }
             } else {
                 if had_grant {
                     report.retained_accounts.push(current.id);
                 }
-                false
+                (None, None)
             };
             current.updated_at = Utc::now();
-            let mut version = self
-                .write_account(&current, CasExpectation::Version(version))
+            self.write_account(&current, CasExpectation::Version(version))
                 .await?;
-            if should_purge {
-                let mut delete_failed = false;
-                if let Some(handle) = current.access_secret.clone() {
-                    match self
-                        .secret_store
-                        .delete(&current.scope.resource, &handle)
-                        .await
-                    {
-                        Ok(_) => {
-                            current.access_secret = None;
-                            current.updated_at = Utc::now();
-                            version = self
-                                .write_account(&current, CasExpectation::Version(version))
-                                .await?;
-                        }
-                        Err(error) => {
-                            tracing::debug!(
-                                secret_store_reason = error.stable_reason(),
-                                account_id = %current.id,
-                                "lifecycle access-secret deletion failed"
-                            );
-                            delete_failed = true;
-                        }
-                    }
-                }
-                if let Some(handle) = current.refresh_secret.clone() {
-                    match self
-                        .secret_store
-                        .delete(&current.scope.resource, &handle)
-                        .await
-                    {
-                        Ok(_) => {
-                            current.refresh_secret = None;
-                            current.updated_at = Utc::now();
-                            self.write_account(&current, CasExpectation::Version(version))
-                                .await?;
-                        }
-                        Err(error) => {
-                            tracing::debug!(
-                                secret_store_reason = error.stable_reason(),
-                                account_id = %current.id,
-                                "lifecycle refresh-secret deletion failed"
-                            );
-                            delete_failed = true;
-                        }
-                    }
-                }
-                if delete_failed {
-                    return Err(AuthProductError::BackendUnavailable);
-                }
+            // Purge secret material after the account record is safely persisted
+            // without the handles.  Best-effort: the account no longer references
+            // these handles so any leftover material becomes unreachable even if
+            // the delete call fails (e.g. transient backend outage).
+            if let Some(h) = &purge_access {
+                self.purge_secret_handle(&current.scope.resource, h).await;
+            }
+            if let Some(h) = &purge_refresh {
+                self.purge_secret_handle(&current.scope.resource, h).await;
             }
         }
-
         Ok(report)
-    }
-}
-
-impl<F> FilesystemAuthProductServices<F>
-where
-    F: RootFilesystem + 'static,
-{
-    async fn clear_oauth_compensation_marker(
-        &self,
-        request: &OAuthCompletionCompensationRequest,
-    ) -> Result<(), AuthProductError> {
-        self.update_flow_with_cas(&request.scope, request.flow_id, |flow| {
-            if flow.state
-                != AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
-                    account_id: request.credential_account_id,
-                })
-                || flow.provider != request.provider
-            {
-                return Err(AuthProductError::CrossScopeDenied);
-            }
-            match flow.credential_secret_fingerprint.as_ref() {
-                None => return Ok(()),
-                Some(current) if current == &request.expected_secret_fingerprint => {}
-                Some(_) => return Err(AuthProductError::CrossScopeDenied),
-            }
-            flow.credential_secret_fingerprint = None;
-            flow.updated_at = Utc::now();
-            Ok(())
-        })
-        .await?;
-        Ok(())
     }
 }

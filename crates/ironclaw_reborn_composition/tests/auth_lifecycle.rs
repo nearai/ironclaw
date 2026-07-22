@@ -258,7 +258,7 @@ async fn lifecycle_uninstall_retries_user_abort_after_exact_run_cancellation_fai
 }
 
 #[tokio::test]
-async fn expired_auth_resolution_requeues_only_the_exact_gate_with_error() {
+async fn expired_auth_resolution_requeues_only_the_exact_gate_with_terminal_disposition() {
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let run_id = TurnRunId::new();
     let gate_ref = GateRef::new("gate:expired-oauth").unwrap();
@@ -306,7 +306,7 @@ async fn expired_auth_resolution_requeues_only_the_exact_gate_with_error() {
     );
     assert_eq!(
         resumes[0].resume_disposition,
-        Some(GateResumeDisposition::Error)
+        Some(GateResumeDisposition::Denied)
     );
 }
 
@@ -449,7 +449,7 @@ async fn assert_lifecycle_uninstall_denies_blocked_auth_gate(
         );
         assert_eq!(
             resumes[0].resume_disposition,
-            Some(GateResumeDisposition::Error)
+            Some(GateResumeDisposition::Denied)
         );
     } else {
         assert!(resumes.is_empty());

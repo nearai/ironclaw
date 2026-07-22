@@ -36,7 +36,7 @@ use ironclaw_reborn_composition::{
     RebornRuntimeInput, build_reborn_runtime, build_webui_services,
 };
 use ironclaw_webui::{
-    EnvBearerAuthenticator, SessionAuthenticator, SessionStore, signed_session_store,
+    EnvBearerAuthenticator, SessionAuthenticator, SignedTokenSessionStore, signed_session_store,
 };
 use ironclaw_webui::{WebuiAuthentication, WebuiAuthenticator, WebuiServeConfig, webui_v2_app};
 use secrecy::{ExposeSecret, SecretString};
@@ -70,7 +70,7 @@ impl HostManagedModelGateway for NoOpGateway {
 // ─── token minter (mirrors production's serve-layer minter) ───────────────
 
 struct SessionTokenMinter {
-    store: Arc<dyn SessionStore>,
+    store: Arc<SignedTokenSessionStore>,
 }
 
 #[async_trait]
@@ -524,7 +524,7 @@ async fn admin_last_admin_protection_over_http() {
 /// bearers that validate under the harness's own authenticator (the exact
 /// property `signed_session_store`'s doc-comment guarantees); a store built with
 /// a *different* secret derives a different HMAC key, so its tokens fail closed.
-fn session_store_with_secret(secret: &str) -> Arc<dyn SessionStore> {
+fn session_store_with_secret(secret: &str) -> Arc<SignedTokenSessionStore> {
     signed_session_store(
         &SecretString::from(secret.to_string()),
         &TenantId::new(TENANT).expect("tenant"),

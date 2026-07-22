@@ -1,29 +1,31 @@
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
-    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, RecordVersion, RootFilesystem,
-    cas_update,
+    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, RootFilesystem, cas_update,
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath};
 use serde::{Deserialize, Serialize};
 use std::time::Duration as StdDuration;
 
 use super::domain::{
-    PreparedCallbackFlow, is_idempotent_lifecycle_callback_replay, prepare_callback_flow,
+    PreparedCallbackFlow, apply_callback_claim, prepare_callback_flow,
     update_account_from_exchange, update_account_from_request, validate_bound_update_authority,
-    validate_callback_claim, validate_flow_update_binding, validate_manual_token_flow,
-    validate_selection_flow,
+    validate_flow_update_binding, validate_manual_token_flow, validate_selection_flow,
 };
-use super::paths::setup_creation_coordination_path;
-use super::{FilesystemAuthProductServices, credential_status_for_completed_flow, scope_matches};
+use super::paths::{flow_path, setup_creation_coordination_path};
+use super::{
+    FilesystemAuthProductServices, credential_status_for_completed_flow, decode_durable_record,
+    encode_durable_record, scope_matches,
+};
 use ironclaw_auth::{
     AuthChallenge, AuthFlowId, AuthFlowManager, AuthFlowOutcome, AuthFlowRecord,
-    AuthFlowRecordSource, AuthFlowState, AuthProductError, CredentialAccount, CredentialAccountId,
+    AuthFlowRecordSource, AuthFlowState, AuthProductError, CredentialAccountId,
     CredentialAccountStatus, CredentialOwnership, CredentialSelectionInput,
-    ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaimRequest,
-    OAuthCallbackFailureInput, OAuthCallbackInput, OAuthProviderExchange, ProviderCallbackOutcome,
-    TurnGateAuthFlowQuery, binding_scope_owns_account, flow_matches_durable_owner,
-    flow_matches_turn_gate_query, is_setup_class_continuation,
+    ManualTokenCompletionInput, NewAuthFlow, NewCredentialAccount, OAuthCallbackClaim,
+    OAuthCallbackClaimRequest, OAuthCallbackFailureInput, OAuthCallbackInput,
+    OAuthProviderExchange, ProviderCallbackOutcome, TurnGateAuthFlowQuery,
+    binding_scope_owns_account, flow_matches_durable_owner, flow_matches_turn_gate_query,
+    is_setup_class_continuation,
 };
 
 const SETUP_CREATION_LEASE_SECONDS: i64 = 30;
@@ -48,22 +50,6 @@ fn map_setup_creation_cas_error(error: CasUpdateError<AuthProductError>) -> Auth
             AuthProductError::BackendUnavailable
         }
     }
-}
-
-struct CallbackAccountWrite {
-    account: CredentialAccount,
-    version: RecordVersion,
-    rollback: CallbackAccountRollback,
-}
-
-enum CallbackAccountRollback {
-    Revoke,
-    Restore {
-        previous_account: Box<CredentialAccount>,
-        cleanup_account_id: CredentialAccountId,
-        staged_cleanup: Option<Box<(CredentialAccount, RecordVersion)>>,
-        rollback_cleanup_account_id: CredentialAccountId,
-    },
 }
 
 impl<F> FilesystemAuthProductServices<F>
@@ -190,7 +176,6 @@ where
             provider: request.provider,
             challenge: Some(request.challenge),
             continuation: request.continuation,
-            credential_secret_fingerprint: None,
             update_binding: request.update_binding,
             opaque_state_hash: request.opaque_state_hash,
             pkce_verifier_hash: request.pkce_verifier_hash,
@@ -286,57 +271,75 @@ where
         &self,
         scope: &ironclaw_auth::AuthProductScope,
         request: OAuthCallbackClaimRequest,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        let claimed = self
-            .update_flow_with_cas(scope, request.flow_id, |record| {
-                match validate_callback_claim(record, scope, &request, Utc::now()) {
-                    Ok(()) => {}
-                    Err(AuthProductError::UnknownOrExpiredFlow)
-                        if record.state == AuthFlowState::Resolved(AuthFlowOutcome::Expired) =>
-                    {
-                        return Ok(());
+    ) -> Result<OAuthCallbackClaim, AuthProductError> {
+        let path = flow_path(scope, request.flow_id)?;
+        let expected_scope = scope.clone();
+        cas_update(
+            self.filesystem.as_ref(),
+            &scope.resource,
+            &path,
+            |bytes| decode_durable_record::<AuthFlowRecord>(bytes, "auth flow"),
+            |record| {
+                let body = encode_durable_record(record, "auth flow")?;
+                Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+            },
+            |current: Option<AuthFlowRecord>| {
+                let outcome = (|| {
+                    let mut record = current.ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+                    let claim =
+                        apply_callback_claim(&mut record, &expected_scope, &request, Utc::now());
+                    match claim {
+                        Ok(claim @ OAuthCallbackClaim::Acquired(_)) => {
+                            Ok(CasApply::new(record, Ok(claim)))
+                        }
+                        Ok(claim @ OAuthCallbackClaim::Existing(_)) => {
+                            Ok(CasApply::no_op(record, Ok(claim)))
+                        }
+                        Err(error @ AuthProductError::UnknownOrExpiredFlow)
+                            if record.state
+                                == AuthFlowState::Resolved(AuthFlowOutcome::Expired) =>
+                        {
+                            Ok(CasApply::new(record, Err(error)))
+                        }
+                        Err(error) => Ok(CasApply::no_op(record, Err(error))),
                     }
-                    Err(error) => return Err(error),
-                }
-                if matches!(
-                    record.state,
-                    AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
-                ) || is_idempotent_lifecycle_callback_replay(record)
-                {
-                    return Ok(());
-                }
-                record.state = AuthFlowState::Processing;
-                record.updated_at = Utc::now();
-                Ok(())
-            })
-            .await?;
-        if claimed.state == AuthFlowState::Resolved(AuthFlowOutcome::Expired) {
-            return Err(AuthProductError::UnknownOrExpiredFlow);
-        }
-        Ok(claimed)
+                })();
+                async move { outcome }
+            },
+        )
+        .await
+        .map_err(map_setup_creation_cas_error)?
     }
     async fn complete_oauth_callback(
         &self,
         scope: &ironclaw_auth::AuthProductScope,
         input: OAuthCallbackInput,
     ) -> Result<AuthFlowRecord, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{}", input.flow_id));
+        let _guard = lock.lock().await;
         let now = Utc::now();
-        let (mut record, _) = self
+        let (mut record, version) = self
             .read_flow(scope, input.flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
         let callback =
             match prepare_callback_flow(&mut record, scope, &input.opaque_state_hash, now) {
-                Ok(callback) => callback,
-                Err(error) => {
-                    if record.state == AuthFlowState::Resolved(AuthFlowOutcome::Expired) {
-                        self.persist_expired_flow(scope, input.flow_id, now).await?;
-                    }
-                    return Err(error);
+                Ok(cb) => cb,
+                Err(AuthProductError::UnknownOrExpiredFlow) => {
+                    self.write_flow(scope, &record, CasExpectation::Version(version))
+                        .await?;
+                    return Err(AuthProductError::UnknownOrExpiredFlow);
                 }
+                Err(e) => return Err(e),
             };
         let exchange = match input.outcome {
-            ProviderCallbackOutcome::Denied => None,
+            ProviderCallbackOutcome::Denied => {
+                record.state = AuthFlowState::Resolved(AuthFlowOutcome::ProviderDenied);
+                record.updated_at = now;
+                self.write_flow(scope, &record, CasExpectation::Version(version))
+                    .await?;
+                return Ok(record);
+            }
             ProviderCallbackOutcome::Authorized { exchange } => {
                 let exchange = *exchange;
                 if exchange.provider != record.provider {
@@ -349,64 +352,32 @@ where
                 {
                     return Err(AuthProductError::CrossScopeDenied);
                 }
-                Some(exchange)
+                exchange
             }
         };
-        self.update_flow_with_cas(scope, input.flow_id, |current| {
-            match current.state {
-                AuthFlowState::Open => {
-                    current.state = AuthFlowState::Processing;
-                    current.updated_at = now;
-                }
-                AuthFlowState::Processing => {}
-                AuthFlowState::Resolved(outcome) => {
-                    return Err(match outcome {
-                        AuthFlowOutcome::UserAborted => AuthProductError::Canceled,
-                        _ => AuthProductError::FlowAlreadyTerminal,
-                    });
-                }
-            }
-            Ok(())
-        })
-        .await?;
-        let Some(exchange) = exchange else {
-            return self
-                .resolve_processing_flow(scope, input.flow_id, AuthFlowOutcome::ProviderDenied, now)
-                .await;
-        };
-        let account_write = self
+        let account_id = self
             .resolve_callback_account(input.flow_id, callback, &exchange)
             .await?;
-        let account_id = account_write.account.id;
-        let account_fingerprint = account_write.account.secret_fingerprint();
-        let outcome = AuthFlowOutcome::Authorized { account_id };
-        let resolved = self
-            .update_flow_with_cas(scope, input.flow_id, |current| {
-                if matches!(current.state, AuthFlowState::Processing) {
-                    current.state = AuthFlowState::Resolved(outcome);
-                    current.authorization_code_hash =
-                        Some(exchange.authorization_code_hash.clone());
-                    current.pkce_verifier_hash = Some(exchange.pkce_verifier_hash.clone());
-                    current.credential_secret_fingerprint = Some(account_fingerprint.clone());
-                    current.updated_at = now;
-                }
-                Ok(())
-            })
-            .await;
-        match resolved {
-            Ok(current) if current.state == AuthFlowState::Resolved(outcome) => {
-                self.finalize_callback_account_write(&account_write).await;
-                Ok(current)
-            }
-            Ok(current) => {
-                self.rollback_failed_callback_account(account_write).await?;
-                Ok(current)
-            }
-            Err(error) => {
-                self.rollback_failed_callback_account(account_write).await?;
-                Err(error)
-            }
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id });
+        record.authorization_code_hash = Some(exchange.authorization_code_hash);
+        record.pkce_verifier_hash = Some(exchange.pkce_verifier_hash);
+        record.updated_at = now;
+        if let Err(error) = self
+            .write_flow(scope, &record, CasExpectation::Version(version))
+            .await
+        {
+            // The exchange already minted/updated the credential account, but
+            // the flow's completion write lost a CAS race — e.g. a concurrent
+            // lifecycle cancel from extension removal on another replica. A
+            // live credential must not outlive its flow: revoke it
+            // best-effort (clearing its secret handles) so a torn-down
+            // extension cannot retain a token minted mid-removal, then
+            // surface the original conflict.
+            self.compensate_unanchored_callback_account(scope, account_id)
+                .await;
+            return Err(error);
         }
+        Ok(record)
     }
 
     async fn complete_credential_selection(
@@ -414,17 +385,14 @@ where
         scope: &ironclaw_auth::AuthProductScope,
         input: CredentialSelectionInput,
     ) -> Result<AuthFlowRecord, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{}", input.flow_id));
+        let _guard = lock.lock().await;
         let now = Utc::now();
-        let (mut record, _) = self
+        let (mut record, version) = self
             .read_flow(scope, input.flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        if let Err(error) = validate_selection_flow(&mut record, scope, &input, now) {
-            if record.state == AuthFlowState::Resolved(AuthFlowOutcome::Expired) {
-                self.persist_expired_flow(scope, input.flow_id, now).await?;
-            }
-            return Err(error);
-        }
+        validate_selection_flow(&mut record, scope, &input, now)?;
         if matches!(record.state, AuthFlowState::Resolved(_)) {
             return Ok(record);
         }
@@ -447,33 +415,13 @@ where
         {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        let claimed = self
-            .update_flow_with_cas(scope, input.flow_id, |current| {
-                match current.state {
-                    AuthFlowState::Open => {
-                        current.state = AuthFlowState::Processing;
-                        current.updated_at = now;
-                    }
-                    AuthFlowState::Resolved(_) => {}
-                    AuthFlowState::Processing => {
-                        return Err(AuthProductError::FlowAlreadyTerminal);
-                    }
-                }
-                Ok(())
-            })
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: input.credential_account_id,
+        });
+        record.updated_at = now;
+        self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
-        if matches!(claimed.state, AuthFlowState::Resolved(_)) {
-            return Ok(claimed);
-        }
-        self.resolve_processing_flow(
-            scope,
-            input.flow_id,
-            AuthFlowOutcome::Authorized {
-                account_id: input.credential_account_id,
-            },
-            Utc::now(),
-        )
-        .await
+        Ok(record)
     }
 
     async fn complete_manual_token(
@@ -494,19 +442,21 @@ where
                 matches_interaction.then_some(flow.id)
             })
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        let lock = self.lock_for(format!("flow:{flow_id}"));
+        let _guard = lock.lock().await;
         let now = Utc::now();
-        let (mut record, _) = self
+        let (mut record, version) = self
             .read_flow(scope, flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
         match validate_manual_token_flow(&mut record, scope, &input, now) {
             Ok(()) => {}
-            Err(error) => {
-                if record.state == AuthFlowState::Resolved(AuthFlowOutcome::Expired) {
-                    self.persist_expired_flow(scope, flow_id, now).await?;
-                }
-                return Err(error);
+            Err(AuthProductError::UnknownOrExpiredFlow) => {
+                self.write_flow(scope, &record, CasExpectation::Version(version))
+                    .await?;
+                return Err(AuthProductError::UnknownOrExpiredFlow);
             }
+            Err(error) => return Err(error),
         }
         if matches!(record.state, AuthFlowState::Resolved(_)) {
             return Ok(record);
@@ -532,33 +482,13 @@ where
         {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        let claimed = self
-            .update_flow_with_cas(scope, flow_id, |current| {
-                match current.state {
-                    AuthFlowState::Open => {
-                        current.state = AuthFlowState::Processing;
-                        current.updated_at = now;
-                    }
-                    AuthFlowState::Resolved(_) => {}
-                    AuthFlowState::Processing => {
-                        return Err(AuthProductError::FlowAlreadyTerminal);
-                    }
-                }
-                Ok(())
-            })
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::Authorized {
+            account_id: input.credential_account_id,
+        });
+        record.updated_at = now;
+        self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
-        if matches!(claimed.state, AuthFlowState::Resolved(_)) {
-            return Ok(claimed);
-        }
-        self.resolve_processing_flow(
-            scope,
-            flow_id,
-            AuthFlowOutcome::Authorized {
-                account_id: input.credential_account_id,
-            },
-            Utc::now(),
-        )
-        .await
+        Ok(record)
     }
 
     async fn cancel_manual_token(
@@ -581,7 +511,22 @@ where
         else {
             return Ok(None);
         };
-        self.cancel_flow(scope, flow_id).await.map(Some)
+        let lock = self.lock_for(format!("flow:{flow_id}"));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !matches!(record.state, AuthFlowState::Resolved(_)) {
+            record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
+            record.updated_at = Utc::now();
+            self.write_flow(scope, &record, CasExpectation::Version(version))
+                .await?;
+        }
+        Ok(Some(record))
     }
 
     async fn fail_oauth_callback(
@@ -589,42 +534,54 @@ where
         scope: &ironclaw_auth::AuthProductScope,
         input: OAuthCallbackFailureInput,
     ) -> Result<AuthFlowRecord, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{}", input.flow_id));
+        let _guard = lock.lock().await;
         let now = Utc::now();
-        let (mut record, _) = self
+        let (mut record, version) = self
             .read_flow(scope, input.flow_id)
             .await?
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        if matches!(record.state, AuthFlowState::Resolved(_)) {
-            return Ok(record);
-        }
         match prepare_callback_flow(&mut record, scope, &input.opaque_state_hash, now) {
             Ok(_) => {}
-            Err(error) => {
-                if record.state == AuthFlowState::Resolved(AuthFlowOutcome::Expired) {
-                    self.persist_expired_flow(scope, input.flow_id, now).await?;
-                }
-                return Err(error);
+            Err(AuthProductError::UnknownOrExpiredFlow) => {
+                self.write_flow(scope, &record, CasExpectation::Version(version))
+                    .await?;
+                return Err(AuthProductError::UnknownOrExpiredFlow);
             }
+            Err(e) => return Err(e),
         }
-        let claimed = self
-            .update_flow_with_cas(scope, input.flow_id, |current| {
-                if matches!(current.state, AuthFlowState::Open) {
-                    current.state = AuthFlowState::Processing;
-                    current.updated_at = now;
-                }
-                Ok(())
-            })
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::Failed { error: input.error });
+        record.updated_at = now;
+        self.write_flow(scope, &record, CasExpectation::Version(version))
             .await?;
-        if matches!(claimed.state, AuthFlowState::Resolved(_)) {
-            return Ok(claimed);
+        Ok(record)
+    }
+
+    async fn cancel_flow(
+        &self,
+        scope: &ironclaw_auth::AuthProductScope,
+        flow_id: AuthFlowId,
+    ) -> Result<AuthFlowRecord, AuthProductError> {
+        let lock = self.lock_for(format!("flow:{flow_id}"));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
         }
-        let outcome = if input.error == ironclaw_auth::AuthErrorCode::ProviderDenied {
-            AuthFlowOutcome::ProviderDenied
-        } else {
-            AuthFlowOutcome::Failed { error: input.error }
-        };
-        self.resolve_processing_flow(scope, input.flow_id, outcome, now)
-            .await
+        if let AuthFlowState::Resolved(outcome) = record.state {
+            return Err(match outcome {
+                AuthFlowOutcome::UserAborted => AuthProductError::Canceled,
+                _ => AuthProductError::FlowAlreadyTerminal,
+            });
+        }
+        record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
+        record.updated_at = Utc::now();
+        self.write_flow(scope, &record, CasExpectation::Version(version))
+            .await?;
+        Ok(record)
     }
 
     async fn expire_flow(
@@ -633,38 +590,22 @@ where
         flow_id: AuthFlowId,
         observed_at: ironclaw_auth::Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError> {
-        self.update_flow_with_cas(scope, flow_id, |record| {
-            if matches!(record.state, AuthFlowState::Resolved(_)) {
-                return Ok(());
-            }
-            if observed_at <= record.expires_at {
-                return Err(AuthProductError::FlowAlreadyTerminal);
-            }
+        let lock = self.lock_for(format!("flow:{flow_id}"));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !matches!(record.state, AuthFlowState::Resolved(_)) && observed_at > record.expires_at {
             record.state = AuthFlowState::Resolved(AuthFlowOutcome::Expired);
             record.updated_at = observed_at;
-            Ok(())
-        })
-        .await
-    }
-
-    async fn cancel_flow(
-        &self,
-        scope: &ironclaw_auth::AuthProductScope,
-        flow_id: AuthFlowId,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        self.update_flow_with_cas(scope, flow_id, |record| {
-            match record.state {
-                AuthFlowState::Resolved(AuthFlowOutcome::UserAborted) => return Ok(()),
-                AuthFlowState::Resolved(_) => {
-                    return Err(AuthProductError::FlowAlreadyTerminal);
-                }
-                AuthFlowState::Open | AuthFlowState::Processing => {}
-            }
-            record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
-            record.updated_at = Utc::now();
-            Ok(())
-        })
-        .await
+            self.write_flow(scope, &record, CasExpectation::Version(version))
+                .await?;
+        }
+        Ok(record)
     }
 
     async fn mark_resolution_delivered(
@@ -673,17 +614,28 @@ where
         flow_id: AuthFlowId,
         delivered_at: ironclaw_auth::Timestamp,
     ) -> Result<AuthFlowRecord, AuthProductError> {
-        self.update_flow_with_cas(scope, flow_id, |record| {
-            if !matches!(record.state, AuthFlowState::Resolved(_)) {
-                return Err(AuthProductError::FlowAlreadyTerminal);
-            }
-            if record.resolution_delivered_at.is_none() {
-                record.resolution_delivered_at = Some(delivered_at);
-                record.updated_at = delivered_at;
-            }
-            Ok(())
-        })
-        .await
+        let lock = self.lock_for(format!("flow:{flow_id}"));
+        let _guard = lock.lock().await;
+        let (mut record, version) = self
+            .read_flow(scope, flow_id)
+            .await?
+            .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+        if !scope_matches(scope, &record.scope) {
+            return Err(AuthProductError::CrossScopeDenied);
+        }
+        if !matches!(record.state, AuthFlowState::Resolved(_)) {
+            return Err(AuthProductError::FlowAlreadyTerminal);
+        }
+        // Idempotent: if the resolution was already marked by a concurrent
+        // caller, return the existing record without writing.
+        if record.resolution_delivered_at.is_some() {
+            return Ok(record);
+        }
+        record.resolution_delivered_at = Some(delivered_at);
+        record.updated_at = delivered_at;
+        self.write_flow(scope, &record, CasExpectation::Version(version))
+            .await?;
+        Ok(record)
     }
 }
 
@@ -738,41 +690,56 @@ impl<F> FilesystemAuthProductServices<F>
 where
     F: RootFilesystem + 'static,
 {
-    async fn persist_expired_flow(
+    /// Best-effort compensation for a callback whose account write committed
+    /// but whose flow-completion write lost a CAS race — typically a
+    /// concurrent lifecycle cancel while an extension is being removed.
+    /// Revokes the account and purges its secret handles so the credential
+    /// cannot outlive its canceled flow. Failures are logged, never
+    /// propagated: the caller surfaces the original conflict, and the
+    /// lifecycle cleanup's account scan (which now runs AFTER flow
+    /// cancellation) remains the durable backstop.
+    async fn compensate_unanchored_callback_account(
         &self,
         scope: &ironclaw_auth::AuthProductScope,
-        flow_id: AuthFlowId,
-        expired_at: ironclaw_auth::Timestamp,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        self.update_flow_with_cas(scope, flow_id, |record| {
-            if !matches!(record.state, AuthFlowState::Resolved(_)) {
-                record.state = AuthFlowState::Resolved(AuthFlowOutcome::Expired);
-                record.updated_at = expired_at;
+        account_id: CredentialAccountId,
+    ) {
+        let lock = self.lock_for(format!("account:{account_id}"));
+        let _guard = lock.lock().await;
+        let (mut account, version) = match self.read_account(scope, account_id).await {
+            Ok(Some(found)) => found,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(
+                    %account_id,
+                    error_code = ?error.code(),
+                    "callback compensation could not read the just-minted account"
+                );
+                return;
             }
-            Ok(())
-        })
-        .await
-    }
-
-    async fn resolve_processing_flow(
-        &self,
-        scope: &ironclaw_auth::AuthProductScope,
-        flow_id: AuthFlowId,
-        outcome: AuthFlowOutcome,
-        resolved_at: ironclaw_auth::Timestamp,
-    ) -> Result<AuthFlowRecord, AuthProductError> {
-        self.update_flow_with_cas(scope, flow_id, |record| {
-            match record.state {
-                AuthFlowState::Processing => {
-                    record.state = AuthFlowState::Resolved(outcome);
-                    record.updated_at = resolved_at;
-                }
-                AuthFlowState::Resolved(_) => {}
-                AuthFlowState::Open => return Err(AuthProductError::FlowAlreadyTerminal),
-            }
-            Ok(())
-        })
-        .await
+        };
+        let purge_access = account.access_secret.take();
+        let purge_refresh = account.refresh_secret.take();
+        account.status = CredentialAccountStatus::Revoked;
+        account.updated_at = Utc::now();
+        if let Err(error) = self
+            .write_account(&account, CasExpectation::Version(version))
+            .await
+        {
+            tracing::warn!(
+                %account_id,
+                error_code = ?error.code(),
+                "callback compensation could not revoke the just-minted account"
+            );
+            return;
+        }
+        if let Some(handle) = &purge_access {
+            self.purge_secret_handle(&account.scope.resource, handle)
+                .await;
+        }
+        if let Some(handle) = &purge_refresh {
+            self.purge_secret_handle(&account.scope.resource, handle)
+                .await;
+        }
     }
 
     async fn resolve_callback_account(
@@ -780,7 +747,7 @@ where
         flow_id: AuthFlowId,
         callback: PreparedCallbackFlow,
         exchange: &OAuthProviderExchange,
-    ) -> Result<CallbackAccountWrite, AuthProductError> {
+    ) -> Result<CredentialAccountId, AuthProductError> {
         match exchange.account_id {
             Some(account_id) => {
                 let binding = callback
@@ -790,13 +757,14 @@ where
                 if binding.account_id != account_id {
                     return Err(AuthProductError::CrossScopeDenied);
                 }
-                self.update_bound_oauth_account(flow_id, &callback.scope, binding, exchange)
-                    .await
+                self.update_bound_oauth_account(&callback.scope, binding, exchange)
+                    .await?;
+                Ok(account_id)
             }
             None => {
                 if let Some(binding) = &callback.update_binding {
                     return self
-                        .update_bound_oauth_account(flow_id, &callback.scope, binding, exchange)
+                        .update_bound_oauth_account(&callback.scope, binding, exchange)
                         .await;
                 }
                 let account_id = CredentialAccountId::from_uuid(flow_id.as_uuid());
@@ -813,7 +781,7 @@ where
                     scopes: exchange.scopes.clone(),
                 };
                 match self
-                    .create_account_with_id_and_provider_identity_versioned(
+                    .create_account_with_id_and_provider_identity(
                         account_id,
                         request.clone(),
                         exchange.provider_identity.clone(),
@@ -821,11 +789,7 @@ where
                     )
                     .await
                 {
-                    Ok((account, version)) => Ok(CallbackAccountWrite {
-                        account,
-                        version,
-                        rollback: CallbackAccountRollback::Revoke,
-                    }),
+                    Ok(account) => Ok(account.id),
                     // CAS conflict: another concurrent callback already created the account.
                     // Re-read, validate it belongs to this flow/scope/provider, then
                     // overwrite only if identity matches.
@@ -844,8 +808,7 @@ where
                         let previous_refresh_secret = account.refresh_secret.clone();
                         update_account_from_request(&mut account, request.clone(), Utc::now())?;
                         account.provider_identity = exchange.provider_identity.clone();
-                        let version = self
-                            .write_account(&account, CasExpectation::Version(version))
+                        self.write_account(&account, CasExpectation::Version(version))
                             .await?;
                         if let Some(h) = &previous_access_secret
                             && previous_access_secret.as_ref() != account.access_secret.as_ref()
@@ -857,11 +820,7 @@ where
                         {
                             self.purge_secret_handle(&request.scope.resource, h).await;
                         }
-                        Ok(CallbackAccountWrite {
-                            account,
-                            version,
-                            rollback: CallbackAccountRollback::Revoke,
-                        })
+                        Ok(account.id)
                     }
                     Err(error) => Err(error),
                 }
@@ -869,352 +828,12 @@ where
         }
     }
 
-    async fn rollback_failed_callback_account(
-        &self,
-        callback_write: CallbackAccountWrite,
-    ) -> Result<(), AuthProductError> {
-        let CallbackAccountWrite {
-            account: callback_account,
-            version: callback_version,
-            rollback,
-        } = callback_write;
-        let account_id = callback_account.id;
-        let lock = self.lock_for(format!("account:{account_id}"));
-        let _guard = lock.lock().await;
-        let Some((mut account, version)) = self
-            .read_account(&callback_account.scope, account_id)
-            .await?
-        else {
-            return Ok(());
-        };
-
-        // A later account mutation owns a different version and must not be
-        // changed by this stale callback's compensation.
-        if version != callback_version || account.status != CredentialAccountStatus::Configured {
-            return Ok(());
-        }
-
-        if let CallbackAccountRollback::Restore {
-            previous_account,
-            staged_cleanup,
-            rollback_cleanup_account_id,
-            ..
-        } = rollback
-        {
-            let previous_account = *previous_account;
-            let cleanup_account = self
-                .stage_replaced_callback_secrets(
-                    rollback_cleanup_account_id,
-                    &callback_account,
-                    &previous_account,
-                )
-                .await;
-            let mut restore_attempts = 0;
-            let restore_result = loop {
-                match self
-                    .write_account(&previous_account, CasExpectation::Version(version))
-                    .await
-                {
-                    Err(AuthProductError::BackendUnavailable) if restore_attempts < 2 => {
-                        restore_attempts += 1;
-                    }
-                    result => break result,
-                }
-            };
-            match restore_result {
-                Ok(_) => {
-                    if let Some(staged_cleanup) = staged_cleanup {
-                        let (account, version) = *staged_cleanup;
-                        self.clear_callback_secret_cleanup(account, version).await?;
-                    }
-                    return match cleanup_account? {
-                        Some((account, version)) => {
-                            self.purge_revoked_callback_account(account, version).await
-                        }
-                        None => Ok(()),
-                    };
-                }
-                Err(AuthProductError::BackendConflict) => {
-                    // A later account mutation owns the record. Preserve any
-                    // staged cleanup pointers for lifecycle retry; if staging
-                    // itself failed, surface that failure to the caller.
-                    cleanup_account?;
-                    return Ok(());
-                }
-                Err(error) => return Err(error),
-            }
-        }
-
-        let CallbackAccountRollback::Revoke = rollback else {
-            return Err(AuthProductError::BackendConflict);
-        };
-        let cleanup_account_id = CredentialAccountId::new();
-        // Preserve a durable, revoked cleanup pointer before mutating the
-        // callback account. If every bounded revoke attempt fails, lifecycle
-        // cleanup can still find and purge the exchanged secret handles.
-        let cleanup_account = self
-            .stage_callback_secret_cleanup(
-                cleanup_account_id,
-                callback_account.scope.clone(),
-                callback_account.provider.clone(),
-                callback_account.label.clone(),
-                callback_account.access_secret.clone(),
-                callback_account.refresh_secret.clone(),
-            )
-            .await;
-
-        account.status = CredentialAccountStatus::Revoked;
-        account.updated_at = Utc::now();
-        let mut revoke_attempts = 0;
-        let revoke_result = loop {
-            match self
-                .write_account(&account, CasExpectation::Version(version))
-                .await
-            {
-                Err(AuthProductError::BackendUnavailable) if revoke_attempts < 2 => {
-                    revoke_attempts += 1;
-                }
-                result => break result,
-            }
-        };
-        let version = match revoke_result {
-            Ok(version) => version,
-            // Another process changed the account after our version check. It
-            // now owns cleanup or a newer connection; do not clobber it.
-            Err(AuthProductError::BackendConflict) => {
-                cleanup_account?;
-                return Ok(());
-            }
-            Err(error) => {
-                cleanup_account?;
-                tracing::warn!(
-                    account_id = %account_id,
-                    cleanup_account_id = %cleanup_account_id,
-                    error_code = ?error.code(),
-                    "retaining failed OAuth callback rollback for lifecycle cleanup"
-                );
-                return Err(error);
-            }
-        };
-
-        match self.purge_revoked_callback_account(account, version).await {
-            Ok(()) => {
-                if let Ok((cleanup, cleanup_version)) = cleanup_account
-                    && let Err(error) = self
-                        .clear_callback_secret_cleanup(cleanup, cleanup_version)
-                        .await
-                {
-                    tracing::warn!(
-                        cleanup_account_id = %cleanup_account_id,
-                        error_code = ?error.code(),
-                        "retaining cleared OAuth rollback marker for lifecycle cleanup"
-                    );
-                }
-                Ok(())
-            }
-            Err(error) => {
-                cleanup_account?;
-                Err(error)
-            }
-        }
-    }
-
-    async fn stage_replaced_callback_secrets(
-        &self,
-        cleanup_account_id: CredentialAccountId,
-        replaced: &CredentialAccount,
-        retained: &CredentialAccount,
-    ) -> Result<Option<(CredentialAccount, RecordVersion)>, AuthProductError> {
-        let access_secret = (replaced.access_secret != retained.access_secret)
-            .then(|| replaced.access_secret.clone())
-            .flatten();
-        let refresh_secret = (replaced.refresh_secret != retained.refresh_secret)
-            .then(|| replaced.refresh_secret.clone())
-            .flatten();
-        if access_secret.is_none() && refresh_secret.is_none() {
-            return Ok(None);
-        }
-        self.stage_callback_secret_cleanup(
-            cleanup_account_id,
-            replaced.scope.clone(),
-            replaced.provider.clone(),
-            replaced.label.clone(),
-            access_secret,
-            refresh_secret,
-        )
-        .await
-        .map(Some)
-    }
-
-    async fn clear_callback_secret_cleanup(
-        &self,
-        mut account: CredentialAccount,
-        version: RecordVersion,
-    ) -> Result<(), AuthProductError> {
-        if account.status != CredentialAccountStatus::Revoked {
-            return Err(AuthProductError::BackendConflict);
-        }
-        account.access_secret = None;
-        account.refresh_secret = None;
-        account.updated_at = Utc::now();
-        match self
-            .write_account(&account, CasExpectation::Version(version))
-            .await
-        {
-            Ok(_) | Err(AuthProductError::BackendConflict) => Ok(()),
-            Err(error) => Err(error),
-        }
-    }
-
-    pub(super) async fn stage_callback_secret_cleanup(
-        &self,
-        cleanup_account_id: CredentialAccountId,
-        scope: ironclaw_auth::AuthProductScope,
-        provider: ironclaw_auth::AuthProviderId,
-        label: ironclaw_auth::CredentialAccountLabel,
-        access_secret: Option<ironclaw_host_api::SecretHandle>,
-        refresh_secret: Option<ironclaw_host_api::SecretHandle>,
-    ) -> Result<(CredentialAccount, RecordVersion), AuthProductError> {
-        let request = NewCredentialAccount {
-            scope: scope.clone(),
-            provider: provider.clone(),
-            label,
-            status: CredentialAccountStatus::Revoked,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: access_secret.clone(),
-            refresh_secret: refresh_secret.clone(),
-            scopes: Vec::new(),
-        };
-        match self
-            .create_account_with_id_and_provider_identity_versioned(
-                cleanup_account_id,
-                request,
-                None,
-                CasExpectation::Absent,
-            )
-            .await
-        {
-            Ok(account) => Ok(account),
-            Err(AuthProductError::BackendConflict) => {
-                let (mut existing, version) = self
-                    .read_account(&scope, cleanup_account_id)
-                    .await?
-                    .ok_or(AuthProductError::BackendConflict)?;
-                if existing.provider != provider
-                    || existing.status != CredentialAccountStatus::Revoked
-                    || !binding_scope_owns_account(&scope, &existing)
-                {
-                    return Err(AuthProductError::BackendConflict);
-                }
-                if existing.access_secret == access_secret
-                    && existing.refresh_secret == refresh_secret
-                {
-                    return Ok((existing, version));
-                }
-                if existing.access_secret.is_some() || existing.refresh_secret.is_some() {
-                    return Err(AuthProductError::BackendConflict);
-                }
-                existing.access_secret = access_secret;
-                existing.refresh_secret = refresh_secret;
-                existing.updated_at = Utc::now();
-                let version = self
-                    .write_account(&existing, CasExpectation::Version(version))
-                    .await?;
-                Ok((existing, version))
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    pub(super) async fn purge_revoked_callback_account(
-        &self,
-        mut account: CredentialAccount,
-        mut version: RecordVersion,
-    ) -> Result<(), AuthProductError> {
-        let mut delete_failed = false;
-        if let Some(handle) = account.access_secret.clone() {
-            match self
-                .secret_store
-                .delete(&account.scope.resource, &handle)
-                .await
-            {
-                Ok(_) => {
-                    account.access_secret = None;
-                    account.updated_at = Utc::now();
-                    version = self
-                        .write_account(&account, CasExpectation::Version(version))
-                        .await?;
-                }
-                Err(_) => delete_failed = true,
-            }
-        }
-        if let Some(handle) = account.refresh_secret.clone() {
-            match self
-                .secret_store
-                .delete(&account.scope.resource, &handle)
-                .await
-            {
-                Ok(_) => {
-                    account.refresh_secret = None;
-                    account.updated_at = Utc::now();
-                    self.write_account(&account, CasExpectation::Version(version))
-                        .await?;
-                }
-                Err(_) => delete_failed = true,
-            }
-        }
-        if delete_failed {
-            return Err(AuthProductError::BackendUnavailable);
-        }
-        Ok(())
-    }
-
-    async fn finalize_callback_account_write(&self, callback_write: &CallbackAccountWrite) {
-        let CallbackAccountRollback::Restore {
-            previous_account,
-            cleanup_account_id,
-            ..
-        } = &callback_write.rollback
-        else {
-            return;
-        };
-        match self
-            .stage_replaced_callback_secrets(
-                *cleanup_account_id,
-                previous_account,
-                &callback_write.account,
-            )
-            .await
-        {
-            Ok(Some((account, version))) => {
-                if let Err(error) = self.purge_revoked_callback_account(account, version).await {
-                    tracing::warn!(
-                        cleanup_account_id = %cleanup_account_id,
-                        error_code = ?error.code(),
-                        "retaining replaced OAuth secrets for lifecycle cleanup retry"
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    cleanup_account_id = %cleanup_account_id,
-                    error_code = ?error.code(),
-                    "failed to stage replaced OAuth secrets for lifecycle cleanup"
-                );
-            }
-        }
-    }
-
     async fn update_bound_oauth_account(
         &self,
-        flow_id: AuthFlowId,
         scope: &ironclaw_auth::AuthProductScope,
         binding: &ironclaw_auth::CredentialAccountUpdateBinding,
         exchange: &OAuthProviderExchange,
-    ) -> Result<CallbackAccountWrite, AuthProductError> {
+    ) -> Result<CredentialAccountId, AuthProductError> {
         let account_id = binding.account_id;
         let lock = self.lock_for(format!("account:{account_id}"));
         let _guard = lock.lock().await;
@@ -1235,47 +854,28 @@ where
             return Err(AuthProductError::TokenExchangeFailed);
         }
         validate_bound_update_authority(&account, binding)?;
-        // Preserve the exact prior account until the flow commit succeeds.
-        // If cancellation wins, compensation can restore a newer reconnect;
-        // if this flow wins, finalization purges the replaced handles.
-        let previous_account = account.clone();
+        // Capture previous secret handles before overwriting so we can delete
+        // orphaned material from SecretStore after a successful write. New
+        // tokens are written first; a write failure leaves the old handles
+        // still referenced by the on-disk record.
+        let previous_access_secret = account.access_secret.clone();
+        let previous_refresh_secret = account.refresh_secret.clone();
         update_account_from_exchange(&mut account, exchange, Utc::now());
-        let cleanup_account_id = CredentialAccountId::from_uuid(flow_id.as_uuid());
-        let staged_cleanup = self
-            .stage_replaced_callback_secrets(cleanup_account_id, &previous_account, &account)
-            .await?
-            .map(Box::new);
-        let version = match self
-            .write_account(&account, CasExpectation::Version(version))
-            .await
+        self.write_account(&account, CasExpectation::Version(version))
+            .await?;
+        // Best-effort purge of replaced handles. Failures are non-fatal:
+        // orphans in SecretStore are recoverable; errors must not propagate to
+        // the caller.
+        if let Some(h) = &previous_access_secret
+            && previous_access_secret.as_ref() != account.access_secret.as_ref()
         {
-            Ok(version) => version,
-            Err(error) => {
-                if let Some(staged_cleanup) = staged_cleanup {
-                    let (cleanup_account, cleanup_version) = *staged_cleanup;
-                    if let Err(clear_error) = self
-                        .clear_callback_secret_cleanup(cleanup_account, cleanup_version)
-                        .await
-                    {
-                        tracing::warn!(
-                            cleanup_account_id = %cleanup_account_id,
-                            error_code = ?clear_error.code(),
-                            "failed to clear unused OAuth cleanup pointer after account update failure"
-                        );
-                    }
-                }
-                return Err(error);
-            }
-        };
-        Ok(CallbackAccountWrite {
-            account,
-            version,
-            rollback: CallbackAccountRollback::Restore {
-                previous_account: Box::new(previous_account),
-                cleanup_account_id,
-                staged_cleanup,
-                rollback_cleanup_account_id: CredentialAccountId::new(),
-            },
-        })
+            self.purge_secret_handle(&scope.resource, h).await;
+        }
+        if let Some(h) = &previous_refresh_secret
+            && previous_refresh_secret.as_ref() != account.refresh_secret.as_ref()
+        {
+            self.purge_secret_handle(&scope.resource, h).await;
+        }
+        Ok(account_id)
     }
 }

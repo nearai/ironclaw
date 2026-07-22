@@ -2125,3 +2125,4 @@ mod tests {
         }
     }
 }
+// arch-exempt: large_file, parity trace support remains centralized, plan #6175

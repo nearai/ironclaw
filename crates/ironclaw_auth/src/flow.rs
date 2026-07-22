@@ -170,10 +170,6 @@ pub struct AuthFlowRecord {
     pub provider: AuthProviderId,
     pub challenge: Option<AuthChallenge>,
     pub continuation: AuthContinuationRef,
-    /// Redacted fingerprint of the secret handles committed by this OAuth
-    /// flow. It fences exact compensation without storing credential material.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credential_secret_fingerprint: Option<crate::CredentialSecretFingerprint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_binding: Option<CredentialAccountUpdateBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -207,7 +203,9 @@ struct AuthFlowRecordWire {
     challenge: Option<AuthChallenge>,
     continuation: AuthContinuationRef,
     #[serde(default)]
-    credential_secret_fingerprint: Option<crate::CredentialSecretFingerprint>,
+    // Legacy compatibility only. Canonical records no longer persist a secret
+    // fingerprint or run a completion-compensation protocol.
+    credential_secret_fingerprint: Option<String>,
     #[serde(default)]
     update_binding: Option<CredentialAccountUpdateBinding>,
     #[serde(default)]
@@ -297,10 +295,7 @@ fn decode_auth_flow_lifecycle<E: serde::de::Error>(
     let state = match status {
         LegacyAuthFlowStatus::Pending | LegacyAuthFlowStatus::AwaitingUser => AuthFlowState::Open,
         LegacyAuthFlowStatus::CallbackReceived => AuthFlowState::Processing,
-        LegacyAuthFlowStatus::Completing => match legacy_account_id {
-            Some(account_id) => AuthFlowState::Resolved(AuthFlowOutcome::Authorized { account_id }),
-            None => AuthFlowState::Processing,
-        },
+        LegacyAuthFlowStatus::Completing => AuthFlowState::Processing,
         LegacyAuthFlowStatus::Completed => {
             let account_id = legacy_account_id.ok_or_else(|| {
                 E::custom("legacy completed auth flow is missing its credential account")
@@ -356,7 +351,6 @@ impl<'de> Deserialize<'de> for AuthFlowRecord {
             provider: wire.provider,
             challenge: wire.challenge,
             continuation: wire.continuation,
-            credential_secret_fingerprint: wire.credential_secret_fingerprint,
             update_binding: wire.update_binding,
             opaque_state_hash: wire.opaque_state_hash,
             pkce_verifier_hash: wire.pkce_verifier_hash,
@@ -470,6 +464,17 @@ pub struct OAuthCallbackClaimRequest {
     pub pkce_verifier_hash: crate::PkceVerifierHash,
 }
 
+/// Result of atomically claiming a provider callback.
+///
+/// Only [`Self::Acquired`] owns the right to dispatch provider exchange.
+/// [`Self::Existing`] is either an in-flight duplicate or an idempotent replay
+/// of an already-authorized callback and must not dispatch exchange again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthCallbackClaim {
+    Acquired(AuthFlowRecord),
+    Existing(AuthFlowRecord),
+}
+
 #[async_trait]
 pub trait AuthFlowManager: Send + Sync {
     /// Mint a new durable auth flow.
@@ -494,7 +499,7 @@ pub trait AuthFlowManager: Send + Sync {
         &self,
         scope: &AuthProductScope,
         request: OAuthCallbackClaimRequest,
-    ) -> Result<AuthFlowRecord, AuthProductError>;
+    ) -> Result<OAuthCallbackClaim, AuthProductError>;
 
     async fn complete_oauth_callback(
         &self,

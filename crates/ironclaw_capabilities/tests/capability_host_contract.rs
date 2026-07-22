@@ -15,12 +15,12 @@ async fn capability_host_denies_missing_grant_before_dispatch() {
     let context = execution_context(CapabilitySet::default());
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "blocked"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "blocked"}),
+        )
         .await
         .unwrap_err();
 
@@ -51,12 +51,12 @@ async fn capability_host_denies_dispatch_when_trust_ceiling_omits_capability_eff
     });
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "blocked by trust"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "blocked by trust"}),
+        )
         .await
         .unwrap_err();
 
@@ -82,20 +82,20 @@ async fn capability_host_authorized_dispatch_uses_neutral_dispatch_port() {
     let scope = context.resource_scope.clone();
 
     let result = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default().set_output_bytes(4096),
-            input: json!({"message": "authorized"}),
-        })
+            capability_id(),
+            ResourceEstimate::default().set_output_bytes(4096),
+            json!({"message": "authorized"}),
+        )
         .await
         .unwrap();
 
     assert_eq!(result.dispatch.output, json!({"ok": true}));
     let recorded = dispatcher.last_request().unwrap();
-    assert_eq!(recorded.capability_id, capability_id());
-    assert_eq!(recorded.scope, scope);
-    assert_eq!(recorded.input, json!({"message": "authorized"}));
+    assert_eq!(recorded.invocation.capability, capability_id());
+    assert_eq!(recorded.invocation.scope, scope);
+    assert_eq!(recorded.invocation.input, json!({"message": "authorized"}));
     assert_eq!(recorded.mounts, None);
     assert_eq!(recorded.resource_reservation, None);
 }
@@ -108,12 +108,12 @@ async fn capability_host_returns_approval_store_missing_when_approval_cannot_be_
     let context = execution_context(CapabilitySet::default());
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs approval"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs approval"}),
+        )
         .await
         .unwrap_err();
 
@@ -150,12 +150,12 @@ async fn capability_host_missing_credential_blocks_before_approval_decision() {
     });
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs credential"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs credential"}),
+        )
         .await
         .unwrap_err();
 
@@ -178,12 +178,12 @@ async fn capability_host_fails_closed_on_unsupported_obligations_before_dispatch
     let context = execution_context(CapabilitySet::default());
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "must not dispatch"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "must not dispatch"}),
+        )
         .await
         .unwrap_err();
 

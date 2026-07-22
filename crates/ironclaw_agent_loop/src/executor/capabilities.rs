@@ -11,12 +11,12 @@ use ironclaw_turns::{
     LoopFailureKind, LoopGateRef, LoopResultRef,
     run_profile::{
         AuthResumeApprovalIdentity, CapabilityActivityId, CapabilityApprovalResume,
-        CapabilityAuthResume, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityFailure, CapabilityFailureDetail, CapabilityFailureKind, CapabilityInputIssue,
-        CapabilityProgress, CapabilityResultMessage, CapabilityResumeToken, ContentDigest,
-        LoopDriverNoteKind, LoopProcessRef, LoopProgressEvent,
-        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
-        ObservationTrust, ToolObservationDetail, ToolObservationStatus, VisibleCapabilitySurface,
+        CapabilityAuthResume, CapabilityCallCandidate, CapabilityFailure, CapabilityFailureDetail,
+        CapabilityFailureKind, CapabilityInputIssue, CapabilityProgress, CapabilityResultMessage,
+        CapabilityResumeToken, ContentDigest, LoopDriverNoteKind, LoopProcessRef,
+        LoopProgressEvent, LoopRequestBatch, MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION,
+        ModelVisibleToolObservation, ObservationTrust, ToolObservationDetail,
+        ToolObservationStatus, VisibleCapabilitySurface,
     },
 };
 
@@ -131,24 +131,14 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         // We call `handle_capability_error` directly so the planner-visible
         // summary can stay distinct from the stable product-facing declined
         // reason token.
-        let terminal_auth_resume = state.pending_auth_resume.as_ref().and_then(|pending| {
-            let (failure_kind, planner_summary) = match pending.disposition.as_ref()? {
-                ironclaw_turns::GateResumeDisposition::Denied => (
-                    CapabilityFailureKind::GateDeclined,
-                    "auth gate denied by user",
-                ),
-                ironclaw_turns::GateResumeDisposition::Error => (
-                    CapabilityFailureKind::Authorization,
-                    "auth flow failed or expired",
-                ),
-            };
-            Some((
-                pending.activity_id_for_resume(),
-                failure_kind,
-                planner_summary,
-            ))
+        let terminal_auth_resume = state.pending_auth_resume.as_ref().filter(|pending| {
+            matches!(
+                pending.disposition.as_ref(),
+                Some(ironclaw_turns::GateResumeDisposition::Denied)
+            )
         });
-        if let Some((activity_id, failure_kind, planner_summary)) = terminal_auth_resume {
+        if let Some(pending) = terminal_auth_resume {
+            let activity_id = pending.activity_id_for_resume();
             // Clear the slot even if no visible call matches, so a stale terminal
             // disposition cannot leak into a later batch.
             state.pending_auth_resume = None;
@@ -159,8 +149,8 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
                     &mut signatures,
                     &mut capability_batch,
                     activity_id,
-                    failure_kind,
-                    planner_summary,
+                    CapabilityFailureKind::GateDeclined,
+                    "auth gate denied by user",
                     visible_calls,
                 )
                 .await?
@@ -284,7 +274,7 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
         let mut pending_auth_resume = state.pending_auth_resume.clone();
         let batch_result = ctx
             .host
-            .invoke_capability_batch(CapabilityBatchInvocation {
+            .invoke_capability_batch(LoopRequestBatch {
                 invocations: visible_calls
                     .iter()
                     .cloned()

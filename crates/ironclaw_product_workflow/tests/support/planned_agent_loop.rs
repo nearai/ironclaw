@@ -52,6 +52,7 @@ use ironclaw_runner::{
         boot_recovery::ScopeRecoveryDriver, resolver::AwaitEdgeResolver,
         store::FilesystemAwaitEdgeStore,
     },
+    subagent::goal_store::in_memory_backed_subagent_goal_store,
 };
 use ironclaw_threads::{
     InMemorySessionThreadService, SessionThreadService, ThreadHistoryRequest, ThreadMessageRecord,
@@ -64,13 +65,12 @@ use ironclaw_turns::{
     LoopResultRef, SanitizedCancelReason, TurnActor, TurnCoordinator, TurnRunId, TurnRunState,
     TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostError, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
+        AgentLoopHostError, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
         CapabilitySurfaceVersion, ConcurrencyHint, InMemoryLoopHostMilestoneSink,
         InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
-        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ParentLoopOutput, PromptMode, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        resolution,
+        LoopInputCursorToken, LoopRequest, LoopRequestBatch, LoopRunContext, NoOpBudgetAccountant,
+        NoOpPolicyGuard, ParentLoopOutput, PromptMode, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, resolution,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -87,7 +87,7 @@ pub struct ProductLiveAgentLoopHarness {
     cancellation_factory: Arc<ReadyRunCancellationFactory>,
     composition: RebornRuntimeLoopComposition<dyn SessionThreadService, RecordingModelGateway>,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
-    capability_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    capability_invocations: Arc<Mutex<Vec<LoopRequest>>>,
     capability_results: Arc<Mutex<Vec<serde_json::Value>>>,
     model_release: Option<CancellationToken>,
     _host_runtime_root: Option<tempfile::TempDir>,
@@ -370,9 +370,7 @@ impl ProductLiveAgentLoopHarness {
         let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
             ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
         )));
-        let await_edge_goal_store = Arc::new(
-            ironclaw_runner::subagent::goal_store::InMemoryBoundedSubagentGoalStore::new(),
-        );
+        let await_edge_goal_store = Arc::new(in_memory_backed_subagent_goal_store());
         let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
             Arc::clone(&await_edge_store),
             await_edge_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
@@ -467,7 +465,7 @@ impl ProductLiveAgentLoopHarness {
             .clone()
     }
 
-    pub fn capability_invocations(&self) -> Vec<CapabilityInvocation> {
+    pub fn capability_invocations(&self) -> Vec<LoopRequest> {
         self.capability_invocations
             .lock()
             .expect("harness capability invocation lock poisoned")
@@ -725,7 +723,7 @@ struct ProductLiveHostRuntimeCapabilityFactory {
     services: Arc<RebornServices>,
     io: Arc<ProductLiveCapabilityIo>,
     staged_inputs: Arc<Mutex<HashMap<TurnRunId, CapabilityInputRef>>>,
-    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    invocations: Arc<Mutex<Vec<LoopRequest>>>,
     results: Arc<Mutex<Vec<serde_json::Value>>>,
     capability_id: CapabilityId,
     input: serde_json::Value,
@@ -818,7 +816,7 @@ struct RecordingDelegatingCapabilityPort {
     inner: Arc<dyn LoopCapabilityPort>,
     run_context: LoopRunContext,
     io: Arc<ProductLiveCapabilityIo>,
-    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    invocations: Arc<Mutex<Vec<LoopRequest>>>,
     results: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
@@ -833,7 +831,7 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations
             .lock()
@@ -846,7 +844,7 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.invocations
             .lock()
@@ -907,7 +905,7 @@ impl ProductLiveCapabilityAuthorityResolver for StaticProductLiveAuthorityResolv
 
 struct RecordingCapabilityFactory {
     capability: HarnessCapabilityConfig,
-    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    invocations: Arc<Mutex<Vec<LoopRequest>>>,
 }
 
 #[async_trait]
@@ -925,7 +923,7 @@ impl LoopCapabilityPortFactory for RecordingCapabilityFactory {
 
 struct RecordingCapabilityPort {
     capability: HarnessCapabilityConfig,
-    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    invocations: Arc<Mutex<Vec<LoopRequest>>>,
 }
 
 #[async_trait]
@@ -951,7 +949,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.invocations
             .lock()
@@ -972,7 +970,7 @@ impl LoopCapabilityPort for RecordingCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let mut resolutions = Vec::new();
         let mut stopped_on_suspension = false;
