@@ -11,6 +11,7 @@ on:
   push:
     branches:
       - main
+      - main-ci-checks-20260722
 
 permissions:
   contents: read
