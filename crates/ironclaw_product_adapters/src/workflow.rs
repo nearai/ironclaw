@@ -52,8 +52,8 @@ pub trait ProductWorkflow: Send + Sync {
         _channel_adapter: std::sync::Arc<dyn ChannelAdapter>,
         _channel_egress: std::sync::Arc<dyn RestrictedEgress>,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
-        Err(ProductAdapterError::Internal {
-            detail: RedactedString::new(
+        Err(ProductAdapterError::WorkflowTransient {
+            reason: RedactedString::new(
                 "channel attachment transfer is not supported by this ProductWorkflow implementation",
             ),
         })

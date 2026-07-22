@@ -890,6 +890,18 @@ mod tests {
         }
     }
 
+    struct DefaultingAttachmentWorkflow;
+
+    #[async_trait]
+    impl ProductWorkflow for DefaultingAttachmentWorkflow {
+        async fn submit_inbound(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            panic!("attachment admission must use the channel-transfer entrypoint")
+        }
+    }
+
     struct TestRestrictedEgress;
 
     #[async_trait]
@@ -1139,5 +1151,26 @@ mod tests {
             !serialized.contains("opaque-provider-file-reference"),
             "provider transfer references must remain transient"
         );
+    }
+
+    #[tokio::test]
+    async fn inherited_attachment_transfer_failure_is_retryable_without_durable_ack() {
+        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+            adapter_id: ProductAdapterId::new("vendorx").expect("adapter id"),
+            evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                header: "X-Vendor-Secret".to_string(),
+            },
+            classifier: None,
+            workflow: Arc::new(DefaultingAttachmentWorkflow),
+            observer: None,
+        });
+
+        let error = sink
+            .admit(admission_with_attachment())
+            .await
+            .expect_err("an inherited unsupported transfer must not claim durable acceptance");
+
+        assert!(error.retryable);
+        assert_eq!(error.reason, "workflow admission failed retryably");
     }
 }
