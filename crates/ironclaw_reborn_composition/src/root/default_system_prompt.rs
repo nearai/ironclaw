@@ -17,6 +17,7 @@ use ironclaw_turns::{
 
 const DEFAULT_SYSTEM_PROMPT_NAME: &str = "SYSTEM.md";
 const DEFAULT_SYSTEM_PROMPT_EMBEDDED: &str = include_str!("../../assets/prompts/default-system.md");
+pub(crate) const DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY: &str = "- Respond in the same language as the user's current message unless they explicitly request another language.\n";
 /// Progressive tool-disclosure protocol, appended to the system prompt only when
 /// disclosure is active (bridged mode). A weak model will not adopt the
 /// search/describe/call protocol from the `tool_search` tool description alone —
@@ -72,7 +73,10 @@ impl DefaultSystemPromptIdentitySource {
     }
 
     fn prompt_content(&self) -> Result<String, DefaultSystemPromptError> {
-        let base = read_default_system_prompt(&self.storage_root, &self.prompt_path)?;
+        let base = effective_default_system_prompt(read_default_system_prompt(
+            &self.storage_root,
+            &self.prompt_path,
+        )?);
         if !self.disclosure_protocol_active {
             return Ok(base);
         }
@@ -111,12 +115,29 @@ impl DefaultSystemPromptIdentitySource {
     }
 }
 
+fn effective_default_system_prompt(content: String) -> String {
+    let known_prior_default =
+        DEFAULT_SYSTEM_PROMPT_EMBEDDED.replacen(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY, "", 1);
+    if content == known_prior_default {
+        // Keep the editable file untouched rather than attempting a
+        // check-then-rewrite while its contents can change concurrently. The
+        // byte-identical prior bundle is the sole safe upgrade candidate, so
+        // compose the updated bundle only for the model request.
+        DEFAULT_SYSTEM_PROMPT_EMBEDDED.to_string()
+    } else {
+        content
+    }
+}
+
 pub(crate) fn seed_default_system_prompt(
     storage_root: &Path,
     path: &Path,
 ) -> Result<(), DefaultSystemPromptError> {
     if path.symlink_metadata().is_ok() {
         validate_default_system_prompt(storage_root, path)?;
+        // Existing prompt files are user-owned. Do not replace even a known
+        // prior default: comparing its content before replacement cannot
+        // safely protect an edit saved between those two filesystem actions.
         return Ok(());
     }
     if let Some(parent) = path.parent() {
@@ -468,6 +489,29 @@ mod tests {
             .expect("edited content exists");
 
         assert_eq!(content.content, "edited local-dev prompt");
+    }
+
+    #[test]
+    fn default_system_prompt_does_not_replace_existing_prior_default() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().canonicalize().expect("canonical root");
+        let prompt_path = storage_root.join("system/prompts/default-system.md");
+        std::fs::create_dir_all(prompt_path.parent().expect("prompt parent"))
+            .expect("prompt parent");
+        let known_prior_default =
+            DEFAULT_SYSTEM_PROMPT_EMBEDDED.replacen(DEFAULT_SYSTEM_PROMPT_LANGUAGE_POLICY, "", 1);
+        assert_ne!(
+            known_prior_default, DEFAULT_SYSTEM_PROMPT_EMBEDDED,
+            "fixture should represent the embedded prompt before the language policy"
+        );
+
+        std::fs::write(&prompt_path, &known_prior_default).expect("prior prompt writes");
+        seed_default_system_prompt(&storage_root, &prompt_path).expect("prior prompt validates");
+        assert_eq!(
+            std::fs::read_to_string(&prompt_path).expect("existing prompt reads"),
+            known_prior_default,
+            "existing prompts must not be auto-replaced because a concurrent user save cannot be safely distinguished from the prior default"
+        );
     }
 
     #[cfg(unix)]
