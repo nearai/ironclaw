@@ -1926,8 +1926,7 @@ async fn webui_v2_slack_personal_oauth_callback_persists_connected_projection() 
     assert_eq!(slack["authenticated"], true, "Slack projection: {slack}");
     assert_eq!(slack["needs_setup"], false, "Slack projection: {slack}");
     assert_eq!(
-        slack["auth_accounts"][0]["accounts"][0]["state"],
-        "connected",
+        slack["auth_accounts"][0]["accounts"][0]["state"], "connected",
         "Slack projection must expose the persisted connected account: {slack}"
     );
 

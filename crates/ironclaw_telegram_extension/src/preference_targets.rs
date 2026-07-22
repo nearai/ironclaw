@@ -173,5 +173,4 @@ mod tests {
         assert!(codec.direct_message_actor_for_target(&target).is_none());
         assert_eq!(codec.conversation_for_target(&target), Some(conversation));
     }
-
 }
