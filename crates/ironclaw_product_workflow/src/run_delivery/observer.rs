@@ -209,6 +209,7 @@ impl RunDeliveryObserver {
     /// Observe one workflow ack for an inbound envelope. This is the
     /// entry point the composition's post-admission observer seam calls.
     pub async fn observe_ack(&self, envelope: ProductInboundEnvelope, ack: ProductInboundAck) {
+        self.close_connect_nudge_epoch_after_accepted_user_message(&envelope, &ack);
         // Rejected approval/auth feedback is a single best-effort post, not
         // a long-running delivery — handle before taking the semaphore.
         if self
@@ -908,6 +909,25 @@ impl RunDeliveryObserver {
         if reservations.get(conversation_key) == Some(&reserved_at) {
             reservations.remove(conversation_key);
         }
+    }
+
+    fn close_connect_nudge_epoch_after_accepted_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        ack: &ProductInboundAck,
+    ) {
+        if !matches!(envelope.payload(), ProductInboundPayload::UserMessage(_))
+            || !matches!(ack, ProductInboundAck::Accepted { .. })
+        {
+            return;
+        }
+        let conversation_key = envelope
+            .external_conversation_ref()
+            .conversation_fingerprint();
+        self.connect_nudge_reservations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&conversation_key);
     }
 
     async fn post_busy_hint(&self, envelope: &ProductInboundEnvelope, active_run_id: TurnRunId) {

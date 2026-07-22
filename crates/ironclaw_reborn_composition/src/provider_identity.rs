@@ -260,6 +260,36 @@ impl ProviderIdentityActorResolver {
             );
         Ok(())
     }
+
+    fn provider_user_id_for_request(
+        &self,
+        request: &ProductActorUserResolutionRequest,
+    ) -> Option<String> {
+        if request.adapter_id.as_str() != self.adapter_id {
+            return None;
+        }
+        if let Some(actor_kind) = &self.actor_kind
+            && request.external_actor_ref.kind() != actor_kind
+        {
+            return None;
+        }
+        Some(installation_scoped_provider_user_id(
+            &request.installation_id,
+            request.external_actor_ref.id(),
+        ))
+    }
+
+    async fn lookup_user(
+        &self,
+        provider_user_id: &str,
+    ) -> Result<Option<UserId>, ProductWorkflowError> {
+        self.lookup
+            .resolve_user_identity(&self.provider, provider_user_id)
+            .await
+            .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
+                reason: error.to_string(),
+            })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -285,32 +315,31 @@ impl ProductActorUserResolver for ProviderIdentityActorResolver {
         &self,
         request: ProductActorUserResolutionRequest,
     ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
-        if request.adapter_id.as_str() != self.adapter_id {
+        let Some(provider_user_id) = self.provider_user_id_for_request(&request) else {
             return Ok(None);
-        }
-        if let Some(actor_kind) = &self.actor_kind
-            && request.external_actor_ref.kind() != actor_kind
-        {
-            return Ok(None);
-        }
-        let provider_user_id = installation_scoped_provider_user_id(
-            &request.installation_id,
-            request.external_actor_ref.id(),
-        );
+        };
         if let Some(user_id) = self.cached_user(&provider_user_id)? {
             return Ok(Some(ResolvedProductActorUser::new(user_id)));
         }
-        let resolved = self
-            .lookup
-            .resolve_user_identity(&self.provider, &provider_user_id)
-            .await
-            .map_err(|error| ProductWorkflowError::BindingResolutionFailed {
-                reason: error.to_string(),
-            })?;
+        let resolved = self.lookup_user(&provider_user_id).await?;
         if let Some(user_id) = resolved.as_ref() {
             self.cache_user(provider_user_id, user_id.clone())?;
         }
         Ok(resolved.map(ResolvedProductActorUser::new))
+    }
+
+    async fn resolved_product_actor_user_is_current(
+        &self,
+        request: &ProductActorUserResolutionRequest,
+        expected: &ResolvedProductActorUser,
+    ) -> Result<bool, ProductWorkflowError> {
+        let Some(provider_user_id) = self.provider_user_id_for_request(request) else {
+            return Ok(false);
+        };
+        // This is the revocation/freshness check, not the hot-path resolver:
+        // reading the positive cache here would keep a removed identity
+        // authoritative until its TTL elapsed and admit another channel turn.
+        Ok(self.lookup_user(&provider_user_id).await?.as_ref() == Some(&expected.user_id))
     }
 }
 
@@ -466,6 +495,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn current_binding_check_observes_revocation_past_positive_cache() {
+        let installation_id = installation("install-alpha");
+        let provider_user_id = installation_scoped_provider_user_id(&installation_id, "U123");
+        let lookup = Arc::new(RevocableLookup::new(provider_user_id, user("user:alice")));
+        let resolver = resolver(lookup.clone());
+        let request = request("slack_v2", installation_id, "slack_user", "U123");
+        let expected = resolver
+            .resolve_product_actor_user(request.clone())
+            .await
+            .expect("initial resolution succeeds")
+            .expect("binding exists");
+
+        lookup.revoke();
+
+        assert!(
+            !resolver
+                .resolved_product_actor_user_is_current(&request, &expected)
+                .await
+                .expect("freshness check succeeds"),
+            "revocation must not remain current until the positive cache expires"
+        );
+        assert_eq!(lookup.calls(), 2, "freshness check must read durable state");
+    }
+
     /// The generic channel host derives the resolver from manifest data,
     /// which declares no actor-kind vocabulary: the any-kind flavor accepts
     /// every kind the adapter emits while binding existence still gates.
@@ -589,6 +643,66 @@ mod tests {
             user_id: &UserId,
         ) -> Result<bool, RebornUserIdentityLookupError> {
             Ok(self.bindings.values().any(|bound| bound == user_id))
+        }
+    }
+
+    #[derive(Debug)]
+    struct RevocableLookup {
+        provider_user_id: String,
+        user_id: std::sync::Mutex<Option<UserId>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RevocableLookup {
+        fn new(provider_user_id: String, user_id: UserId) -> Self {
+            Self {
+                provider_user_id,
+                user_id: std::sync::Mutex::new(Some(user_id)),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn revoke(&self) {
+            *self
+                .user_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RebornUserIdentityLookup for RevocableLookup {
+        async fn resolve_user_identity(
+            &self,
+            _provider: &str,
+            provider_user_id: &str,
+        ) -> Result<Option<UserId>, RebornUserIdentityLookupError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if provider_user_id != self.provider_user_id {
+                return Ok(None);
+            }
+            Ok(self
+                .user_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone())
+        }
+
+        async fn user_has_provider_binding(
+            &self,
+            _provider: &str,
+            user_id: &UserId,
+        ) -> Result<bool, RebornUserIdentityLookupError> {
+            Ok(self
+                .user_id
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                == Some(user_id))
         }
     }
 

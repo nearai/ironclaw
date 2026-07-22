@@ -32,6 +32,7 @@ use ironclaw_extensions::ExtensionInstallationStore;
 use ironclaw_host_api::{ExtensionId, TenantId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
 
+use crate::extension_host::channel_config::ChannelConfigService;
 use crate::product_auth::api::auth::{
     OAuthProviderIdentityBindingRollback, OAuthProviderIdentityCheck,
     OAuthProviderIdentityCheckFuture,
@@ -129,6 +130,10 @@ pub struct ChannelIdentityBindingConfig {
     /// Generic discovery + scoping-value source. `None` when the composed
     /// runtime has no durable installation store — only overrides bind then.
     pub(crate) installation_store: Option<Arc<dyn ExtensionInstallationStore>>,
+    /// Effective manifest-driven channel configuration, including tenant
+    /// administrator values. `None` preserves the retired per-installation
+    /// configuration source for compatibility and focused test fixtures.
+    pub(crate) channel_config: Option<Arc<ChannelConfigService>>,
     pub(crate) binding_store: Arc<dyn RebornUserIdentityBindingStore>,
     /// Undoes bindings written by the callback hook when OAuth completion
     /// fails afterwards; the binding is the user-visible "connected" signal,
@@ -154,6 +159,7 @@ impl ChannelIdentityBindingConfig {
         Self {
             tenant_id,
             installation_store: Some(installation_store),
+            channel_config: None,
             binding_store,
             rollback_store,
             post_bind_factory: None,
@@ -192,6 +198,7 @@ struct ChannelIdentityTarget {
 struct ChannelConfigConnectionScopeSource {
     installation_store: Arc<dyn ExtensionInstallationStore>,
     extension_id: ExtensionId,
+    channel_config: Option<Arc<ChannelConfigService>>,
 }
 
 #[async_trait]
@@ -220,11 +227,17 @@ impl ChannelConnectionScopeSource for ChannelConfigConnectionScopeSource {
         };
         let installation_id = AdapterInstallationId::new(installation.installation_id().as_str())
             .map_err(|error| error.to_string())?;
-        let values = self
-            .installation_store
-            .channel_config(&self.extension_id)
-            .await
-            .map_err(|error| error.to_string())?;
+        let values = if let Some(channel_config) = &self.channel_config {
+            channel_config
+                .effective_non_secret_config(&self.extension_id)
+                .await
+                .map_err(|error| error.to_string())?
+        } else {
+            self.installation_store
+                .channel_config(&self.extension_id)
+                .await
+                .map_err(|error| error.to_string())?
+        };
         let expected = |claim: &str| -> Option<String> {
             channel
                 .config
@@ -264,10 +277,12 @@ fn handle_declares_claim(handle: &str, claim: &str) -> bool {
 pub(crate) fn channel_config_connection_scope_source(
     installation_store: Arc<dyn ExtensionInstallationStore>,
     extension_id: ExtensionId,
+    channel_config: Option<Arc<ChannelConfigService>>,
 ) -> Arc<dyn ChannelConnectionScopeSource> {
     Arc::new(ChannelConfigConnectionScopeSource {
         installation_store,
         extension_id,
+        channel_config,
     })
 }
 
@@ -443,6 +458,7 @@ async fn channel_identity_targets(
                 scope_source: channel_config_connection_scope_source(
                     Arc::clone(installation_store),
                     extension_id,
+                    config.channel_config.clone(),
                 ),
                 post_bind,
             });
@@ -738,6 +754,7 @@ app_id = "/app_id"
             installation_store: Some(
                 Arc::clone(&installation_store) as Arc<dyn ExtensionInstallationStore>
             ),
+            channel_config: None,
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),
             post_bind_factory: None,
@@ -942,6 +959,7 @@ app_id = "/app_id"
         let config = ChannelIdentityBindingConfig {
             tenant_id: tenant(),
             installation_store: None,
+            channel_config: None,
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),
             post_bind_factory: None,
@@ -987,6 +1005,7 @@ app_id = "/app_id"
         let config = ChannelIdentityBindingConfig {
             tenant_id: tenant(),
             installation_store: None,
+            channel_config: None,
             binding_store: identity_store.clone(),
             rollback_store: identity_store.clone(),
             post_bind_factory: None,

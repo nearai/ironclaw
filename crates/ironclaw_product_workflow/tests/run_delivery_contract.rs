@@ -960,6 +960,54 @@ async fn observer_connect_nudge_posts_only_for_direct_chat_binding_required() {
 }
 
 #[tokio::test]
+async fn observer_connect_nudge_reopens_after_connected_message_is_accepted() {
+    let run_id = TurnRunId::new();
+    let harness = build_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        true,
+        None,
+        Duration::from_millis(20),
+    );
+    let rejected = ProductInboundAck::Rejected(ProductRejection::permanent(
+        ProductRejectionKind::BindingRequired,
+        "unbound",
+    ));
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-before-connect"),
+            rejected.clone(),
+        )
+        .await;
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-connected"),
+            accepted_ack(run_id),
+        )
+        .await;
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-after-disconnect"),
+            rejected,
+        )
+        .await;
+
+    let connect_notices = harness
+        .adapter
+        .texts()
+        .into_iter()
+        .filter(|text| text == &harness.connection_notices.connect_required)
+        .count();
+    assert_eq!(
+        connect_notices, 2,
+        "a successful connected message must close the prior unbound throttle epoch"
+    );
+}
+
+#[tokio::test]
 async fn observer_connect_nudge_releases_failed_delivery_reservation_for_retry() {
     let harness = build_harness(
         vec![scripted_state(TurnStatus::Running, None)],

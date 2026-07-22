@@ -246,6 +246,7 @@ impl GenericChannelConnectionFacade {
                 scope_source: channel_config_connection_scope_source(
                     Arc::clone(installation_store),
                     extension_id,
+                    None,
                 ),
                 disconnect_cleanup,
             });

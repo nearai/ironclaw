@@ -56,8 +56,9 @@ use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, CorrelationId, EffectKind,
-    ExecutionContext, ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy,
-    Principal, ResourceEstimate, ResourceScope, RuntimeKind, TrustClass,
+    ExecutionContext, ExtensionId, GrantConstraints, InvocationId, InvocationOrigin, MountView,
+    NetworkPolicy, Principal, ProductKind, ResourceEstimate, ResourceScope, RuntimeKind,
+    TrustClass,
 };
 use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeCapabilityRequest};
 use ironclaw_loop_host::{
@@ -615,6 +616,9 @@ async fn configure_admin_group(
         mission_id: None,
         thread_id: None,
         run_id: None,
+        origin: Some(InvocationOrigin::Product(
+            ProductKind::new("webui").expect("product origin kind"),
+        )),
         extension_id: product_ingress.clone(),
         runtime: RuntimeKind::FirstParty,
         trust: TrustClass::Sandbox,

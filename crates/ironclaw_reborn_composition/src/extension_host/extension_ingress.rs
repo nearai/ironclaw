@@ -634,6 +634,7 @@ pub(crate) fn build_extension_ingress(
     }
 }
 
+pub(crate) use serve_mount::extension_ingress_alias_route_mount;
 pub use serve_mount::{
     EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount, forward_alias_request,
 };
@@ -690,6 +691,23 @@ mod serve_mount {
     pub fn extension_ingress_route_mount(
         parts: &ExtensionIngressParts,
     ) -> Result<PublicRouteMount, crate::RebornBuildError> {
+        let descriptor =
+            ingress_route_descriptor(EXTENSION_INGRESS_ROUTE_ID, EXTENSION_INGRESS_ROUTE_PATTERN)?;
+
+        let router = Router::new()
+            .route(EXTENSION_INGRESS_ROUTE_PATTERN, post(ingress_handler))
+            .with_state(Arc::clone(&parts.router));
+        Ok(
+            PublicRouteMount::new(router, vec![descriptor]).with_drain(Arc::new(RegistryDrain {
+                registry: Arc::clone(&parts.registry),
+            })),
+        )
+    }
+
+    fn ingress_route_descriptor(
+        route_id: &'static str,
+        path: &'static str,
+    ) -> Result<IngressRouteDescriptor, crate::RebornBuildError> {
         let policy = IngressPolicy::new(IngressPolicyParts {
             listener_class: ListenerClass::PublicWebhook,
             auth: IngressAuthPolicy::Required {
@@ -714,24 +732,31 @@ mod serve_mount {
         .map_err(|error| crate::RebornBuildError::InvalidConfig {
             reason: format!("extension ingress policy invalid: {error}"),
         })?;
-        let descriptor = IngressRouteDescriptor::new(
-            EXTENSION_INGRESS_ROUTE_ID,
-            NetworkMethod::Post,
-            EXTENSION_INGRESS_ROUTE_PATTERN,
-            policy,
-        )
-        .map_err(|error| crate::RebornBuildError::InvalidConfig {
-            reason: format!("extension ingress descriptor invalid: {error}"),
-        })?;
+        IngressRouteDescriptor::new(route_id, NetworkMethod::Post, path, policy).map_err(|error| {
+            crate::RebornBuildError::InvalidConfig {
+                reason: format!("extension ingress descriptor invalid: {error}"),
+            }
+        })
+    }
 
+    /// Build a fixed-path compatibility alias over the same generic router and
+    /// public-webhook policy as the canonical manifest route.
+    pub(crate) fn extension_ingress_alias_route_mount(
+        parts: &ExtensionIngressParts,
+        route_id: &'static str,
+        legacy_path: &'static str,
+        extension_id: &'static str,
+        route_suffix: &'static str,
+    ) -> Result<PublicRouteMount, crate::RebornBuildError> {
+        let descriptor = ingress_route_descriptor(route_id, legacy_path)?;
         let router = Router::new()
-            .route(EXTENSION_INGRESS_ROUTE_PATTERN, post(ingress_handler))
-            .with_state(Arc::clone(&parts.router));
-        Ok(
-            PublicRouteMount::new(router, vec![descriptor]).with_drain(Arc::new(RegistryDrain {
-                registry: Arc::clone(&parts.registry),
-            })),
-        )
+            .route(legacy_path, post(alias_handler))
+            .with_state(AliasState {
+                router: Arc::clone(&parts.router),
+                extension_id,
+                route_suffix,
+            });
+        Ok(PublicRouteMount::new(router, vec![descriptor]))
     }
 
     struct RegistryDrain {
@@ -760,6 +785,28 @@ mod serve_mount {
             ))
             .await;
         into_axum_response(response)
+    }
+
+    #[derive(Clone)]
+    struct AliasState {
+        router: Arc<ExtensionIngressRouter>,
+        extension_id: &'static str,
+        route_suffix: &'static str,
+    }
+
+    async fn alias_handler(
+        State(state): State<AliasState>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        forward_alias_request(
+            &state.router,
+            state.extension_id,
+            state.route_suffix,
+            &headers,
+            body,
+        )
+        .await
     }
 
     /// Drive the generic router for a legacy fixed-path alias

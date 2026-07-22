@@ -301,7 +301,7 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         )
         assert unconnected.status_code == 200, unconnected.text
         notices = await wait_for_message_containing(
-            client, fake_slack_server, "connect it in the IronClaw web app", 1
+            client, fake_slack_server, "connect it in the Ironclaw web app", 1
         )
         assert notices[0]["channel"] == DM_CHANNEL, notices
         assert final_replies(await fake_sent_messages(client, fake_slack_server)) == []
@@ -413,7 +413,7 @@ async def test_reborn_slack_channel_configure_connect_roundtrip_remove(
         )
         assert stale.status_code == 200, stale.text
         await wait_for_message_containing(
-            client, fake_slack_server, "connect it in the IronClaw web app", 2
+            client, fake_slack_server, "connect it in the Ironclaw web app", 2
         )
         final_messages = await fake_sent_messages(client, fake_slack_server)
         assert len(final_replies(final_messages)) == 2, (

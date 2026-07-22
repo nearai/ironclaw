@@ -1649,6 +1649,7 @@ impl RebornRuntime {
             crate::extension_host::channel_identity::ChannelIdentityBindingConfig {
                 tenant_id: self.thread_scope.tenant_id.clone(),
                 installation_store,
+                channel_config: local_runtime.channel_config.clone(),
                 binding_store: Arc::clone(&identity_store)
                     as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
                 rollback_store: identity_store

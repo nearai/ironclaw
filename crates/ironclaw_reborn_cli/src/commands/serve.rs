@@ -574,6 +574,14 @@ impl ServeCommand {
                     ironclaw_reborn_composition::extension_ingress_route_mount(&ingress_parts)
                         .context("failed to compose the extension ingress route mount")?;
                 serve_config = serve_config.with_public_route_mount(ingress_mount);
+                for alias_mount in
+                    ironclaw_reborn_composition::legacy_extension_ingress_alias_mounts(
+                        &ingress_parts,
+                    )
+                    .context("failed to compose legacy extension ingress aliases")?
+                {
+                    serve_config = serve_config.with_public_route_mount(alias_mount);
+                }
             }
             // The generic post-OAuth channel identity binding: installed
             // channel extensions bind through generic discovery over the

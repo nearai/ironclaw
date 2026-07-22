@@ -165,6 +165,7 @@ pub fn build_channel_connection_for_test(
     let identity_binding = ChannelIdentityBindingConfig {
         tenant_id: tenant_id.clone(),
         installation_store: Some(installation_store),
+        channel_config: local_runtime.channel_config.clone(),
         binding_store: Arc::clone(&identity_store)
             as Arc<dyn crate::provider_identity::RebornUserIdentityBindingStore>,
         rollback_store: Arc::clone(&identity_store)
