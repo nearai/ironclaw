@@ -1111,6 +1111,8 @@ registerPack("ar", {
   "admin.users.member": "عضو",
   "admin.users.admin": "مسؤول",
   "admin.users.suspend": "إيقاف",
+  "admin.users.actionFailed": "فشل الإجراء: {message}",
+  "admin.users.lastAdminRequired": "يلزم وجود مسؤول نشط واحد على الأقل. أضف مسؤولاً آخر أو فعّله قبل تغيير هذا المستخدم.",
   "admin.users.activate": "تفعيل",
   "admin.users.promote": "ترقية",
   "admin.users.demote": "خفض",
@@ -1361,6 +1363,10 @@ registerPack("ar", {
 
 registerPack("ar", {
   "app.checkingSession": "جارٍ التحقق من الجلسة...",
+  "app.sessionCheckFailedTitle": "تعذّر التحقق من جلستك",
+  "app.sessionCheckFailedDescription":
+    "تعذّر التحقق من جلستك الآن. ما زالت معلومات تسجيل دخولك محفوظة. حاول مرة أخرى بعد قليل.",
+  "app.retrySession": "إعادة المحاولة",
   "common.close": "إغلاق",
   "common.download": "تنزيل",
   "common.copy": "نسخ",

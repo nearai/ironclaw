@@ -16,6 +16,7 @@ from emulate_provider import (
     gmail_header,
     google_headers,
     raw_mime,
+    slack_headers,
     slack_post,
 )
 from helpers import (
@@ -216,6 +217,116 @@ async def test_emulate_google_covers_reborn_gsuite_write_outputs(emulate_google_
         assert drive_media_response.text == drive_content
 
 
+async def test_emulate_google_covers_reborn_docs_contract(emulate_google_server):
+    """Cover create, insert, and read shapes used by harvested Docs traces."""
+    base_url = emulate_google_server["url"]
+    marker = "Reborn harvested Google Docs contract"
+    async with httpx.AsyncClient(timeout=10) as client:
+        created = await client.post(
+            f"{base_url}/v1/documents",
+            headers=google_headers(),
+            json={"title": marker},
+        )
+        created.raise_for_status()
+        document_id = created.json()["documentId"]
+        assert created.json()["title"] == marker
+
+        updated = await client.post(
+            f"{base_url}/v1/documents/{document_id}:batchUpdate",
+            headers=google_headers(),
+            json={
+                "requests": [
+                    {
+                        "insertText": {
+                            "endOfSegmentLocation": {},
+                            "text": marker,
+                        }
+                    }
+                ]
+            },
+        )
+        updated.raise_for_status()
+        assert updated.json()["writeControl"]["requiredRevisionId"]
+
+        document = await client.get(
+            f"{base_url}/v1/documents/{document_id}",
+            headers=google_headers(),
+        )
+        document.raise_for_status()
+        text = "".join(
+            element.get("textRun", {}).get("content", "")
+            for structural in document.json()["body"]["content"]
+            for element in structural.get("paragraph", {}).get("elements", [])
+        )
+        assert marker in text
+
+
+async def test_emulate_google_covers_reborn_sheets_contract(emulate_google_server):
+    """Cover create, metadata, rename, write, append, and read trace shapes."""
+    base_url = emulate_google_server["url"]
+    marker = "Reborn harvested Google Sheets contract"
+    async with httpx.AsyncClient(timeout=10) as client:
+        created = await client.post(
+            f"{base_url}/v4/spreadsheets",
+            headers=google_headers(),
+            json={"properties": {"title": marker}},
+        )
+        created.raise_for_status()
+        spreadsheet = created.json()
+        spreadsheet_id = spreadsheet["spreadsheetId"]
+        sheet_id = spreadsheet["sheets"][0]["properties"]["sheetId"]
+        assert spreadsheet["properties"]["title"] == marker
+
+        renamed = await client.post(
+            f"{base_url}/v4/spreadsheets/{spreadsheet_id}:batchUpdate",
+            headers=google_headers(),
+            json={
+                "requests": [
+                    {
+                        "updateSheetProperties": {
+                            "properties": {"sheetId": sheet_id, "title": "Results"},
+                            "fields": "title",
+                        }
+                    }
+                ]
+            },
+        )
+        renamed.raise_for_status()
+
+        written = await client.put(
+            f"{base_url}/v4/spreadsheets/{spreadsheet_id}/values/Results!A1:B1",
+            headers=google_headers(),
+            json={"values": [[marker, "seed"]]},
+        )
+        written.raise_for_status()
+        assert written.json()["updatedCells"] == 2
+
+        appended = await client.post(
+            f"{base_url}/v4/spreadsheets/{spreadsheet_id}/values/Results:append",
+            headers=google_headers(),
+            json={"values": [[marker, "appended"]]},
+        )
+        appended.raise_for_status()
+        assert appended.json()["updates"]["updatedCells"] == 2
+
+        metadata = await client.get(
+            f"{base_url}/v4/spreadsheets/{spreadsheet_id}",
+            headers=google_headers(),
+        )
+        metadata.raise_for_status()
+        assert metadata.json()["sheets"][0]["properties"]["title"] == "Results"
+
+        values = await client.get(
+            f"{base_url}/v4/spreadsheets/{spreadsheet_id}/values/Results!A1:B2",
+            headers=google_headers(),
+        )
+        values.raise_for_status()
+        assert values.json()["values"] == [
+            [marker, "seed"],
+            [marker, "appended"],
+        ]
+
+
 async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_server):
     base_url = emulate_slack_server["url"]
     async with httpx.AsyncClient(timeout=10) as client:
@@ -325,6 +436,42 @@ async def test_emulate_slack_covers_reborn_delivery_surfaces(emulate_slack_serve
             {"user": reviewer["id"]},
         )
         assert reviewer_info["user"]["name"] == "qa-reviewer"
+
+
+async def test_emulate_slack_covers_reborn_search_messages(emulate_slack_server):
+    """Cover the search.messages result shape used by harvested Slack traces."""
+    base_url = emulate_slack_server["url"]
+    marker = "reborn-harvested-slack-search-contract"
+    async with httpx.AsyncClient(timeout=10) as client:
+        channels = await slack_post(
+            client,
+            base_url,
+            "conversations.list",
+            {"types": "public_channel"},
+        )
+        channel_id = next(
+            channel["id"]
+            for channel in channels["channels"]
+            if channel["name"] == "reborn-alerts"
+        )
+        await slack_post(
+            client,
+            base_url,
+            "chat.postMessage",
+            {"channel": channel_id, "text": marker},
+        )
+
+        response = await client.get(
+            f"{base_url}/api/search.messages",
+            headers=slack_headers(),
+            params={"query": marker, "count": 20, "sort": "timestamp"},
+        )
+        response.raise_for_status()
+        body = response.json()
+        assert body["ok"] is True
+        assert any(
+            match["text"] == marker for match in body["messages"]["matches"]
+        )
 
 
 async def test_emulate_github_covers_reborn_repo_surfaces(emulate_github_server):

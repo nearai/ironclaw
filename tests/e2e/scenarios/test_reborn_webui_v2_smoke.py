@@ -210,6 +210,103 @@ async def test_reborn_v2_serves_shell_and_gates_auth(reborn_v2_server, reborn_v2
         await anon_ctx.close()
 
 
+async def test_reborn_v2_session_check_failure_blocks_app_and_retries(
+    reborn_v2_page,
+):
+    """A transient session failure keeps the bearer but never renders anonymous-scoped UI."""
+    session_requests = 0
+
+    async def handle_session(route) -> None:
+        nonlocal session_requests
+        session_requests += 1
+        if session_requests == 1:
+            await route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps({"error": "temporarily_unavailable"}),
+            )
+            return
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "tenant_id": "reborn-v2-e2e",
+                    "user_id": USER_ID,
+                    "capabilities": {},
+                    "features": {"reborn_projects": False},
+                    "attachments": {
+                        "accept": ["text/plain"],
+                        "max_files_per_message": 4,
+                        "max_bytes_per_file": 1048576,
+                        "max_bytes_per_message": 4194304,
+                    },
+                }
+            ),
+        )
+
+    await reborn_v2_page.route("**/api/webchat/v2/session", handle_session)
+    await reborn_v2_page.reload()
+
+    error = reborn_v2_page.locator(SEL_V2["session_check_error"])
+    await expect(error).to_be_visible(timeout=15000)
+    await expect(error).to_contain_text("Couldn't verify your session")
+    await expect(error).to_contain_text("Your sign-in is still saved")
+    await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_have_count(0)
+    await expect(reborn_v2_page.locator(SEL_V2["login_token"])).to_have_count(0)
+    assert await reborn_v2_page.evaluate(
+        "() => sessionStorage.getItem('ironclaw_token')"
+    ) == REBORN_V2_AUTH_TOKEN
+    assert session_requests == 1
+
+    await reborn_v2_page.locator(SEL_V2["session_check_retry"]).click()
+    await expect(reborn_v2_page.locator(SEL_V2["chat_composer"])).to_be_visible(
+        timeout=15000
+    )
+    await expect(error).to_have_count(0)
+    assert session_requests >= 2
+
+
+async def test_reborn_v2_session_check_failure_allows_sign_out(
+    reborn_v2_page,
+):
+    """A user can clear a saved bearer when session verification stays unavailable."""
+    async def fail_session_check(route) -> None:
+        await route.fulfill(
+            status=503,
+            content_type="application/json",
+            body=json.dumps({"error": "temporarily_unavailable"}),
+        )
+
+    async def handle_logout(route) -> None:
+        # Keep this module's shared test bearer valid for later scenarios while
+        # still exercising the SPA's local sign-out path end to end.
+        await route.fulfill(status=204)
+
+    await reborn_v2_page.route("**/api/webchat/v2/session", fail_session_check)
+    await reborn_v2_page.route("**/auth/logout", handle_logout)
+    await reborn_v2_page.reload()
+
+    await expect(
+        reborn_v2_page.locator(SEL_V2["session_check_error"])
+    ).to_be_visible(timeout=15000)
+
+    await reborn_v2_page.locator(SEL_V2["session_check_sign_out"]).click()
+
+    await expect(reborn_v2_page.locator(SEL_V2["login_token"])).to_be_visible(
+        timeout=15000
+    )
+    await reborn_v2_page.wait_for_url(
+        re.compile(r".*/login(?:[?#].*)?$"), timeout=15000
+    )
+    assert await reborn_v2_page.evaluate(
+        "() => sessionStorage.getItem('ironclaw_token')"
+    ) is None
+    await expect(
+        reborn_v2_page.locator(SEL_V2["session_check_error"])
+    ).to_have_count(0)
+
+
 async def test_reborn_v2_legacy_paths_redirect_to_root(
     reborn_v2_server, reborn_v2_browser
 ):

@@ -1111,6 +1111,8 @@ registerPack("uk", {
   "admin.users.member": "Учасник",
   "admin.users.admin": "Адмін",
   "admin.users.suspend": "Призупинити",
+  "admin.users.actionFailed": "Не вдалося виконати дію: {message}",
+  "admin.users.lastAdminRequired": "Потрібен щонайменше один активний адміністратор. Додайте або активуйте іншого адміністратора, перш ніж змінювати цього користувача.",
   "admin.users.activate": "Активувати",
   "admin.users.promote": "Підвищити",
   "admin.users.demote": "Понизити",
@@ -1361,6 +1363,10 @@ registerPack("uk", {
 
 registerPack("uk", {
   "app.checkingSession": "Перевірка сеансу...",
+  "app.sessionCheckFailedTitle": "Не вдалося перевірити сеанс",
+  "app.sessionCheckFailedDescription":
+    "Зараз не вдалося перевірити ваш сеанс. Дані для входу залишаються збереженими. Повторіть спробу трохи пізніше.",
+  "app.retrySession": "Повторити",
   "common.close": "Закрити",
   "common.download": "Завантажити",
   "common.copy": "Копіювати",
