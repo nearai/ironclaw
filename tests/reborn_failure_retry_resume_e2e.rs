@@ -29,9 +29,10 @@ use parity_qa_support::{
 use reborn_support::doubles::RecordingTestCapabilityPort;
 use serde_json::json;
 
-/// A single stale capability surface is recoverable inside the same run: the
-/// loop re-drives the model from `BeforeModel`, consumes a second model turn,
-/// and persists the recovered reply without requiring an external retry.
+/// A stale model request injected at the model gateway is recoverable inside
+/// the same run: the loop re-drives the model from `BeforeModel`, consumes a
+/// second model turn, and persists the recovered reply without requiring an
+/// external retry.
 #[tokio::test]
 async fn reborn_single_stale_model_request_redrives_in_loop_to_completion() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
@@ -41,7 +42,7 @@ async fn reborn_single_stale_model_request_redrives_in_loop_to_completion() {
         },
         RebornModelReplayStep::Response {
             response: HostManagedModelResponse::assistant_reply(
-                "Recovered after refreshing the capability surface.",
+                "Recovered after retrying the stale model request.",
             ),
             expected_tool_results: Vec::new(),
         },
@@ -67,7 +68,7 @@ async fn reborn_single_stale_model_request_redrives_in_loop_to_completion() {
         .await
         .expect("one stale request is recovered in-loop");
     harness
-        .assert_final_reply("Recovered after refreshing the capability surface.")
+        .assert_final_reply("Recovered after retrying the stale model request.")
         .await
         .expect("recovered reply persisted to the thread");
 

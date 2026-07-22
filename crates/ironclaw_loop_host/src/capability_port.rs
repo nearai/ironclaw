@@ -4341,6 +4341,19 @@ mod tests {
     }
 
     #[test]
+    fn sandbox_diagnostic_truncates_without_splitting_multibyte_utf8() {
+        let raw = format!("a{}", "é".repeat(300));
+        assert!(raw.len() > 400);
+        assert!(!raw.is_char_boundary(400));
+
+        let text = sandbox_model_visible_diagnostic_text(&raw)
+            .expect("non-empty sandbox diagnostic remains model-visible");
+
+        assert!(text.len() <= 400, "diagnostic exceeded byte budget");
+        assert_eq!(text, format!("a{}", "é".repeat(199)));
+    }
+
+    #[test]
     fn runtime_diagnostic_detail_that_normalizes_to_nothing_is_dropped() {
         // A diagnostic that is nothing but disallowed control characters
         // normalizes to whitespace; an empty diagnostic would fail the
