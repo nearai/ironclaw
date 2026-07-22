@@ -44,9 +44,12 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
     // bundled extension capability post-activation, which crosses HTTP. The
     // typed recorder is retained so tests can assert on the recorded wire
     // (`captured_network_requests`).
-    let network_egress = Arc::new(RecordingNetworkHttpEgress::with_body(
-        br#"{"ok":true,"channels":[],"messages":[],"resultSizeEstimate":0,"response_metadata":{"next_cursor":""}}"#.to_vec(),
-    ));
+    let network_egress = Arc::new(
+        RecordingNetworkHttpEgress::with_body(
+            br#"{"ok":true,"channels":[],"messages":[],"resultSizeEstimate":0,"response_metadata":{"next_cursor":""}}"#.to_vec(),
+        )
+        .with_vendor_router(Arc::new(hosted_mcp_discovery_fixture_response)),
+    );
     Ok(ToolsProfile {
         capability_ids,
         effect_kinds: local_dev_all_effects(),
@@ -64,6 +67,45 @@ pub(crate) fn extension_lifecycle_tools_profile_for_user(
         auto_approve_default: Some(true),
         ..ToolsProfile::new("reborn-e2e-extension-lifecycle-tools", user_id)?
     })
+}
+
+/// Hermetic hosted-MCP handshake for lifecycle scenarios that need a real
+/// post-auth activation. The production path still performs the complete
+/// initialize -> initialized -> tools/list exchange through mediated network
+/// egress; only the external server response is replaced here.
+fn hosted_mcp_discovery_fixture_response(
+    request: &ironclaw_network::NetworkHttpRequest,
+) -> Option<(u16, Vec<u8>)> {
+    let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+    let method = body.get("method")?.as_str()?;
+    let result = match method {
+        "initialize" => serde_json::json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "extension-lifecycle-test", "version": "1.0.0"}
+        }),
+        "notifications/initialized" => serde_json::json!({}),
+        "tools/list" => serde_json::json!({
+            "tools": [{
+                "name": "live-search",
+                "description": "Hermetic hosted MCP search tool",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                },
+                "annotations": {"readOnlyHint": true}
+            }]
+        }),
+        _ => return None,
+    };
+    let response = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": body.get("id").cloned().unwrap_or(serde_json::Value::Null),
+        "result": result,
+    }))
+    .ok()?;
+    Some((200, response))
 }
 
 /// [`extension_lifecycle_tools_profile`], plus a composition-time Google
