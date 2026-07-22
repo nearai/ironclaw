@@ -245,23 +245,22 @@ where
     }
 }
 
-fn local_runtime_parts(
-    local_runtime: &crate::factory::RebornRuntimeSubstrate,
+fn runtime_store_parts(
+    graph: crate::factory::RebornRuntimeStoreGraph<'_>,
 ) -> RuntimeStoreParts<'_> {
     let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
-        &local_runtime.scoped_filesystem,
+        &graph.scoped_filesystem,
     ))) as Arc<dyn RuntimeSubagentGoalStore>;
 
     let (subagent_await_edge_writer, subagent_await_edge_settler, subagent_await_edge_evidence) = {
         let store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(
-            &local_runtime.scoped_filesystem,
+            &graph.scoped_filesystem,
         )));
         let resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
             Arc::clone(&store),
             Arc::clone(&subagent_goal_store) as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
-            Arc::clone(&local_runtime.turn_state)
-                as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
-            Arc::clone(&local_runtime.thread_service),
+            Arc::clone(&graph.turn_state) as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
+            Arc::clone(&graph.thread_service),
         ));
         let driver = Arc::new(ScopeRecoveryDriver::new(
             Arc::clone(&resolver),
@@ -275,55 +274,11 @@ fn local_runtime_parts(
     };
 
     RuntimeStoreParts {
-        local_runtime: Some(local_runtime),
-        turn_state_store: Arc::clone(&local_runtime.turn_state) as Arc<dyn RuntimeTurnStateStore>,
-        turn_state_flush: Arc::clone(&local_runtime.turn_state) as Arc<dyn TurnStateFlush>,
-        checkpoint_state_store: Arc::clone(&local_runtime.checkpoint_state_store),
-        loop_checkpoint_store: Arc::clone(&local_runtime.loop_checkpoint_store),
-        thread_service: Arc::clone(&local_runtime.thread_service),
-        event_log: Arc::clone(&local_runtime.event_log),
-        audit_log: Arc::clone(&local_runtime.audit_log),
-        resource_governor: Arc::clone(&local_runtime.resource_governor),
-        budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
-        broadcast_budget_event_sink: Arc::clone(&local_runtime.broadcast_budget_event_sink),
-        subagent_goal_store,
-        subagent_await_edge_writer,
-        subagent_await_edge_settler,
-        subagent_await_edge_evidence,
-        trigger_repository: Some(Arc::clone(&local_runtime.trigger_repository)),
-        turn_run_snapshot_source: Arc::clone(&local_runtime.turn_state)
-            as Arc<dyn TurnRunSnapshotSource>,
-    }
-}
-
-fn production_runtime_parts(
-    graph: &Arc<crate::factory::RebornProductionRuntimeStoreGraph>,
-) -> RuntimeStoreParts<'static> {
-    let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
-        &graph.scoped_filesystem,
-    ))) as Arc<dyn RuntimeSubagentGoalStore>;
-
-    let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::clone(
-        &graph.scoped_filesystem,
-    )));
-    let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound_deferred_result_writer(
-        Arc::clone(&await_edge_store),
-        Arc::clone(&subagent_goal_store) as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,
-        Arc::clone(&graph.turn_state) as Arc<dyn ironclaw_turns::TurnSpawnTreeStateStore>,
-        Arc::clone(&graph.thread_service),
-    ));
-    let await_edge_driver = Arc::new(ScopeRecoveryDriver::new(
-        Arc::clone(&await_edge_resolver),
-        Arc::clone(&await_edge_store),
-    ));
-
-    RuntimeStoreParts {
-        local_runtime: None,
+        local_runtime: graph.local_runtime.map(Arc::as_ref),
         turn_state_store: Arc::clone(&graph.turn_state) as Arc<dyn RuntimeTurnStateStore>,
         turn_state_flush: Arc::clone(&graph.turn_state) as Arc<dyn TurnStateFlush>,
         checkpoint_state_store: Arc::clone(&graph.checkpoint_state_store),
-        loop_checkpoint_store: Arc::clone(&graph.turn_state)
-            as Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        loop_checkpoint_store: Arc::clone(&graph.loop_checkpoint_store),
         thread_service: Arc::clone(&graph.thread_service),
         event_log: Arc::clone(&graph.event_log),
         audit_log: Arc::clone(&graph.audit_log),
@@ -331,24 +286,11 @@ fn production_runtime_parts(
         budget_gate_store: Arc::clone(&graph.budget_gate_store),
         broadcast_budget_event_sink: Arc::clone(&graph.broadcast_budget_event_sink),
         subagent_goal_store,
-        subagent_await_edge_writer: await_edge_driver as Arc<dyn AwaitEdgeWriter>,
-        subagent_await_edge_settler: await_edge_resolver as Arc<dyn AwaitEdgeSettler>,
-        subagent_await_edge_evidence: await_edge_store as Arc<dyn AwaitDependentRunEvidenceStore>,
+        subagent_await_edge_writer,
+        subagent_await_edge_settler,
+        subagent_await_edge_evidence,
         trigger_repository: Some(Arc::clone(&graph.trigger_repository)),
         turn_run_snapshot_source: Arc::clone(&graph.turn_state) as Arc<dyn TurnRunSnapshotSource>,
-    }
-}
-
-fn runtime_store_parts(
-    graph: crate::factory::RebornRuntimeStoreGraph<'_>,
-) -> RuntimeStoreParts<'_> {
-    match graph {
-        crate::factory::RebornRuntimeStoreGraph::Local(local_runtime) => {
-            local_runtime_parts(local_runtime)
-        }
-        crate::factory::RebornRuntimeStoreGraph::Production(production_runtime) => {
-            production_runtime_parts(production_runtime.store_graph())
-        }
     }
 }
 
@@ -1485,7 +1427,7 @@ impl RebornRuntime {
         self.services
             .production_runtime
             .as_ref()
-            .map(|production| production.trigger_repository())
+            .map(|production| Arc::clone(&production.trigger_repository))
     }
 
     /// Test-only accessor for the SAME `ConversationActorPairingService`
@@ -1589,13 +1531,9 @@ impl RebornRuntime {
     pub(crate) fn reborn_project_service(
         &self,
     ) -> Option<Arc<dyn ironclaw_product_workflow::ProjectService>> {
-        if let Some(local) = self.services.local_runtime.as_ref() {
-            return Some(Arc::clone(&local.project_service));
-        }
         self.services
-            .production_runtime
-            .as_ref()
-            .map(|production| production.project_service())
+            .runtime_store_graph()
+            .map(|graph| graph.project_service())
     }
 
     /// The admin API-token minter supplied via
@@ -3967,7 +3905,7 @@ pub async fn build_reborn_runtime(
             None => services
                 .production_runtime
                 .as_ref()
-                .map(|production| production.trigger_conversation_services())
+                .map(|production| production.trigger_conversation_services.clone())
                 .ok_or_else(|| RebornRuntimeError::InvalidArgument {
                     reason: "trigger poller enabled but no runtime substrate present".to_string(),
                 })?,

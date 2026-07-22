@@ -8,6 +8,7 @@ use ironclaw_auth::{
 };
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
 use ironclaw_filesystem::FilesystemError;
+use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
@@ -510,10 +511,10 @@ async fn local_dev_services_include_repl_runtime_substrate() {
     assert!(services.turn_coordinator.is_some());
     assert!(services.product_auth.is_some());
     assert!(services.local_runtime.is_some());
-    assert!(matches!(
-        services.runtime_store_graph(),
-        Some(RebornRuntimeStoreGraph::Local(_))
-    ));
+    let graph = services
+        .runtime_store_graph()
+        .expect("local-dev runtime store graph");
+    assert!(graph.local_runtime.is_some());
     assert!(
         services
             .local_runtime
@@ -1454,6 +1455,32 @@ fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
 }
 
 #[tokio::test]
+async fn production_database_root_filesystem_mounts_canonical_runtime_roots() {
+    let filesystem =
+        production_database_root_filesystem(Arc::new(InMemoryBackend::new()), "production-test")
+            .expect("production composite filesystem");
+    let mounted_roots: Vec<String> = filesystem
+        .mounts()
+        .await
+        .expect("production composite mounts")
+        .into_iter()
+        .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        mounted_roots,
+        vec![
+            "/events",
+            "/memory",
+            "/projects",
+            "/system/extensions",
+            "/system/settings",
+            "/system/skills",
+            "/tenants",
+        ]
+    );
+}
+
+#[tokio::test]
 async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = Arc::new(
@@ -1498,31 +1525,10 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    assert!(matches!(
-        services.runtime_store_graph(),
-        Some(RebornRuntimeStoreGraph::Production(_))
-    ));
-    let graph = production_runtime.store_graph();
-    let mounted_roots: Vec<String> = graph
-        .filesystem
-        .mounts()
-        .await
-        .expect("production composite mounts")
-        .into_iter()
-        .map(|descriptor| descriptor.virtual_root.as_str().to_owned())
-        .collect();
-    assert_eq!(
-        mounted_roots,
-        vec![
-            "/events",
-            "/memory",
-            "/projects",
-            "/system/extensions",
-            "/system/settings",
-            "/system/skills",
-            "/tenants",
-        ]
-    );
+    let graph = services
+        .runtime_store_graph()
+        .expect("production runtime store graph");
+    assert!(graph.local_runtime.is_none());
     let scope = ironclaw_turns::TurnScope::new_with_owner(
         tenant,
         Some(agent),
@@ -1553,7 +1559,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         product_context: None,
     };
     ironclaw_turns::TurnStateStore::submit_turn(
-        graph.turn_state.as_ref(),
+        production_runtime.turn_state.as_ref(),
         submit,
         &ironclaw_turns::AllowAllTurnAdmissionPolicy,
         &InMemoryRunProfileResolver::default(),
@@ -1629,7 +1635,6 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    let graph = production_runtime.store_graph();
     let default_path =
         VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/rows/v1/deltas/log")
             .expect("default turn-state row delta log path");
@@ -1668,7 +1673,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         product_context: None,
     };
     ironclaw_turns::TurnStateStore::submit_turn(
-        graph.turn_state.as_ref(),
+        production_runtime.turn_state.as_ref(),
         submit,
         &ironclaw_turns::AllowAllTurnAdmissionPolicy,
         &InMemoryRunProfileResolver::default(),
