@@ -19,6 +19,7 @@ import pytest
 
 from emulate_provider import google_headers, slack_post
 from helpers import EMULATE_GITHUB_BEARER, EMULATE_SLACK_BEARER
+from provider_capability_inventory import EMULATE_SUPPORTED_TOOLS
 from reborn_webui_harness import (
     YOLO_PROFILE,
     capability_preview_payload,
@@ -80,11 +81,7 @@ GOOGLE_TOOL_PREFIXES = (
     "google-drive__",
     "google-sheets__",
 )
-PROVIDER_TOOL_PREFIXES = (
-    *GOOGLE_TOOL_PREFIXES,
-    "github__",
-    "slack__",
-)
+PROVIDER_TOOL_NAMES = EMULATE_SUPPORTED_TOOLS
 ALL_EXTENSIONS = (*GOOGLE_EXTENSIONS, "github", "slack")
 TRACE_BOOTSTRAP_TOOLS = {"builtin__extension_search"}
 MUTATING_PROVIDER_TOOLS = {
@@ -105,7 +102,7 @@ def _provider_journey_cases() -> tuple[str, ...]:
             continue
         trace = json.loads((TRACE_DIR / f"{case}.json").read_text(encoding="utf-8"))
         if any(
-            call["name"].startswith(PROVIDER_TOOL_PREFIXES)
+            call["name"] in PROVIDER_TOOL_NAMES
             for step in trace["steps"]
             for call in step["response"].get("tool_calls", [])
         ):
@@ -512,7 +509,7 @@ async def _activate_extensions(base_url: str, extension_ids: tuple[str, ...]) ->
             assert body.get("activated") is True, body
 
 
-def _provider_leg(trace: dict, prefixes: tuple[str, ...]) -> dict:
+def _provider_leg(trace: dict, provider_tools: frozenset[str]) -> dict:
     """Keep the recorded provider decisions and final response in order."""
     provider_steps = []
     final_text = None
@@ -522,7 +519,7 @@ def _provider_leg(trace: dict, prefixes: tuple[str, ...]) -> dict:
             calls = [
                 call
                 for call in response["tool_calls"]
-                if call["name"].startswith(prefixes)
+                if call["name"] in provider_tools
                 or call["name"] in TRACE_BOOTSTRAP_TOOLS
             ]
             if calls:
@@ -551,14 +548,14 @@ def _inject_deferred_tool_disclosure(trace: dict) -> None:
             call["name"]
             for step in trace["steps"]
             for call in step["response"].get("tool_calls", [])
-            if call["name"].startswith(PROVIDER_TOOL_PREFIXES)
+            if call["name"] in PROVIDER_TOOL_NAMES
         )
     )
     first_provider_step = next(
         index
         for index, step in enumerate(trace["steps"])
         if any(
-            call["name"].startswith(PROVIDER_TOOL_PREFIXES)
+            call["name"] in PROVIDER_TOOL_NAMES
             for call in step["response"].get("tool_calls", [])
         )
     )
@@ -585,7 +582,7 @@ def _coalesce_independent_provider_reads(trace: dict, batch_size: int = 25) -> N
         index
         for index, step in enumerate(trace["steps"])
         if any(
-            call["name"].startswith(PROVIDER_TOOL_PREFIXES)
+            call["name"] in PROVIDER_TOOL_NAMES
             for call in step["response"].get("tool_calls", [])
         )
     ]
@@ -711,12 +708,12 @@ async def _load_trace(
     mock_llm_server: str,
     trace_path: Path,
     *,
-    provider_prefixes: tuple[str, ...] | None = None,
+    provider_tools: frozenset[str] | None = None,
     slack_state: dict[str, str] | None = None,
 ) -> dict:
     trace = json.loads(trace_path.read_text(encoding="utf-8"))
-    if provider_prefixes is not None:
-        trace = _provider_leg(trace, provider_prefixes)
+    if provider_tools is not None:
+        trace = _provider_leg(trace, provider_tools)
     if trace_path.stem == "qa_9c_slack_digest_names_not_ids":
         _coalesce_independent_provider_reads(trace)
         _inject_deferred_tool_disclosure(trace)
@@ -724,7 +721,7 @@ async def _load_trace(
         trace["steps"][-1]["request_hint"] = {
             "expected_failed_tool_result_contains": "channel_not_found"
         }
-    if provider_prefixes is not None:
+    if provider_tools is not None:
         _normalize_google_arguments(trace, trace_path.stem)
     if slack_state is not None:
         _normalize_slack_arguments(trace, slack_state, trace_path.stem)
@@ -804,7 +801,7 @@ def _recorded_provider_calls(trace: dict) -> list[dict]:
         call
         for step in trace["steps"]
         for call in step["response"].get("tool_calls", [])
-        if call["name"].startswith(PROVIDER_TOOL_PREFIXES)
+        if call["name"] in PROVIDER_TOOL_NAMES
     ]
 
 
@@ -1030,7 +1027,7 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
     trace = await _load_trace(
         mock_llm_server,
         trace_path,
-        provider_prefixes=PROVIDER_TOOL_PREFIXES,
+        provider_tools=PROVIDER_TOOL_NAMES,
         slack_state=reborn_qa_emulate_provider_server["slack_state"],
     )
     user_input = trace["steps"][0]["response"]["content"]
