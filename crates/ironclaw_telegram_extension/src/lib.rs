@@ -1,42 +1,21 @@
-//! Telegram channel host for IronClaw Reborn (the single `telegram`
-//! extension).
+//! Telegram channel extension for Reborn (issue #3285).
 //!
-//! Owns the Telegram host domain: operator bot setup (+ Bot API client),
-//! durable filesystem host state, WebGeneratedCode pairing, the DM-only
-//! pairing-aware dispatch pre-router, the manifest-projected webhook serve
-//! fragment with its dynamic per-setup-revision installation resolver, actor
-//! identity, admin/pairing channel routes, connectable/connection facades,
-//! the outbound DM target provider, and `TelegramDeliveryProtocol`.
+//! The Telegram side of the Reborn generic-ingress [`ChannelAdapter`]
+//! contract defined in `ironclaw_product_adapters`. Pure Bot API protocol
+//! work (payload normalization, outbound rendering) lives in
+//! `ironclaw_telegram_v2_adapter`; this crate owns the adapter itself —
+//! live inbound/outbound plus the webhook registration hooks
+//! (extension-runtime P4) — and stays free of raw token bytes: hosts run
+//! the manifest-declared `shared_secret_header` verification and inject
+//! credentials on mediated egress.
 //!
-//! Composition (`ironclaw_reborn_composition::telegram::telegram_host_beta`)
-//! keeps only the thin wiring layer: it builds these services from
-//! `RebornRuntime` parts, wraps the route fragments into its mount shapes,
-//! and registers the delivery hooks. Behavior contract:
-//! `docs/reborn/contracts/telegram-v2.md`. At the #6116 fold the crate
-//! boundary survives while the internals swap onto the generic extension
-//! runtime.
+//! [`ChannelAdapter`]: ironclaw_product_adapters::ChannelAdapter
 
-#![warn(unreachable_pub)]
+#![forbid(unsafe_code)]
 
-mod attachment_materializer;
+mod channel;
 
-pub mod bot_api;
-pub mod channel_routes;
-pub mod delivery;
-pub mod egress;
-pub mod host;
-pub mod ingress;
-pub mod pairing;
-pub mod setup;
-pub mod state;
-pub mod telegram_account_setup;
-pub mod telegram_actor_identity;
-pub mod telegram_adapter;
-pub mod telegram_connectable_channel;
-pub mod telegram_manifest;
-#[cfg(test)]
-mod test_support;
-
-pub use telegram_account_setup::{
-    TELEGRAM_EXTENSION_ID, TelegramHostBuildError, telegram_account_setup_descriptor,
+pub use channel::{
+    TELEGRAM_BOT_TOKEN_HANDLE, TELEGRAM_WEBHOOK_SECRET_HANDLE, TELEGRAM_WEBHOOK_URL_CONFIG,
+    TelegramChannelAdapter,
 };

@@ -21,7 +21,7 @@ pub use subagent::{SUBAGENT_FAMILY_DIGEST, subagent};
 /// (see `family.rs` component-identity contract).
 fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts: u32) -> String {
     format!(
-        "ironclaw_agent_loop.default_family.v1:\
+        "ironclaw_agent_loop.default_family.v2:\
         family_id=default;\
         identity=component_identity_v1;\
         planner=DefaultPlanner;\
@@ -32,7 +32,7 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
         model:DefaultModelStrategy(primary_or_fallback_index),\
         batch:DefaultBatchPolicyStrategy(exclusive_sequential),\
         gate:DefaultGateHandlingStrategy(block),\
-        recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts}),\
+        recovery:DefaultRecoveryStrategy(max_attempts_per_class=2,model_availability_attempts={model_availability_attempts},stale_request=iteration_retry,unauthorized=abort,checkpoint_rejected=abort,transcript_write_failed=abort),\
         reply_admission:DefaultReplyAdmissionStrategy(reject_empty_and_provider_transcript_artifacts),\
         stop:DefaultStopConditionStrategy(window=5,repeat=3,failure_run=3,rejected_reply=invalid_model_output),\
         drain:DefaultInputDrainStrategy(steering=true,followup=true),\
@@ -46,8 +46,8 @@ fn default_family_fingerprint(iteration_limit: u32, model_availability_attempts:
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xd7, 0xc0, 0xe7, 0xdd, 0xc4, 0x17, 0xe9, 0xe4, 0xe2, 0xcb, 0xa1, 0x4b, 0xab, 0xc4, 0x42, 0x40,
-    0x7d, 0x0d, 0x38, 0x64, 0xff, 0xe3, 0x85, 0xaa, 0xbe, 0x6a, 0x7b, 0xc1, 0xc7, 0xcc, 0x1f, 0xad,
+    0x05, 0x9f, 0x9c, 0x88, 0x91, 0x15, 0xcc, 0xf1, 0x4e, 0x05, 0x7e, 0x5d, 0x9a, 0x1e, 0xb9, 0xfe,
+    0x3c, 0x39, 0xd6, 0x00, 0xae, 0x07, 0xc4, 0x2c, 0x85, 0xe8, 0x39, 0x3f, 0xcf, 0x95, 0x71, 0x9e,
 ]);
 
 /// The default loop family: the text-tool-use baseline.

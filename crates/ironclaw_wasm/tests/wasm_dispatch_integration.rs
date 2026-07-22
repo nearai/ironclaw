@@ -9,7 +9,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
-    RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher, RuntimeExecutor,
+    BoundCapabilityAdapter, CapabilityDispatchRequest, ResolvedCapability, RuntimeAdapterResult,
+    RuntimeDispatcher, ToolResolver,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{
@@ -36,13 +37,8 @@ async fn wasm_lane_loads_component_from_root_filesystem_and_uses_fresh_instances
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
     let adapter = Arc::new(WasmRuntimeAdapter::new());
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        registry,
-        Arc::new(fs),
-        Arc::clone(&governor),
-        Arc::clone(&adapter),
-    )
-    .with_event_sink_arc(Arc::new(events.clone()));
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
 
     let first = dispatcher
         .dispatch_json(dispatch_request("wasm-smoke.count", json!({"call":1})))
@@ -93,13 +89,9 @@ async fn wasm_lane_guest_trap_releases_reservation_and_preserves_dispatch_failur
     let registry = Arc::new(registry_with_package(WASM_TRAP_MANIFEST));
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        registry,
-        Arc::new(fs),
-        Arc::clone(&governor),
-        Arc::new(WasmRuntimeAdapter::new()),
-    )
-    .with_event_sink_arc(Arc::new(events.clone()));
+    let adapter = Arc::new(WasmRuntimeAdapter::new());
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
         .dispatch_json(dispatch_request("wasm-smoke.trap", json!({"call":"trap"})))
@@ -161,9 +153,8 @@ async fn wasm_lane_execution_failure_reconciles_preserved_usage_from_runtime() {
     let adapter = Arc::new(WasmRuntimeAdapter::with_host(
         WitToolHost::deny_all().with_http(wasm_http),
     ));
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(registry, Arc::new(fs), Arc::clone(&governor), adapter)
-            .with_event_sink_arc(Arc::new(events.clone()));
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
         .dispatch_json(dispatch_request(
@@ -215,13 +206,8 @@ async fn wasm_lane_missing_module_file_returns_sanitized_filesystem_error() {
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
     let adapter = Arc::new(WasmRuntimeAdapter::new());
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        registry,
-        Arc::new(fs),
-        Arc::clone(&governor),
-        Arc::clone(&adapter),
-    )
-    .with_event_sink_arc(Arc::new(events.clone()));
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
         .dispatch_json(dispatch_request(
@@ -265,13 +251,9 @@ async fn wasm_lane_malformed_module_returns_sanitized_manifest_error() {
     let registry = Arc::new(registry_with_package(WASM_MANIFEST));
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        registry,
-        Arc::new(fs),
-        Arc::clone(&governor),
-        Arc::new(WasmRuntimeAdapter::new()),
-    )
-    .with_event_sink_arc(Arc::new(events.clone()));
+    let adapter = Arc::new(WasmRuntimeAdapter::new());
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
         .dispatch_json(dispatch_request(
@@ -328,13 +310,9 @@ async fn wasm_lane_invalid_output_json_returns_sanitized_output_error() {
     let registry = Arc::new(registry_with_package(WASM_MANIFEST));
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        registry,
-        Arc::new(fs),
-        Arc::clone(&governor),
-        Arc::new(WasmRuntimeAdapter::new()),
-    )
-    .with_event_sink_arc(Arc::new(events.clone()));
+    let adapter = Arc::new(WasmRuntimeAdapter::new());
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
         .dispatch_json(dispatch_request(
@@ -381,13 +359,8 @@ async fn wasm_lane_rejects_unsupported_import_through_dispatcher_without_reserva
     let governor = Arc::new(governor_with_default_limit(sample_account()));
     let events = InMemoryEventSink::new();
     let adapter = Arc::new(WasmRuntimeAdapter::new());
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        registry,
-        Arc::new(fs),
-        Arc::clone(&governor),
-        Arc::clone(&adapter),
-    )
-    .with_event_sink_arc(Arc::new(events.clone()));
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
         .dispatch_json(dispatch_request(
@@ -445,13 +418,9 @@ async fn wasm_lane_enforces_memory_growth_budget_through_dispatcher() {
             .with_fuel(100_000)
             .with_timeout(Duration::from_secs(5)),
     });
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        registry,
-        Arc::new(fs),
-        Arc::clone(&governor),
-        Arc::new(adapter),
-    )
-    .with_event_sink_arc(Arc::new(events.clone()));
+    let adapter = Arc::new(adapter);
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
         .dispatch_json(dispatch_request(
@@ -525,13 +494,9 @@ async fn wasm_lane_caps_overdue_host_import_at_dispatch_execution_deadline() {
                 .with_timeout(Duration::from_millis(20)),
         },
     );
-    let dispatcher = RuntimeDispatcher::from_arcs(
-        registry,
-        Arc::new(fs),
-        Arc::clone(&governor),
-        Arc::new(adapter),
-    )
-    .with_event_sink_arc(Arc::new(events.clone()));
+    let adapter = Arc::new(adapter);
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
         .dispatch_json(dispatch_request(
@@ -659,16 +624,10 @@ impl WasmRuntimeAdapter {
     }
 }
 
-#[async_trait]
-impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for WasmRuntimeAdapter {
-    fn supports_lane(&self, lane: RuntimeLane) -> bool {
-        lane == RuntimeLane::Wasm
-    }
-
-    async fn dispatch_json(
+impl WasmRuntimeAdapter {
+    async fn dispatch_lane(
         &self,
-        _lane: RuntimeLane,
-        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
+        request: LocalLaneRequest<'_>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let module_path = match &request.package.manifest.runtime {
             ExtensionRuntime::Wasm { module } => module
@@ -727,11 +686,95 @@ impl RuntimeExecutor<DiskFilesystem, InMemoryResourceGovernor> for WasmRuntimeAd
     }
 }
 
+/// The per-invocation slice of the old lane request: everything else is
+/// captured by the prebound `RegistryBoundWasmCapability` at binding time.
+struct LocalLaneRequest<'a> {
+    package: &'a ExtensionPackage,
+    capability_id: &'a CapabilityId,
+    filesystem: &'a DiskFilesystem,
+    governor: &'a InMemoryResourceGovernor,
+    scope: ResourceScope,
+    estimate: ResourceEstimate,
+    resource_reservation: Option<ResourceReservation>,
+    input: Value,
+}
+
+/// Prebinds every registry capability to the file-local WASM lane adapter,
+/// mirroring the production registry-lane resolver's shape at test scale.
+fn dispatcher_for(
+    registry: &ironclaw_extensions::ExtensionRegistry,
+    filesystem: Arc<DiskFilesystem>,
+    governor: Arc<InMemoryResourceGovernor>,
+    adapter: &Arc<WasmRuntimeAdapter>,
+) -> RuntimeDispatcher<'static, InMemoryResourceGovernor> {
+    let bindings = registry
+        .capabilities()
+        .map(|descriptor| {
+            let package = registry
+                .get_extension(&descriptor.provider)
+                .expect("registry package for descriptor");
+            (
+                descriptor.id.clone(),
+                ResolvedCapability {
+                    provider: descriptor.provider.clone(),
+                    runtime: descriptor.runtime,
+                    adapter: Arc::new(RegistryBoundWasmCapability {
+                        package: Arc::new(package.clone()),
+                        adapter: Arc::clone(adapter),
+                        filesystem: Arc::clone(&filesystem),
+                        governor: Arc::clone(&governor),
+                    }) as Arc<dyn BoundCapabilityAdapter>,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let resolver: Arc<dyn ToolResolver> = Arc::new(MapResolver { bindings });
+    RuntimeDispatcher::from_arcs(resolver, governor)
+}
+
+struct MapResolver {
+    bindings: HashMap<CapabilityId, ResolvedCapability>,
+}
+
+impl ToolResolver for MapResolver {
+    fn resolve(&self, capability_id: &CapabilityId) -> Option<ResolvedCapability> {
+        self.bindings.get(capability_id).cloned()
+    }
+}
+
+struct RegistryBoundWasmCapability {
+    package: Arc<ExtensionPackage>,
+    adapter: Arc<WasmRuntimeAdapter>,
+    filesystem: Arc<DiskFilesystem>,
+    governor: Arc<InMemoryResourceGovernor>,
+}
+
+#[async_trait]
+impl BoundCapabilityAdapter for RegistryBoundWasmCapability {
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        self.adapter
+            .dispatch_lane(LocalLaneRequest {
+                package: &self.package,
+                capability_id: &request.capability_id,
+                filesystem: self.filesystem.as_ref(),
+                governor: self.governor.as_ref(),
+                scope: request.scope,
+                estimate: request.estimate,
+                resource_reservation: request.resource_reservation,
+                input: request.input,
+            })
+            .await
+    }
+}
+
 fn execute_prepared_wasm(
     runtime: &WitToolRuntime,
     prepared: &PreparedWitTool,
     host: WitToolHost,
-    request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
+    request: LocalLaneRequest<'_>,
 ) -> Result<RuntimeAdapterResult, DispatchError> {
     let input_json = serde_json::to_string(&request.input).map_err(|_| DispatchError::Wasm {
         kind: RuntimeDispatchErrorKind::InputEncode,
@@ -846,7 +889,7 @@ fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegist
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+    let manifest = ExtensionManifest::parse(
         manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -902,20 +945,29 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
 }
 
-fn dispatch_request(capability: &str, input: Value) -> CapabilityDispatchRequest {
-    CapabilityDispatchRequest {
-        run_id: None,
-        capability_id: CapabilityId::new(capability).unwrap(),
-        scope: sample_scope(),
-        authenticated_actor_user_id: None,
-        estimate: ResourceEstimate::default()
-            .set_concurrency_slots(1)
-            .set_process_count(1)
-            .set_output_bytes(10_000),
-        mounts: None,
-        resource_reservation: None,
-        input,
-    }
+fn dispatch_request(capability: &str, input: Value) -> Authorized {
+    let estimate = ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_process_count(1)
+        .set_output_bytes(10_000);
+    Authorized::seal_for_test(
+        Invocation {
+            activity_id: ActivityId::new(),
+            capability: CapabilityId::new(capability).unwrap(),
+            input,
+            scope: sample_scope(),
+            actor: Actor::System,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            estimate,
+            correlation_id: CorrelationId::new(),
+            process_id: None,
+            parent_process_id: None,
+        },
+        RuntimeLane::Wasm,
+        MountView::default(),
+        None,
+        Timestamp::MAX_UTC,
+    )
 }
 
 fn sample_scope() -> ResourceScope {

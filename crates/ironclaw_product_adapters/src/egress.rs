@@ -302,9 +302,6 @@ pub struct EgressRequest {
     headers: Vec<EgressHeader>,
     body: Vec<u8>,
     credential_handle: Option<EgressCredentialHandle>,
-    /// Requested response cap. The host may clamp this to a stricter policy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    response_body_limit: Option<u64>,
 }
 
 impl EgressRequest {
@@ -316,7 +313,6 @@ impl EgressRequest {
             headers: Vec::new(),
             body: Vec::new(),
             credential_handle: None,
-            response_body_limit: None,
         }
     }
 
@@ -332,11 +328,6 @@ impl EgressRequest {
 
     pub fn with_credential_handle(mut self, handle: Option<EgressCredentialHandle>) -> Self {
         self.credential_handle = handle;
-        self
-    }
-
-    pub fn with_response_body_limit(mut self, limit: u64) -> Self {
-        self.response_body_limit = Some(limit);
         self
     }
 
@@ -362,10 +353,6 @@ impl EgressRequest {
 
     pub fn credential_handle(&self) -> Option<&EgressCredentialHandle> {
         self.credential_handle.as_ref()
-    }
-
-    pub fn response_body_limit(&self) -> Option<u64> {
-        self.response_body_limit
     }
 }
 

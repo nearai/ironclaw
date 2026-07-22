@@ -170,6 +170,50 @@ async fn mid_turn_provider_error_reaches_failed_with_model_error_category() {
     );
 }
 
+/// Credentials sibling of the context-overflow test above (issue #6284 item
+/// 1 — precise model-path failure categories): a raw provider auth failure
+/// (`LlmError::AuthFailed`, non-retryable) must reach `TurnStatus::Failed`
+/// with the PINNED, user-actionable `model_credentials_unavailable` category
+/// — "fix the provider API key" — not the generic
+/// `model_unavailable`/`host_stage_unavailable_model` collapse. Asserts at
+/// the persisted `SanitizedFailure` seam through the full production path:
+/// provider `Err` -> `map_provider_error` (`CredentialUnavailable`) -> loop
+/// `HostUnavailableWithDiagnostics{Model}` -> runner
+/// `model_stage_failure_category` -> persisted failure.
+#[tokio::test]
+async fn mid_turn_auth_provider_error_reaches_failed_with_credentials_category() {
+    let harness = RebornIntegrationHarness::test_default()
+        .fail_model_auth()
+        .build()
+        .await
+        .expect("harness builds");
+
+    let run_id = harness
+        .submit_turn_async("do something")
+        .await
+        .expect("turn submitted");
+    let state = harness
+        .wait_for_status(run_id, TurnStatus::Failed)
+        .await
+        .expect("run reaches Failed after a non-retryable provider auth error");
+    let failure = state
+        .failure
+        .as_ref()
+        .expect("a Failed run must carry a failure detail");
+    assert_eq!(
+        failure.category(),
+        "model_credentials_unavailable",
+        "expected the pinned credentials category (AuthFailed), got {failure:?}"
+    );
+    let detail = failure
+        .detail()
+        .expect("credentials failure must carry the provider cause for the explainer");
+    assert!(
+        detail.contains("Authentication failed"),
+        "detail should describe the auth failure, got {detail:?}"
+    );
+}
+
 /// Regression guard, `Failed`-path sibling of
 /// `cancelled_run_does_not_block_a_second_turn_on_the_same_thread`: the
 /// per-thread busy/admission lock must release on `TurnStatus::Failed`, not

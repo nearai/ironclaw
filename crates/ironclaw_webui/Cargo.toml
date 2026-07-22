@@ -14,11 +14,9 @@ publish = false
 layer = "products"
 
 [features]
-# Compile in `InMemorySessionStore` + `EmailUserDirectory` as public crate
-# items. Off by default so a production deployment cannot accidentally wire the
-# process-local store as a `SessionStore` impl — `SessionAuthenticator` would
-# happily accept it, but sessions would vanish on every restart and the O(n)
-# lookup would scale poorly under real user load. Local dev and tests opt in.
+# Compile in `EmailUserDirectory` as a public crate item. Off by default so a
+# production deployment cannot accidentally trust provider identities without a
+# host-owned user join. Local dev and tests opt in.
 test-support = []
 
 [dependencies]
@@ -61,11 +59,7 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 url = "2"
 urlencoding = "2"
-# `uuid` is consumed by `InMemorySessionStore` (session.rs) and the
-# library's internal tests under `#[cfg(test)]`. The earlier attempt
-# to mark it `optional = true` broke `cargo test` because the
-# `cfg(test)` gate activated the `use uuid::Uuid;` import without
-# pulling in the optional crate.
+# `uuid` is consumed by the signed session token store and library tests.
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
@@ -81,10 +75,10 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = 
 # Handler contract test (moved from ironclaw_webui_v2) constructs
 # `ProductOutboundEnvelope` fixtures with the canonical newtype constructors.
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
-# `tests/slack_host_beta_webui_v2.rs` drives the Slack host-beta surface
-# composed into `webui_v2_app`. It builds a local-dev
-# runtime through composition's public builders, so it needs composition's
-# `test-support` + `libsql` seams plus the model-gateway / capability-port traits.
+# The serve/auth integration tests (`tests/serve_loop.rs`, `tests/auth_route_contract.rs`,
+# `tests/session_round_trip.rs`, …) build a local-dev runtime through composition's
+# public builders, so they need composition's `test-support` + `libsql` seams plus
+# the model-gateway / capability-port traits.
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["test-support"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
 tempfile = "3"

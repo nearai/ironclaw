@@ -8,44 +8,37 @@ use ironclaw_auth::{
 };
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
 use ironclaw_filesystem::FilesystemError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_filesystem::{
-    DirEntry, FileStat, FilesystemOperation, RootFilesystem, VersionedEntry,
-};
+use ironclaw_filesystem::RootFilesystem;
+use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
     NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
-    ResourceUsage, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
+    ResourceUsage, RunId, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
     VirtualPath,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
-    RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialRequirementSource,
+    RuntimeCredentialAccountSetup, RuntimeCredentialRequirementSource, VendorId,
 };
 use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, RuntimeFailureKind, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
+    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
 };
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase};
+use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use rust_decimal_macros::dec;
-#[cfg(feature = "libsql")]
 use secrecy::ExposeSecret;
 
 use crate::builtin_capability_policy::{BuiltinApprovalPolicyAction, BuiltinCapabilityPolicyError};
 use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
+use crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress;
 use crate::{
     RebornReadinessDiagnostic, RebornReadinessState, runtime::SKILL_ACTIVATE_CAPABILITY_ID,
 };
 
-#[cfg(feature = "libsql")]
 #[test]
 fn libsql_build_resource_governor_guard_requires_singleton_authority() {
     assert!(ensure_libsql_resource_governor_authority_for_build(true).is_ok());
@@ -56,7 +49,6 @@ fn libsql_build_resource_governor_guard_requires_singleton_authority() {
     ));
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn production_turn_state_store_uses_row_layout() {
     let view = MountView::new(vec![MountGrant::new(
@@ -81,7 +73,6 @@ async fn production_turn_state_store_uses_row_layout() {
     assert!(snapshot.runs.is_empty());
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[test]
 fn build_reborn_services_uses_filesystem_resource_governor() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -133,10 +124,7 @@ fn extension_installation_state_path_stays_legacy_for_local_dev() {
         local_dev_extension_installation_state_path(RebornCompositionProfile::LocalDev, None)
             .expect("state path");
 
-    assert_eq!(
-        path.as_str(),
-        "/system/extensions/.installations/state.json"
-    );
+    assert_eq!(path.as_str(), "/system/extensions/.installations");
 }
 
 #[test]
@@ -153,7 +141,7 @@ fn extension_installation_state_path_uses_durable_tenant_root_for_hosted() {
 
     assert_eq!(
         path.as_str(),
-        "/tenants/acme/system/extensions/.installations/state.json"
+        "/tenants/acme/system/extensions/.installations"
     );
 }
 
@@ -171,7 +159,7 @@ fn extension_installation_state_path_uses_durable_tenant_root_for_hosted_volume(
 
     assert_eq!(
         path.as_str(),
-        "/tenants/acme/system/extensions/.installations/state.json"
+        "/tenants/acme/system/extensions/.installations"
     );
 }
 
@@ -231,32 +219,6 @@ impl ConversationActorPairingService for FailingConversationActorPairingService 
     > {
         Err(ironclaw_conversations::InboundTurnError::DurableState {
             reason: "raw durable store error".to_string(),
-        })
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-struct FailingConversationStateFilesystem;
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[async_trait::async_trait]
-impl RootFilesystem for FailingConversationStateFilesystem {
-    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        Err(FilesystemError::Backend {
-            path: path.clone(),
-            operation: FilesystemOperation::ReadFile,
-            reason: "conversation state load failed".to_string(),
-        })
-    }
-
-    async fn list_dir(&self, _path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        Ok(Vec::new())
-    }
-
-    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        Err(FilesystemError::NotFound {
-            path: path.clone(),
-            operation: FilesystemOperation::ReadFile,
         })
     }
 }
@@ -400,7 +362,6 @@ async fn pair_trigger_creator_maps_pairing_failure_to_sanitized_backend_error() 
     assert_eq!(reason, "trigger creator actor pairing failed");
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntimeSubstrate> {
     let local_dev_root = tempfile::tempdir().expect("tempdir");
     let owner_user_id = "pairing-owner";
@@ -425,7 +386,17 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
                 BackendCapabilities::default(),
             )
             .expect("mount descriptor"),
-            Arc::new(FailingConversationStateFilesystem),
+            Arc::new(
+                ironclaw_filesystem::FaultInjecting::new(
+                    ironclaw_filesystem::InMemoryBackend::new(),
+                )
+                .with_fault(
+                    ironclaw_filesystem::Fault::on(
+                        ironclaw_filesystem::FilesystemOperation::ReadFile,
+                    )
+                    .backend("conversation state load failed"),
+                ),
+            ),
         )
         .expect("mount failing backend");
     Arc::new(RebornRuntimeSubstrate {
@@ -450,9 +421,6 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         outbound_state: Arc::clone(&base_runtime.outbound_state),
         delivered_gate_routes: Arc::clone(&base_runtime.delivered_gate_routes),
         triggered_run_delivery: Arc::clone(&base_runtime.triggered_run_delivery),
-        #[cfg(not(any(feature = "libsql", feature = "postgres")))]
-        trigger_conversation_services: base_runtime.trigger_conversation_services.clone(),
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
         trigger_conversation_services: tokio::sync::OnceCell::new(),
         checkpoint_state_store: Arc::clone(&base_runtime.checkpoint_state_store),
         loop_checkpoint_store: Arc::clone(&base_runtime.loop_checkpoint_store),
@@ -464,7 +432,12 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
         skill_management: Arc::clone(&base_runtime.skill_management),
         extension_management: base_runtime.extension_management.clone(),
-        channel_connection_facade_slot: Arc::clone(&base_runtime.channel_connection_facade_slot),
+        channel_config: base_runtime.channel_config.clone(),
+        admin_configuration: base_runtime.admin_configuration.clone(),
+        admin_configuration_uses: Arc::clone(&base_runtime.admin_configuration_uses),
+        channel_identity_store: base_runtime.channel_identity_store.clone(),
+        channel_dm_target_store: base_runtime.channel_dm_target_store.clone(),
+        channel_disconnect_slot: Arc::clone(&base_runtime.channel_disconnect_slot),
         runtime_http_egress: base_runtime.runtime_http_egress.clone(),
         host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
         skill_mounts: base_runtime.skill_mounts.clone(),
@@ -472,12 +445,8 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         system_extensions_lifecycle_mounts: base_runtime.system_extensions_lifecycle_mounts.clone(),
         skill_filesystem: Arc::clone(&base_runtime.skill_filesystem),
         workspace_filesystem: Arc::clone(&base_runtime.workspace_filesystem),
-        host_state_filesystem: Arc::clone(&base_runtime.host_state_filesystem),
-        telegram_host_state_filesystem: Arc::clone(&base_runtime.telegram_host_state_filesystem),
-        #[cfg(any(feature = "libsql", feature = "postgres"))]
         identity_filesystem: Arc::clone(&base_runtime.identity_filesystem),
         admin_secret_provisioner: base_runtime.admin_secret_provisioner.clone(),
-        #[cfg(feature = "libsql")]
         identity_substrate_db: base_runtime.identity_substrate_db.clone(),
         subagent_goal_filesystem: Arc::new(ScopedFilesystem::with_fixed_view(
             Arc::new(failing_root),
@@ -499,7 +468,6 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
     })
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn durable_trigger_conversation_services_propagates_init_error() {
     let runtime = local_runtime_with_failing_trigger_conversations().await;
@@ -515,7 +483,6 @@ async fn durable_trigger_conversation_services_propagates_init_error() {
     ));
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_runtime_trigger_create_hook_maps_conversation_init_error_to_backend() {
     let hook = LocalRuntimeTriggerCreatorPairingHook {
@@ -638,7 +605,6 @@ async fn local_dev_memory_first_party_tools_use_mounted_memory_root() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_memory_documents_persist_across_rebuilds() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -695,7 +661,6 @@ async fn local_dev_memory_documents_persist_across_rebuilds() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -810,52 +775,6 @@ async fn local_dev_default_product_auth_preserves_manual_token_across_rebuilds()
     );
 }
 
-/// Caller-level regression for the Slack durable conversation store mount
-/// alias. `slack_host_state_mount_view` has a unit test for the grant set,
-/// but the grant only matters through the composed path: production wraps
-/// the local-dev root filesystem with that view via
-/// `local_dev_slack_host_state_filesystem`, then opens the store with
-/// `RebornFilesystemConversationServices::new`, whose init reads
-/// `/conversations/state.json`. Without the `/conversations` alias the
-/// ScopedFilesystem rejects that path ("no mount alias matches scoped
-/// path"), init fails, and every inbound Slack DM is silently dropped (the
-/// bug fixed in 7917cf89f). This drives that exact composition so a future
-/// edit that drops the alias fails here, not just in the mount-view unit
-/// test the composition never consults directly.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[tokio::test]
-async fn slack_durable_conversation_store_initializes_through_composed_host_state_mount() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let local_dev_root = dir.path().join("local-dev");
-    // `local_dev_project_filesystem` mounts these host paths; they must
-    // exist before the root filesystem is built.
-    std::fs::create_dir_all(local_dev_root.join("workspace")).expect("workspace dir");
-    std::fs::create_dir_all(local_dev_root.join("system/extensions"))
-        .expect("system extensions dir");
-
-    let root_filesystem = build_local_runtime_root_filesystem(
-        &local_dev_root,
-        &local_dev_root.join("workspace"),
-        None,
-        StorageBackendInput::LocalDefault,
-    )
-    .await
-    .expect("local-dev root filesystem")
-    .filesystem;
-
-    // Exactly how production composes the Slack host-state filesystem.
-    let host_state_filesystem = local_dev_slack_host_state_filesystem(root_filesystem);
-
-    let conversations = RebornFilesystemConversationServices::new(host_state_filesystem).await;
-
-    assert!(
-        conversations.is_ok(),
-        "durable conversation store must open `/conversations/state.json` \
-             through the composed Slack host-state mount view; got {:?}",
-        conversations.err()
-    );
-}
-
 /// Verify that `attach_hosted_mcp_runtime` is soft-disabled when the host
 /// runtime has no HTTP egress (e.g. in-memory-only test services). The
 /// function must not panic or return an error; it simply skips the MCP
@@ -885,7 +804,6 @@ fn attach_hosted_mcp_runtime_skips_services_without_http_egress() {
 /// material reaches `SecretsCrypto::new` several layers deep. Mirrors the
 /// real all-zeros key an `[env] SECRETS_MASTER_KEY = "000...0"` cargo
 /// override writes into the cached key file.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn resolve_local_dev_secret_master_key_rejects_malformed_file_with_path_context() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -920,7 +838,6 @@ async fn resolve_local_dev_secret_master_key_rejects_malformed_file_with_path_co
 /// (via its env-parameterized inner) so this also guards the
 /// write-before-validate invariant: a rejected env key must never be
 /// persisted to the cached `.reborn-local-dev-secrets-master-key` file.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn resolve_local_dev_secret_master_key_rejects_malformed_env_without_persisting() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -961,7 +878,6 @@ async fn resolve_local_dev_secret_master_key_rejects_malformed_env_without_persi
 }
 
 #[tokio::test]
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn resolve_local_dev_secret_master_key_rejects_set_but_empty_env_without_persisting() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -990,7 +906,6 @@ async fn resolve_local_dev_secret_master_key_rejects_set_but_empty_env_without_p
 }
 
 #[tokio::test]
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_file() {
     // Regression: the empty-env rejection must run BEFORE the cached-file
     // read, so an explicitly-set-but-empty SECRETS_MASTER_KEY fails closed
@@ -1031,7 +946,6 @@ async fn resolve_local_dev_secret_master_key_rejects_empty_env_even_with_cached_
 }
 
 #[tokio::test]
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 async fn resolve_local_dev_secret_master_key_rejects_malformed_env_even_with_cached_file() {
     // A non-empty-but-malformed env value must also fail closed BEFORE the
     // cached-file read, so `SECRETS_MASTER_KEY=0000...` is not silently
@@ -1070,7 +984,6 @@ async fn resolve_local_dev_secret_master_key_rejects_malformed_env_even_with_cac
 }
 
 /// A well-formed cached key file passes through unchanged.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn resolve_local_dev_secret_master_key_accepts_valid_cached_file() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1090,7 +1003,6 @@ async fn resolve_local_dev_secret_master_key_accepts_valid_cached_file() {
 /// `forbid(unsafe_code)` note above — this crate's inline tests cannot
 /// mutate process env, and a cached dotfile is the non-env-mutating way
 /// to make the resolver deterministic here).
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn open_local_dev_secret_store_opens_a_working_store_over_the_bare_root() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1122,7 +1034,6 @@ async fn open_local_dev_secret_store_opens_a_working_store_over_the_bare_root() 
 /// db file, same cached master key) must decrypt a value written by a
 /// prior open — this is the "onboard writes, serve reads" contract B2
 /// exists to satisfy.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn open_local_dev_secret_store_is_visible_across_reopens_of_the_same_root() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1311,6 +1222,11 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
     let catalog =
         AvailableExtensionCatalog::from_first_party_assets().expect("first-party extensions load");
     let notion_package = catalog.resolve(&notion_ref).expect("Notion MCP is bundled");
+    // v3 hosted-MCP manifests declare one [mcp] block instead of placeholder
+    // static tools: the only bundled capability is the synthesized
+    // host-internal connection template. Model-visible Notion tools exist
+    // only after live tools/list discovery, so this test scripts discovery
+    // below to reach the auth gate.
     let capability_ids = notion_package
         .package
         .manifest
@@ -1318,11 +1234,11 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .iter()
         .map(|capability| capability.id.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(capability_ids.len(), 18);
-    assert!(capability_ids.contains(&"notion.notion-create-pages"));
-    assert!(capability_ids.contains(&"notion.notion-query-data-sources"));
-    assert!(capability_ids.contains(&"notion.notion-create-comment"));
-    assert!(capability_ids.contains(&"notion.notion-get-self"));
+    assert_eq!(capability_ids, vec!["notion.mcp_server"]);
+    assert_eq!(
+        notion_package.package.manifest.capabilities[0].visibility,
+        ironclaw_extensions::CapabilityVisibility::HostInternal
+    );
 
     extension_management
         .install(
@@ -1332,9 +1248,21 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .await
         .expect("install Notion MCP");
     extension_management
-        .activate_with_prechecked_credentials_for_test(notion_ref, ExtensionActivationMode::Static)
+        .activate_with_prechecked_credentials_for_test(
+            notion_ref,
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: ResourceScope::local_default(
+                    UserId::new("local-dev-notion-mcp-owner").expect("valid user"),
+                    InvocationId::new(),
+                )
+                .expect("valid scope"),
+                runtime_http_egress: Arc::new(
+                    HostedMcpDiscoveryEgress::with_tool_name("notion-search").read_only(),
+                ),
+            },
+        )
         .await
-        .expect("activate Notion MCP");
+        .expect("activate Notion MCP with scripted discovery");
 
     let context = notion_mcp_context("notion.notion-search");
     enable_global_auto_approve_for_context(local_runtime, &context).await;
@@ -1342,7 +1270,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .host_runtime
         .as_ref()
         .expect("host runtime")
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new("notion.notion-search").unwrap(),
             ResourceEstimate::default(),
@@ -1399,7 +1327,7 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
         .host_runtime
         .as_ref()
         .expect("host runtime")
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new("web-access.search").unwrap(),
             ResourceEstimate::default(),
@@ -1459,7 +1387,6 @@ fn hosted_single_tenant_nearai_mcp_bootstrap_scope_uses_runtime_identity() {
     assert!(scope.project_id.is_none());
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[test]
 fn turn_state_filesystem_routes_global_store_ops_to_owner_turns_path() {
     let root = Arc::new(ironclaw_filesystem::InMemoryBackend::default());
@@ -1485,7 +1412,6 @@ fn turn_state_filesystem_routes_global_store_ops_to_owner_turns_path() {
     );
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[test]
 fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     let owner = UserId::new("configured-owner").expect("owner");
@@ -1500,7 +1426,6 @@ fn runtime_owner_scope_uses_configured_runtime_identity_for_turn_state() {
     assert_eq!(scope.agent_id, Some(identity.agent_id));
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1546,9 +1471,6 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    #[cfg(not(feature = "postgres"))]
-    let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
-    #[cfg(feature = "postgres")]
     let graph = match production_runtime {
         RebornProductionRuntimeServices::LibSql(graph) => graph,
         RebornProductionRuntimeServices::Postgres(_) => {
@@ -1619,7 +1541,6 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfigured() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1662,9 +1583,6 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         .production_runtime
         .as_ref()
         .expect("production runtime");
-    #[cfg(not(feature = "postgres"))]
-    let RebornProductionRuntimeServices::LibSql(graph) = production_runtime;
-    #[cfg(feature = "postgres")]
     let graph = match production_runtime {
         RebornProductionRuntimeServices::LibSql(graph) => graph,
         RebornProductionRuntimeServices::Postgres(_) => {
@@ -1735,7 +1653,6 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     );
 }
 
-#[cfg(feature = "libsql")]
 async fn append_log_has_entries<F>(filesystem: &F, path: &VirtualPath, label: &str) -> bool
 where
     F: RootFilesystem,
@@ -1750,7 +1667,6 @@ where
     }
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_boundary() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1793,7 +1709,6 @@ async fn production_libsql_builder_rejects_invalid_owner_id_at_composition_bound
     );
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1816,12 +1731,62 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
 
     let projection = extension_management
         .project(
-            nearai_ref,
+            nearai_ref.clone(),
             extension_management.tenant_operator_user_id_for_test(),
         )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePhase::Active);
+    assert_eq!(projection.phase, InstallationState::Active);
+
+    // v3 hosted-MCP surface: boot-time bootstrap activates the package
+    // statically, publishing the host-internal MCP connection template
+    // plus the statically pinned web_search tool (main parity: searchable
+    // from first boot); live tools/list discovery replaces the static set
+    // with the server's catalog.
+    let capabilities = extension_management
+        .active_model_visible_capabilities()
+        .await
+        .expect("active capabilities");
+    assert_eq!(
+        capabilities
+            .iter()
+            .filter(|capability| capability.provider.as_str() == "nearai")
+            .map(|capability| capability.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["nearai.web_search"],
+        "activated hosted-MCP package must pin exactly the static web_search tool before discovery"
+    );
+    let template_id = CapabilityId::new("nearai.mcp_server").unwrap();
+    let registry = extension_management.active_extensions_for_test().snapshot();
+    assert!(
+        registry.get_capability(&template_id).is_some(),
+        "host-internal MCP connection template should be published"
+    );
+    assert_eq!(
+        registry.capability_visibility(&template_id),
+        Some(ironclaw_extensions::CapabilityVisibility::HostInternal)
+    );
+
+    // Script live tools/list discovery through the hosted-MCP seam so the
+    // discovered web_search tool surfaces with the connection template's
+    // credential wiring (the injected endpoint override patches
+    // [mcp].server only; the audience derives from that server host).
+    extension_management
+        .activate_with_prechecked_credentials_for_test(
+            nearai_ref,
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: ResourceScope::local_default(
+                    UserId::new(owner).unwrap(),
+                    InvocationId::new(),
+                )
+                .expect("valid scope"),
+                runtime_http_egress: Arc::new(HostedMcpDiscoveryEgress::with_tool_name(
+                    "web_search",
+                )),
+            },
+        )
+        .await
+        .expect("scripted NEAR AI discovery activation");
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -1842,7 +1807,7 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     assert_eq!(
         search.runtime_credentials[0].source,
         RuntimeCredentialRequirementSource::ProductAuthAccount {
-            provider: RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            provider: VendorId::new("nearai").unwrap(),
             setup: Default::default(),
         }
     );
@@ -1850,7 +1815,9 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
         search.runtime_credentials[0].audience.host_pattern,
         "nearai-db.example.test"
     );
-    assert_eq!(search.runtime_credentials[0].audience.port, Some(9443));
+    // v3 derives the credential audience from the [mcp].server host; the
+    // audience pattern carries the host only (port unconstrained).
+    assert_eq!(search.runtime_credentials[0].audience.port, None);
 
     let auth_scope = AuthProductScope::new(
         local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
@@ -1900,7 +1867,7 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     let resolved = resolver
         .resolve_access_secret(RuntimeCredentialAccountRequest {
             scope: &sso_scope,
-            provider: &RuntimeCredentialAccountProviderId::new("nearai").unwrap(),
+            provider: &VendorId::new("nearai").unwrap(),
             setup: &RuntimeCredentialAccountSetup::ManualToken,
             provider_scopes: &[],
             requester_extension: &ExtensionId::new("nearai").unwrap(),
@@ -1911,67 +1878,6 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
     assert_eq!(resolved.scope, nearai_account_scope);
 }
 
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-#[tokio::test]
-async fn local_dev_nearai_mcp_skips_auto_activation_without_durable_product_auth() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let owner = "local-dev-nearai-mcp-no-durable-owner";
-    let services = build_reborn_services(nearai_bootstrap_input_with_base(
-            owner,
-            dir.path().join("local-dev"),
-            "http://private.near.ai",
-            "nearai-test-key",
-        ))
-        .await
-        .expect("local-dev services build should ignore invalid NEAR AI MCP endpoint without durable product auth");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
-    let nearai_ref =
-        LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
-
-    let projection = extension_management
-        .project(
-            nearai_ref,
-            extension_management.tenant_operator_user_id_for_test(),
-        )
-        .await
-        .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePhase::Discovered);
-
-    let capabilities = extension_management
-        .active_model_visible_capabilities()
-        .await
-        .expect("active capabilities");
-    assert!(
-        capabilities
-            .iter()
-            .all(|capability| capability.id.as_str() != "nearai.web_search")
-    );
-
-    let auth_scope = AuthProductScope::new(
-        local_dev_nearai_mcp_owner_scope(UserId::new(owner).unwrap(), None)
-            .expect("NEAR AI MCP owner scope"),
-        AuthSurface::Api,
-    );
-    let accounts = services
-        .product_auth
-        .as_ref()
-        .expect("product auth")
-        .credential_account_record_source()
-        .accounts_for_owner(&auth_scope)
-        .await
-        .expect("credential accounts load");
-    assert!(
-        accounts
-            .iter()
-            .all(|account| account.provider.as_str() != "nearai")
-    );
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2048,7 +1954,6 @@ async fn local_dev_nearai_mcp_rebootstrap_reuses_existing_account() {
     );
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2109,20 +2014,38 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
         )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePhase::Active);
+    assert_eq!(projection.phase, InstallationState::Active);
 
+    // v3 hosted-MCP surface: reinstall-and-activate publishes the
+    // host-internal MCP connection template plus the statically pinned
+    // web_search tool (main parity: searchable from first boot); a
+    // successful live tools/list discovery — which this bootstrap-focused
+    // test does not run — replaces the static set with the live catalog.
     let capabilities = extension_management
         .active_model_visible_capabilities()
         .await
         .expect("active capabilities");
-    assert!(
+    assert_eq!(
         capabilities
             .iter()
-            .any(|capability| capability.id.as_str() == "nearai.web_search")
+            .filter(|capability| capability.provider.as_str() == "nearai")
+            .map(|capability| capability.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["nearai.web_search"],
+        "reinstalled hosted-MCP package must pin exactly the static web_search tool before discovery"
+    );
+    let template_id = CapabilityId::new("nearai.mcp_server").unwrap();
+    let registry = extension_management.active_extensions_for_test().snapshot();
+    assert!(
+        registry.get_capability(&template_id).is_some(),
+        "host-internal MCP connection template should be published"
+    );
+    assert_eq!(
+        registry.capability_visibility(&template_id),
+        Some(ironclaw_extensions::CapabilityVisibility::HostInternal)
     );
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_dev_nearai_mcp_invalid_base_url_fails_build() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2163,7 +2086,6 @@ fn attach_hosted_mcp_runtime_skips_services_without_runtime_http_egress() {
     assert!(services.product_auth_provider_runtime_ports().is_none());
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_services_persist_thread_records_across_rebuilds() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2475,7 +2397,6 @@ fn builtin_first_party_package_declares_skill_management_tools() {
     ));
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[test]
 fn production_skill_management_mounts_use_production_namespace() {
     let scope = ResourceScope {
@@ -2597,7 +2518,7 @@ fn memory_context(capability_id: &str) -> ExecutionContext {
 
 fn gsuite_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::FirstParty,
@@ -2609,7 +2530,12 @@ fn gsuite_context(capability_id: &str) -> ExecutionContext {
                 grantee: Principal::Extension(extension_id),
                 issued_by: Principal::HostRuntime,
                 constraints: GrantConstraints {
-                    allowed_effects: gsuite_allowed_effects(),
+                    allowed_effects: vec![
+                        EffectKind::DispatchCapability,
+                        EffectKind::Network,
+                        EffectKind::UseSecret,
+                        EffectKind::ExternalWrite,
+                    ],
                     mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
                     network: NetworkPolicy::default(),
                     secrets: vec![SecretHandle::new("missing-google-access-token").unwrap()],
@@ -2621,7 +2547,9 @@ fn gsuite_context(capability_id: &str) -> ExecutionContext {
         },
         MountView::new(Vec::new()).expect("valid empty mount view"),
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 /// Turn on the global auto-approve switch for `context`'s actor scope so a
@@ -2648,7 +2576,7 @@ use crate::approval_test_support::disable_global_auto_approve;
 
 fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::Mcp,
@@ -2672,12 +2600,14 @@ fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
         },
         MountView::new(Vec::new()).expect("valid empty mount view"),
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn web_access_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::FirstParty,
@@ -2689,7 +2619,7 @@ fn web_access_context(capability_id: &str) -> ExecutionContext {
                 grantee: Principal::Extension(extension_id),
                 issued_by: Principal::HostRuntime,
                 constraints: GrantConstraints {
-                    allowed_effects: web_access_allowed_effects(),
+                    allowed_effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
                     mounts: MountView::new(Vec::new()).expect("valid empty mount view"),
                     network: web_access_network_policy(),
                     secrets: Vec::new(),
@@ -2701,7 +2631,9 @@ fn web_access_context(capability_id: &str) -> ExecutionContext {
         },
         MountView::new(Vec::new()).expect("valid empty mount view"),
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn web_access_network_policy() -> NetworkPolicy {
@@ -2718,7 +2650,7 @@ fn web_access_network_policy() -> NetworkPolicy {
 
 fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::FirstParty,
@@ -2732,7 +2664,9 @@ fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext
         },
         mounts,
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn capability_grant(
@@ -2838,7 +2772,6 @@ fn skill_md(name: &str, description: &str, prompt: &str) -> String {
 /// `RebornRuntimeSubstrate` and compares their data halves via
 /// `std::ptr::addr_eq` (trait objects of different traits cannot be compared
 /// with `Arc::ptr_eq` directly).
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[tokio::test]
 async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2876,7 +2809,7 @@ fn slack_identity(
     digest: Option<String>,
 ) -> ironclaw_host_api::PackageIdentity {
     ironclaw_host_api::PackageIdentity::new(
-        ironclaw_host_api::PackageId::new("slack_bot").expect("slack package id"),
+        ironclaw_host_api::PackageId::new("slack").expect("slack package id"),
         ironclaw_host_api::PackageSource::LocalManifest {
             path: manifest_path.to_string(),
         },
@@ -2887,14 +2820,23 @@ fn slack_identity(
 
 #[test]
 fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
+    // slack migrated to the self-contained inventory; its first-party trust
+    // entry is now produced by the generic `bundled_packages()` loop. This
+    // pin locks that the migration preserved slack's first-party grant and
+    // its manifest-digest binding (wrong digest / wrong path → Sandbox).
     let policy = builtin_first_party_trust_policy().expect("trust policy");
-    let expected_digest = slack_bot_manifest_digest();
+    let slack_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+        .into_iter()
+        .find(|bundle| bundle.id == "slack")
+        .expect("slack is in the bundled inventory");
+    let expected_digest =
+        ironclaw_host_api::sha256_digest_token(slack_bundle.manifest_toml.as_bytes());
 
     let matching = ironclaw_trust::TrustPolicy::evaluate(
         &policy,
         &ironclaw_trust::TrustPolicyInput {
             identity: slack_identity(
-                "/system/extensions/slack_bot/manifest.toml",
+                "/system/extensions/slack/manifest.toml",
                 Some(expected_digest.clone()),
             ),
             requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
@@ -2913,7 +2855,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
         &policy,
         &ironclaw_trust::TrustPolicyInput {
             identity: slack_identity(
-                "/system/extensions/slack_bot/manifest.toml",
+                "/system/extensions/slack/manifest.toml",
                 Some(
                     "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
                         .to_string(),
@@ -2935,7 +2877,7 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
         &policy,
         &ironclaw_trust::TrustPolicyInput {
             identity: slack_identity(
-                "/system/extensions/slack_bot/other-manifest.toml",
+                "/system/extensions/slack/other-manifest.toml",
                 Some(expected_digest),
             ),
             requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
@@ -2949,4 +2891,60 @@ fn builtin_first_party_trust_policy_includes_slack_local_manifest_entry() {
         wrong_path.provenance,
         ironclaw_trust::TrustProvenance::Default
     );
+}
+
+#[test]
+fn builtin_first_party_trust_policy_grants_migrated_gmail_via_inventory() {
+    // gmail migrated to the self-contained inventory; its first-party trust
+    // entry is now produced by the generic `bundled_packages()` loop, not a
+    // hardcoded `AdminEntry`. Lock that the migration preserved gmail's
+    // first-party grant AND its manifest-digest binding (a wrong digest must
+    // still fall back to Sandbox — the loop didn't drop the digest).
+    let policy = builtin_first_party_trust_policy().expect("trust policy");
+    let gmail_bundle = ironclaw_first_party_extensions::packages::bundled_packages()
+        .into_iter()
+        .find(|bundle| bundle.id == "gmail")
+        .expect("gmail is in the bundled inventory");
+    let expected_digest =
+        ironclaw_host_api::sha256_digest_token(gmail_bundle.manifest_toml.as_bytes());
+
+    let gmail_identity = |digest: Option<String>| {
+        ironclaw_host_api::PackageIdentity::new(
+            ironclaw_host_api::PackageId::new("gmail").expect("gmail package id"),
+            ironclaw_host_api::PackageSource::LocalManifest {
+                path: "/system/extensions/gmail/manifest.toml".to_string(),
+            },
+            digest,
+            None,
+        )
+    };
+
+    let matching = ironclaw_trust::TrustPolicy::evaluate(
+        &policy,
+        &ironclaw_trust::TrustPolicyInput {
+            identity: gmail_identity(Some(expected_digest.clone())),
+            requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+            requested_authority: Default::default(),
+        },
+    )
+    .expect("matching gmail identity should evaluate");
+    assert_eq!(matching.effective_trust.class(), TrustClass::FirstParty);
+    assert_eq!(
+        matching.provenance,
+        ironclaw_trust::TrustProvenance::AdminConfig
+    );
+
+    let wrong_digest = ironclaw_trust::TrustPolicy::evaluate(
+        &policy,
+        &ironclaw_trust::TrustPolicyInput {
+            identity: gmail_identity(Some(
+                "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    .to_string(),
+            )),
+            requested_trust: ironclaw_host_api::RequestedTrustClass::FirstPartyRequested,
+            requested_authority: Default::default(),
+        },
+    )
+    .expect("wrong digest gmail identity should evaluate");
+    assert_eq!(wrong_digest.effective_trust.class(), TrustClass::Sandbox);
 }

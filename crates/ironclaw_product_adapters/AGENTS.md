@@ -7,7 +7,6 @@
 - Use these neighboring contracts before changing behavior:
   - `crates/ironclaw_product_adapter_registry/AGENTS.md`
   - `crates/ironclaw_product_workflow/AGENTS.md`
-  - `crates/ironclaw_wasm_product_adapters/CLAUDE.md`
   - `crates/ironclaw_outbound/AGENTS.md`
 
 ## What This Crate Owns

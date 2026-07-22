@@ -55,6 +55,9 @@ pub fn reborn_failure_summary_for_category(category: Option<&str>) -> &'static s
         "model_invalid_output" => {
             "The run failed because the model returned output the runner could not use. Retry the run or choose a different model."
         }
+        "model_stale_request" => {
+            "The run failed because the available tools changed while a model request was in flight. Retry the run."
+        }
         "context_build_failed" => {
             "The run failed while building the model context. Retry the run, and contact support if it keeps happening."
         }

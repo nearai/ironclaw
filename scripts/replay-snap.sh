@@ -49,7 +49,7 @@ case "${1:-}" in
     cargo insta test \
       --check \
       --no-default-features \
-      --features "libsql,replay" \
+      --features "replay" \
       --test e2e_recorded_trace \
       --test e2e_live
     ;;

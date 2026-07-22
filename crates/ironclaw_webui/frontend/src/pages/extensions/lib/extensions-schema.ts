@@ -1,41 +1,135 @@
+// Tabs are product-taxonomy views over surfaces. Runtime (wasm/mcp/...) is
+// an implementation badge on cards, never a grouping axis.
 export const EXTENSIONS_TABS = [
   { id: "registry", labelKey: "extensions.registry", icon: "plus" },
   { id: "channels", labelKey: "extensions.channels", icon: "send" },
-  { id: "mcp", labelKey: "extensions.mcp", icon: "pulse" },
+  { id: "tools", labelKey: "extensions.tools", icon: "pulse" },
 ];
 
-export const KIND_LABELS = {
-  wasm_tool: "WASM Tool",
-  wasm_channel: "Channel",
-  channel: "Channel",
-  mcp_server: "MCP Server",
+// Runtime implementation labels — the wire's `runtime` field is an honest
+// implementation name; product taxonomy travels in `surfaces`.
+export const RUNTIME_LABELS = {
+  wasm: "WASM",
+  mcp: "MCP",
   first_party: "First-party",
   system: "System",
-  channel_relay: "Relay",
+  script: "Script",
 };
 
-export function isChannelExtensionKind(kind) {
-  return kind === "wasm_channel" || kind === "channel";
+// Product taxonomy is surface-based: an extension is a channel view when its
+// surfaces declare a channel; a tools view when they declare tools.
+export function extensionSurfaces(item) {
+  return item?.surfaces || [];
 }
 
+export function hasChannelSurface(item) {
+  return extensionSurfaces(item).some((surface) => surface?.kind === "channel");
+}
+
+export function hasToolSurface(item) {
+  return extensionSurfaces(item).some((surface) => surface?.kind === "tool");
+}
+
+// Channel discovery is extension-surface data: an extension's `surfaces`
+// carry a typed `channel` entry with direction (inbound/outbound), the
+// caller's connection state, and the connect affordance. There is no separate
+// connectable-channel registry.
+export function channelSurface(item) {
+  return extensionSurfaces(item).find((surface) => surface?.kind === "channel") || null;
+}
+
+export function channelConnection(item) {
+  return channelSurface(item)?.connection || null;
+}
+
+export function isInboundProofCodeConnection(connection) {
+  return connection?.strategy === "inbound_proof_code";
+}
+
+// A channel extension whose connect affordance is a browser OAuth relay:
+// connecting happens through the configure modal's OAuth secret, never a
+// paste-a-code pairing panel. Derived from the wire only — the surface
+// connection strategy, or an oauth-kind setup secret.
+export function connectsViaOauth(item, secrets = []) {
+  if (channelConnection(item)?.strategy === "oauth") return true;
+  return secrets.some((secret) => secret?.setup?.kind === "oauth");
+}
+
+// Installation-state axis (§6.1, `ironclaw_host_api::InstallationState`) — the
+// six honest resting states a *listed* extension's `installation_state` can
+// carry. `removed` is an action-response signal only (removal drops the
+// record) and never appears on a listed extension, so it has no card tone.
+// The old transient states (`activating`/`deactivating`/`removing`/
+// `removal_pending`) no longer exist on the wire — the host now persists only
+// `installed` / `active` / `failed` and derives `configured` / `disabled` /
+// `unsupported` at projection time (never a real in-flight step).
+//
+// Onboarding-state axis (§6.2, `RebornExtensionOnboardingState`) — layered on
+// top of installation state for an extension still missing credentials.
+// `installed` / `failed` are shared with the installation axis above;
+// `auth_required` / `setup_required` are onboarding-only.
 export const STATE_TONES = {
+  installed: "muted",
+  configured: "muted",
   active: "success",
-  ready: "success",
-  pairing_required: "warning",
-  pairing: "warning",
+  disabled: "muted",
+  failed: "danger",
+  unsupported: "warning",
   auth_required: "warning",
   setup_required: "muted",
-  failed: "danger",
-  installed: "muted",
 };
 
 export const STATE_LABELS = {
+  installed: "installed",
+  configured: "configured",
   active: "active",
-  ready: "ready",
-  pairing_required: "pairing",
-  pairing: "pairing",
+  disabled: "disabled",
+  failed: "failed",
+  unsupported: "unsupported",
   auth_required: "auth needed",
   setup_required: "setup needed",
-  failed: "failed",
-  installed: "installed",
 };
+
+// The primary vendor account on the extensions wire
+// (auth_accounts[0].accounts[0]; §6.4 / ADR 0001 — list length ≤ 1 today). It
+// carries the shared §6.3 auth-account `state` and typed `last_error` the
+// connect affordance and expiry notice key off.
+export function primaryAuthAccount(item) {
+  const vendor = (item?.auth_accounts || [])[0];
+  return (vendor?.accounts || [])[0] || null;
+}
+
+// Whether the caller's account needs re-authentication rather than a
+// first-time connect (§6.3 `AuthAccountState`): `expired` (token/refresh
+// lapsed), or `disconnected` while carrying a typed `last_error` — a live
+// grant was revoked, a stored credential went missing, or a prior auth
+// attempt failed/expired before completing. A `disconnected` account with NO
+// `last_error` is a fresh, never-connected extension and stays a plain
+// Connect. Drives the distinct "Reconnect (expired)" affordance and the
+// expiry/failure notice. There is no `revoking` state on the wire: disconnect
+// and removal delete the account synchronously (overview §6.3), so no
+// in-progress revoking window is ever produced or observed here.
+export function authAccountNeedsReconnect(item) {
+  const account = primaryAuthAccount(item);
+  if (!account) return false;
+  if (account.state === "expired") return true;
+  return account.state === "disconnected" && Boolean(account.last_error);
+}
+
+// Typed last-transition reason (§6.3 `AuthAccountLastError`) mapped to a
+// distinct i18n key, so the card explains WHY re-authentication is needed
+// instead of one generic "expired" notice. Falls back to the generic expiry
+// copy for an account that needs reconnecting with no typed reason attached.
+const AUTH_ACCOUNT_REASON_LABELS = {
+  flow_expired: "extensions.accountFlowExpired",
+  vendor_denied: "extensions.accountVendorDenied",
+  exchange_failed: "extensions.accountExchangeFailed",
+  refresh_failed: "extensions.accountExpired",
+  grant_revoked: "extensions.accountRevoked",
+  validation_probe_failed: "extensions.accountValidationFailed",
+  credential_missing: "extensions.accountCredentialMissing",
+};
+
+export function authAccountReasonLabelKey(account) {
+  return AUTH_ACCOUNT_REASON_LABELS[account?.last_error] || "extensions.accountExpired";
+}

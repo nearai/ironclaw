@@ -39,7 +39,7 @@ use super::pending::{PendingFlowStore, SessionTicketStore, sanitize_redirect};
 use super::provider::OAuthProvider;
 use super::provider_name::OAuthProviderName;
 use super::user_directory::{UserDirectory, UserDirectoryError};
-use crate::session::SessionStore;
+use crate::signed_session_login::SignedTokenSessionStore;
 
 /// Default landing page after a successful OAuth callback. The SPA
 /// reads `?login_ticket=` and exchanges it for a bearer.
@@ -59,7 +59,7 @@ const DEFAULT_SESSION_LIFETIME: ChronoDuration = ChronoDuration::seconds(30 * 24
 #[derive(Clone)]
 pub struct OAuthRouterConfig {
     pub tenant_id: TenantId,
-    pub session_store: Arc<dyn SessionStore>,
+    pub session_store: Arc<SignedTokenSessionStore>,
     pub user_directory: Arc<dyn UserDirectory>,
     pub providers: Vec<Arc<dyn OAuthProvider>>,
     pub base_url: String,
@@ -70,7 +70,7 @@ impl OAuthRouterConfig {
     /// Build a config with the default 30-day session lifetime.
     pub fn new(
         tenant_id: TenantId,
-        session_store: Arc<dyn SessionStore>,
+        session_store: Arc<SignedTokenSessionStore>,
         user_directory: Arc<dyn UserDirectory>,
         providers: Vec<Arc<dyn OAuthProvider>>,
         base_url: impl Into<String>,
@@ -94,7 +94,7 @@ impl OAuthRouterConfig {
 /// Internal state shared across all `/auth/*` handlers.
 struct RouterState {
     tenant_id: TenantId,
-    session_store: Arc<dyn SessionStore>,
+    session_store: Arc<SignedTokenSessionStore>,
     user_directory: Arc<dyn UserDirectory>,
     providers: Vec<Arc<dyn OAuthProvider>>,
     base_url: String,
@@ -305,7 +305,7 @@ fn sso_justification() -> IngressJustification {
         "webui-v2 sso",
         "OAuth login surface is unauthenticated by design — \
          the user has no session yet; the handler mints one on \
-         successful callback through SessionStore",
+         successful callback through the signed session store",
     )
     .expect("SSO justification literal must validate") // safety: non-empty, no leading/trailing whitespace.
 }
@@ -576,22 +576,15 @@ async fn session_exchange_handler(
 
 // ─── /auth/logout ─────────────────────────────────────────────────────
 
-/// `POST /auth/logout` — revoke the bearer session and clear it from
-/// the durable session store. Honors `Authorization: Bearer <token>`
-/// only — query-token shim is reserved for the SSE route per the
-/// composition's `extract_bearer_token` policy.
+/// `POST /auth/logout` — revoke the bearer session in the signed-token store's
+/// process-local denylist. Honors `Authorization: Bearer <token>` only —
+/// query-token shim is reserved for the SSE route per the composition's
+/// `extract_bearer_token` policy.
 ///
 /// **Status contract:**
-/// - `204 No Content` when there is no bearer header (idempotent
-///   sign-out — the SPA clears local state unconditionally), OR
-///   when the session store confirms the revoke.
-/// - `500 Internal Server Error` when the session store backend
-///   fails to revoke. A success status in this case would lie to
-///   the caller: the bearer might still authenticate in another
-///   tab or another client until natural expiry, violating the
-///   PR's revoke contract. The SPA still clears its local copy
-///   regardless of the response status — losing the local token
-///   is strictly weaker than a stale bearer roaming the network.
+/// - `204 No Content` when there is no bearer header (idempotent sign-out — the
+///   SPA clears local state unconditionally), OR after denylisting the presented
+///   bearer.
 async fn logout_handler(
     State(state): State<RouterStateHandle>,
     headers: axum::http::HeaderMap,
@@ -599,18 +592,8 @@ async fn logout_handler(
     let Some(token) = extract_bearer(&headers) else {
         return StatusCode::NO_CONTENT.into_response();
     };
-    match state.session_store.revoke(&token).await {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(err) => {
-            tracing::warn!(
-                target = "ironclaw::reborn::webui_ingress::auth",
-                error = %err,
-                "session store revoke failed during logout — returning 500 so the \
-                 client knows the server-side revocation did not complete",
-            );
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
-        }
-    }
+    state.session_store.revoke(&token).await;
+    StatusCode::NO_CONTENT.into_response()
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────

@@ -42,20 +42,20 @@ use ironclaw_turns::{
     TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityDeniedReasonKind, CapabilityInputIssue, CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle,
-        LoopContextCompactionKind, LoopContextMessage, LoopContextPort, LoopContextRequest,
-        LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneKind, LoopHostMilestoneSink,
-        LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
-        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust,
-        ParentLoopOutput, PersonalContextPolicy, PromptMode, PromptSkillContextMetadata,
-        ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition, SkillTrustLevel,
-        SkillVisibility, ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
+        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
+        CapabilityInputIssue, CapabilityInputRef, CapabilitySurfaceVersion,
+        EphemeralInstructionMaterializationStore, FinalizeAssistantMessage,
+        HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
+        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind, LoopContextMessage,
+        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopDriverNoteKind,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputCursor, LoopInputCursorToken,
+        LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
+        LoopModelRouteSnapshot, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
+        LoopTranscriptPort, ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput,
+        PersonalContextPolicy, PromptMode, PromptSkillContextMetadata, ProviderToolCallReference,
+        ProviderToolCallReplay, ProviderToolDefinition, SkillTrustLevel, SkillVisibility,
+        ToolObservationDetail, ToolObservationStatus, UpdateAssistantDraft,
         VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
     },
 };
@@ -1288,7 +1288,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
         .with_identity_context_source(source.clone()),
     );
     let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
-    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let materialization_store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let prompt_port =
         HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones)
             .with_instruction_materialization_store(materialization_store);
@@ -1849,7 +1849,7 @@ async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
 #[tokio::test]
 async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
     let fixture = ThreadFixture::new().await;
-    let materialization_store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let materialization_store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let context_port = Arc::new(StaticLoopContextPort {
         bundle: LoopContextBundle {
             identity_messages: vec![LoopContextMessage {
@@ -3019,7 +3019,7 @@ async fn empty_capability_port_exposes_empty_surface_and_rejects_invocations() {
     assert!(surface.descriptors.is_empty());
 
     let error = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
             capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -3039,8 +3039,8 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
     let port = EmptyLoopCapabilityPort;
 
     let outcome = port
-        .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
-            invocations: vec![CapabilityInvocation {
+        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+            invocations: vec![LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -3072,8 +3072,8 @@ async fn empty_capability_batch_rejects_stale_surface() {
     let port = EmptyLoopCapabilityPort;
 
     let error = port
-        .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
-            invocations: vec![CapabilityInvocation {
+        .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
+            invocations: vec![LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("nonempty:v1").unwrap(),
                 capability_id: CapabilityId::new("demo.echo").unwrap(),
@@ -4964,7 +4964,7 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
 
     async fn invoke_capability(
         &self,
-        _request: CapabilityInvocation,
+        _request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         Ok(resolution::denied(
             CapabilityDeniedReasonKind::EmptySurface,
@@ -4975,7 +4975,7 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let resolutions = request
             .invocations
@@ -4994,3 +4994,4 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
         })
     }
 }
+// arch-exempt: large_file, thread loop host contract remains one integration suite, plan #6175

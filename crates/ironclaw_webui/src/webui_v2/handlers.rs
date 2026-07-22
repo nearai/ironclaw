@@ -27,25 +27,25 @@ use axum::response::{IntoResponse, Response};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    CodexLoginStart, FsMount, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
-    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_LOGS_VIEW,
-    ProductOutboundEnvelope, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
-    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
-    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
-    RebornCancelRunResponse, RebornConnectableChannelListResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornListAutomationsResponse, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW, CodexLoginStart, FsMount,
+    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult,
+    LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_LOGS_VIEW, ProductOutboundEnvelope,
+    ProductWorkflowError, ProjectFsFile, ProjectionCursor, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
+    RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
+    RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+    RebornAttachmentRequest, RebornAutomationMutationResponse, RebornCancelRunResponse,
+    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
+    RebornFsStatResponse, RebornGetProjectRequest, RebornListAutomationsResponse,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
     RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
@@ -68,7 +68,10 @@ use ironclaw_product_workflow::{
 };
 use serde::{Deserialize, Serialize};
 
-use ironclaw_host_api::{SecretHandle, UserId};
+use ironclaw_host_api::{
+    ActivityId, Blocked, CapabilityId, FailureKind, Resolution, SecretHandle, UserId,
+};
+use uuid::Uuid;
 
 use crate::webui_v2::error::WebUiV2HttpError;
 use crate::webui_v2::router::{WebUiV2Capabilities, WebUiV2State};
@@ -83,6 +86,7 @@ const SETTINGS_TOOLS_AUTO_APPROVE_KEY: &str = "agent.auto_approve_tools";
 const SETTINGS_TOOL_CONFIG_PREFIX: &str = "tool.";
 const SETTINGS_TOOL_CAPABILITY_ID_MAX_BYTES: usize =
     OPERATOR_CONFIG_KEY_MAX_BYTES - SETTINGS_TOOL_CONFIG_PREFIX.len();
+const ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WebUiV2SessionResponse {
@@ -898,10 +902,21 @@ pub async fn stream_events(
     headers: HeaderMap,
     Query(query): Query<StreamEventsQuery>,
 ) -> Result<Response, WebUiV2HttpError> {
-    let slot = state
-        .sse_capacity()
-        .try_acquire(&caller.tenant_id, &caller.user_id)
-        .ok_or_else(sse_concurrency_exhausted)?;
+    let connection_id = stream_connection_id(query.connection_id.as_deref());
+    let slot = match state.sse_capacity().try_acquire_ordered(
+        &caller.tenant_id,
+        &caller.user_id,
+        connection_id,
+        connection_id.and(query.connection_generation),
+    ) {
+        crate::webui_v2::sse_capacity::SseAcquireResult::Acquired(slot) => slot,
+        crate::webui_v2::sse_capacity::SseAcquireResult::AtCapacity => {
+            return Err(sse_concurrency_exhausted());
+        }
+        crate::webui_v2::sse_capacity::SseAcquireResult::StaleGeneration => {
+            return Ok(StatusCode::NO_CONTENT.into_response());
+        }
+    };
     let services = state.services().clone();
     let initial_cursor = headers
         .get(LAST_EVENT_ID_HEADER)
@@ -947,6 +962,20 @@ fn sse_concurrency_exhausted() -> WebUiV2HttpError {
 pub struct StreamEventsQuery {
     #[serde(default)]
     pub after_cursor: Option<String>,
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub connection_generation: Option<u64>,
+}
+
+fn stream_connection_id(connection_id: Option<&str>) -> Option<&str> {
+    connection_id.filter(|connection_id| {
+        !connection_id.is_empty()
+            && connection_id.len() <= 64
+            && connection_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    })
 }
 
 /// Redacted SSE error payload. Defined as a typed struct (not built with
@@ -1009,6 +1038,14 @@ fn sse_error_event(error: RebornServicesError) -> Event {
     }
 }
 
+const STREAM_READY_PAYLOAD: &str = r#"{"type":"keep_alive"}"#;
+
+fn sse_ready_event() -> Event {
+    Event::default()
+        .event("keep_alive")
+        .data(STREAM_READY_PAYLOAD)
+}
+
 fn build_sse_stream(
     services: std::sync::Arc<dyn RebornServicesApi>,
     caller: WebUiAuthenticatedCaller,
@@ -1021,7 +1058,7 @@ fn build_sse_stream(
         // the lifetime of this stream. It drops automatically when the
         // generator is dropped (client disconnect, max-lifetime expiry,
         // or facade error), releasing the per-caller concurrency slot.
-        let _slot_guard = slot;
+        let mut slot_guard = slot;
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
         if services.supports_stream_events_subscription() {
@@ -1033,12 +1070,15 @@ fn build_sse_stream(
                 thread_id: thread_id.clone(),
                 after_cursor: after_cursor.clone(),
             };
-            let mut subscription = match tokio::time::timeout(
-                remaining,
-                services.subscribe_events(caller.clone(), request),
-            )
-            .await
-            {
+            let subscription_result = tokio::select! {
+                biased;
+                _ = slot_guard.cancelled() => return,
+                result = tokio::time::timeout(
+                    remaining,
+                    services.subscribe_events(caller.clone(), request),
+                ) => result,
+            };
+            let mut subscription = match subscription_result {
                 Err(_elapsed) => {
                     tracing::debug!(
                         target = "ironclaw_webui_v2::sse",
@@ -1057,12 +1097,23 @@ fn build_sse_stream(
                     return;
                 }
             };
+            // Axum can complete the HTTP handshake before the facade has
+            // admitted its projection subscription. This application frame
+            // proves the stream is actually ready, so a route switch can clear
+            // a stale reconnecting state without waiting for the next model
+            // delta or the transport keep-alive interval.
+            yield Ok(sse_ready_event());
             loop {
                 let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
                 if remaining.is_zero() {
                     return;
                 }
-                match tokio::time::timeout(remaining, subscription.next()).await {
+                let next = tokio::select! {
+                    biased;
+                    _ = slot_guard.cancelled() => return,
+                    result = tokio::time::timeout(remaining, subscription.next()) => result,
+                };
+                match next {
                     Err(_elapsed) => {
                         tracing::debug!(
                             target = "ironclaw_webui_v2::sse",
@@ -1104,12 +1155,15 @@ fn build_sse_stream(
                 thread_id: thread_id.clone(),
                 after_cursor: after_cursor.clone(),
             };
-            match tokio::time::timeout(
-                remaining,
-                services.stream_events(caller.clone(), request),
-            )
-            .await
-            {
+            let drain = tokio::select! {
+                biased;
+                _ = slot_guard.cancelled() => return,
+                result = tokio::time::timeout(
+                    remaining,
+                    services.stream_events(caller.clone(), request),
+                ) => result,
+            };
+            match drain {
                 Err(_elapsed) => {
                     // The facade drain was still pending when SSE_MAX_LIFETIME
                     // ran out. Returning here drops the generator (and the
@@ -1149,7 +1203,11 @@ fn build_sse_stream(
                     if sleep_for.is_zero() {
                         return;
                     }
-                    tokio::time::sleep(sleep_for).await;
+                    tokio::select! {
+                        biased;
+                        _ = slot_guard.cancelled() => return,
+                        _ = tokio::time::sleep(sleep_for) => {}
+                    }
                 }
                 Ok(Err(error)) => {
                     // Surface a redacted error event and close the stream.
@@ -1443,15 +1501,6 @@ pub async fn authorize_trace_hold(
     Ok(Json(response))
 }
 
-/// `GET /api/webchat/v2/channels/connectable`
-pub async fn list_connectable_channels(
-    State(state): State<WebUiV2State>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
-) -> Result<Json<RebornConnectableChannelListResponse>, WebUiV2HttpError> {
-    let response = state.services().list_connectable_channels(caller).await?;
-    Ok(Json(response))
-}
-
 /// `GET /api/webchat/v2/outbound/preferences`
 pub async fn get_outbound_preferences(
     State(state): State<WebUiV2State>,
@@ -1725,6 +1774,285 @@ fn require_operator_webui_config(
         validation_code: None,
     }
     .into())
+}
+
+#[derive(Deserialize)]
+pub struct ExtensionAdminConfigurationPath {
+    pub group_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+pub struct ExtensionAdminConfigurationValue {
+    pub handle: String,
+    pub value: String,
+}
+
+#[derive(Deserialize)]
+pub struct ReplaceExtensionAdminConfigurationBody {
+    pub values: Vec<ExtensionAdminConfigurationValue>,
+    pub expected_revision: u64,
+    pub idempotency_key: String,
+}
+
+#[derive(Serialize)]
+struct ReplaceExtensionAdminConfigurationInput {
+    group_id: String,
+    values: Vec<ExtensionAdminConfigurationValue>,
+    expected_revision: u64,
+}
+
+/// `GET /api/webchat/v2/operator/extension-configuration`
+pub async fn list_extension_admin_configuration(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let payload = query_extension_admin_configuration(&state, caller).await?;
+    Ok(Json(payload))
+}
+
+/// `PUT /api/webchat/v2/operator/extension-configuration/{group_id}`
+///
+/// This ingress adapter carries only the manifest group designator and values
+/// through the generic product capability conduit. The client retry key is
+/// consumed here into a scoped [`ActivityId`]; it never enters capability
+/// input as authority.
+pub async fn replace_extension_admin_configuration(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Path(path): Path<ExtensionAdminConfigurationPath>,
+    Json(body): Json<ReplaceExtensionAdminConfigurationBody>,
+) -> Result<Json<serde_json::Value>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let activity_id =
+        admin_configuration_activity_id(&caller, &path.group_id, &body.idempotency_key)?;
+    let expected_revision = body.expected_revision;
+    let input = serde_json::to_value(ReplaceExtensionAdminConfigurationInput {
+        group_id: path.group_id.clone(),
+        values: body.values,
+        expected_revision,
+    })
+    .map_err(RebornServicesError::internal_from)?;
+    let capability = CapabilityId::new(ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID)
+        .map_err(RebornServicesError::internal_from)?;
+    let resolution = state
+        .services()
+        .invoke(caller.clone(), capability, input, activity_id)
+        .await?;
+
+    match resolution {
+        Resolution::Done(outcome) => {
+            let payload = query_extension_admin_configuration(&state, caller).await?;
+            let group = select_extension_admin_configuration_group(&payload, &path.group_id)?;
+            if outcome.verdict.is_success() {
+                return Ok(Json(group));
+            }
+
+            // The generic runtime failure taxonomy deliberately has no HTTP
+            // conflict variant. The authoritative query is the typed CAS
+            // witness: a failed replacement whose active revision moved past
+            // the submitted revision is a 409, without parsing prose.
+            let current_revision = group
+                .get("revision")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    RebornServicesError::internal_from(
+                        "admin configuration view omitted a numeric revision",
+                    )
+                })?;
+            if current_revision != expected_revision {
+                return Err(admin_configuration_conflict().into());
+            }
+            Err(admin_configuration_done_failure(outcome.verdict.error_kind()).into())
+        }
+        Resolution::Denied(_) => Err(RebornServicesError {
+            code: RebornServicesErrorCode::Forbidden,
+            kind: RebornServicesErrorKind::ParticipantDenied,
+            status_code: 403,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        }
+        .into()),
+        Resolution::Blocked(blocked) => Err(admin_configuration_blocked(blocked).into()),
+        Resolution::Suspended(_) => Err(admin_configuration_unavailable(true).into()),
+    }
+}
+
+async fn query_extension_admin_configuration(
+    state: &WebUiV2State,
+    caller: WebUiAuthenticatedCaller,
+) -> Result<serde_json::Value, RebornServicesError> {
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: ADMIN_CONFIGURATION_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    if !page
+        .payload
+        .get("groups")
+        .is_some_and(serde_json::Value::is_array)
+    {
+        return Err(RebornServicesError::internal_from(
+            "admin configuration view returned an invalid list payload",
+        ));
+    }
+    Ok(page.payload)
+}
+
+fn select_extension_admin_configuration_group(
+    payload: &serde_json::Value,
+    group_id: &str,
+) -> Result<serde_json::Value, RebornServicesError> {
+    payload
+        .get("groups")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|groups| {
+            groups.iter().find(|group| {
+                group.get("group_id").and_then(serde_json::Value::as_str) == Some(group_id)
+            })
+        })
+        .cloned()
+        .ok_or_else(RebornServicesError::not_found)
+}
+
+fn admin_configuration_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    group_id: &str,
+    idempotency_key: &str,
+) -> Result<ActivityId, RebornServicesError> {
+    let validation_code = if idempotency_key.is_empty() {
+        Some(WebUiInboundValidationCode::Blank)
+    } else if idempotency_key.len() > ADMIN_CONFIGURATION_IDEMPOTENCY_KEY_MAX_BYTES {
+        Some(WebUiInboundValidationCode::TooLong)
+    } else if idempotency_key.trim() != idempotency_key {
+        Some(WebUiInboundValidationCode::InvalidId)
+    } else if idempotency_key.chars().any(char::is_control) {
+        Some(WebUiInboundValidationCode::InvalidControlCharacter)
+    } else {
+        None
+    };
+    if let Some(validation_code) = validation_code {
+        return Err(RebornServicesError {
+            code: RebornServicesErrorCode::InvalidRequest,
+            kind: RebornServicesErrorKind::Validation,
+            status_code: 400,
+            retryable: false,
+            field: Some("idempotency_key".to_string()),
+            validation_code: Some(validation_code),
+        });
+    }
+
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-extension-admin-configuration",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        group_id,
+        idempotency_key,
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
+}
+
+fn admin_configuration_conflict() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind: RebornServicesErrorKind::Conflict,
+        status_code: 409,
+        retryable: false,
+        field: Some("expected_revision".to_string()),
+        validation_code: None,
+    }
+}
+
+fn admin_configuration_unavailable(retryable: bool) -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn admin_configuration_done_failure(error_kind: Option<&FailureKind>) -> RebornServicesError {
+    match error_kind {
+        Some(FailureKind::InvalidInput) => RebornServicesError {
+            code: RebornServicesErrorCode::InvalidRequest,
+            kind: RebornServicesErrorKind::Validation,
+            status_code: 400,
+            retryable: false,
+            field: None,
+            validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+        },
+        Some(
+            FailureKind::Backend
+            | FailureKind::Network
+            | FailureKind::Resource
+            | FailureKind::Transient
+            | FailureKind::Unavailable,
+        ) => admin_configuration_unavailable(true),
+        Some(
+            FailureKind::Authorization | FailureKind::PolicyDenied | FailureKind::GateDeclined,
+        ) => RebornServicesError {
+            code: RebornServicesErrorCode::Forbidden,
+            kind: RebornServicesErrorKind::ParticipantDenied,
+            status_code: 403,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        },
+        Some(
+            FailureKind::Cancelled
+            | FailureKind::Dispatcher
+            | FailureKind::InvalidOutput
+            | FailureKind::MissingRuntime
+            | FailureKind::OperationFailed
+            | FailureKind::OutputTooLarge
+            | FailureKind::Process
+            | FailureKind::Internal
+            | FailureKind::Permanent
+            | FailureKind::Unknown(_),
+        )
+        | None => RebornServicesError::internal(),
+    }
+}
+
+fn admin_configuration_blocked(blocked: Blocked) -> RebornServicesError {
+    let kind = match blocked {
+        Blocked::Approval(_) => RebornServicesErrorKind::BlockedApproval,
+        Blocked::Auth(_) => RebornServicesErrorKind::BlockedAuthentication,
+        Blocked::Resource(_) => RebornServicesErrorKind::BlockedResource,
+    };
+    RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind,
+        status_code: 409,
+        retryable: true,
+        field: None,
+        validation_code: None,
+    }
 }
 
 /// `GET /api/webchat/v2/operator/setup`
@@ -2279,7 +2607,11 @@ pub async fn stream_events_ws(
 ) -> Result<axum::response::Response, WebUiV2HttpError> {
     let slot = state
         .sse_capacity()
-        .try_acquire(&caller.tenant_id, &caller.user_id)
+        .try_acquire(
+            &caller.tenant_id,
+            &caller.user_id,
+            stream_connection_id(query.connection_id.as_deref()),
+        )
         .ok_or_else(sse_concurrency_exhausted)?;
     let services = state.services().clone();
     let initial_cursor = headers
@@ -2316,7 +2648,7 @@ async fn ws_drain_loop(
     //    leave bytes queued indefinitely. Each `socket.send().await`
     //    runs under `ws_send_with_timeout` so the per-caller slot
     //    is released within the lifetime budget regardless.
-    let _slot_guard = slot;
+    let mut slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
     if services.supports_stream_events_subscription() {
@@ -2330,38 +2662,60 @@ async fn ws_drain_loop(
             thread_id: thread_id.clone(),
             after_cursor: after_cursor.clone(),
         };
-        let mut subscription =
-            match tokio::time::timeout(remaining, services.subscribe_events(caller, request)).await
-            {
-                Err(_elapsed) => {
-                    let _ = socket.close().await;
-                    return;
+        let subscription_result = tokio::select! {
+            biased;
+            _ = slot_guard.cancelled() => {
+                let _ = socket.close().await;
+                return;
+            }
+            result = tokio::time::timeout(
+                remaining,
+                services.subscribe_events(caller, request),
+            ) => result,
+        };
+        let mut subscription = match subscription_result {
+            Err(_elapsed) => {
+                let _ = socket.close().await;
+                return;
+            }
+            Ok(Ok(subscription)) => subscription,
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    target = "ironclaw_webui_v2::ws",
+                    error = ?error,
+                    "facade rejected WS subscription; closing stream",
+                );
+                let payload = SseErrorPayload {
+                    error: error.code,
+                    kind: error.kind,
+                    retryable: error.retryable,
+                };
+                if let Ok(text) = serde_json::to_string(&payload) {
+                    let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                    let _ = ws_send_with_timeout(
+                        &mut socket,
+                        Some(axum::extract::ws::Message::Text(text.into())),
+                        send_budget,
+                    )
+                    .await;
                 }
-                Ok(Ok(subscription)) => subscription,
-                Ok(Err(error)) => {
-                    tracing::debug!(
-                        target = "ironclaw_webui_v2::ws",
-                        error = ?error,
-                        "facade rejected WS subscription; closing stream",
-                    );
-                    let payload = SseErrorPayload {
-                        error: error.code,
-                        kind: error.kind,
-                        retryable: error.retryable,
-                    };
-                    if let Ok(text) = serde_json::to_string(&payload) {
-                        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
-                        let _ = ws_send_with_timeout(
-                            &mut socket,
-                            Some(axum::extract::ws::Message::Text(text.into())),
-                            send_budget,
-                        )
-                        .await;
-                    }
-                    let _ = socket.close().await;
-                    return;
-                }
-            };
+                let _ = socket.close().await;
+                return;
+            }
+        };
+        let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+        if ws_send_with_timeout(
+            &mut socket,
+            Some(axum::extract::ws::Message::Text(
+                STREAM_READY_PAYLOAD.into(),
+            )),
+            send_budget,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
         loop {
             let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
             if remaining.is_zero() {
@@ -2370,6 +2724,10 @@ async fn ws_drain_loop(
             }
             let outcome = tokio::select! {
                 biased;
+                _ = slot_guard.cancelled() => {
+                    let _ = socket.close().await;
+                    return;
+                }
                 incoming = socket.recv() => {
                     match incoming {
                         None | Some(Err(_)) => return,
@@ -2456,6 +2814,10 @@ async fn ws_drain_loop(
         let facade_call = services.stream_events(caller.clone(), request);
         let outcome = tokio::select! {
             biased;
+            _ = slot_guard.cancelled() => {
+                let _ = socket.close().await;
+                return;
+            }
             // Peer close / socket error wins over the facade poll —
             // if the browser already dropped the connection we want
             // to free the slot immediately, not wait for stream_events
@@ -2534,6 +2896,10 @@ async fn ws_drain_loop(
                 // slot immediately.
                 tokio::select! {
                     biased;
+                    _ = slot_guard.cancelled() => {
+                        let _ = socket.close().await;
+                        return;
+                    }
                     incoming = socket.recv() => match incoming {
                         None | Some(Err(_)) => return,
                         Some(Ok(axum::extract::ws::Message::Close(_))) => return,

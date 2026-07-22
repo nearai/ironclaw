@@ -385,7 +385,6 @@ mod tests {
     /// secret store. A directory at the database path is a deliberate
     /// tripwire: any database open fails, while public-field diagnosis must
     /// still succeed.
-    #[cfg(feature = "libsql")]
     #[test]
     fn status_dto_complete_google_config_does_not_open_secret_store() {
         let _guard = crate::runtime::test_env::lock_runtime_env();

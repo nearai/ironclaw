@@ -18,17 +18,17 @@ use ironclaw_turns::{
     RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        CancellationPolicy, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityFailureKind, CapabilityInputRef, CapabilityInvocation,
-        CapabilityProgress, CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy,
-        CheckpointSchemaId, ConcurrencyClass, ConcurrencyHint, ContentDigest, ContextProfileId,
-        FinalizeAssistantMessage, LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome,
-        LoopCompactionRequest, LoopCompactionResponse, LoopContextBundle,
-        LoopContextCompactionMetadata, LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck,
-        LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage,
-        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
+        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView,
+        CapabilityFailureKind, CapabilityInputRef, CapabilityProgress, CapabilitySurfaceProfileId,
+        CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
+        ConcurrencyHint, ContentDigest, ContextProfileId, FinalizeAssistantMessage,
+        LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopCompactionError, LoopCompactionOutcome, LoopCompactionRequest,
+        LoopCompactionResponse, LoopContextBundle, LoopContextCompactionMetadata,
+        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
+        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopRequest, LoopRequestBatch, LoopRunContext, LoopRunInfoPort,
         ModelProfileId, ModelStreamChunk, ParentLoopOutput, ProviderToolCallReference,
         RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
         RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
@@ -833,7 +833,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.record_call(MockHostCall::InvokeCapability {
             capability_id: request.capability_id,
@@ -852,7 +852,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockAgentLoopDriverHost
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.record_call(MockHostCall::InvokeCapabilityBatch {
             call_count: request.invocations.len(),

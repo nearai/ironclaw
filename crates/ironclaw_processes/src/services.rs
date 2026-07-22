@@ -268,6 +268,7 @@ impl ProcessManager for BackgroundProcessManager {
             estimate: record.estimated_resources.clone(),
             mounts: record.mounts.clone(),
             resource_reservation,
+            authorized_continuation: record.authorized_continuation.clone(),
             input,
             cancellation,
         };

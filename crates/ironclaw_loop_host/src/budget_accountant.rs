@@ -774,7 +774,7 @@ mod tests {
     use super::*;
     use crate::budget_cost_table::ZeroCostTable;
     use chrono::Utc;
-    use ironclaw_host_api::{ResourceReceipt, TenantId, ThreadId};
+    use ironclaw_host_api::{ResourceReceipt, ResourceReservation, TenantId, ThreadId};
     use ironclaw_resources::{
         AccountSnapshot, BudgetPeriod, BudgetThresholds, FakeClock, InMemoryResourceGovernor,
         ReservationOutcome, ResourceAccount, ResourceLimits,
@@ -917,6 +917,13 @@ mod tests {
             actual: ResourceUsage,
         ) -> Result<ResourceReceipt, ResourceError> {
             self.inner.reconcile(reservation_id, actual)
+        }
+
+        fn validate_reservation(
+            &self,
+            reservation: &ResourceReservation,
+        ) -> Result<(), ResourceError> {
+            self.inner.validate_reservation(reservation)
         }
 
         fn release(
@@ -1422,6 +1429,12 @@ mod tests {
             ) -> Result<ResourceReceipt, ResourceError> {
                 self.inner.reconcile(reservation_id, actual)
             }
+            fn validate_reservation(
+                &self,
+                reservation: &ResourceReservation,
+            ) -> Result<(), ResourceError> {
+                self.inner.validate_reservation(reservation)
+            }
             fn release(
                 &self,
                 reservation_id: ResourceReservationId,
@@ -1531,6 +1544,13 @@ mod tests {
                     });
                 }
                 self.inner.reconcile(reservation_id, actual)
+            }
+
+            fn validate_reservation(
+                &self,
+                reservation: &ResourceReservation,
+            ) -> Result<(), ResourceError> {
+                self.inner.validate_reservation(reservation)
             }
 
             fn release(

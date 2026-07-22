@@ -77,11 +77,13 @@ def _telegram_preflight(
     """Live prerequisites for the reborn `telegram` channel extension.
 
     The shipped model is admin setup via
-    ``PUT /api/webchat/v2/channels/telegram/setup`` with the bot token as the
+    ``POST /api/webchat/v2/extensions/telegram/setup`` with the bot token as the
     only secret (the webhook shared secret is minted server-side per save
     revision and ``setWebhook`` registers
     ``/webhooks/extensions/telegram/updates``), then per-user pairing via
-    ``/api/webchat/v2/channels/telegram/pairing``. The bot token env is
+    ``POST /api/webchat/v2/extensions/telegram/pairing/mint`` and
+    ``GET /api/webchat/v2/extensions/telegram/pairing/status``; the deep-link
+    code is consumed through the extension webhook. The bot token env is
     therefore the credential prerequisite; the v1 monolith WASM channel
     artifacts (``channels-src/telegram``) are no longer part of the reborn
     lane. ``TELEGRAM_WEBHOOK_SECRET`` presence is reported for diagnostics

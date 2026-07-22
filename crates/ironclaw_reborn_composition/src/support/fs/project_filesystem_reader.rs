@@ -13,7 +13,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-#[cfg(test)]
 use ironclaw_attachments::DEFAULT_MAX_ATTACHMENT_BYTES;
 use ironclaw_filesystem::{
     DirEntry, FileStat, FileType, FilesystemError, RootFilesystem, ScopedFilesystem,
@@ -40,7 +39,6 @@ pub(crate) struct ProjectScopedFilesystemReader<F: RootFilesystem> {
 }
 
 impl<F: RootFilesystem> ProjectScopedFilesystemReader<F> {
-    #[cfg(test)]
     pub(crate) fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
             filesystem,
@@ -49,10 +47,8 @@ impl<F: RootFilesystem> ProjectScopedFilesystemReader<F> {
         }
     }
 
-    pub(crate) fn with_max_read_bytes(
-        filesystem: Arc<ScopedFilesystem<F>>,
-        max_read_bytes: u64,
-    ) -> Self {
+    #[cfg(test)]
+    fn with_max_read_bytes(filesystem: Arc<ScopedFilesystem<F>>, max_read_bytes: u64) -> Self {
         Self {
             filesystem,
             workspace_alias: WORKSPACE_ALIAS.to_string(),
@@ -65,10 +61,7 @@ impl<F: RootFilesystem> ProjectScopedFilesystemReader<F> {
     /// normalized path to stay under the `/workspace` alias so the read-only
     /// workspace mount is the only reachable surface.
     fn confine(&self, path: &str) -> Result<ScopedPath, ProjectFsError> {
-        let scoped = ScopedPath::new(path).map_err(|error| {
-            tracing::debug!(%error, "project filesystem path failed scoped validation");
-            ProjectFsError::InvalidPath
-        })?;
+        let scoped = ScopedPath::new(path).map_err(|_| ProjectFsError::InvalidPath)?;
         // Component-wise containment via `Path::strip_prefix` so a sibling like
         // `/workspaceother` cannot pass a naive string-prefix check. `Ok` covers
         // both the alias root itself and any descendant under it.

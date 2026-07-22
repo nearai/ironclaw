@@ -37,7 +37,7 @@ Slack is disabled unless the mounted or seeded Reborn config enables it.
 Slack Events API must reach the Reborn listener over a public HTTPS URL:
 
 ```text
-https://<public-host>/webhooks/slack/events
+https://<public-host>/webhooks/extensions/slack/events
 ```
 
 Slack personal OAuth must also redirect back to the Reborn product-auth
@@ -106,7 +106,7 @@ enabled = true
 overrides only the route enablement gate: `true`/`1` mounts Slack, while
 `false`/`0` acts as a deployment kill switch.
 
-Slack enablement mounts `POST /webhooks/slack/events`, exposes Slack channel
+Slack enablement mounts `POST /webhooks/extensions/slack/events`, exposes Slack channel
 setup in WebUI, and makes personal Slack connection available through the Slack
 extension's OAuth configuration flow.
 Slack installation ids, team/app ids, the bot token, the signing secret,
@@ -157,7 +157,6 @@ https://<public-host>/api/reborn/product-auth/oauth/slack_personal/callback
   - `groups:history` if the bot should receive private-channel message events.
   - `mpim:history` if the bot should receive group-DM message events.
   - `files:read` if Slack file attachments should be downloaded and processed.
-  - `files:write` to upload assistant-produced `/workspace/...` files back to Slack.
 - Add user token scopes:
   - `users:read` for binding the authenticated Slack user to the Reborn user.
 - Install or reinstall the app to the workspace after changing scopes.
@@ -169,7 +168,7 @@ Event Subscriptions:
 - Set Request URL to:
 
 ```text
-https://<public-host>/webhooks/slack/events
+https://<public-host>/webhooks/extensions/slack/events
 ```
 
 - Subscribe to bot events:
@@ -210,12 +209,11 @@ oauth_config:
       - groups:history
       - mpim:history
       - files:read
-      - files:write
     user:
       - users:read
 settings:
   event_subscriptions:
-    request_url: https://<public-host>/webhooks/slack/events
+    request_url: https://<public-host>/webhooks/extensions/slack/events
     bot_events:
       - app_mention
       - message.im
@@ -228,9 +226,8 @@ settings:
 ```
 
 Use least privilege for production. For example, omit `groups:history` if the
-bot does not need private-channel events. Omit `files:read` if inbound
-attachment processing is not needed, and omit `files:write` if native delivery
-of assistant-produced workspace files is not needed.
+bot does not need private-channel events, and omit `files:read` if attachment
+processing is not needed.
 
 ## Start and Verify
 
@@ -255,7 +252,7 @@ docker run --rm \
 Verification checklist:
 
 - Slack Event Subscriptions shows the Request URL as verified.
-- `POST /webhooks/slack/events` returns the Slack URL-verification challenge
+- `POST /webhooks/extensions/slack/events` returns the Slack URL-verification challenge
   during setup.
 - After the user installs and configures the Slack extension, the OAuth callback
   binds that Slack user to the authenticated Reborn user.
@@ -271,7 +268,7 @@ Confirm the Reborn config sets [slack].enabled = true, or that the deployment en
 
 ### Slack route never receives events
 
-Confirm the Slack Request URL is exactly https://<public-host>/webhooks/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host path.
+Confirm the Slack Request URL is exactly https://<public-host>/webhooks/extensions/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host path.
 
 ### Slack URL verification fails
 
@@ -279,9 +276,7 @@ Confirm the WebUI Slack setup signing secret matches the app signing secret and 
 
 ### Slack replies fail with missing_scope
 
-Add or confirm `chat:write` for text replies, `files:read` for inbound files,
-and `files:write` for outbound files; reinstall the Slack app, then update the
-bot token in WebUI Slack setup if Slack issued a new token.
+Add or confirm chat:write, reinstall the Slack app, and update the bot token in WebUI Slack setup if Slack issued a new token.
 
 ### Slack OAuth callback fails
 

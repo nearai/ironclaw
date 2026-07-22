@@ -1,7 +1,8 @@
+use ironclaw_host_api::InstallationState;
+
 use crate::{
     LifecycleExtensionCredentialSetup, LifecycleExtensionRuntimeKind, LifecycleExtensionSummary,
-    LifecycleInstalledExtensionSummary, LifecyclePhase, LifecycleProductPayload,
-    LifecycleProductResponse,
+    LifecycleInstalledExtensionSummary, LifecycleProductPayload, LifecycleProductResponse,
 };
 
 use super::extension_credentials::ExtensionCredentialReadiness;
@@ -40,13 +41,15 @@ pub(super) fn for_installed_with_credential_status(
     if readiness == ExtensionCredentialReadiness::Configured
         && matches!(
             extension.phase,
-            LifecyclePhase::Installed | LifecyclePhase::Configured | LifecyclePhase::Failed
+            InstallationState::Installed
+                | InstallationState::Configured
+                | InstallationState::Failed
         )
     {
-        let phase = if extension.phase == LifecyclePhase::Failed {
-            LifecyclePhase::Failed
+        let phase = if extension.phase == InstallationState::Failed {
+            InstallationState::Failed
         } else {
-            LifecyclePhase::Configured
+            InstallationState::Configured
         };
         return no_credential_onboarding(&extension.summary, phase);
     }
@@ -72,11 +75,14 @@ pub(super) fn from_lifecycle(lifecycle: &LifecycleProductResponse) -> ExtensionO
     for_installed(extension)
 }
 
-fn for_summary(summary: &LifecycleExtensionSummary, phase: LifecyclePhase) -> ExtensionOnboarding {
-    if phase == LifecyclePhase::Active {
+fn for_summary(
+    summary: &LifecycleExtensionSummary,
+    phase: InstallationState,
+) -> ExtensionOnboarding {
+    if phase == InstallationState::Active {
         return ExtensionOnboarding::empty();
     }
-    if phase == LifecyclePhase::Configured || summary.credential_requirements.is_empty() {
+    if phase == InstallationState::Configured || summary.credential_requirements.is_empty() {
         return no_credential_onboarding(summary, phase);
     }
     credential_onboarding(summary)
@@ -115,16 +121,16 @@ fn credential_onboarding(summary: &LifecycleExtensionSummary) -> ExtensionOnboar
 
 fn no_credential_onboarding(
     summary: &LifecycleExtensionSummary,
-    phase: LifecyclePhase,
+    phase: InstallationState,
 ) -> ExtensionOnboarding {
     let state = match phase {
-        LifecyclePhase::Installed | LifecyclePhase::Configured => {
+        InstallationState::Installed | InstallationState::Configured => {
             Some(RebornExtensionOnboardingState::Installed)
         }
-        LifecyclePhase::Failed => Some(RebornExtensionOnboardingState::Failed),
+        InstallationState::Failed => Some(RebornExtensionOnboardingState::Failed),
         _ => None,
     };
-    let instructions = if phase == LifecyclePhase::Configured {
+    let instructions = if phase == InstallationState::Configured {
         Some(activation_instructions(summary))
     } else if let Some(onboarding) = &summary.onboarding {
         Some(onboarding.instructions.clone())
@@ -136,7 +142,7 @@ fn no_credential_onboarding(
             "{} is installed. Activate it to make its MCP tools available.",
             summary.name
         ))
-    } else if phase == LifecyclePhase::Installed {
+    } else if phase == InstallationState::Installed {
         Some(format!(
             "{} is installed. Activate it to make its tools available.",
             summary.name
@@ -221,7 +227,7 @@ mod tests {
         let extension = installed_extension(
             "github",
             "GitHub",
-            LifecyclePhase::Installed,
+            InstallationState::Installed,
             vec![manual_requirement("github_runtime_token", "github")],
             LifecycleExtensionRuntimeKind::WasmTool,
             Some(LifecycleExtensionOnboarding {
@@ -260,7 +266,7 @@ mod tests {
         let extension = installed_extension(
             "gmail",
             "Gmail",
-            LifecyclePhase::Installed,
+            InstallationState::Installed,
             vec![oauth_requirement("gmail_account", "google")],
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
@@ -295,7 +301,7 @@ mod tests {
         let extension = installed_extension(
             "web-access",
             "Web Access",
-            LifecyclePhase::Installed,
+            InstallationState::Installed,
             Vec::new(),
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
@@ -326,7 +332,7 @@ mod tests {
         let extension = installed_extension(
             "github",
             "GitHub",
-            LifecyclePhase::Configured,
+            InstallationState::Configured,
             vec![manual_requirement("github_runtime_token", "github")],
             LifecycleExtensionRuntimeKind::WasmTool,
             Some(LifecycleExtensionOnboarding {
@@ -355,7 +361,7 @@ mod tests {
         let extension = installed_extension(
             "gmail",
             "Gmail",
-            LifecyclePhase::Installed,
+            InstallationState::Installed,
             vec![oauth_requirement("gmail_account", "google")],
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
@@ -393,7 +399,7 @@ mod tests {
         let extension = installed_extension(
             "gmail",
             "Gmail",
-            LifecyclePhase::Failed,
+            InstallationState::Failed,
             vec![oauth_requirement("gmail_account", "google")],
             LifecycleExtensionRuntimeKind::FirstParty,
             Some(LifecycleExtensionOnboarding {
@@ -432,7 +438,7 @@ mod tests {
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, "target")
                     .expect("valid package ref"),
             ),
-            phase: LifecyclePhase::Installed,
+            phase: InstallationState::Installed,
             blockers: Vec::new(),
             message: None,
             payload: Some(LifecycleProductPayload::ExtensionList {
@@ -440,7 +446,7 @@ mod tests {
                     installed_extension(
                         "other",
                         "Other",
-                        LifecyclePhase::Installed,
+                        InstallationState::Installed,
                         Vec::new(),
                         LifecycleExtensionRuntimeKind::FirstParty,
                         Some(LifecycleExtensionOnboarding {
@@ -453,7 +459,7 @@ mod tests {
                     installed_extension(
                         "target",
                         "Target",
-                        LifecyclePhase::Installed,
+                        InstallationState::Installed,
                         Vec::new(),
                         LifecycleExtensionRuntimeKind::FirstParty,
                         Some(LifecycleExtensionOnboarding {
@@ -476,7 +482,7 @@ mod tests {
     fn installed_extension(
         package_id: &str,
         name: &str,
-        phase: LifecyclePhase,
+        phase: InstallationState,
         credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
         runtime_kind: LifecycleExtensionRuntimeKind,
         onboarding: Option<LifecycleExtensionOnboarding>,
@@ -491,6 +497,9 @@ mod tests {
                 source: LifecycleExtensionSource::HostBundled,
                 runtime_kind,
                 surface_kinds: Vec::new(),
+                channel_directions: None,
+                channel_connection: None,
+                channel_presentation: None,
                 visible_capability_ids: Vec::new(),
                 visible_read_only_capability_ids: Vec::new(),
                 credential_requirements,

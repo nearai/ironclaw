@@ -2,9 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-mod adapter;
 pub mod auth;
 pub mod capabilities;
+mod channel_adapter;
 mod egress;
 mod error;
 pub mod external;
@@ -16,9 +16,10 @@ pub mod interaction_commands;
 mod outbound;
 mod projection;
 pub mod redaction;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 mod workflow;
 
-pub use adapter::{ProductAdapter, ProductAdapterHealth};
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, ProtocolAuthFailure, VerifiedAuthClaim};
 #[cfg(feature = "host-auth-mint")]
 pub use auth::{
@@ -28,6 +29,12 @@ pub use auth::{
     mark_shared_secret_header_verified_for_tenant,
 };
 pub use capabilities::{ProductAdapterCapabilities, ProductCapabilityFlag};
+pub use channel_adapter::{
+    AttachmentRef, ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, ImmediateResponse,
+    InboundOutcome, MAX_IMMEDIATE_RESPONSE_BYTES, MAX_REPLY_CONTEXT_BYTES,
+    NormalizedInboundMessage, OutboundEnvelope, OutboundPart, OutboundTarget, PartDeliveryOutcome,
+    TargetCandidate, TargetQuery, VerifiedInbound,
+};
 pub use egress::{
     DeclaredEgressHost, DeclaredEgressTarget, DeliveryAttemptId, DeliveryStatus,
     EgressCredentialHandle, EgressHeader, EgressMethod, EgressPath, EgressRequest, EgressResponse,
@@ -55,7 +62,6 @@ pub use inbound::{
     parse_product_slash_command,
 };
 pub use interaction_commands::{parse_interaction_resolution_text, strip_wrapping_inline_code};
-pub use ironclaw_attachments::WorkspaceFile;
 pub use outbound::{
     ApprovalPromptActionView, ApprovalPromptContextView, ApprovalPromptDestinationView,
     ApprovalPromptDetailView, ApprovalPromptScopeView, AuthPromptChallengeKind,
@@ -65,8 +71,9 @@ pub use outbound::{
     CapabilityActivityViewInput, CapabilityDisplayPreviewView, CapabilityDisplayPreviewViewInput,
     ConnectionPromptContext, FinalReplyView, GatePromptView, PROJECTION_SKILL_ACTIVATION_MAX_ITEMS,
     PROJECTION_SKILL_FEEDBACK_MAX_BYTES, PROJECTION_SKILL_NAME_MAX_BYTES,
-    PROJECTION_TEXT_MAX_BYTES, ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload,
-    ProductOutboundTarget, ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
+    PROJECTION_TEXT_MAX_BYTES, PreferenceTargetCodec, PreferenceTargetEncodeRequest,
+    ProductGateKind, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+    ProductProjectionItem, ProductProjectionState, ProductRenderOutcome,
     ProductSynchronousResponse, ProductWorkSummaryPhase, ProgressKind, ProgressUpdateView,
     ProjectionCursor,
 };

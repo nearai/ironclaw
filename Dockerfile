@@ -58,15 +58,7 @@ WORKDIR /app
 RUN cargo chef cook \
     --profile dist \
     --package ironclaw \
-    --features libsql,postgres \
     --recipe-path recipe.json
-RUN cargo chef cook \
-    --profile dist \
-    --package ironclaw_reborn_migration \
-    --no-default-features \
-    --features libsql \
-    --recipe-path recipe.json
-
 FROM deps AS builder
 
 COPY Cargo.toml Cargo.lock ./
@@ -88,15 +80,7 @@ WORKDIR /app
 RUN cargo build \
     --profile dist \
     --package ironclaw \
-    --features libsql,postgres \
     --bin ironclaw
-
-RUN cargo build \
-    --profile dist \
-    --package ironclaw_reborn_migration \
-    --no-default-features \
-    --features libsql \
-    --bin ironclaw-reborn-extension-ownership-migration
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 
@@ -108,7 +92,6 @@ RUN apt-get -o Acquire::Retries=3 update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/dist/ironclaw /usr/local/bin/ironclaw
-COPY --from=builder /app/target/dist/ironclaw-reborn-extension-ownership-migration /usr/local/bin/ironclaw-reborn-extension-ownership-migration
 COPY docker/reborn/config.toml /opt/ironclaw/reborn/config.toml
 COPY docker/reborn/config.hosted-single-tenant.toml /opt/ironclaw/reborn/config.hosted-single-tenant.toml
 COPY docker/reborn/config.hosted-single-tenant-volume.toml /opt/ironclaw/reborn/config.hosted-single-tenant-volume.toml

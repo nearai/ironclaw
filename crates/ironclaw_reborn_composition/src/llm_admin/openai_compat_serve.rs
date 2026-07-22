@@ -25,10 +25,10 @@ use ironclaw_product_adapters::{
 };
 use ironclaw_product_workflow::RebornFilesystemIdempotencyLedger;
 use ironclaw_product_workflow::{
-    DefaultInboundTurnService, DefaultProductWorkflow, ProductActorUserResolutionRequest,
-    ProductActorUserResolver, ProductConversationBindingService, ProductInstallationKey,
-    ProductInstallationScope, ProductWorkflowError, ResolvedProductActorUser,
-    StaticProductInstallationResolver,
+    DefaultInboundTurnService, DefaultProductWorkflow, InboundAttachmentLander,
+    ProductActorUserResolutionRequest, ProductActorUserResolver, ProductConversationBindingService,
+    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError,
+    ResolvedProductActorUser, StaticProductInstallationResolver,
 };
 use ironclaw_product_workflow::{
     LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, WebUiAuthenticatedCaller,
@@ -81,23 +81,6 @@ const OPENAI_COMPAT_PENDING_EXTERNAL_TOOL_FALLBACK_DELAY: Duration = Duration::f
 const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const OPENAI_COMPAT_EXTERNAL_TOOL_RESUME_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// OpenAI-compatible conversation bindings must survive a restart, so these
-/// routes need a durable backend. Without one the mount is refused rather than
-/// served over non-durable bindings.
-#[cfg(not(any(feature = "libsql", feature = "postgres")))]
-pub async fn build_openai_compat_route_mount(
-    _runtime: &RebornRuntime,
-    _tenant_id: TenantId,
-    _default_agent_id: AgentId,
-    _default_project_id: Option<ProjectId>,
-) -> Result<ProtectedRouteMount, RebornBuildError> {
-    Err(RebornBuildError::InvalidConfig {
-        reason: "OpenAI-compatible routes require durable conversation bindings;                  configure a storage backend"
-            .to_string(),
-    })
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub async fn build_openai_compat_route_mount(
     runtime: &RebornRuntime,
     tenant_id: TenantId,
@@ -137,15 +120,20 @@ pub async fn build_openai_compat_route_mount(
         installation_scope,
     )]);
     let binding = ProductConversationBindingService::new(conversation_port, installation_resolver);
-    let inbound_turn_service = DefaultInboundTurnService::new(
+    let mut inbound_turn_service = DefaultInboundTurnService::new(
         binding.clone(),
         runtime.webui_thread_service(),
         runtime.webui_turn_coordinator(),
-    )
+    );
     // Lands inline image bytes (vision, #4644) through the same project-scoped
     // workspace authority the agent's file tools resolve through, so an image
     // attached to an OpenAI-compatible chat completion reaches the model.
-    .with_inbound_attachments(runtime.inbound_attachment_lander());
+    if let Some(workspace_filesystem) = runtime.webui_workspace_filesystem() {
+        let lander: Arc<dyn InboundAttachmentLander> = Arc::new(
+            crate::support::fs::ProjectScopedAttachmentLander::new(workspace_filesystem),
+        );
+        inbound_turn_service = inbound_turn_service.with_inbound_attachments(lander);
+    }
     let inbound = Arc::new(inbound_turn_service);
     // `.with_delivered_gate_routes` is intentionally omitted here. The
     // OpenAI-compat surface never produces `ApprovalResolution`,

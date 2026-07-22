@@ -5,12 +5,12 @@
 //! gate:<ref>` to decline it here"), so every channel adapter that carries
 //! that copy must recognize the same grammar. One definition here — the
 //! crate that owns the resolution payload types — keeps the advertised copy
-//! and the parsing from drifting per channel: the 2026-07-17 Telegram
+//! and the parsing from drifting per channel: the 2026-07-17 second-channel
 //! regression shipped exactly that drift (the busy hint advertised `auth
 //! deny` on a channel with no parser, so the reply bounced off the busy
 //! thread forever).
 //!
-//! Vendor-specific normalization (Slack mention stripping, Telegram leading
+//! Vendor-specific normalization (mention stripping, leading
 //! @botname stripping) stays in each adapter, in front of this parser.
 //! [`strip_wrapping_inline_code`] is exposed separately because every chat
 //! surface renders the advertised command in backticks, so users on any

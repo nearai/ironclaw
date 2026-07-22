@@ -113,9 +113,7 @@ async fn push_candidates_reject_actor_stream_user_mismatch_before_outbound_looku
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
         Arc::new(NoExposureProjectionRedactionValidator),
-        Arc::new(FailingOutboundStore {
-            kind: FailingOutboundKind::Backend,
-        }),
+        outbound_store_failing_backend_reads(),
     );
 
     let error = manager
@@ -129,6 +127,28 @@ async fn push_candidates_reject_actor_stream_user_mismatch_before_outbound_looku
 #[tokio::test]
 async fn push_candidates_maps_outbound_store_failures() {
     let scope = turn_scope("thread-a");
+
+    // Backend faults flow through the real `FilesystemOutboundStateStore`: the
+    // policy `ReadFile` fault maps `FilesystemError::Backend ->
+    // OutboundError::Backend -> ProjectionStreamError::Outbound`, exercising the
+    // production store's error mapping rather than a hand-returned variant.
+    let backend_manager = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(projection_scope("thread-a"))),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        outbound_store_failing_backend_reads(),
+    );
+    let backend_error = backend_manager
+        .push_candidates_for_update(push_request(&scope, OutboundPushKind::Progress))
+        .await
+        .expect_err("backend fault maps to Outbound");
+    assert_same_error_kind(backend_error, ProjectionStreamError::Outbound);
+
+    // The remaining variants are domain classifications the real store never
+    // emits from a backend fault; inject them directly to lock the manager's
+    // `map_outbound_error` mapping (see `FailingOutboundStore` in fakes).
     for (kind, expected) in [
         (
             FailingOutboundKind::AccessDenied,
@@ -139,10 +159,6 @@ async fn push_candidates_maps_outbound_store_failures() {
             ProjectionStreamError::InvalidRequest {
                 reason: "bad request",
             },
-        ),
-        (
-            FailingOutboundKind::Backend,
-            ProjectionStreamError::Outbound,
         ),
         (
             FailingOutboundKind::PreferenceTargetMissing,

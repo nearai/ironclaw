@@ -1,5 +1,3 @@
-#![cfg(feature = "postgres")]
-
 #[path = "support/postgres.rs"]
 mod postgres_support;
 mod support;

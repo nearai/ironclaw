@@ -1,5 +1,3 @@
-#![cfg(feature = "libsql")]
-
 mod support;
 
 use std::{sync::Arc, time::Duration};

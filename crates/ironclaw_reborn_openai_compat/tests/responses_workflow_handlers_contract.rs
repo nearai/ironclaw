@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+mod support;
+
 use async_trait::async_trait;
 use axum::body::Body;
 use http::Request;
@@ -15,8 +17,8 @@ use ironclaw_product_adapters::{
     ProjectionReadRequest, ProjectionSubscriptionRequest, ProtocolAuthEvidence, RedactedString,
 };
 use ironclaw_reborn_openai_compat::{
-    InMemoryOpenAiCompatRefStore, OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope,
-    OpenAiCompatAuthenticatedCaller, OpenAiCompatBindInternalRefs, OpenAiCompatExternalToolResume,
+    OpenAiChatProjectionStreamRequest, OpenAiCompatActorScope, OpenAiCompatAuthenticatedCaller,
+    OpenAiCompatBindInternalRefs, OpenAiCompatExternalToolResume,
     OpenAiCompatExternalToolResumeRequest, OpenAiCompatExternalToolSpec,
     OpenAiCompatExternalToolStore, OpenAiCompatHttpError, OpenAiCompatInternalRefs,
     OpenAiCompatMarkExternalToolResumeCompleted, OpenAiCompatProductActionRef,
@@ -31,6 +33,7 @@ use ironclaw_reborn_openai_compat::{
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnActor, TurnRunId, TurnScope};
 use serde_json::{Value, json};
+use support::in_memory_openai_compat_ref_store;
 use tokio::sync::Notify;
 use tower::ServiceExt;
 
@@ -290,7 +293,7 @@ async fn responses_idempotency_replay_without_accepted_ack_resubmits() {
     let workflow = Arc::new(FixedAckWorkflow::new(deferred_busy_ack()));
     let service = OpenAiResponsesWorkflow::new(
         workflow.clone(),
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader::completed("unused")),
     );
     let router =
@@ -326,7 +329,7 @@ async fn responses_handlers_require_authenticated_caller_before_side_effects() {
     let workflow = Arc::new(FakeProductWorkflow::new());
     let service = OpenAiResponsesWorkflow::new(
         workflow.clone(),
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader::completed("unused")),
     );
     let router =
@@ -360,7 +363,7 @@ async fn responses_handlers_require_authenticated_caller_before_side_effects() {
 #[tokio::test]
 async fn responses_retrieve_reads_authorized_projection() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let reader = Arc::new(RecordingResponsesReader::new(completed_response(
         OpenAiResponseId::new("resp_placeholder").expect("id"),
         "read",
@@ -396,7 +399,7 @@ async fn responses_retrieve_reads_authorized_projection() {
 #[tokio::test]
 async fn responses_cancel_uses_product_workflow_control_action() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let reader = Arc::new(StaticResponsesReader::cancelled());
     let router = router_with_store(workflow.clone(), ref_store, reader);
 
@@ -439,7 +442,7 @@ async fn responses_cancel_rejected_busy_ack_returns_429_and_does_not_read_projec
     // Create a response first (FakeProductWorkflow returns Accepted by default) so the
     // ref_store has a valid mapping that the cancel path can look up.
     let create_workflow = Arc::new(FakeProductWorkflow::new());
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let reader = Arc::new(RecordingResponsesReader::new(completed_response(
         OpenAiResponseId::new("resp_placeholder").expect("id"),
         "unused",
@@ -536,7 +539,7 @@ async fn responses_product_workflow_error_redacts_request_and_backend_details() 
     }));
     let router = router_with_product_workflow(
         workflow,
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader::completed("unused")),
         caller(),
     );
@@ -627,7 +630,7 @@ async fn responses_binding_required_rejection_carries_input_param() {
     )));
     let service = OpenAiResponsesWorkflow::new(
         workflow,
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader::completed("ok")),
     );
     let router =
@@ -660,7 +663,7 @@ async fn responses_invalid_request_rejection_carries_input_param() {
     )));
     let service = OpenAiResponsesWorkflow::new(
         workflow,
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader::completed("ok")),
     );
     let router =
@@ -702,7 +705,7 @@ async fn responses_create_ambiguous_resolution_rejection_returns_409() {
     )));
     let service = OpenAiResponsesWorkflow::new(
         workflow,
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader::completed("ok")),
     );
     let router =
@@ -754,7 +757,7 @@ async fn responses_wait_timeout_detaches_without_resubmitting() {
     workflow.program_projection_read_resolution(sample_projection_read_request());
     let service = OpenAiResponsesWorkflow::new(
         workflow.clone(),
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(NeverResponsesReader),
     )
     .with_wait_timeout(Duration::from_millis(1));
@@ -1052,7 +1055,7 @@ async fn lookup_and_cancel_nonexistent_ids_return_same_not_found_shape() {
 #[tokio::test]
 async fn lookup_and_cancel_cross_scope_ids_return_same_not_found_shape() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let reader = Arc::new(StaticResponsesReader::completed("unused"));
     let alice_router = router_with_store_and_caller(
         workflow.clone(),
@@ -1111,7 +1114,7 @@ async fn assert_fixed_ack_status(ack: ProductInboundAck, status: http::StatusCod
     let workflow = Arc::new(FixedAckWorkflow::new(ack));
     let service = OpenAiResponsesWorkflow::new(
         workflow,
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader::completed("ok")),
     );
     let router =
@@ -1134,16 +1137,12 @@ fn test_router(
     workflow: Arc<FakeProductWorkflow>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
 ) -> axum::Router {
-    router_with_store(
-        workflow,
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
-        reader,
-    )
+    router_with_store(workflow, in_memory_openai_compat_ref_store(), reader)
 }
 
 fn router_with_store(
     workflow: Arc<FakeProductWorkflow>,
-    ref_store: Arc<InMemoryOpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStore>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
 ) -> axum::Router {
     router_with_store_and_caller(workflow, ref_store, reader, caller())
@@ -1151,7 +1150,7 @@ fn router_with_store(
 
 fn router_with_store_and_caller(
     workflow: Arc<FakeProductWorkflow>,
-    ref_store: Arc<InMemoryOpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStore>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     caller: OpenAiCompatAuthenticatedCaller,
 ) -> axum::Router {
@@ -1161,7 +1160,7 @@ fn router_with_store_and_caller(
 
 fn router_with_product_workflow(
     workflow: Arc<dyn ProductWorkflow>,
-    ref_store: Arc<InMemoryOpenAiCompatRefStore>,
+    ref_store: Arc<dyn OpenAiCompatRefStore>,
     reader: Arc<dyn OpenAiResponsesProjectionReader>,
     caller: OpenAiCompatAuthenticatedCaller,
 ) -> axum::Router {
@@ -1774,14 +1773,14 @@ impl OpenAiCompatExternalToolResume for ConflictAfterFirstResume {
 }
 
 struct FailsFirstResumeCompletionMark {
-    inner: InMemoryOpenAiCompatRefStore,
+    inner: Arc<dyn OpenAiCompatRefStore>,
     fail_next_mark: Mutex<bool>,
 }
 
 impl FailsFirstResumeCompletionMark {
     fn new() -> Self {
         Self {
-            inner: InMemoryOpenAiCompatRefStore::new(),
+            inner: in_memory_openai_compat_ref_store(),
             fail_next_mark: Mutex::new(true),
         }
     }
@@ -1877,7 +1876,7 @@ async fn responses_with_external_tools_registers_specs_after_submit() {
     let resume = Arc::new(RecordingExternalToolResume::default());
     let router = router_with_external_tools(
         workflow.clone(),
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader::completed("ok")),
         store.clone(),
         resume.clone(),
@@ -1918,7 +1917,7 @@ async fn responses_with_external_tools_registers_specs_after_submit() {
 #[tokio::test]
 async fn responses_idempotency_replay_retries_tool_registration_after_partial_create_failure() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let store = Arc::new(FailsFirstRegisterExternalToolStore::new());
     let resume = Arc::new(RecordingExternalToolResume::default());
     let reader = Arc::new(RecordingResponsesReader::new(completed_response(
@@ -1973,7 +1972,7 @@ async fn streamed_responses_with_external_tools_registers_specs_after_submit() {
     let resume = Arc::new(RecordingExternalToolResume::default());
     let router = router_with_external_tools_and_streamer(
         workflow.clone(),
-        Arc::new(InMemoryOpenAiCompatRefStore::new()),
+        in_memory_openai_compat_ref_store(),
         Arc::new(StaticResponsesReader::completed("unused")),
         Arc::new(EmptyProjectionStreamer),
         store.clone(),
@@ -2011,7 +2010,7 @@ async fn streamed_responses_with_external_tools_registers_specs_after_submit() {
 #[tokio::test]
 async fn responses_function_call_output_resumes_parked_run_without_new_submit() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let store = Arc::new(RecordingExternalToolStore::default());
     let resume = Arc::new(RecordingExternalToolResume::default());
     let router = router_with_external_tools(
@@ -2077,7 +2076,7 @@ async fn responses_function_call_output_resumes_parked_run_without_new_submit() 
 #[tokio::test]
 async fn responses_function_call_output_idempotency_replay_does_not_resubmit_output() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let store = Arc::new(RecordingExternalToolStore::default());
     let resume = Arc::new(RecordingExternalToolResume::default());
     let router = router_with_external_tools(
@@ -2216,7 +2215,7 @@ async fn responses_function_call_output_replay_recovers_when_completion_marker_f
 #[tokio::test]
 async fn responses_function_call_output_rejects_mixed_continuation_input() {
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let store = Arc::new(RecordingExternalToolStore::default());
     let resume = Arc::new(RecordingExternalToolResume::default());
     let router = router_with_external_tools(
@@ -2273,7 +2272,7 @@ async fn responses_function_call_output_without_external_tools_is_rejected() {
     // With no external-tool store wired, a `function_call_output` continuation
     // fails closed instead of being serialized into a fresh transcript turn.
     let workflow = Arc::new(FakeProductWorkflow::new());
-    let ref_store = Arc::new(InMemoryOpenAiCompatRefStore::new());
+    let ref_store = in_memory_openai_compat_ref_store();
     let router = router_with_store(
         workflow.clone(),
         ref_store,

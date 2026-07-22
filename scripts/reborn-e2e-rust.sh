@@ -28,9 +28,6 @@ run_architecture() {
   # Pins docs/reborn/contracts/telegram-v2.md: retired-taxonomy telegram
   # identifiers stay dead and no v1 pairing routes re-enter the reborn context.
   run_test ironclaw_architecture telegram_extension_gates
-  # Pins the production-composed Telegram contract, including durable
-  # attachment landing/retry and native workspace-file delivery.
-  run_test ironclaw_reborn_integration_tests reborn_integration_telegram_journey
   run_test ironclaw_host_runtime host_runtime_contract
   run_test ironclaw_host_runtime host_runtime_services_contract
   run_test ironclaw_host_runtime reborn_e2e_gate
@@ -52,8 +49,9 @@ run_runtimes() {
   run_test ironclaw_dispatcher boundary_contract
   run_test ironclaw_dispatcher dispatch_contract
   run_test ironclaw_dispatcher event_dispatch_contract
-  run_test ironclaw_dispatcher runtime_dispatcher_integration
-  run_test ironclaw_dispatcher vertical_slice_contract
+  # main's runtime_dispatcher_integration / vertical_slice_contract test the
+  # retired RuntimeAdapter<F, G> architecture; the ToolResolver/BoundCapabilityAdapter
+  # pipeline is pinned by the three dispatcher contract suites above.
   run_test ironclaw_wasm wasm_dispatch_integration
   run_test ironclaw_wasm wasm_http_adapter_contract
   run_test ironclaw_wasm wit_tool_runtime_contract

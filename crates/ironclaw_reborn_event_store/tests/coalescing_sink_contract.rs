@@ -43,6 +43,16 @@ fn scope_for(user: &str, project: &str) -> ResourceScope {
 /// partial-failure result vector: the first event succeeds (committed to the
 /// inner log) and the remaining events fail with an injected error. This lets
 /// tests verify that `flush()` propagates a per-event rejection as `Err`.
+//
+// domain-state fake, not an I/O fault — cannot move to
+// ironclaw_filesystem::FaultInjecting. This is a double for the log dependency
+// while the *sink* (`CoalescingEventSink`) is under test, and its assertions
+// observe the sink->log call shape *above* the store: it distinguishes single
+// `append` from `append_batch`, records each batch's size (`batch_sizes`), and
+// returns a partial-failure results vector (`[Ok, Err, ..]`). FaultInjecting
+// records only one `Append` op per call (no single-vs-batch distinction, no
+// size) and faults whole ops, so the real `FilesystemDurableEventLog` over it
+// could reproduce none of those observations without dropping coverage.
 struct CountingEventLog {
     inner: InMemoryDurableEventLog,
     append_calls: AtomicUsize,

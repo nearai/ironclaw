@@ -8,6 +8,8 @@ tokens:
       - https://www.googleapis.com/auth/calendar.events
       - https://www.googleapis.com/auth/drive.readonly
       - https://www.googleapis.com/auth/drive.file
+      - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/spreadsheets
   mock-refreshed-access-token:
     login: e2e.google@example.com
     scopes:
@@ -17,6 +19,8 @@ tokens:
       - https://www.googleapis.com/auth/calendar.events
       - https://www.googleapis.com/auth/drive.readonly
       - https://www.googleapis.com/auth/drive.file
+      - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/spreadsheets
   emulate-google-secondary-token:
     login: secondary.google@example.com
     scopes:
@@ -26,6 +30,8 @@ tokens:
       - https://www.googleapis.com/auth/calendar.events
       - https://www.googleapis.com/auth/drive.readonly
       - https://www.googleapis.com/auth/drive.file
+      - https://www.googleapis.com/auth/documents
+      - https://www.googleapis.com/auth/spreadsheets
 
 google:
   users:

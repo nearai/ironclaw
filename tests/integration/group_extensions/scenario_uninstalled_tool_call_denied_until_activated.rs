@@ -102,6 +102,12 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     lifecycle
         .assert_tool_result_contains("\"activated\":true")
         .await?;
+    lifecycle
+        .assert_model_message_content_contains(r#"\"installed\":true"#)
+        .await?;
+    lifecycle
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .await?;
 
     // ── Turn 2 (same conversation): the identical call now dispatches ───────
     caller.submit_turn("check my mail again").await?;

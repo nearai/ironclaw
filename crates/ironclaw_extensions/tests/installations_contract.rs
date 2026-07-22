@@ -1,15 +1,17 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use chrono::Utc;
 use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationPersistedParts,
-    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-    InMemoryExtensionInstallationStore, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash,
+    CapabilityProviderHostApiContract, ExtensionActivationState, ExtensionCredentialBinding,
+    ExtensionCredentialHandle, ExtensionHealthMessage, ExtensionHealthSnapshot,
+    ExtensionHealthStatus, ExtensionInstallation, ExtensionInstallationError,
+    ExtensionInstallationId, ExtensionInstallationPersistedParts, ExtensionInstallationStore,
+    ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
+    HostApiContractRegistry, InstallationOwner, MANIFEST_SCHEMA_VERSION, ManifestHash,
     ManifestSource, ManifestV2Error,
 };
-use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId};
+use ironclaw_filesystem::{Filter, InMemoryBackend, Page, RootFilesystem};
+use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle, UserId, VirtualPath};
 
 fn extension_id(value: &str) -> ExtensionId {
     ExtensionId::new(value).unwrap()
@@ -23,7 +25,18 @@ fn manifest_hash(value: &str) -> ManifestHash {
     ManifestHash::new(value).unwrap()
 }
 
-fn raw_legacy_capability_manifest() -> String {
+async fn filesystem_store() -> FilesystemExtensionInstallationStore {
+    FilesystemExtensionInstallationStore::load_at(
+        Arc::new(InMemoryBackend::new()),
+        VirtualPath::new("/system/extensions/.installations/test").unwrap(),
+        HostPortCatalog::empty(),
+        contracts(),
+    )
+    .await
+    .unwrap()
+}
+
+fn raw_capability_provider_manifest() -> String {
     format!(
         r#"
 schema_version = "{schema}"
@@ -37,7 +50,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/acme.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme-tools.echo"
 description = "Echoes input"
 default_permission = "allow"
@@ -50,12 +69,23 @@ prompt_doc_ref = "prompts/acme/echo.md"
     )
 }
 
+fn contracts() -> HostApiContractRegistry {
+    let mut registry = HostApiContractRegistry::new();
+    registry
+        .register(std::sync::Arc::new(
+            CapabilityProviderHostApiContract::new().unwrap(),
+        ))
+        .unwrap();
+    registry
+}
+
 fn manifest(hash: &str) -> ExtensionManifestRecord {
     ExtensionManifestRecord::from_toml(
-        raw_legacy_capability_manifest(),
+        raw_capability_provider_manifest(),
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
         Some(manifest_hash(hash)),
+        &contracts(),
     )
     .unwrap()
 }
@@ -87,28 +117,44 @@ fn installation_with_manifest_hash(hash: Option<&str>) -> ExtensionInstallation 
 }
 
 #[test]
-fn installed_legacy_top_level_capabilities_are_rejected() {
-    let err = ExtensionManifestRecord::from_toml(
-        raw_legacy_capability_manifest(),
-        ManifestSource::InstalledLocal,
-        &HostPortCatalog::empty(),
-        Some(manifest_hash("sha256:abc")),
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        err,
-        ExtensionInstallationError::Manifest(
-            ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
-                manifest_source: ManifestSource::InstalledLocal
-            }
+fn top_level_capabilities_are_rejected_for_every_source() {
+    // The legacy manifest form is gone: capabilities are declared under an
+    // ironclaw.capability_provider/v1 host_api section, for host-bundled
+    // manifests exactly as for installed ones.
+    let legacy = raw_capability_provider_manifest()
+        .replace(
+            "[[host_api]]\nid = \"ironclaw.capability_provider/v1\"\nsection = \"capability_provider.tools\"\n\n[capability_provider.tools]\n\n",
+            "",
         )
-    ));
+        .replace("[[capability_provider.tools.capabilities]]", "[[capabilities]]");
+    for source in [
+        ManifestSource::InstalledLocal,
+        ManifestSource::RegistryInstalled,
+        ManifestSource::HostBundled,
+    ] {
+        let err = ExtensionManifestRecord::from_toml(
+            legacy.clone(),
+            source,
+            &HostPortCatalog::empty(),
+            Some(manifest_hash("sha256:abc")),
+            &contracts(),
+        )
+        .unwrap_err();
+        match err {
+            ExtensionInstallationError::Manifest(ManifestV2Error::Invalid { reason }) => {
+                assert!(
+                    reason.contains("top-level [[capabilities]] is not supported"),
+                    "{source:?}: {reason}"
+                );
+            }
+            other => panic!("{source:?}: expected Invalid, got {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
 async fn upsert_installation_rejects_unknown_manifest() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
 
     let err = store
         .upsert_installation(
@@ -137,7 +183,7 @@ async fn upsert_installation_rejects_unknown_manifest() {
 
 #[tokio::test]
 async fn upsert_manifest_rejects_manifest_hash_change_for_existing_installation() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     store.upsert_manifest(manifest("sha256:old")).await.unwrap();
     store
         .upsert_installation(installation("sha256:old"))
@@ -157,7 +203,7 @@ async fn upsert_manifest_rejects_manifest_hash_change_for_existing_installation(
 
 #[tokio::test]
 async fn upsert_manifest_and_installation_replaces_coherent_manifest_hash_pair() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     store.upsert_manifest(manifest("sha256:old")).await.unwrap();
     store
         .upsert_installation(installation("sha256:old"))
@@ -188,7 +234,7 @@ async fn upsert_manifest_and_installation_replaces_coherent_manifest_hash_pair()
 
 #[tokio::test]
 async fn upsert_manifest_and_installation_rejects_mismatched_manifest_hash_pair() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
 
     let err = store
         .upsert_manifest_and_installation(manifest("sha256:new"), installation("sha256:old"))
@@ -217,7 +263,7 @@ async fn upsert_manifest_and_installation_rejects_mismatched_manifest_hash_pair(
 
 #[tokio::test]
 async fn missing_installation_mutations_return_not_found() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     let missing = installation_id("missing-prod");
 
     let activation_err = store
@@ -241,7 +287,7 @@ async fn missing_installation_mutations_return_not_found() {
 
 #[tokio::test]
 async fn manifest_hash_presence_mismatch_is_rejected() {
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     store.upsert_manifest(manifest("sha256:abc")).await.unwrap();
 
     let missing_ref_hash = store
@@ -253,12 +299,13 @@ async fn manifest_hash_presence_mismatch_is_rejected() {
         ExtensionInstallationError::ManifestHashMismatch { .. }
     ));
 
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     let manifest_without_hash = ExtensionManifestRecord::from_toml(
-        raw_legacy_capability_manifest(),
+        raw_capability_provider_manifest(),
         ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
         None,
+        &contracts(),
     )
     .unwrap();
     store.upsert_manifest(manifest_without_hash).await.unwrap();
@@ -415,7 +462,7 @@ async fn enabled_installations_sort_by_updated_at_desc_then_id() {
     let newer = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
         .unwrap()
         .with_timezone(&Utc);
-    let store = InMemoryExtensionInstallationStore::default();
+    let store = filesystem_store().await;
     store.upsert_manifest(manifest("sha256:abc")).await.unwrap();
 
     for (id, updated_at) in [
@@ -451,4 +498,66 @@ async fn enabled_installations_sort_by_updated_at_desc_then_id() {
         .map(|installation| installation.installation_id().as_str().to_owned())
         .collect();
     assert_eq!(ids, ["acme-tools-c", "acme-tools-a", "acme-tools-b"]);
+}
+
+#[tokio::test]
+async fn filesystem_store_persists_manifest_and_installation_as_rows() {
+    let filesystem: Arc<dyn RootFilesystem> = Arc::new(InMemoryBackend::new());
+    let root = VirtualPath::new("/system/extensions/.installations/reload").unwrap();
+    let store = FilesystemExtensionInstallationStore::load_at(
+        Arc::clone(&filesystem),
+        root.clone(),
+        HostPortCatalog::empty(),
+        ironclaw_extensions::HostApiContractRegistry::new(),
+    )
+    .await
+    .unwrap();
+
+    store
+        .upsert_manifest_and_installation(manifest("sha256:abc"), installation("sha256:abc"))
+        .await
+        .unwrap();
+
+    let manifest_rows = filesystem
+        .query(
+            &VirtualPath::new(format!("{}/manifests", root.as_str())).unwrap(),
+            &Filter::All,
+            Page::first(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(manifest_rows.len(), 1);
+    assert_eq!(
+        manifest_rows[0].entry.kind.as_ref().unwrap().as_str(),
+        "extension_manifest_record"
+    );
+    let installation_rows = filesystem
+        .query(
+            &VirtualPath::new(format!("{}/installations", root.as_str())).unwrap(),
+            &Filter::All,
+            Page::first(10),
+        )
+        .await
+        .unwrap();
+    assert_eq!(installation_rows.len(), 1);
+    assert_eq!(
+        installation_rows[0].entry.kind.as_ref().unwrap().as_str(),
+        "extension_installation_record"
+    );
+
+    let reloaded = FilesystemExtensionInstallationStore::load_at(
+        filesystem,
+        root,
+        HostPortCatalog::empty(),
+        ironclaw_extensions::HostApiContractRegistry::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        reloaded
+            .get_installation(&installation_id("acme-tools-prod"))
+            .await
+            .unwrap()
+            .is_some()
+    );
 }

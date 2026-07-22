@@ -144,6 +144,7 @@ TriggerFire {
     agent_id,
     project_id,
     prompt,
+    delivery_target,
 }
 ```
 
@@ -445,10 +446,9 @@ The trigger system must expose `trigger_create`, `trigger_list`, `trigger_remove
 - `trigger_remove` is caller-scoped delete.
 - `trigger_pause` and `trigger_resume` are caller-scoped state transitions
   (`Scheduled` <-> `Paused`); the poller does not fire a paused trigger.
-- Local-dev builds compiled with `libsql` store trigger records in the
-  local-dev libSQL database (`reborn-local-dev.db`) through the same
-  `TriggerRepository` contract used by production libSQL. Local-dev builds
-  without `libsql` keep the existing in-memory repository behavior.
+- Local-dev builds store trigger records in the local-dev libSQL database
+  (`reborn-local-dev.db`) through the same `TriggerRepository` contract used
+  by production libSQL.
 - A scheduled-trigger fire resolves a dedicated `scheduled_trigger` run
   profile, not the interactive default. That profile's capability surface
   denies `trigger_create`, `trigger_remove`, `trigger_pause`, and
@@ -484,16 +484,25 @@ the outbound delivery track. Product-facing outbound preference APIs and
 explicit provider-backed target tooling own discovery and approval-gated
 selection. Local-dev Reborn exposes model-visible outbound target
 discovery/selection capabilities that write the caller's final-reply
-preference. When a user asks to send routine or trigger results through a
-delivery product/channel, model-visible trigger surfaces must steer the model to
-discover and select an outbound delivery target before calling
-`trigger_create`; durable selection remains product-owned and trigger records
-still do not embed delivery targets.
+preference. A trigger may also persist an optional opaque `delivery_target` id
+selected from that creator-scoped registry; the fire carries the id without
+placing it in `TriggerFireIdentity`. At fire time, composition re-resolves the
+id for the creator, obtains the current typed reply-target binding, and sends
+ordinary results through the outbound delivery-resolution path. Missing,
+foreign, disconnected, or removed targets fail closed. Triggers without an
+explicit target retain the user-wide preference fallback.
+
+When a user asks to send routine or trigger results through a delivery
+product/channel, model-visible trigger surfaces must steer the model to discover
+and select an outbound delivery target before calling `trigger_create`.
 
 - Trigger ingress identity must not include delivery targets.
 - Trigger record identity must not include delivery targets.
 - Trigger fire identity must not include delivery targets.
-- When delivery is added, it must flow through the delivery-resolution/outbound contract track, not through trigger ingress identity.
+- A trigger record and fire may carry the optional opaque target id outside
+  their identity fields.
+- Delivery flows through the delivery-resolution/outbound contract track, not
+  through trigger ingress identity.
 
 V1 acceptance does not require external delivery. A valid V1 trigger fire is one that submits a cron-backed synthetic inbound turn and persists through the normal Reborn turn path.
 

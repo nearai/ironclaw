@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{CapabilityId, ResourceScope, RuntimeHttpEgressRequest};
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
-use ironclaw_turns::{GateRef, run_profile::CapabilityInvocation};
+use ironclaw_turns::{GateRef, run_profile::LoopRequest};
 
 use super::super::doubles::RecordingTestCapabilityPort;
 use super::{HarnessResult, HostRuntimeCapabilityHarness};
@@ -21,7 +21,7 @@ pub(crate) enum HarnessCapabilityRecorder {
 }
 
 impl HarnessCapabilityRecorder {
-    pub(crate) fn invocations(&self) -> Vec<CapabilityInvocation> {
+    pub(crate) fn invocations(&self) -> Vec<LoopRequest> {
         match self {
             Self::Recording(port) => port.invocations(),
             Self::HostRuntime(harness) => harness.invocations(),
@@ -93,6 +93,19 @@ impl HarnessCapabilityRecorder {
         match self {
             Self::Recording(_) => Vec::new(),
             Self::HostRuntime(harness) => harness.network_http_requests(),
+        }
+    }
+
+    pub(crate) fn install_network_response_script(
+        &self,
+        status: u16,
+        body: Vec<u8>,
+    ) -> HarnessResult<()> {
+        match self {
+            Self::Recording(_) => {
+                Err("recording capability port has no network response script".into())
+            }
+            Self::HostRuntime(harness) => harness.install_network_response_script(status, body),
         }
     }
 

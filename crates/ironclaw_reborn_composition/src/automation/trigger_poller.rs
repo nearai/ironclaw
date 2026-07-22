@@ -1,5 +1,4 @@
 use std::collections::VecDeque;
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -22,7 +21,22 @@ pub(crate) use crate::automation::trigger_poller_trusted_submit::ConversationCon
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::automation::trigger_poller_trusted_submit::TenantScopedTrustedTriggerFireAuthorizer;
 use crate::runtime_input::TriggerPollerSettings;
-use ironclaw_channel_delivery::PostSubmitDeliveryHook;
+use ironclaw_triggers::TriggerFire;
+use ironclaw_turns::{TurnRunId, TurnScope};
+
+/// Composition-owned hook invoked by the trigger poller after a successful
+/// fire submission has been durably settled in trigger storage. The
+/// composition root wires a channel-host implementation or a no-op.
+///
+/// The poller invokes this hook from a detached task after the accepted fire
+/// appears as settled, so hook latency cannot delay settlement and delivery
+/// cannot precede the persisted run/thread mapping.
+#[async_trait::async_trait]
+pub trait PostSubmitDeliveryHook: Send + Sync {
+    /// Called with the original trigger fire, the submitted run id, and the
+    /// turn scope the run was submitted under.
+    async fn on_trigger_submitted(&self, fire: TriggerFire, run_id: TurnRunId, scope: TurnScope);
+}
 
 mod active_run_lookup;
 pub(crate) use active_run_lookup::SnapshotActiveRunLookup;
@@ -32,7 +46,6 @@ pub(crate) const TRIGGER_POLLER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs
 pub(crate) struct TriggerPollerRuntimeHandle {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
-    post_submit_tasks: Arc<PostSubmitDeliveryTaskOwner>,
 }
 
 impl TriggerPollerRuntimeHandle {
@@ -61,7 +74,6 @@ impl TriggerPollerRuntimeHandle {
                 }
             }
         }
-        self.post_submit_tasks.drain(timeout).await;
     }
 }
 
@@ -84,12 +96,9 @@ pub(crate) fn spawn_trigger_poller(
     }
     settings.worker.validate()?;
     let cancel = CancellationToken::new();
-    let post_submit_observer = Arc::new(PostSubmitHookObserver::new(
-        deps.post_submit_hook_slot,
-        cancel.clone(),
-    ));
-    let post_submit_tasks = Arc::clone(&post_submit_observer.task_owner);
-    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = post_submit_observer;
+    let fire_settlement_observer: Arc<dyn TriggerFireSettlementObserver> = Arc::new(
+        PostSubmitHookObserver::new(deps.post_submit_hook_slot, cancel.clone()),
+    );
     let trusted_submitter = deps.trusted_submitter;
     let worker = TriggerPollerWorker::new(
         settings.worker.clone(),
@@ -106,88 +115,19 @@ pub(crate) fn spawn_trigger_poller(
     let handle = tokio::spawn(async move {
         run_trigger_poller(worker, settings, task_cancel).await;
     });
-    Ok(Some(TriggerPollerRuntimeHandle {
-        cancel,
-        handle,
-        post_submit_tasks,
-    }))
+    Ok(Some(TriggerPollerRuntimeHandle { cancel, handle }))
 }
 
 const POST_SUBMIT_HOOK_PENDING_CAPACITY: usize = 256;
 
-#[derive(Default)]
-struct PostSubmitDeliveryTaskOwner {
-    tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
-}
-
-impl PostSubmitDeliveryTaskOwner {
-    async fn spawn(
-        &self,
-        hook: Arc<dyn PostSubmitDeliveryHook>,
-        event: TriggerAcceptedFireSettlement,
-    ) {
-        self.spawn_task(run_post_submit_hook(hook, event)).await;
-    }
-
-    async fn spawn_task(&self, task: impl Future<Output = ()> + Send + 'static) {
-        let mut tasks = self.tasks.lock().await;
-        while let Some(joined) = tasks.try_join_next() {
-            if let Err(error) = joined {
-                tracing::debug!(%error, "post-submit delivery task join failed");
-            }
-        }
-        if tasks.len() >= POST_SUBMIT_HOOK_PENDING_CAPACITY
-            && let Some(joined) = tasks.join_next().await
-            && let Err(error) = joined
-        {
-            tracing::debug!(%error, "post-submit delivery task join failed");
-        }
-        tasks.spawn(task);
-    }
-
-    async fn drain(&self, timeout: Duration) {
-        let drain = async {
-            let mut tasks = self.tasks.lock().await;
-            while let Some(joined) = tasks.join_next().await {
-                if let Err(error) = joined {
-                    tracing::debug!(%error, "post-submit delivery task join failed during drain");
-                }
-            }
-        };
-        if tokio::time::timeout(timeout, drain).await.is_err() {
-            tracing::warn!(
-                ?timeout,
-                "post-submit delivery tasks did not drain before shutdown timeout; aborting"
-            );
-            let mut tasks = self.tasks.lock().await;
-            tasks.abort_all();
-            while let Some(joined) = tasks.join_next().await {
-                if let Err(error) = joined
-                    && error.is_panic()
-                {
-                    tracing::debug!(%error, "aborted post-submit delivery task panicked");
-                }
-            }
-        }
-    }
-}
-
-async fn run_post_submit_hook(
+fn spawn_post_submit_delivery(
     hook: Arc<dyn PostSubmitDeliveryHook>,
     event: TriggerAcceptedFireSettlement,
 ) {
-    let run_id = event.run_id;
-    if let Err(error) = hook
-        .on_trigger_submitted(event.fire, run_id, event.turn_scope)
-        .await
-    {
-        tracing::warn!(
-            target = "ironclaw::reborn::trigger_poller",
-            %run_id,
-            %error,
-            "managed post-submit delivery did not reach an authoritative terminal state"
-        );
-    }
+    tokio::spawn(async move {
+        hook.on_trigger_submitted(event.fire, event.run_id, event.turn_scope)
+            .await;
+    });
 }
 
 /// Bridges trigger-domain settlement notifications to the composition-owned
@@ -198,7 +138,6 @@ pub(crate) struct PostSubmitHookObserver {
     pending: Arc<Mutex<VecDeque<TriggerAcceptedFireSettlement>>>,
     drain_scheduled: Arc<AtomicBool>,
     drain_cancel: CancellationToken,
-    task_owner: Arc<PostSubmitDeliveryTaskOwner>,
 }
 
 impl PostSubmitHookObserver {
@@ -211,11 +150,10 @@ impl PostSubmitHookObserver {
             pending: Arc::new(Mutex::new(VecDeque::new())),
             drain_scheduled: Arc::new(AtomicBool::new(false)),
             drain_cancel,
-            task_owner: Arc::new(PostSubmitDeliveryTaskOwner::default()),
         }
     }
 
-    async fn buffer_until_hook_installed(&self, event: TriggerAcceptedFireSettlement) {
+    fn buffer_until_hook_installed(&self, event: TriggerAcceptedFireSettlement) {
         {
             let mut pending = self
                 .pending
@@ -231,10 +169,10 @@ impl PostSubmitHookObserver {
             }
             pending.push_back(event);
         }
-        self.ensure_drain_task().await;
+        self.ensure_drain_task();
     }
 
-    async fn ensure_drain_task(&self) {
+    fn ensure_drain_task(&self) {
         if self
             .drain_scheduled
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -247,42 +185,30 @@ impl PostSubmitHookObserver {
         let pending = Arc::clone(&self.pending);
         let drain_scheduled = Arc::clone(&self.drain_scheduled);
         let drain_cancel = self.drain_cancel.clone();
-        let owner = Arc::clone(&self.task_owner);
-        owner
-            .spawn_task(async move {
-                loop {
-                    if let Some(hook) = hook_slot.get().cloned() {
-                        let buffered = {
-                            let mut pending = pending
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner());
-                            pending.drain(..).collect::<Vec<_>>()
-                        };
-                        // The startup buffer is bounded. A local joined set
-                        // preserves concurrency while the owner retains one
-                        // shutdown handle for the complete drain operation.
-                        let mut deliveries = tokio::task::JoinSet::new();
-                        for event in buffered {
-                            deliveries.spawn(run_post_submit_hook(Arc::clone(&hook), event));
-                        }
-                        while let Some(joined) = deliveries.join_next().await {
-                            if let Err(error) = joined {
-                                tracing::debug!(%error, "buffered post-submit delivery task join failed");
-                            }
-                        }
+        tokio::spawn(async move {
+            loop {
+                if let Some(hook) = hook_slot.get().cloned() {
+                    let buffered = {
+                        let mut pending = pending
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        pending.drain(..).collect::<Vec<_>>()
+                    };
+                    for event in buffered {
+                        spawn_post_submit_delivery(Arc::clone(&hook), event);
+                    }
+                    drain_scheduled.store(false, Ordering::Release);
+                    return;
+                }
+                tokio::select! {
+                    _ = drain_cancel.cancelled() => {
                         drain_scheduled.store(false, Ordering::Release);
                         return;
                     }
-                    tokio::select! {
-                        _ = drain_cancel.cancelled() => {
-                            drain_scheduled.store(false, Ordering::Release);
-                            return;
-                        }
-                        _ = tokio::time::sleep(Duration::from_millis(25)) => {}
-                    }
+                    _ = tokio::time::sleep(Duration::from_millis(25)) => {}
                 }
-            })
-            .await;
+            }
+        });
     }
 }
 
@@ -294,10 +220,10 @@ impl TriggerFireSettlementObserver for PostSubmitHookObserver {
                 target = "ironclaw::reborn::trigger_poller",
                 "post-submit hook not installed; buffering trigger settlement"
             );
-            self.buffer_until_hook_installed(event).await;
+            self.buffer_until_hook_installed(event);
             return;
         };
-        self.task_owner.spawn(hook, event).await;
+        spawn_post_submit_delivery(hook, event);
     }
 }
 
@@ -396,11 +322,7 @@ mod tests {
             task_cancel.cancelled().await;
             std::future::pending::<()>().await;
         });
-        let runtime_handle = TriggerPollerRuntimeHandle {
-            cancel,
-            handle,
-            post_submit_tasks: Arc::new(PostSubmitDeliveryTaskOwner::default()),
-        };
+        let runtime_handle = TriggerPollerRuntimeHandle { cancel, handle };
 
         runtime_handle.shutdown(Duration::from_millis(1)).await;
     }
@@ -412,6 +334,7 @@ mod tests {
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
+        use super::super::PostSubmitDeliveryHook;
         use async_trait::async_trait;
         use chrono::Utc;
         use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
@@ -424,7 +347,6 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         use super::super::{POST_SUBMIT_HOOK_PENDING_CAPACITY, PostSubmitHookObserver};
-        use ironclaw_channel_delivery::PostSubmitDeliveryHook;
 
         #[derive(Default)]
         struct RecordingHook {
@@ -458,13 +380,12 @@ mod tests {
                 fire: TriggerFire,
                 run_id: TurnRunId,
                 scope: TurnScope,
-            ) -> Result<(), ironclaw_channel_delivery::PostSubmitDeliveryError> {
+            ) {
                 self.calls
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .push((fire, run_id, scope));
                 self.notify.notify_one();
-                Ok(())
             }
         }
 
@@ -481,11 +402,10 @@ mod tests {
                 _fire: TriggerFire,
                 _run_id: TurnRunId,
                 _scope: TurnScope,
-            ) -> Result<(), ironclaw_channel_delivery::PostSubmitDeliveryError> {
+            ) {
                 self.entered.notify_one();
                 self.release.notified().await;
                 self.completed.store(true, Ordering::SeqCst);
-                Ok(())
             }
         }
 
@@ -662,22 +582,14 @@ mod tests {
                 "hook must still be blocked until the test releases it"
             );
 
-            let task_owner = Arc::clone(&observer.task_owner);
-            let mut drain = tokio::spawn(async move {
-                task_owner.drain(Duration::from_secs(1)).await;
-            });
-            assert!(
-                tokio::time::timeout(Duration::from_millis(50), &mut drain)
-                    .await
-                    .is_err(),
-                "the lifecycle owner must retain and await the in-flight hook"
-            );
             release.notify_one();
-            tokio::time::timeout(Duration::from_secs(1), drain)
-                .await
-                .expect("hook task should drain after release")
-                .expect("drain task joins");
-            assert!(completed.load(Ordering::SeqCst));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !completed.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("hook task should complete after release");
         }
 
         #[tokio::test]

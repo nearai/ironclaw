@@ -8,7 +8,7 @@
 use ironclaw_product_adapters::{
     AuthPromptView, DeclaredEgressHost, EgressCredentialHandle, EgressHeader, EgressMethod,
     EgressPath, EgressRequest, ExternalConversationRef, FinalReplyView, GatePromptView,
-    ProductOutboundTarget, ProgressKind, ProgressUpdateView, WorkspaceFile,
+    ProductOutboundTarget, ProgressKind, ProgressUpdateView,
 };
 use ironclaw_turns::ReplyTargetBindingRef;
 use thiserror::Error;
@@ -19,106 +19,6 @@ use crate::payload::TELEGRAM_API_HOST;
 pub enum TelegramRenderError {
     #[error("reply target {target} did not parse as Telegram chat#message: {reason}")]
     InvalidReplyTarget { target: String, reason: String },
-    #[error("attachment could not be rendered: {reason}")]
-    Attachment { reason: String },
-}
-
-/// Render one workspace file as a Telegram `sendDocument` multipart request.
-pub fn render_document(
-    reply: &TelegramReplyTarget,
-    attachment: &WorkspaceFile,
-    credential_handle: EgressCredentialHandle,
-) -> Result<EgressRequest, TelegramRenderError> {
-    let boundary = multipart_boundary(&attachment.bytes)?;
-    let mut body = Vec::new();
-    push_text_part(&mut body, &boundary, "chat_id", &reply.chat_id.to_string());
-    if let Some(topic_id) = reply.topic_id {
-        push_text_part(
-            &mut body,
-            &boundary,
-            "message_thread_id",
-            &topic_id.to_string(),
-        );
-    }
-    if let Some(reply_to) = reply.reply_message_id {
-        push_text_part(
-            &mut body,
-            &boundary,
-            "reply_to_message_id",
-            &reply_to.to_string(),
-        );
-    }
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    let filename = attachment
-        .filename
-        .as_deref()
-        .unwrap_or("attachment")
-        .replace('"', "_");
-    body.extend_from_slice(
-        format!(
-            "Content-Disposition: form-data; name=\"document\"; filename=\"{filename}\"\r\nContent-Type: {}\r\n\r\n",
-            attachment.mime_type
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(&attachment.bytes);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-
-    let host = DeclaredEgressHost::new(TELEGRAM_API_HOST).map_err(|error| {
-        TelegramRenderError::Attachment {
-            reason: error.to_string(),
-        }
-    })?;
-    let path =
-        EgressPath::new("/sendDocument").map_err(|error| TelegramRenderError::Attachment {
-            reason: error.to_string(),
-        })?;
-    let content_type = EgressHeader::new(
-        "content-type",
-        format!("multipart/form-data; boundary={boundary}"),
-    )
-    .map_err(|error| TelegramRenderError::Attachment {
-        reason: error.to_string(),
-    })?;
-    Ok(EgressRequest::new(host, EgressMethod::post(), path)
-        .with_header(content_type)
-        .with_body(body)
-        .with_credential_handle(Some(credential_handle)))
-}
-
-fn multipart_boundary(bytes: &[u8]) -> Result<String, TelegramRenderError> {
-    for _ in 0..10 {
-        let candidate = format!("ironclaw-attachment-{}", uuid::Uuid::new_v4());
-        if !bytes
-            .windows(candidate.len())
-            .any(|window| window == candidate.as_bytes())
-        {
-            return Ok(candidate);
-        }
-    }
-    Err(TelegramRenderError::Attachment {
-        reason: "could not generate a collision-free multipart boundary".to_string(),
-    })
-}
-
-#[cfg(test)]
-mod attachment_tests {
-    use super::*;
-
-    #[test]
-    fn multipart_boundaries_are_unpredictable_for_identical_bytes() {
-        let bytes = b"same attachment bytes";
-        assert_ne!(multipart_boundary(bytes), multipart_boundary(bytes)); // safety: test-only assertion proves repeated renders cannot reuse a predictable boundary.
-    }
-}
-
-fn push_text_part(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
-    body.extend_from_slice(
-        format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
-        )
-        .as_bytes(),
-    );
 }
 
 /// Reply-target encoding used by Telegram outbound. The workflow stores the

@@ -13,9 +13,8 @@
 //! usable bearer, then revoked) is end-of-pipeline.
 //!
 //! Gated on `test-support` because the test wires
-//! `InMemorySessionStore` + `EmailUserDirectory` + the test-only
-//! `GitHubProvider::with_endpoints` constructor, all of which only
-//! exist behind that feature.
+//! `EmailUserDirectory` plus the test-only `GitHubProvider::with_endpoints`
+//! constructor, which only exist behind that feature.
 
 #![cfg(feature = "test-support")]
 
@@ -34,8 +33,8 @@ use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::TenantId;
 use ironclaw_webui::{
-    EmailUserDirectory, GitHubOAuthConfig, GitHubProvider, InMemorySessionStore, OAuthProvider,
-    OAuthRouterConfig, SessionStore, webui_v2_auth_router,
+    EmailUserDirectory, GitHubOAuthConfig, GitHubProvider, OAuthProvider, OAuthRouterConfig,
+    SignedTokenSessionStore, signed_session_store, webui_v2_auth_router,
 };
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -137,9 +136,16 @@ fn tenant() -> TenantId {
     TenantId::new("tenant-a").expect("tenant")
 }
 
+fn session_store() -> Arc<SignedTokenSessionStore> {
+    signed_session_store(
+        &SecretString::from("operator-secret".to_string()),
+        &tenant(),
+    )
+}
+
 fn build_router(
     providers: Vec<Arc<dyn OAuthProvider>>,
-    session_store: Arc<dyn SessionStore>,
+    session_store: Arc<SignedTokenSessionStore>,
 ) -> axum::Router {
     let config = OAuthRouterConfig::new(
         tenant(),
@@ -255,8 +261,7 @@ async fn redeem_ticket(router: &axum::Router, ticket: &str) -> String {
 #[tokio::test]
 async fn providers_lists_configured_github() {
     let (addr, _server) = spawn_stub_github(StubGitHub::octocat()).await;
-    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
-    let router = build_router(vec![github_provider(addr)], store);
+    let router = build_router(vec![github_provider(addr)], session_store());
 
     let resp = router
         .oneshot(
@@ -279,8 +284,7 @@ async fn providers_lists_configured_github() {
 #[tokio::test]
 async fn login_redirects_to_github_with_state_and_scope_and_no_pkce() {
     let (addr, _server) = spawn_stub_github(StubGitHub::octocat()).await;
-    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
-    let router = build_router(vec![github_provider(addr)], store);
+    let router = build_router(vec![github_provider(addr)], session_store());
 
     let resp = router
         .oneshot(
@@ -313,9 +317,8 @@ async fn login_redirects_to_github_with_state_and_scope_and_no_pkce() {
 #[tokio::test]
 async fn callback_success_mints_session_for_primary_verified_email() {
     let (addr, _server) = spawn_stub_github(StubGitHub::octocat()).await;
-    let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
-    let session_store: Arc<dyn SessionStore> = store_inner.clone();
-    let router = build_router(vec![github_provider(addr)], session_store);
+    let store = session_store();
+    let router = build_router(vec![github_provider(addr)], store.clone());
 
     let landing = login_and_callback(&router).await;
     assert!(landing.starts_with("/?login_ticket="), "got {landing}");
@@ -323,14 +326,12 @@ async fn callback_success_mints_session_for_primary_verified_email() {
         !landing.contains("#token="),
         "callback Location must not carry the bearer: {landing}",
     );
-    assert_eq!(store_inner.len(), 1, "session should be persisted");
-
     // Exchange the one-time ticket for a usable bearer, then confirm
     // the session was minted for the PRIMARY VERIFIED email (not the
     // unverified one and not the empty profile email).
     let ticket = ticket_from_landing(&landing);
     let bearer = redeem_ticket(&router, &ticket).await;
-    let session = store_inner
+    let session = store
         .lookup(&bearer)
         .await
         .expect("lookup")
@@ -386,15 +387,14 @@ async fn callback_with_unverified_emails_mints_session_for_provider_sub() {
         },
     ];
     let (addr, _server) = spawn_stub_github(stub).await;
-    let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
-    let session_store: Arc<dyn SessionStore> = store_inner.clone();
-    let router = build_router(vec![github_provider(addr)], session_store);
+    let store = session_store();
+    let router = build_router(vec![github_provider(addr)], store.clone());
 
     let landing = login_and_callback(&router).await;
     assert!(landing.starts_with("/?login_ticket="), "got {landing}");
     let ticket = ticket_from_landing(&landing);
     let bearer = redeem_ticket(&router, &ticket).await;
-    let session = store_inner
+    let session = store
         .lookup(&bearer)
         .await
         .expect("lookup")
@@ -411,8 +411,7 @@ async fn callback_with_unverified_emails_mints_session_for_provider_sub() {
 #[tokio::test]
 async fn callback_with_provider_error_redirects_with_denied() {
     let (addr, _server) = spawn_stub_github(StubGitHub::octocat()).await;
-    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
-    let router = build_router(vec![github_provider(addr)], store);
+    let router = build_router(vec![github_provider(addr)], session_store());
 
     // GitHub appends `?error=access_denied` when the user rejects the
     // consent screen. No state is consumed; the SPA must see a
@@ -442,7 +441,6 @@ async fn callback_exchange_failure_redirects_with_exchange_failed() {
     );
     let (addr, _server) = spawn_router(failing).await;
 
-    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let provider: Arc<dyn OAuthProvider> = Arc::new(
         GitHubProvider::with_endpoints(
             GitHubOAuthConfig {
@@ -457,7 +455,7 @@ async fn callback_exchange_failure_redirects_with_exchange_failed() {
         )
         .expect("build provider"),
     );
-    let router = build_router(vec![provider], store);
+    let router = build_router(vec![provider], session_store());
 
     let login = router
         .clone()
@@ -498,8 +496,7 @@ async fn callback_with_unknown_state_redirects_with_invalid_state_error() {
     // pending-flow store, or fabricated) must fail closed with the
     // opaque `invalid_state` code and never reach the provider.
     let (addr, _server) = spawn_stub_github(StubGitHub::octocat()).await;
-    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
-    let router = build_router(vec![github_provider(addr)], store);
+    let router = build_router(vec![github_provider(addr)], session_store());
 
     let resp = router
         .oneshot(
@@ -525,8 +522,7 @@ async fn callback_with_state_replay_fails_closed() {
     // consumed by a successful callback must not mint a second session
     // when replayed against the same router.
     let (addr, _server) = spawn_stub_github(StubGitHub::octocat()).await;
-    let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
-    let router = build_router(vec![github_provider(addr)], store_inner.clone());
+    let router = build_router(vec![github_provider(addr)], session_store());
 
     let login = router
         .clone()
@@ -558,7 +554,6 @@ async fn callback_with_state_replay_fails_closed() {
         .expect("oneshot");
     assert_eq!(first.status(), StatusCode::SEE_OTHER);
     assert!(header_str(&first, header::LOCATION).starts_with("/?login_ticket="));
-    assert_eq!(store_inner.len(), 1);
 
     // Replaying the SAME state must fail closed — no second session.
     let replay = router
@@ -578,11 +573,6 @@ async fn callback_with_state_replay_fails_closed() {
     assert_eq!(
         header_str(&replay, header::LOCATION),
         "/?login_error=invalid_state"
-    );
-    assert_eq!(
-        store_inner.len(),
-        1,
-        "replayed state must NOT mint a second session"
     );
 }
 
@@ -606,7 +596,6 @@ async fn callback_profile_fetch_failure_redirects_with_exchange_failed() {
         .route("/user", get(|| async { StatusCode::UNAUTHORIZED }));
     let (addr, _server) = spawn_router(server).await;
 
-    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let provider: Arc<dyn OAuthProvider> = Arc::new(
         GitHubProvider::with_endpoints(
             GitHubOAuthConfig {
@@ -621,7 +610,7 @@ async fn callback_profile_fetch_failure_redirects_with_exchange_failed() {
         )
         .expect("build provider"),
     );
-    let router = build_router(vec![provider], store);
+    let router = build_router(vec![provider], session_store());
 
     let login = router
         .clone()
@@ -672,7 +661,6 @@ async fn callback_exchange_timeout_redirects_with_exchange_failed() {
     );
     let (addr, _server) = spawn_router(blackhole).await;
 
-    let store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::new());
     let provider: Arc<dyn OAuthProvider> = Arc::new(
         GitHubProvider::with_endpoints(
             GitHubOAuthConfig {
@@ -688,7 +676,7 @@ async fn callback_exchange_timeout_redirects_with_exchange_failed() {
         .expect("build provider")
         .with_exchange_budget(Duration::from_millis(150)),
     );
-    let router = build_router(vec![provider], store);
+    let router = build_router(vec![provider], session_store());
 
     let login = router
         .clone()
@@ -728,9 +716,8 @@ async fn callback_exchange_timeout_redirects_with_exchange_failed() {
 #[tokio::test]
 async fn logout_revokes_the_minted_session() {
     let (addr, _server) = spawn_stub_github(StubGitHub::octocat()).await;
-    let store_inner: Arc<InMemorySessionStore> = Arc::new(InMemorySessionStore::new());
-    let session_store: Arc<dyn SessionStore> = store_inner.clone();
-    let router = build_router(vec![github_provider(addr)], session_store);
+    let store = session_store();
+    let router = build_router(vec![github_provider(addr)], store.clone());
 
     let landing = login_and_callback(&router).await;
     let ticket = ticket_from_landing(&landing);
@@ -738,7 +725,7 @@ async fn logout_revokes_the_minted_session() {
 
     // Sanity: the bearer authenticates before logout.
     assert!(
-        store_inner.lookup(&bearer).await.expect("lookup").is_some(),
+        store.lookup(&bearer).await.expect("lookup").is_some(),
         "session must exist before logout",
     );
 
@@ -759,7 +746,7 @@ async fn logout_revokes_the_minted_session() {
     // After logout the bearer must no longer resolve to a session —
     // subsequent API / SSE / WebSocket access is denied.
     assert!(
-        store_inner.lookup(&bearer).await.expect("lookup").is_none(),
+        store.lookup(&bearer).await.expect("lookup").is_none(),
         "session must be revoked after logout",
     );
 }

@@ -1,6 +1,4 @@
-//! Stateless, HMAC-signed session login wiring — the host-owned,
-//! production-suitable counterpart to the dev-only
-//! [`InMemorySessionStore`](crate::session::InMemorySessionStore).
+//! Stateless, HMAC-signed session login wiring.
 //!
 //! [`build_signed_session_login`] assembles the pieces the
 //! `ironclaw-reborn serve` binary needs to mount the OAuth login
@@ -8,10 +6,10 @@
 //! ids/secrets, base URL, operator secret) plus a host-owned
 //! [`UserDirectory`] and calls the builder — it does not own the
 //! auth/session model. That keeps the rule from this crate's guardrails
-//! intact: `WebuiAuthenticator` / `SessionStore` implementations live
-//! here, not in the command crate.
+//! intact: the host-owned WebUI authentication model lives here, not in
+//! the command crate.
 //!
-//! - [`SignedTokenSessionStore`] — a `SessionStore` whose bearer token
+//! - [`SignedTokenSessionStore`] — a session backend whose bearer token
 //!   carries the tenant/user/expiry, HMAC-SHA256-signed with a key
 //!   derived from the operator secret. Validation needs no persistence,
 //!   so tokens survive a restart as long as the operator secret is
@@ -19,8 +17,7 @@
 //!   denylist, so `POST /auth/logout` truly invalidates the presented
 //!   bearer rather than returning `204` while the token stays live. The
 //!   denylist is process-local and clears on restart, after which a
-//!   not-yet-expired revoked token would validate again; a deployment
-//!   needing durable revocation supplies a DB-backed `SessionStore`.
+//!   not-yet-expired revoked token would validate again.
 //! - The `user_directory` (host-supplied via `SignedSessionLoginConfig`)
 //!   maps each authenticated OAuth profile to a `UserId`. A multi-user
 //!   host injects a DB-backed directory (a distinct user per identity);
@@ -48,9 +45,7 @@ use uuid::Uuid;
 use crate::auth::{
     OAuthProvider, OAuthRouterConfig, PublicRouteMount, UserDirectory, webui_v2_auth_router,
 };
-use crate::session::{
-    SessionAuthenticator, SessionId, SessionRecord, SessionStore, SessionStoreError,
-};
+use crate::session::{SessionAuthenticator, SessionId, SessionRecord, SessionStoreError};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -96,9 +91,8 @@ pub fn build_signed_session_login(
         return None;
     }
 
-    let session_store: Arc<dyn SessionStore> = Arc::new(
-        SignedTokenSessionStore::from_operator_secret(&config.operator_secret, &config.tenant_id),
-    );
+    let session_store =
+        SignedTokenSessionStore::from_operator_secret(&config.operator_secret, &config.tenant_id);
     let session_authenticator: Arc<dyn WebuiAuthenticator> =
         Arc::new(SessionAuthenticator::new(session_store.clone()));
 
@@ -130,10 +124,10 @@ pub fn build_signed_session_login(
 /// `exp`).
 const MAX_REVOKED_ENTRIES: usize = 4096;
 
-/// Stateless `SessionStore` whose "record" is the cryptographic
+/// Stateless session backend whose "record" is the cryptographic
 /// signature itself (HMAC-SHA256 over the base64url payload), plus a
 /// process-local denylist that makes `revoke` (logout) effective.
-struct SignedTokenSessionStore {
+pub struct SignedTokenSessionStore {
     key: Vec<u8>,
     /// Host tenant this store is bound to. The signing key is derived from
     /// it, and `lookup` re-checks it as defense in depth.
@@ -146,7 +140,7 @@ struct SignedTokenSessionStore {
     revoked: RwLock<HashMap<String, i64>>,
 }
 
-/// Build a signed-token [`SessionStore`] for minting/validating bearers from an
+/// Build a signed-token store for minting/validating bearers from an
 /// operator secret + tenant. The store is stateless and deterministic in the
 /// signing key, so an instance built here mints tokens that validate under any
 /// other instance sharing the same operator secret + tenant (e.g. the SSO login
@@ -156,11 +150,8 @@ struct SignedTokenSessionStore {
 pub fn signed_session_store(
     operator_secret: &SecretString,
     tenant_id: &TenantId,
-) -> std::sync::Arc<dyn SessionStore> {
-    std::sync::Arc::new(SignedTokenSessionStore::from_operator_secret(
-        operator_secret,
-        tenant_id,
-    ))
+) -> Arc<SignedTokenSessionStore> {
+    SignedTokenSessionStore::from_operator_secret(operator_secret, tenant_id)
 }
 
 impl SignedTokenSessionStore {
@@ -171,7 +162,7 @@ impl SignedTokenSessionStore {
     /// one operator secret but serve different tenants derive different
     /// keys, so neither can validate the other's session tokens — a token
     /// minted for one tenant fails the HMAC check on the other.
-    fn from_operator_secret(secret: &SecretString, tenant_id: &TenantId) -> Self {
+    pub fn from_operator_secret(secret: &SecretString, tenant_id: &TenantId) -> Arc<Self> {
         let mut hasher = Sha256::new();
         hasher.update(b"ironclaw-reborn-webui-session-v1::");
         // Length-prefix the tenant so its bytes can never be confused with
@@ -182,11 +173,11 @@ impl SignedTokenSessionStore {
         hasher.update(tenant_bytes);
         hasher.update(b"::");
         hasher.update(secret.expose_secret().as_bytes());
-        Self {
+        Arc::new(Self {
             key: hasher.finalize().to_vec(),
             tenant_id: tenant_id.clone(),
             revoked: RwLock::new(HashMap::new()),
-        }
+        })
     }
 
     /// Fresh keyed MAC. `new_from_slice` is infallible for HMAC — it
@@ -214,27 +205,7 @@ impl SignedTokenSessionStore {
         let payload_json = URL_SAFE_NO_PAD.decode(payload_b64).ok()?;
         serde_json::from_slice::<TokenPayload>(&payload_json).ok()
     }
-}
-
-/// Wire payload encoded into the bearer token. Field names are short to
-/// keep the token compact; this struct is never persisted.
-#[derive(Serialize, Deserialize)]
-struct TokenPayload {
-    sid: String,
-    tenant: String,
-    user: String,
-    iat: i64,
-    exp: i64,
-    /// Operator-capability stamp (see `SessionRecord::operator`). Defaults
-    /// to non-operator so pre-existing tokens fail closed rather than
-    /// retroactively escalating.
-    #[serde(default)]
-    op: bool,
-}
-
-#[async_trait]
-impl SessionStore for SignedTokenSessionStore {
-    async fn create_session(
+    pub async fn create_session(
         &self,
         tenant_id: TenantId,
         user_id: UserId,
@@ -268,7 +239,10 @@ impl SessionStore for SignedTokenSessionStore {
         Ok(SecretString::from(format!("{payload_b64}.{signature}")))
     }
 
-    async fn lookup(&self, candidate: &str) -> Result<Option<SessionRecord>, SessionStoreError> {
+    pub async fn lookup(
+        &self,
+        candidate: &str,
+    ) -> Result<Option<SessionRecord>, SessionStoreError> {
         let Some(payload) = self.verify(candidate) else {
             return Ok(None);
         };
@@ -311,14 +285,14 @@ impl SessionStore for SignedTokenSessionStore {
         }))
     }
 
-    async fn revoke(&self, candidate: &str) -> Result<(), SessionStoreError> {
+    pub async fn revoke(&self, candidate: &str) {
         // Only a validly-signed, not-yet-expired token carries a session
         // id worth denying; a garbage or already-expired bearer has nothing
         // to revoke, so logout is a silent success.
         if let Some(payload) = self.verify(candidate) {
             let now = Utc::now().timestamp();
             if payload.exp <= now {
-                return Ok(());
+                return;
             }
             let mut guard = self.revoked.write();
             // Common case: O(1) insert. Only when the map reaches the cap do
@@ -340,8 +314,23 @@ impl SessionStore for SignedTokenSessionStore {
             }
             guard.insert(payload.sid, payload.exp);
         }
-        Ok(())
     }
+}
+
+/// Wire payload encoded into the bearer token. Field names are short to
+/// keep the token compact; this struct is never persisted.
+#[derive(Serialize, Deserialize)]
+struct TokenPayload {
+    sid: String,
+    tenant: String,
+    user: String,
+    iat: i64,
+    exp: i64,
+    /// Operator-capability stamp (see `SessionRecord::operator`). Defaults
+    /// to non-operator so pre-existing tokens fail closed rather than
+    /// retroactively escalating.
+    #[serde(default)]
+    op: bool,
 }
 
 /// `WebuiAuthenticator` that accepts a bearer recognized by EITHER the
@@ -397,14 +386,14 @@ mod tests {
         TenantId::new("tenant-a").expect("tenant")
     }
 
-    fn signed_store(secret: &str) -> SignedTokenSessionStore {
+    fn signed_store(secret: &str) -> Arc<SignedTokenSessionStore> {
         SignedTokenSessionStore::from_operator_secret(
             &SecretString::from(secret.to_string()),
             &tenant(),
         )
     }
 
-    fn signed_store_for(secret: &str, tenant_id: &TenantId) -> SignedTokenSessionStore {
+    fn signed_store_for(secret: &str, tenant_id: &TenantId) -> Arc<SignedTokenSessionStore> {
         SignedTokenSessionStore::from_operator_secret(
             &SecretString::from(secret.to_string()),
             tenant_id,
@@ -534,7 +523,7 @@ mod tests {
         let raw = token.expose_secret().to_string();
         assert!(store.lookup(&raw).await.expect("lookup").is_some());
 
-        store.revoke(&raw).await.expect("revoke");
+        store.revoke(&raw).await;
         assert!(
             store.lookup(&raw).await.expect("lookup").is_none(),
             "a revoked token must no longer authenticate"
@@ -550,9 +539,8 @@ mod tests {
         // store built from the SAME operator secret + tenant (a process
         // restart) re-accepts a revoked-but-unexpired token, because the token
         // is a stateless valid HMAC and the new process starts with an empty
-        // denylist. A deployment needing durable revocation supplies a
-        // DB-backed SessionStore; this test pins that logout does not survive a
-        // restart with the stateless store.
+        // denylist. This test pins that logout does not survive a restart with
+        // the stateless store.
         let store_a = signed_store("operator-secret");
         let token = store_a
             .create_session(
@@ -565,7 +553,7 @@ mod tests {
             .expect("create");
         let raw = token.expose_secret().to_string();
 
-        store_a.revoke(&raw).await.expect("revoke");
+        store_a.revoke(&raw).await;
         assert!(
             store_a.lookup(&raw).await.expect("lookup").is_none(),
             "the minting store rejects the revoked token in-process",
@@ -614,7 +602,7 @@ mod tests {
         // entry closest to expiry") is guaranteed to target it once the cap is
         // reached — while it stays on the denylist, it is rejected.
         let victim = raw("victim", base + 60);
-        store.revoke(&victim).await.expect("revoke victim");
+        store.revoke(&victim).await;
         assert!(
             store.lookup(&victim).await.expect("lookup").is_none(),
             "a revoked token on the denylist must be rejected",
@@ -625,7 +613,7 @@ mod tests {
         // evict the soonest-expiry entry (the victim) to stay bounded.
         for i in 0..MAX_REVOKED_ENTRIES {
             let filler = raw(&format!("filler-{i}"), base + 3600);
-            store.revoke(&filler).await.expect("revoke filler");
+            store.revoke(&filler).await;
         }
 
         // The denylist stayed bounded at/under the hard cap.

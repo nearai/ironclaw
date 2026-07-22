@@ -16,7 +16,6 @@ layer = "app"
 [package.metadata.dist]
 dist = true
 display-name = "ironclaw"
-features = ["libsql", "postgres"]
 
 [package.metadata.wix]
 upgrade-guid = "650712A0-A6B4-4584-829A-03A90CE3D7D9"
@@ -24,19 +23,6 @@ path-guid = "9BB3F0DB-3513-45E6-A23B-CE5A5E5C1759"
 license = false
 eula = false
 
-[features]
-# libsql is the default storage backend: a file-backed local database needs
-# no external server, so a default `ironclaw` build is runnable as-is.
-# `postgres` remains opt-in for deployments that point `[storage]` at a server.
-default = ["libsql"]
-# Enable production PostgreSQL storage composition for `ironclaw`.
-postgres = [
-    "ironclaw_reborn_composition/postgres",
-]
-# Enable embedded libSQL storage composition for volume-backed hosted previews.
-libsql = [
-    "ironclaw_reborn_composition/libsql",
-]
 [dependencies]
 anyhow = "1"
 async-trait = { version = "0.1" }
@@ -52,6 +38,9 @@ dotenvy = "0.15"
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
+ironclaw_extension_host = { path = "../ironclaw_extension_host", version = "0.1.0" }
+ironclaw_slack_extension = { path = "../ironclaw_slack_extension", version = "0.1.0" }
+ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension", version = "0.1.0" }
 ironclaw_webui = { path = "../ironclaw_webui", version = "0.1.0" }
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
@@ -88,22 +77,20 @@ ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version
 # second, non-serializing lock domain (the #6015 flake). Dev-only: the lock is
 # reached solely from `#[cfg(test)]` code in `runtime::test_env`.
 ironclaw_common = { path = "../ironclaw_common", version = "0.4.2" }
-# Unconditional (not the feature-gated `dep:async-trait` optional dependency
-# above): `commands::onboard::mod`'s write-first-then-config-ordering test
-# implements a fake `ironclaw_secrets::SecretStore` whose `put` always fails,
-# needing `#[async_trait::async_trait]` in every feature combination `cargo
-# test` runs.
-async-trait = "0.1"
-# Same fake `SecretStore` impl takes `ResourceScope` / `SecretHandle` /
-# `Timestamp` in its trait method signatures.
-ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
-# Same fake `SecretStore` impl (`FailingSecretStore` in `commands::onboard::mod`'s
-# tests) implements `ironclaw_secrets::SecretStore` directly; production
-# onboarding code only ever touches secrets through
-# `ironclaw_reborn_composition::LlmKeyStore`'s facade (`put_plaintext`), so
-# this stays a dev-only dependency — see
+# FaultInjecting decorator: test store fault paths through the real store.
+# `commands::onboard::llm_credentials`'s write-first-then-config-ordering test
+# builds the real `ironclaw_secrets::FilesystemSecretStore` over a
+# `FaultInjecting<InMemoryBackend>` armed to fail secret writes, so the failing
+# put exercises the production store's real error mapping.
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", features = ["test-support"] }
+# `commands::onboard::llm_credentials`'s write-ordering test builds the real
+# `ironclaw_secrets::FilesystemSecretStore::ephemeral_over(..)` (plus
+# `keychain::generate_master_key_hex`); production onboarding code only ever
+# touches secrets through `ironclaw_reborn_composition::LlmKeyStore`'s facade
+# (`put_plaintext`), so this stays a dev-only dependency — see
 # `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::reborn_cli_binary_crate_stays_separate_from_v1_root`.
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0" }
+toml = "1.1"
 
 [[bin]]
 name = "ironclaw"

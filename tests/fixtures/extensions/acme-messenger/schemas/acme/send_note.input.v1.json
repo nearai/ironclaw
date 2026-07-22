@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "acme.send_note input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["conversation_id", "text"],
+  "properties": {
+    "conversation_id": {
+      "type": "string",
+      "description": "Acme conversation id to post the note into.",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "text": {
+      "type": "string",
+      "description": "Note body.",
+      "minLength": 1,
+      "maxLength": 4000
+    }
+  }
+}

@@ -39,7 +39,12 @@ export function useAdminUsers() {
 
   const invalidateUsers = () =>
     queryClient.invalidateQueries({ queryKey: ["admin", "users"] });
-  const invalidateUser = (userId) => {
+  const refreshUser = (userId, user) => {
+    if (userId && user?.id === userId) {
+      queryClient.setQueryData(["admin", "user", userId], (currentUser) =>
+        currentUser ? { ...currentUser, ...user } : user,
+      );
+    }
     const invalidations = [invalidateUsers()];
     if (userId) {
       invalidations.push(
@@ -56,7 +61,7 @@ export function useAdminUsers() {
   const createMut = useMutation({ mutationFn: createAdminUser, onSuccess: invalidateUsers });
   const updateMut = useMutation({
     mutationFn: ({ id, payload }) => updateAdminUser(id, payload),
-    onSuccess: (_user, { id }) => invalidateUser(id),
+    onSuccess: (user, { id }) => refreshUser(id, user),
   });
   const deleteMut = useMutation({
     mutationFn: (id) => deleteAdminUser(id),
@@ -64,12 +69,19 @@ export function useAdminUsers() {
   });
   const suspendMut = useMutation({
     mutationFn: (id) => suspendAdminUser(id),
-    onSuccess: (_user, id) => invalidateUser(id),
+    onSuccess: (user, id) => refreshUser(id, user),
   });
   const activateMut = useMutation({
     mutationFn: (id) => activateAdminUser(id),
-    onSuccess: (_user, id) => invalidateUser(id),
+    onSuccess: (user, id) => refreshUser(id, user),
   });
+
+  const resetActionErrors = () => {
+    updateMut.reset();
+    deleteMut.reset();
+    suspendMut.reset();
+    activateMut.reset();
+  };
 
   return {
     users,
@@ -78,10 +90,27 @@ export function useAdminUsers() {
     createUser: createMut.mutateAsync,
     isCreating: createMut.isPending,
     createError: createMut.error,
+    resetCreate: createMut.reset,
     updateUser: (id, payload) => updateMut.mutateAsync({ id, payload }),
+    isUpdating: updateMut.isPending,
+    updateError: updateMut.error,
+    updatingUserId: updateMut.variables?.id || null,
+    resetUpdate: updateMut.reset,
     deleteUser: deleteMut.mutateAsync,
+    isDeleting: deleteMut.isPending,
+    deleteError: deleteMut.error,
+    deletingUserId: deleteMut.variables || null,
+    resetDelete: deleteMut.reset,
     suspendUser: suspendMut.mutateAsync,
+    isSuspending: suspendMut.isPending,
+    suspendError: suspendMut.error,
+    suspendingUserId: suspendMut.variables || null,
+    resetSuspend: suspendMut.reset,
     activateUser: activateMut.mutateAsync,
+    isActivating: activateMut.isPending,
+    activateError: activateMut.error,
+    activatingUserId: activateMut.variables || null,
+    resetActionErrors,
     // The one-time API bearer is issued ONLY at user creation, so the create
     // result (which carries `.token`) feeds the one-time token banner. There is
     // no re-issue endpoint for existing users, so no `createToken` action is

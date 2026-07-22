@@ -423,7 +423,7 @@ class TestGSuiteOAuthWireShape:
     reason=(
         "Playwright browser test requires the ironclaw binary; the WebUI v2 "
         "routes are compiled in unconditionally. Build with: "
-        "cargo build --features libsql"
+        "cargo build"
     )
 )
 async def test_gsuite_browser_oauth_card_renders(v2_gsuite_server, browser):
