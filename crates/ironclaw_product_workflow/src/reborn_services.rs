@@ -24,10 +24,10 @@ use ironclaw_auth::{
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
-    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, FailureKind, GrantConstraints,
-    InvocationId, Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution,
-    ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle,
-    TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
+    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, FailureKind, InvocationId, Outcome,
+    OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution, ResourceScope,
+    ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId,
+    TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -120,9 +120,8 @@ pub use fs_browse::{
 };
 use ironclaw_approvals::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStore,
-    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
-    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
-    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
+    ToolPermissionOverride, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
@@ -211,6 +210,10 @@ pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
     "builtin.operator_config_set_auto_approve";
 pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID);
+pub const OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID: &str =
+    "builtin.operator_config_set_tool_permission";
+pub const OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID);
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID);
@@ -1429,6 +1432,13 @@ fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
     }
 }
 
+fn tool_permission_update_wire(update: ToolPermissionUpdate) -> &'static str {
+    match update {
+        ToolPermissionUpdate::Default => "default",
+        ToolPermissionUpdate::State(state) => tool_permission_state_wire(state),
+    }
+}
+
 /// Wire enum for the WebUI settings/tools permission request body.
 ///
 /// Request-side vocabulary on the RebornServicesApi contract surface: the
@@ -1472,96 +1482,6 @@ fn parse_tool_permission_state(
         "disabled" => Ok(ToolPermissionUpdate::State(ToolPermissionState::Disabled)),
         _ => Err(operator_config_invalid_value("state")),
     }
-}
-
-async fn apply_tool_permission_state(
-    config: &RebornOperatorApprovalConfig,
-    scope: &ResourceScope,
-    actor: &TurnActor,
-    tool: &RebornOperatorToolInfo,
-    update: ToolPermissionUpdate,
-) -> Result<(), RebornServicesError> {
-    match update {
-        ToolPermissionUpdate::Default => {
-            let operator_scope = operator_tool_permission_scope(scope);
-            match config
-                .persistent_policies
-                .revoke(&persistent_user_policy_key(&operator_scope, tool))
-                .await
-            {
-                Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => {}
-                Err(error) => return Err(operator_config_store_error(error)),
-            }
-            config
-                .overrides
-                .clear(&ToolPermissionOverrideKey::new(
-                    &operator_scope,
-                    tool.capability_id.clone(),
-                ))
-                .await
-                .map_err(operator_config_store_error)?;
-        }
-        ToolPermissionUpdate::State(ToolPermissionState::AlwaysAllow) => {
-            let operator_scope = operator_tool_permission_scope(scope);
-            config
-                .persistent_policies
-                .allow(PersistentApprovalPolicyInput {
-                    scope: operator_scope.clone(),
-                    action: PersistentApprovalAction::Dispatch,
-                    capability_id: tool.capability_id.clone(),
-                    grantee: Principal::Extension(tool.provider.clone()),
-                    approved_by: Principal::User(actor.user_id.clone()),
-                    constraints: GrantConstraints {
-                        allowed_effects: tool.effects.as_ref().to_vec(),
-                        mounts: Default::default(),
-                        network: Default::default(),
-                        secrets: Vec::new(),
-                        resource_ceiling: None,
-                        expires_at: None,
-                        max_invocations: None,
-                    },
-                    source_approval_request_id: None,
-                })
-                .await
-                .map_err(operator_config_store_error)?;
-            config
-                .overrides
-                .clear(&ToolPermissionOverrideKey::new(
-                    &operator_scope,
-                    tool.capability_id.clone(),
-                ))
-                .await
-                .map_err(operator_config_store_error)?;
-        }
-        ToolPermissionUpdate::State(state @ ToolPermissionState::AskEachTime)
-        | ToolPermissionUpdate::State(state @ ToolPermissionState::Disabled) => {
-            let operator_scope = operator_tool_permission_scope(scope);
-            let override_state = match state {
-                ToolPermissionState::AskEachTime => ToolPermissionOverride::AskEachTime,
-                ToolPermissionState::Disabled => ToolPermissionOverride::Disabled,
-                ToolPermissionState::AlwaysAllow => unreachable!(),
-            };
-            match config
-                .persistent_policies
-                .revoke(&persistent_user_policy_key(&operator_scope, tool))
-                .await
-            {
-                Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => {}
-                Err(error) => return Err(operator_config_store_error(error)),
-            }
-            config
-                .overrides
-                .set(ToolPermissionOverrideInput {
-                    scope: operator_scope.clone(),
-                    capability_id: tool.capability_id.clone(),
-                    state: override_state,
-                    updated_by: Principal::User(actor.user_id.clone()),
-                })
-                .await
-                .map_err(operator_config_store_error)?;
-        }
-    }
-    Ok(())
 }
 
 const LLM_BASE_URL_MAX_BYTES: usize = 2048;
@@ -3498,11 +3418,10 @@ where
         key: String,
         request: RebornOperatorConfigSetRequest,
     ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        let Some(config) = &self.operator_approval_config else {
+        if self.operator_approval_config.is_none() {
             let _ = (caller, key, request);
             return Err(RebornServicesError::service_unavailable(false));
-        };
-        let scope = caller_resource_scope(&caller);
+        }
         if key == AUTO_APPROVE_CONFIG_KEY {
             let enabled = request
                 .value
@@ -3522,19 +3441,26 @@ where
                 .await;
         }
 
-        let actor = caller.actor();
-        let entry = if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
-            let tool = find_operator_tool(config, capability_id, &scope.user_id).await?;
-            if tool_permission_locked(&tool) {
-                return Err(operator_config_invalid_value("state"));
-            }
-            let state = parse_tool_permission_state(&request.value)?;
-            apply_tool_permission_state(config, &scope, &actor, &tool, state).await?;
-            tool_config_entry(config, &scope, &tool).await?
-        } else {
+        let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) else {
             return Err(operator_config_unknown_key_error("key"));
         };
-        Ok(RebornOperatorConfigGetResponse { entry })
+        {
+            let state = parse_tool_permission_state(&request.value)?;
+            let resolution = self
+                .invoke_json_capability(
+                    caller.clone(),
+                    OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY,
+                    serde_json::json!({
+                        "capability_id": capability_id,
+                        "state": tool_permission_update_wire(state),
+                    }),
+                    ActivityId::new(),
+                )
+                .await?;
+            operator_config_mutation_succeeded(resolution)?;
+            self.build_operator_config_key_view(caller, serde_json::json!({ "key": key }))
+                .await
+        }
     }
 
     /// `requested_thread_id` makes the caller's choice authoritative.

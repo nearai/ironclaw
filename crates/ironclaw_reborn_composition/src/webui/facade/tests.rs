@@ -10,6 +10,7 @@ fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegist
 }
 use super::*;
 use async_trait::async_trait;
+use ironclaw_extensions::InstallationOwner;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionHealthSnapshot, ExtensionInstallation,
     ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
@@ -21,8 +22,10 @@ use ironclaw_host_api::{
     ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView,
     TenantId, UserId, VirtualPath,
 };
+use ironclaw_product_workflow::{RebornOperatorToolCatalog, RebornOperatorToolInfo};
 use std::time::Duration;
 
+use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 #[tokio::test]
