@@ -22,7 +22,6 @@ mod support;
 mod scenario_activate_then_active_cross_thread;
 mod scenario_credential_extension_lifecycle_state_machine;
 mod scenario_extension_activation_github_normal_gate;
-mod scenario_extension_activation_instance_not_configured;
 mod scenario_extension_activation_reauth_gate;
 mod scenario_google_family_install_gate_and_shared_account;
 mod scenario_install_then_visible_cross_thread;
@@ -71,27 +70,9 @@ async fn extensions_group_e2e() {
         scenario_install_unknown_extension_id_fails_safely::run(&g).await,
     );
 
-    // Scenario 4.5 (provider-instance readiness map, two-phase — see the
-    // module doc): Phase 1 — activating a google-family
-    // extension with NO Google OAuth backend configured (this harness's
-    // default state — never wired otherwise) must fail early with a
-    // model-visible `config set google.client_id` remediation and keep
-    // running, not park an unresolvable BlockedAuth gate. Phase 2 — a
-    // SEPARATE, freshly built group with a Google OAuth backend configured
-    // must fall through to the ordinary per-account BlockedAuth gate instead
-    // (already green today). The readiness-map chokepoint gates the "google"
-    // PROVIDER build-time-wide (not just the specific package), so Scenario 5
-    // now runs on its OWN isolated, Google-OAuth-configured group instead of
-    // `g` — see that scenario's module doc.
-    report.record(
-        "extension_activation_instance_not_configured",
-        scenario_extension_activation_instance_not_configured::run(&g).await,
-    );
-
-    // Scenario 4.6: negative case pinning current behavior — a provider with
-    // no instance-config requirement (github: manual-token, user-credential
-    // gate) must keep raising the normal per-account BlockedAuth gate,
-    // proving the readiness check doesn't false-positive on it. Activates
+    // Scenario 4.5: a provider with a user-owned credential requirement
+    // (github: manual-token) raises the normal per-account BlockedAuth gate.
+    // Activates
     // github's EXISTING install from Scenario 1 (never activated there); runs
     // before Scenario 7 (which later activates github for real with a seeded
     // credential — a denied gate here leaves no persistent credential state,
@@ -163,8 +144,8 @@ async fn extensions_group_e2e() {
     // activation (parks a renderable google gate), bulk installs park
     // INDEPENDENT gates, denial leaves a clean retry, and one
     // correctly-scoped google account then unlocks calendar AND drive. Like
-    // Scenario 5, it builds an isolated Google-OAuth-configured group so the
-    // provider-instance readiness check can fall through to account gating.
+    // Scenario 5, it builds an isolated Google-OAuth-configured group so its
+    // seeded accounts cannot affect sibling scenarios.
     report.record(
         "google_family_install_gate_and_shared_account",
         scenario_google_family_install_gate_and_shared_account::run(&g).await,

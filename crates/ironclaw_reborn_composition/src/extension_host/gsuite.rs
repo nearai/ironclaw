@@ -64,18 +64,14 @@ impl RuntimeCredentialAccountVisibilityPolicy for GsuiteRuntimeCredentialAccount
 /// Build GSuite handlers for a surface that can install and activate GSuite packages.
 ///
 /// Handler registration is allowed before lifecycle activation because runtime
-/// dispatch still requires active package descriptors.
-///
-/// `google_oauth_configured` is the cheap, build-time signal for whether a
-/// Google OAuth backend was registered on this composition's
-/// `RebornBuildInput`. It is not a live credential check: it gates a
-/// pre-dispatch "not configured" tool result, distinct from the per-account
-/// `AuthRequired` gate `GoogleCredentialResolver` still owns once dispatch proceeds.
+/// dispatch still requires active package descriptors. Deployment OAuth client
+/// material is resolved by the manifest-driven product-auth engine when an
+/// account is connected or refreshed; dispatch only consumes the resulting
+/// user account credential.
 pub fn bundled_gsuite_first_party_handlers(
     accounts: Arc<dyn CredentialAccountService>,
     account_records: Arc<dyn CredentialAccountRecordSource>,
     credential_stager: Arc<dyn GsuiteCredentialStager>,
-    google_oauth_configured: bool,
 ) -> Result<FirstPartyCapabilityRegistry, HostApiError> {
     let mut registry = FirstPartyCapabilityRegistry::new();
     register_bundled_gsuite_first_party_handlers(
@@ -83,7 +79,6 @@ pub fn bundled_gsuite_first_party_handlers(
         accounts,
         account_records,
         credential_stager,
-        google_oauth_configured,
     )?;
     Ok(registry)
 }
@@ -93,11 +88,9 @@ pub(crate) fn register_bundled_gsuite_first_party_handlers(
     accounts: Arc<dyn CredentialAccountService>,
     account_records: Arc<dyn CredentialAccountRecordSource>,
     credential_stager: Arc<dyn GsuiteCredentialStager>,
-    google_oauth_configured: bool,
 ) -> Result<(), HostApiError> {
     let handler = Arc::new(GsuiteFirstPartyHandler {
         executor: GsuiteExecutor::new(accounts, account_records, credential_stager),
-        google_oauth_configured,
     });
     for package in gsuite_package_specs() {
         for capability in package.capabilities {
@@ -109,7 +102,6 @@ pub(crate) fn register_bundled_gsuite_first_party_handlers(
 
 struct GsuiteFirstPartyHandler {
     executor: GsuiteExecutor,
-    google_oauth_configured: bool,
 }
 
 #[async_trait]
@@ -118,17 +110,6 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        // Pre-dispatch check: every GSuite capability requires a Google OAuth
-        // account (`runtime_credentials` below always sources from
-        // `GOOGLE_PROVIDER_ID`), so a missing build-time OAuth backend means
-        // no dispatch can ever succeed. Short-circuit before the executor
-        // call reaches `GoogleCredentialResolver::resolve` (which owns the
-        // separate missing-account/revoked-account `AuthRequired` gate) so a
-        // fresh install with no Google OAuth backend at all gets a
-        // remediation tool result instead of a silent auth-gate stall.
-        if !self.google_oauth_configured {
-            return Err(google_oauth_not_configured_error());
-        }
         let egress = request
             .services
             .runtime_http_egress
@@ -151,24 +132,6 @@ impl FirstPartyCapabilityHandler for GsuiteFirstPartyHandler {
             .map_err(|error| gsuite_error(error, &request.capability_id))?;
         Ok(FirstPartyCapabilityResult::new(result.output, result.usage))
     }
-}
-
-/// Tool-result error for a GSuite capability dispatched with no Google OAuth
-/// backend configured at all — distinct from `AuthRequired` (an account was
-/// expected but is missing/revoked/needs selection).
-///
-/// Rides the trusted HOST-REMEDIATION channel (not `safe_summary`, and not the
-/// untrusted diagnostic channel) because the text names `config set` keys
-/// containing "secret" and console URLs: `safe_summary` rejects those outright,
-/// and the untrusted diagnostic channel collapses them to the placeholder at
-/// the host_api boundary. The trusted channel guards credential VALUES instead
-/// of vocabulary, so this host-authored text survives intact to the model.
-fn google_oauth_not_configured_error() -> FirstPartyCapabilityError {
-    FirstPartyCapabilityError::dispatch_with_host_remediation(
-        RuntimeDispatchErrorKind::OperationFailed,
-        None,
-        ironclaw_reborn_config::HostRemediationText::GoogleNotConfigured.text(),
-    )
 }
 
 fn package_from_spec(spec: &GsuitePackageSpec) -> Result<ExtensionPackage, ExtensionError> {

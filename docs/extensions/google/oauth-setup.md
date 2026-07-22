@@ -25,10 +25,11 @@ Go to [**Google Auth Platform → Clients**](https://console.cloud.google.com/au
 1. Click **Create client**
 2. Set **Application type** to **Web application**
 3. Give it a name (e.g. `ironclaw`)
-4. Under **Authorized redirect URIs**, click **+ Add URI** and enter:
+4. Under **Authorized redirect URIs**, click **+ Add URI** and enter your
+   WebUI's Google callback URL:
 
    ```
-   http://127.0.0.1:9876/callback
+   https://<your-ironclaw-host>/api/reborn/product-auth/oauth/google/callback
    ```
 
 5. Click **Create** and copy the **Client ID** and **Client Secret** shown
@@ -47,37 +48,14 @@ Only test users can complete the OAuth flow while the app is in Testing mode. If
 
 </Step>
 
-<Step title="Open the SSH Tunnel">
-To complete the OAuth flow, we need to allow Google to reach the IronClaw server. Since port 9876 is only accessible from within the server, you need to open an SSH tunnel that forwards your local port 9876 to the server.
+<Step title="Save the Credentials in WebUI Admin">
 
-Open a new SSH session using port forwarding:
+Open **WebUI Admin → Extension Configuration**, find **Google OAuth client
+credentials**, and save the Client ID and Client Secret from Google Cloud.
 
-```bash
-# ssh -p <SSH-PORT> -L 9876:127.0.0.1:9876 <user>@<ironclaw-server-ip>
-ssh -p 15222 -L 9876:127.0.0.1:9876 liquid-zebra@agent4.near.ai
-```
-
-Keep this terminal session open while completing the OAuth flow.
-
-<Info>
-The port forwarding will remain active as long as the SSH session remains open, and automatically closes when you exit the session.
-</Info>
-
-<Tip>
-Remember to whitelist the port 9876 in your server's firewall settings to allow the tunnel to work properly
-</Tip>
-
-
-</Step>
-
-<Step title="Set Environment Variables">
-
-Once connected via SSH, export your OAuth credentials as environment variables:
-
-```bash
-export GOOGLE_OAUTH_CLIENT_ID=<your-client-id>
-export GOOGLE_OAUTH_CLIENT_SECRET=<your-client-secret>
-```
+The configuration is shared by Gmail, Calendar, Drive, Docs, Sheets, and
+Slides. New or rotated values apply to the next OAuth operation without an SSH
+session or IronClaw restart.
 
 </Step>
 

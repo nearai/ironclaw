@@ -76,11 +76,8 @@ impl RebornIntegrationGroup {
         Self::builder().extension_delivery().await
     }
 
-    /// Same group as [`Self::extension_lifecycle`], with a Google OAuth
-    /// backend configured at composition time. Proves the
-    /// provider-instance readiness check does not false-positive once an
-    /// operator has run `config set` + restarted — activation falls through
-    /// to the ordinary per-account credential gate.
+    /// Same group as [`Self::extension_lifecycle`], with Google OAuth boot
+    /// fallback material for scenarios that seed Google credential accounts.
     pub async fn extension_lifecycle_google_oauth_configured() -> HarnessResult<Self> {
         Self::builder()
             .extension_lifecycle_google_oauth_configured()
@@ -292,13 +289,8 @@ impl RebornIntegrationGroupBuilder {
         .await
     }
 
-    /// Same group as [`Self::extension_lifecycle`], but with a Google OAuth
-    /// backend configured at composition time (the "config set" + restart
-    /// arm of the provider-instance readiness map). A SEPARATE composition
-    /// build rather than a toggle on the shared `extension_lifecycle()`
-    /// group — a real `config
-    /// set` + service restart is a new process, not a live flip, so a second
-    /// `#[tokio::test]`-local build is the honest analog. See
+    /// Same group as [`Self::extension_lifecycle`], but with Google OAuth boot
+    /// fallback material. See
     /// [`RebornIntegrationGroup::extension_lifecycle_google_oauth_configured`].
     pub async fn extension_lifecycle_google_oauth_configured(
         self,

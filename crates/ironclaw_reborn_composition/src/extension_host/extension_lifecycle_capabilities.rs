@@ -344,15 +344,6 @@ fn extension_package_ref(
         .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))
 }
 
-/// Fixed, host-authored, validator-safe headline for the
-/// `dispatch_with_host_remediation` call below — the strict `safe_summary`
-/// validator rejects `{}[]<>/` and secret-like vocabulary
-/// (`agent-loop-capabilities` invariant 2), so the full `config set`
-/// remediation text rides the trusted host-remediation channel instead;
-/// `safe_summary` stays this short fixed literal.
-const PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY: &str =
-    "extension activation requires host instance configuration";
-
 fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
     match error {
         // UNTRUSTED on purpose. `InvalidBindingRequest` has ~40 construction
@@ -367,31 +358,11 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
         // channel would stamp `ObservationTrust::HostAuthored` on attacker
         // -influenced text and skip the credential-vocabulary scan
         // `ironclaw_threads` applies to untrusted output. The trusted channel
-        // is reserved for reasons built entirely from host-authored constants
-        // (the `ProviderInstanceNotConfigured` arm below).
+        // is reserved for reasons built entirely from host-authored constants.
         ProductWorkflowError::InvalidBindingRequest { reason } => {
             FirstPartyCapabilityError::dispatch_with_diagnostic(
                 RuntimeDispatchErrorKind::InputEncode,
                 None,
-                reason,
-            )
-        }
-        // The third readiness axis: a provider-instance readiness failure is
-        // a build-time configuration fault, not a malformed-input fault, so it
-        // maps to `OperationFailed` rather than `InvalidBindingRequest`'s
-        // `InputEncode` (PR #6095 misclassification precedent). Both arms are
-        // non-terminal, but they deliberately ride DIFFERENT trust channels:
-        // `InvalidBindingRequest` above stays UNTRUSTED
-        // (`dispatch_with_diagnostic`) because its ~40 construction sites
-        // interpolate externally-influenced text — MCP tool names off the
-        // wire, model-supplied `extension_id`, uploaded-zip entry names. This
-        // arm is the one exception routed onto the TRUSTED channel
-        // (`dispatch_with_host_remediation`), because its `reason` is built
-        // entirely from host-authored constants.
-        ProductWorkflowError::ProviderInstanceNotConfigured { reason } => {
-            FirstPartyCapabilityError::dispatch_with_host_remediation(
-                RuntimeDispatchErrorKind::OperationFailed,
-                Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string()),
                 reason,
             )
         }
@@ -429,14 +400,8 @@ mod tests {
     use ironclaw_host_api::InstallationState;
     use ironclaw_product_workflow::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
 
-    /// Dummy but well-formed Google OAuth backend config for tests below that
-    /// exercise PER-ACCOUNT credential gating (scope coalescing, shared
-    /// credential reuse) rather than the provider-instance readiness map —
-    /// without this, every google-family activation on a plain
-    /// `RebornBuildInput::local_dev(..)` fixture now fails closed
-    /// with `ProviderInstanceNotConfigured` before it ever reaches the
-    /// per-account gate these tests target. Mirrors
-    /// `factory/auth_tests.rs::local_dev_google_oauth_backend_builds_with_host_provider_config`.
+    /// Dummy but well-formed Google OAuth boot fallback for tests below that
+    /// exercise per-account credential gating and refresh behavior.
     fn test_google_oauth_client_config() -> OAuthClientConfig {
         OAuthClientConfig::new(
             "itest-google-client-id.apps.googleusercontent.com",
@@ -1676,54 +1641,6 @@ mod tests {
             provenance: TrustProvenance::Default,
             evaluated_at: chrono::Utc::now(),
         }
-    }
-
-    /// The fixed `safe_summary` headline used
-    /// for `ProviderInstanceNotConfigured` must itself pass the strict
-    /// `LoopSafeSummary` validator (agent-loop-capabilities invariant 2) —
-    /// proves the summary never trips the `{}[]<>/` / secret-vocabulary
-    /// rejection that would otherwise kill the whole run — and the full
-    /// remediation must ride the diagnostic-detail channel, naming the exact
-    /// `config set` command verbatim.
-    #[test]
-    fn provider_instance_not_configured_safe_summary_validates_and_diagnostic_names_config_set() {
-        ironclaw_turns::run_profile::LoopSafeSummary::new(
-            PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY,
-        )
-        .expect("fixed safe_summary must pass the strict LoopSafeSummary validator");
-
-        let reason = format!(
-            "{}\n\n{}",
-            ironclaw_reborn_config::google_remediation_text(),
-            ironclaw_reborn_config::apply_step_text()
-        );
-        let mapped = lifecycle_error(ProductWorkflowError::ProviderInstanceNotConfigured {
-            reason: reason.clone(),
-        });
-
-        let FirstPartyCapabilityError::Dispatch {
-            kind,
-            safe_summary,
-            detail,
-            ..
-        } = mapped
-        else {
-            panic!("expected a Dispatch failure, got {mapped:?}");
-        };
-        assert_eq!(kind, RuntimeDispatchErrorKind::OperationFailed);
-        assert_eq!(
-            safe_summary,
-            Some(PROVIDER_INSTANCE_NOT_CONFIGURED_SAFE_SUMMARY.to_string())
-        );
-        let detail = detail.expect("remediation detail must be present");
-        // The TRUSTED channel, not the untrusted diagnostic one: this reason is
-        // host-authored, and the untrusted channel collapses it to the
-        // safe-summary placeholder at the host_api boundary (#6299).
-        let ironclaw_host_api::DispatchFailureDetail::HostRemediation { text } = *detail else {
-            panic!("expected a HostRemediation detail, got {detail:?}");
-        };
-        assert!(text.as_str().contains("config set google.client_id"));
-        assert_eq!(text.as_str(), reason);
     }
 
     /// `InvalidBindingRequest` keeps its existing `InputEncode` kind and

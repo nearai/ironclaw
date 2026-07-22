@@ -179,8 +179,7 @@ fn host_remediation_texts_name_their_operator_step() {
     for entry in HostRemediationText::all() {
         let text = entry.text();
         let expected = match entry {
-            HostRemediationText::GoogleNotConfigured => "config set google.client_id",
-            HostRemediationText::GoogleBackendAuth => "config set google.client_secret",
+            HostRemediationText::GoogleBackendAuth => "WebUI Admin > Extension Configuration",
             HostRemediationText::ApplyStep => "ironclaw service restart",
         };
         assert!(

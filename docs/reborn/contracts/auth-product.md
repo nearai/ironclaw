@@ -206,13 +206,14 @@ updates the pre-authorized account id captured in the flow. Completed flows
 return their stored credential account id on callback retry/replay, so provider
 code is not re-exchanged after a completed durable claim.
 
-Google OAuth production config is resolved by host composition before provider
-client construction. Injected `OAuthClientConfig` is the canonical production
-source for client id, optional client secret, and redirect URI in this slice.
-Legacy Google tool environment variables remain bootstrap compatibility for
-older v1/v2 tool paths only until a Reborn settings-config resolver explicitly
-adopts and documents them. Production startup rejects malformed OAuth config at
-construction time through the typed `OAuthClientConfig` validators.
+OAuth providers resolve manifest-declared client credential handles through the
+tenant-scoped admin-configuration store when each authorization, callback,
+refresh, or revocation operation starts. Saved admin values take precedence over
+the host-composed `OAuthClientConfig`; the latter remains a bootstrap fallback
+for deployments that still configure Google through environment variables.
+Redirect URI and hosted-domain metadata remain host-owned because they are not
+declared as admin credential handles. Both sources pass through the typed OAuth
+client validators before provider use.
 
 The HA-safe PKCE decision for this slice is documented sticky callback routing:
 the mounted WebUI OAuth route keeps raw PKCE verifiers in process-local bounded
@@ -533,17 +534,21 @@ Rules:
 - Manual-token setup and secret-submit are linked by `interaction_id` plus an
   `invocation_id` round-tripped through the browser, matching the OAuth
   start/callback pattern.
-- Google OAuth setup is configured in the Reborn host process from env-only
-  values: `IRONCLAW_REBORN_GOOGLE_CLIENT_ID`,
-  `IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI`, optional
-  `IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET`, and optional
-  `IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT`. For bootstrap compatibility, Reborn
-  also accepts `GOOGLE_CLIENT_ID`, `GOOGLE_OAUTH_REDIRECT_URI`,
-  `GOOGLE_CLIENT_SECRET`, and `GOOGLE_ALLOWED_HD` as a hosted-domain hint when
-  the redirect URI opt-in is present. The hint only adds Google's `hd=`
-  authorization parameter; product-auth setup does not treat it as a server-side
-  domain allowlist. The redirect URI must match the static Google callback route
-  exposed by the WebUI listener.
+- Google OAuth client ID and secret are declared by each Google extension's
+  Manifest V3 `[admin_configuration]` and `[auth.google].client_credentials`
+  sections. An operator saves the shared `vendor.google` group through WebUI
+  Admin; the next OAuth operation uses those values without a restart.
+  `IRONCLAW_REBORN_GOOGLE_CLIENT_ID` and optional
+  `IRONCLAW_REBORN_GOOGLE_CLIENT_SECRET` remain lower-precedence bootstrap
+  fallbacks. `IRONCLAW_REBORN_GOOGLE_OAUTH_REDIRECT_URI` and optional
+  `IRONCLAW_REBORN_GOOGLE_HOSTED_DOMAIN_HINT` remain host configuration because
+  they are not credential handles. For bootstrap compatibility, Reborn also
+  accepts `GOOGLE_CLIENT_ID`, `GOOGLE_OAUTH_REDIRECT_URI`,
+  `GOOGLE_CLIENT_SECRET`, and `GOOGLE_ALLOWED_HD` when the redirect URI opt-in
+  is present. The hint only adds Google's `hd=` authorization parameter;
+  product-auth setup does not treat it as a server-side domain allowlist. The
+  redirect URI must match the static Google callback route exposed by the WebUI
+  listener.
 - All routes project only adapter-safe DTOs (`CredentialAccountProjection`,
   `CredentialAccountListPage`, `CredentialRecoveryProjection`,
   `CredentialRefreshReport`, `SecretCleanupReport`). Raw secret handles,

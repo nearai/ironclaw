@@ -80,11 +80,10 @@ impl fmt::Debug for ChannelConfigCredentialSlot {
 }
 
 /// Handle-keyed deployment client-credential data. Recipes name their
-/// `client_credentials` handles; composition registers values for those
-/// handles (env config) — data, never a vendor code path. Handles without a
-/// registered value fall back to the operator channel configuration, so
-/// recipe client material saved through the generic configure surface
-/// resolves with no per-vendor wiring.
+/// `client_credentials` handles; the live manifest-declared administrator
+/// configuration is authoritative, with composition-registered boot values
+/// retained as a compatibility fallback. This keeps provider setup generic
+/// and lets operator changes take effect on the next auth operation.
 #[derive(Clone, Default)]
 pub(crate) struct CompositionClientCredentials {
     values: BTreeMap<String, ClientCredentialValue>,
@@ -103,24 +102,25 @@ impl CompositionClientCredentials {
     }
 
     async fn resolve_handle(&self, handle: &str) -> Result<Option<SecretString>, AuthProductError> {
-        match self.values.get(handle) {
-            Some(ClientCredentialValue::Static(value)) => return Ok(Some(value.clone())),
-            None => {}
+        if let Some(service) = self.channel_config.as_ref().and_then(|slot| slot.get()) {
+            let configured = service
+                .credential_handle_value(handle)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(
+                        %error,
+                        handle,
+                        "operator admin-configuration client-credential lookup failed"
+                    );
+                    AuthProductError::BackendUnavailable
+                })?;
+            if configured.is_some() {
+                return Ok(configured);
+            }
         }
-        let Some(service) = self.channel_config.as_ref().and_then(|slot| slot.get()) else {
-            return Ok(None);
-        };
-        service
-            .credential_handle_value(handle)
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    %error,
-                    handle,
-                    "operator channel-config client-credential lookup failed"
-                );
-                AuthProductError::BackendUnavailable
-            })
+        Ok(self.values.get(handle).map(|value| match value {
+            ClientCredentialValue::Static(value) => value.clone(),
+        }))
     }
 }
 

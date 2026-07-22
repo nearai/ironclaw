@@ -1,9 +1,5 @@
-//! Negative case for the provider-instance readiness map: a provider with no
-//! instance-config requirement (github has no entry in the readiness map —
-//! only providers with an OPERATOR-level OAuth backend need one) must not
-//! false-positive on the readiness check — activating it must still raise the
-//! NORMAL per-account `BlockedAuth` gate. Pins CURRENT behavior; must stay
-//! green after the readiness-map implementation lands.
+//! A provider with a manual-token user credential requirement (GitHub) must
+//! raise the normal per-account `BlockedAuth` gate.
 //!
 //! Uses "github", not telegram: telegram is feature-available here, but
 //! empirically (verified against this exact harness) its activation resolves
@@ -17,7 +13,7 @@
 //! product-auth credential-account mechanism as google/notion (the
 //! mechanism `scenario_extension_activation_reauth_gate` already proves
 //! raises a real `BlockedAuth` gate for an unsatisfied requirement), so it
-//! is the honest in-catalog stand-in for a readiness-map-absent provider.
+//! is the in-catalog manual-token provider used by this scenario.
 //! Runs on github's EXISTING install from Scenario 1 (never activated,
 //! never credentialed there) — no fresh install, mirroring how Scenario 7
 //! activates the same pre-existing install.

@@ -21,10 +21,8 @@
 //!   the credential-appears → activation-completes arm, and the
 //!   one-account-many-extensions shape.
 //!
-//! Uses "google-calendar" and "google-drive" in its own
-//! Google-OAuth-configured group. The isolated composition is required by the
-//! provider-instance readiness contract: this scenario tests per-account
-//! gating, not the earlier missing-instance remediation path.
+//! Uses "google-calendar" and "google-drive" in its own isolated group so its
+//! seeded Google accounts and activation state cannot affect sibling scenarios.
 
 use super::reborn_support::group::{HarnessResult, RebornIntegrationGroup};
 use super::reborn_support::reply::RebornScriptedReply;

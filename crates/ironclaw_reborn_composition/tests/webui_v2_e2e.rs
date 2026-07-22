@@ -23,10 +23,11 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
+use chrono::{Duration as ChronoDuration, Utc};
 use http_body_util::BodyExt;
 use ironclaw_auth::{
     AuthProductScope, AuthSurface, CredentialAccountLabel, CredentialAccountStatus,
-    CredentialOwnership, NewCredentialAccount, ProviderScope,
+    CredentialOwnership, GOOGLE_GMAIL_READONLY_SCOPE, NewCredentialAccount, ProviderScope,
 };
 use ironclaw_host_api::runtime_policy::{
     ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
@@ -42,8 +43,9 @@ use ironclaw_loop_host::{
     HostManagedModelStreamSink,
 };
 use ironclaw_reborn_composition::{
-    OAuthClientConfig, PollSettings, RebornBuildInput, RebornRuntime, RebornRuntimeIdentity,
-    RebornRuntimeInput, build_reborn_runtime, build_webui_services,
+    LOCAL_DEV_SECRETS_MASTER_KEY_PATH, OAuthClientConfig, PollSettings, RebornBuildInput,
+    RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
+    build_webui_services,
 };
 use ironclaw_turns::run_profile::{
     CapabilityCallCandidate, LoopCapabilityPort, ProviderToolCall, RegisterProviderToolCallRequest,
@@ -611,30 +613,8 @@ async fn build_harness_at(
     .await
 }
 
-/// Harness with NO Google OAuth backend configured at composition time, so
-/// the provider-instance readiness map's `google` entry stays populated (see
-/// `provider_instance_readiness_map`) and a google-family extension
-/// activation fails closed with the sanitized 400 before it ever reaches the
-/// per-account credential gate. Backs
-/// `webui_v2_extension_activate_returns_400_when_provider_instance_not_configured`.
-async fn build_harness_without_google_oauth_backend() -> Harness {
-    let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
-    build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
-        storage_root,
-        Some(root),
-        Arc::new(ToolCallingGateway::default()),
-        local_dev_effective_policy(),
-        USER,
-        USER,
-        None,
-    )
-    .await
-}
-
 /// Dummy but well-formed Google OAuth backend for harnesses that need
-/// Gmail/GSuite setup+activation to reach the per-account credential gate
-/// instead of failing closed at the provider-instance readiness map.
+/// Gmail/GSuite setup+activation to reach the per-account credential gate.
 fn test_google_oauth_backend() -> OAuthClientConfig {
     OAuthClientConfig::new(
         "e2e-google-client-id.apps.googleusercontent.com",
@@ -653,14 +633,7 @@ async fn build_harness_at_with_runtime_owner_and_auth_user(
     authenticated_user_id: &str,
 ) -> Harness {
     // This shared harness backs WebUI e2e tests that exercise Gmail/GSuite
-    // setup+activation over the real v2 router, not the provider-instance
-    // readiness map — without a configured Google OAuth backend,
-    // `webui_v2_gmail_oauth_setup_complete_allows_activation` and any other
-    // google-family activation test here fails closed with the
-    // readiness-map's 400 before it ever reaches the per-account gate under
-    // test. `webui_v2_extension_activate_returns_400_when_provider_instance_not_configured`
-    // is the dedicated test for that 400 path and uses
-    // `build_harness_without_google_oauth_backend` instead.
+    // setup+activation over the real v2 router with a boot-config fallback.
     build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
         storage_root,
         root,
@@ -673,13 +646,8 @@ async fn build_harness_at_with_runtime_owner_and_auth_user(
     .await
 }
 
-/// Harness variant with composition-time Google OAuth configuration under the
-/// caller's control. `google_oauth_backend: None` leaves the provider-instance
-/// readiness map's `google` entry populated, so a google-family extension
-/// activation fails closed with the sanitized 400 before it ever reaches the
-/// per-account credential gate — the shape
-/// `webui_v2_extension_activate_returns_400_when_provider_instance_not_configured`
-/// needs to drive the real HTTP activate route through that path.
+/// Harness variant with composition-time Google OAuth fallback configuration
+/// under the caller's control.
 async fn build_harness_at_with_runtime_owner_auth_user_and_google_oauth_backend(
     storage_root: PathBuf,
     root: Option<tempfile::TempDir>,
@@ -1619,85 +1587,6 @@ async fn webui_v2_gmail_oauth_setup_complete_allows_activation() {
     assert_eq!(activate_body["activated"], true);
 }
 
-/// The provider-instance readiness map's 400 path
-/// (`ProviderInstanceNotConfigured` -> `map_lifecycle_error` -> sanitized
-/// `InvalidRequest`) had crate-tier coverage for the port contract
-/// (`google_family_activation_fails_closed_when_provider_instance_not_configured`
-/// in `extension_lifecycle.rs`) and for the WebUI mapping function
-/// (`lifecycle_setup::provider_instance_not_configured_maps_to_sanitized_400`),
-/// but nothing drove the real HTTP activate route end-to-end. This proves the
-/// whole chain: a composition build with NO Google OAuth backend configured
-/// -> the readiness map's `google` entry -> `activation_credential_requirements`
-/// failing closed -> the real `POST .../activate` handler returning 400 with
-/// the sanitized wire body (no remediation text, no `reason` field at all).
-#[tokio::test]
-async fn webui_v2_extension_activate_returns_400_when_provider_instance_not_configured() {
-    let harness = build_harness_without_google_oauth_backend().await;
-
-    let package_ref = json!({"kind": "extension", "id": "gmail"});
-    let install = harness
-        .router
-        .clone()
-        .oneshot(bearer_post(
-            "/api/webchat/v2/extensions/install",
-            json!({"package_ref": package_ref}),
-        ))
-        .await
-        .expect("install Gmail oneshot");
-    assert_eq!(install.status(), StatusCode::OK);
-    let install_body = read_json(install).await;
-    assert_eq!(
-        install_body["success"], true,
-        "install body: {install_body}"
-    );
-
-    let activate = harness
-        .router
-        .clone()
-        .oneshot(bearer_post(
-            "/api/webchat/v2/extensions/gmail/activate",
-            json!({}),
-        ))
-        .await
-        .expect("activate Gmail oneshot");
-    assert_eq!(
-        activate.status(),
-        StatusCode::BAD_REQUEST,
-        "activation must fail closed before any per-account credential gate when the \
-         operator never configured this instance's Google OAuth backend at all"
-    );
-    let activate_body = read_json(activate).await;
-    assert_eq!(activate_body["error"], "invalid_request");
-    assert_eq!(activate_body["kind"], "validation");
-    assert_eq!(activate_body["retryable"], false);
-    assert!(
-        activate_body.get("field").is_none(),
-        "sanitized 400 body must carry no field hint: {activate_body}"
-    );
-    assert!(
-        activate_body.get("validation_code").is_none(),
-        "sanitized 400 body must carry no validation code: {activate_body}"
-    );
-    let body_text = activate_body.to_string().to_ascii_lowercase();
-    for leaked in [
-        "config set",
-        "client_secret",
-        "client_id",
-        "console.cloud.google.com",
-    ] {
-        assert!(
-            !body_text.contains(leaked),
-            "sanitized 400 body must not leak remediation text: {activate_body}"
-        );
-    }
-
-    harness
-        .runtime
-        .shutdown()
-        .await
-        .expect("runtime shutdown clean");
-}
-
 #[tokio::test]
 async fn webui_v2_google_docs_setup_projects_oauth_before_install() {
     let harness = build_harness().await;
@@ -1970,8 +1859,20 @@ mod operator_llm_config {
     }
 
     async fn build_operator_harness() -> Harness {
+        build_operator_harness_with_google_fallback(None).await
+    }
+
+    async fn build_operator_harness_with_google_fallback(
+        google_fallback: Option<OAuthClientConfig>,
+    ) -> Harness {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(&storage_root).expect("local-dev storage root");
+        std::fs::write(
+            storage_root.join(LOCAL_DEV_SECRETS_MASTER_KEY_PATH),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("test secrets master key");
         let home = RebornHome::resolve_from_env_parts(
             Some(root.path().join("reborn-home").into_os_string()),
             None,
@@ -1981,22 +1882,27 @@ mod operator_llm_config {
         let boot = RebornBootConfig::new(home, RebornProfile::LocalDev);
 
         let gateway = Arc::new(ToolCallingGateway::default());
-        let input = RebornRuntimeInput::from_services(
-            RebornBuildInput::local_dev(USER, storage_root)
-                .with_runtime_policy(local_dev_effective_policy()),
-        )
-        .with_identity(RebornRuntimeIdentity {
-            tenant_id: TENANT.to_string(),
-            agent_id: AGENT.to_string(),
-            source_binding_id: "e2e-source".to_string(),
-            reply_target_binding_id: "e2e-reply".to_string(),
-        })
-        .with_poll_settings(PollSettings {
-            interval: Duration::from_millis(10),
-            max_total: Duration::from_secs(10),
-        })
-        .with_model_gateway_override(gateway)
-        .with_boot_config(boot);
+        let mut services = RebornBuildInput::local_dev(USER, storage_root)
+            .with_runtime_policy(local_dev_effective_policy())
+            .with_dcr_oauth_callback("http://127.0.0.1:3000")
+            .expect("loopback OAuth callback origin");
+        if let Some(google_fallback) = google_fallback {
+            services = services
+                .with_vendor_oauth_client(ironclaw_auth::GOOGLE_PROVIDER_ID, google_fallback);
+        }
+        let input = RebornRuntimeInput::from_services(services)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: TENANT.to_string(),
+                agent_id: AGENT.to_string(),
+                source_binding_id: "e2e-source".to_string(),
+                reply_target_binding_id: "e2e-reply".to_string(),
+            })
+            .with_poll_settings(PollSettings {
+                interval: Duration::from_millis(10),
+                max_total: Duration::from_secs(10),
+            })
+            .with_model_gateway_override(gateway)
+            .with_boot_config(boot);
 
         let runtime = build_reborn_runtime(input).await.expect("runtime builds");
         let bundle = build_webui_services(&runtime, None).expect("webui bundle");
@@ -2013,6 +1919,175 @@ mod operator_llm_config {
             router,
             _root: Some(root),
         }
+    }
+
+    async fn save_google_admin_configuration(
+        router: &axum::Router,
+        client_id: &str,
+        client_secret: &str,
+        expected_revision: u64,
+    ) {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/webchat/v2/operator/extension-configuration/vendor.google")
+                    .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "values": [
+                                {
+                                    "handle": "google_oauth_client_id",
+                                    "value": client_id,
+                                },
+                                {
+                                    "handle": "google_oauth_client_secret",
+                                    "value": client_secret,
+                                },
+                            ],
+                            "expected_revision": expected_revision,
+                            "idempotency_key": format!("webui-google-admin-save-{expected_revision}"),
+                        })
+                        .to_string(),
+                    ))
+                    .expect("admin configuration request"),
+            )
+            .await
+            .expect("save admin configuration");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "saving manifest-declared Google configuration must succeed: {}",
+            String::from_utf8_lossy(
+                &to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .expect("bounded error response")
+            )
+        );
+    }
+
+    async fn install_gmail(router: &axum::Router) {
+        let install = router
+            .clone()
+            .oneshot(bearer_post(
+                "/api/webchat/v2/extensions/install",
+                json!({"package_ref": {"kind": "extension", "id": "gmail"}}),
+            ))
+            .await
+            .expect("install Gmail");
+        assert_eq!(install.status(), StatusCode::OK);
+    }
+
+    async fn start_gmail_oauth(router: &axum::Router) -> Value {
+        let response = router
+            .clone()
+            .oneshot(bearer_post(
+                "/api/webchat/v2/extensions/gmail/setup/oauth/start",
+                json!({
+                    "provider": "google",
+                    "account_label": "work google",
+                    "scopes": [GOOGLE_GMAIL_READONLY_SCOPE],
+                    "expires_at": (Utc::now() + ChronoDuration::minutes(5)).to_rfc3339(),
+                    "invocation_id": InvocationId::new().to_string(),
+                }),
+            ))
+            .await
+            .expect("start Gmail OAuth");
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "OAuth must use configuration saved after startup"
+        );
+        read_json(response).await
+    }
+
+    #[tokio::test]
+    async fn manifest_admin_configuration_drives_and_rotates_google_oauth_without_restart() {
+        let harness = build_operator_harness().await;
+        let admin_client_id = "admin-live.apps.googleusercontent.com";
+
+        save_google_admin_configuration(
+            &harness.router,
+            admin_client_id,
+            "admin-google-client-secret",
+            0,
+        )
+        .await;
+        install_gmail(&harness.router).await;
+        let started = start_gmail_oauth(&harness.router).await;
+        let authorization_url = started["authorization_url"]
+            .as_str()
+            .expect("authorization URL");
+        let parsed = url::Url::parse(authorization_url).expect("valid authorization URL");
+        assert!(
+            parsed
+                .query_pairs()
+                .any(|(name, value)| { name == "client_id" && value == admin_client_id })
+        );
+
+        let rotated_client_id = "admin-rotated.apps.googleusercontent.com";
+        save_google_admin_configuration(
+            &harness.router,
+            rotated_client_id,
+            "rotated-google-client-secret",
+            1,
+        )
+        .await;
+        let rotated = start_gmail_oauth(&harness.router).await;
+        let rotated_url = rotated["authorization_url"]
+            .as_str()
+            .expect("rotated authorization URL");
+        let parsed = url::Url::parse(rotated_url).expect("valid rotated authorization URL");
+        assert!(
+            parsed
+                .query_pairs()
+                .any(|(name, value)| { name == "client_id" && value == rotated_client_id })
+        );
+
+        harness
+            .runtime
+            .shutdown()
+            .await
+            .expect("runtime shutdown clean");
+    }
+
+    #[tokio::test]
+    async fn manifest_admin_configuration_overrides_boot_google_credentials() {
+        let fallback = OAuthClientConfig::new(
+            "boot-fallback.apps.googleusercontent.com",
+            "http://127.0.0.1:3000/api/reborn/product-auth/oauth/google/callback",
+            Some(secrecy::SecretString::from("boot-fallback-secret")),
+        )
+        .expect("valid fallback config");
+        let harness = build_operator_harness_with_google_fallback(Some(fallback)).await;
+        let admin_client_id = "admin-override.apps.googleusercontent.com";
+
+        save_google_admin_configuration(
+            &harness.router,
+            admin_client_id,
+            "admin-google-client-secret",
+            0,
+        )
+        .await;
+        install_gmail(&harness.router).await;
+        let started = start_gmail_oauth(&harness.router).await;
+        let authorization_url = started["authorization_url"]
+            .as_str()
+            .expect("authorization URL");
+        let parsed = url::Url::parse(authorization_url).expect("valid authorization URL");
+        assert!(
+            parsed
+                .query_pairs()
+                .any(|(name, value)| { name == "client_id" && value == admin_client_id })
+        );
+
+        harness
+            .runtime
+            .shutdown()
+            .await
+            .expect("runtime shutdown clean");
     }
 
     fn nearai_save_payload() -> Value {

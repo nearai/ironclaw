@@ -626,12 +626,8 @@ mod tests {
         extension_state: GsuiteExtensionState,
     ) -> GsuiteSurfaceHarness {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Dummy but well-formed Google OAuth backend: this harness exercises
-        // GSuite/Gmail activation and dispatch (per-account credential
-        // gating), not the provider-instance readiness map — without this,
-        // google-family activation below fails closed with
-        // `ProviderInstanceNotConfigured` before it ever reaches the
-        // per-account gate these tests target.
+        // Dummy but well-formed Google OAuth boot fallback: this harness
+        // exercises GSuite/Gmail account activation and dispatch.
         let google_oauth_backend = crate::OAuthClientConfig::new(
             "itest-google-client-id.apps.googleusercontent.com",
             "http://127.0.0.1/oauth/callback/google",
