@@ -151,6 +151,24 @@ pub(super) async fn user_container_launch_config(
     let labels = build_user_container_labels(LABEL_PREFIX, tenant_id, user_id);
     let mut env = config.command_env(std::collections::HashMap::new())?;
     env.push("HOME=/workspace/.home".to_string());
+    // npm's global install prefix defaults to `/usr` on this Debian-apt
+    // install (Dockerfile.process-sandbox), which is NOT `$HOME`-relative —
+    // unlike cargo/rustup, `HOME=/workspace/.home` alone does not rescue it.
+    // Under `readonly_rootfs: Some(true)` a bare `npm install -g` then fails
+    // with EROFS. Redirect npm's prefix into the writable, persistent
+    // workspace HOME instead.
+    env.push("NPM_CONFIG_PREFIX=/workspace/.home/.npm-global".to_string());
+    // Setting `Config.env`'s PATH here REPLACES the image-baked `ENV PATH`
+    // for the whole container (and therefore every subsequent `docker exec`)
+    // rather than extending it, so every directory a sandboxed command needs
+    // must be restated explicitly: the new npm global bin dir, `pip
+    // --user`'s console-script directory (installed but otherwise not on
+    // PATH — those CLIs would be present but not invokable), the image's
+    // baked cargo bin dir, and the standard system dirs.
+    env.push(
+        "PATH=/workspace/.home/.npm-global/bin:/workspace/.home/.local/bin:/home/sandbox/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            .to_string(),
+    );
     let container_user = config.container_identity.container_user()?;
     let mut binds = config
         .mount_sources
@@ -502,6 +520,28 @@ mod tests {
         assert_eq!(labels.get("ironclaw.user").unwrap(), "user-a");
         let env = launch.env.unwrap();
         assert!(env.iter().any(|e| e == "HOME=/workspace/.home"));
+        assert!(
+            env.iter()
+                .any(|e| e == "NPM_CONFIG_PREFIX=/workspace/.home/.npm-global"),
+            "npm's global prefix is not $HOME-relative, so it must be redirected explicitly \
+             to a writable path under readonly_rootfs: {env:?}"
+        );
+        let path_entry = env
+            .iter()
+            .find(|e| e.starts_with("PATH="))
+            .unwrap_or_else(|| panic!("launch env must set an explicit PATH: {env:?}"));
+        for expected in [
+            "/workspace/.home/.npm-global/bin",
+            "/workspace/.home/.local/bin",
+            "/home/sandbox/.cargo/bin",
+            "/usr/bin",
+        ] {
+            assert!(
+                path_entry.contains(expected),
+                "PATH must include {expected} (setting Config.env PATH replaces the \
+                 image-baked ENV PATH for every docker exec): {path_entry:?}"
+            );
+        }
         let host_config = launch.host_config.unwrap();
         assert_eq!(host_config.auto_remove, Some(false));
     }
@@ -877,14 +917,16 @@ mod docker_tests {
             &container_id,
             ContainerWorkdir::workspace_root(),
             Vec::new(),
-            "command -v git node python3 cargo gh tmux && whoami && echo $HOME".to_string(),
+            "command -v git node python3 cargo gh tmux npm && whoami && echo $HOME".to_string(),
             Duration::from_secs(20),
             4096,
         )
         .await
         .expect("probe exec succeeds");
 
-        for binary in ["/git", "/node", "/python3", "/cargo", "/gh", "/tmux"] {
+        for binary in [
+            "/git", "/node", "/python3", "/cargo", "/gh", "/tmux", "/npm",
+        ] {
             assert!(
                 probe.output.contains(binary),
                 "expected {binary} on PATH: {probe:?}"
@@ -901,6 +943,81 @@ mod docker_tests {
         assert!(
             probe.output.contains("/workspace/.home"),
             "HOME must be workspace-relative: {probe:?}"
+        );
+
+        best_effort_remove(&docker, &container_id).await;
+    }
+
+    /// Guards against the applied container's `HostConfig` diverging from
+    /// `RebornSandboxConfig` — a limit can be coded into
+    /// `user_container_launch_config` and unit-tested against the Rust
+    /// `Config` struct while never actually taking effect against the real
+    /// Docker daemon (e.g. a field docker silently ignores or overrides).
+    /// This asserts against `docker inspect`'s own view, not the struct we
+    /// built.
+    #[tokio::test]
+    async fn applied_container_limits_match_config_via_docker_inspect() {
+        if !docker_gate::docker_available() {
+            eprintln!(
+                "SKIP: no docker daemon reachable — applied_container_limits_match_config_via_docker_inspect requires a real Docker daemon (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+        let image = docker_gate::configured_sandbox_image();
+        if !docker_gate::docker_image_available(&image) {
+            eprintln!(
+                "SKIP: sandbox worker image {image:?} is not built locally — requires a locally-built ironclaw-worker image (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let config = docker_tests_config(temp.path());
+        let tenant = ironclaw_host_api::TenantId::new("limits-tenant").unwrap();
+        let user = ironclaw_host_api::UserId::new("limits-user").unwrap();
+        let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
+        let workspace = key.workspace_path(temp.path());
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let container_id = ensure_container(&docker, &config, &key, &tenant, &user, &workspace)
+            .await
+            .expect("ensure_container succeeds");
+
+        let inspected = docker
+            .inspect_container(&container_id, None::<InspectContainerOptions>)
+            .await
+            .expect("inspect succeeds");
+        let host_config = inspected
+            .host_config
+            .expect("inspected container has a host config");
+
+        assert_eq!(
+            host_config.memory,
+            Some(config.memory_bytes as i64),
+            "applied memory limit must match config: {host_config:?}"
+        );
+        assert_eq!(
+            host_config.cpu_shares,
+            Some(config.cpu_shares as i64),
+            "applied cpu_shares must match config: {host_config:?}"
+        );
+        assert_eq!(
+            host_config.readonly_rootfs,
+            Some(true),
+            "applied container must have a readonly rootfs: {host_config:?}"
+        );
+        let cap_drop = host_config.cap_drop.unwrap_or_default();
+        assert!(
+            cap_drop.iter().any(|cap| cap == "ALL"),
+            "applied container must drop ALL capabilities: {cap_drop:?}"
+        );
+        let security_opt = host_config.security_opt.unwrap_or_default();
+        assert!(
+            security_opt
+                .iter()
+                .any(|opt| opt == "no-new-privileges:true"),
+            "applied container must set no-new-privileges: {security_opt:?}"
         );
 
         best_effort_remove(&docker, &container_id).await;
