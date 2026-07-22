@@ -48,10 +48,7 @@ pub use reaper::{ReapSummary, SandboxReaper, SandboxReaperConfig};
 use registry::BackgroundJobRegistry;
 pub use registry::SandboxActivityRegistry;
 pub use scope_key::RebornSandboxScopeKey;
-pub use shell_limits::{
-    SHELL_OUTPUT_LIMIT_DEFAULT_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES, SHELL_TIMEOUT_DEFAULT_SECS,
-    SHELL_TIMEOUT_MAX_SECS, clamp_shell_output_limit_bytes, clamp_shell_timeout_secs,
-};
+pub use shell_limits::{clamp_shell_output_limit_bytes, clamp_shell_timeout_secs};
 pub use user_key::RebornSandboxUserKey;
 
 /// Docker label prefix for container metadata attached by
