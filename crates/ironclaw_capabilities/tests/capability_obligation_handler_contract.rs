@@ -73,7 +73,7 @@ async fn capability_host_still_fails_closed_when_handler_rejects_obligations() {
 }
 
 #[tokio::test]
-async fn capability_host_passes_prepared_effects_to_dispatch() {
+async fn capability_host_authorize_fold_seals_authority_and_prepared_effects_to_dispatch() {
     let registry = registry_with_echo_capability();
     let reservation_id = ResourceReservationId::new();
     let narrowed_mounts = mount_view(
@@ -88,8 +88,17 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
         "/projects/demo",
         MountPermissions::read_write(),
     );
+    let actor = UserId::new("authenticated-alice").unwrap();
+    let process_id = ProcessId::new();
+    let parent_process_id = ProcessId::new();
+    context.authenticated_actor_user_id = Some(actor.clone());
+    context.process_id = Some(process_id);
+    context.parent_process_id = Some(parent_process_id);
+    context.validate().unwrap();
     let estimate = ResourceEstimate::default().set_concurrency_slots(1);
     let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let correlation_id = context.correlation_id;
     let authorizer = ObligatingAuthorizer::new(vec![
         Obligation::UseScopedMounts {
             mounts: narrowed_mounts.clone(),
@@ -118,8 +127,30 @@ async fn capability_host_passes_prepared_effects_to_dispatch() {
     .unwrap();
 
     let request = dispatcher.last_request().unwrap();
+    assert_eq!(
+        request.invocation.activity_id,
+        ActivityId::from_uuid(invocation_id.as_uuid())
+    );
+    assert_eq!(request.authenticated_actor_user_id, Some(actor.clone()));
+    assert_eq!(request.invocation.actor, Actor::Sealed(actor));
+    assert_eq!(
+        request.invocation.origin,
+        InvocationOrigin::Product(ProductKind::new("tests").unwrap())
+    );
+    assert_eq!(request.invocation.correlation_id, correlation_id);
+    assert_eq!(request.invocation.process_id, Some(process_id));
+    assert_eq!(
+        request.invocation.parent_process_id,
+        Some(parent_process_id)
+    );
+    assert_eq!(
+        request.invocation.input,
+        json!({"message": "prepared effects"})
+    );
     assert_eq!(request.invocation.scope, scope);
     assert_eq!(request.invocation.estimate, estimate);
+    assert_eq!(request.lane, RuntimeLane::Wasm);
+    assert_eq!(request.run_id, None);
     assert_eq!(request.mounts, Some(narrowed_mounts));
     assert_eq!(
         request
