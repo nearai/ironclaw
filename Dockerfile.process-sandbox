@@ -25,14 +25,38 @@ RUN apt-get update \
        iptables \
        libcap2-bin \
        tini \
+       tmux \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI (gh)
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY docker/process-sandbox-entrypoint.sh /usr/local/bin/process-sandbox-entrypoint
 RUN chmod +x /usr/local/bin/process-sandbox-entrypoint \
     && useradd -m -u 1000 -s /bin/bash sandbox \
-    && mkdir -p /workspace /ironclaw/state/tools /ironclaw/state/cache /ironclaw/broker \
+    && mkdir -p /workspace/.home /ironclaw/state/tools /ironclaw/state/cache /ironclaw/broker \
     && chown -R sandbox:sandbox /workspace /ironclaw
+
+# Rust toolchain, installed as the sandbox user under the workspace-relative
+# HOME so it survives container-rm/recreate only via the bind-mounted
+# workspace (matches the design's "HOME=/workspace/.home so caches/dotfiles
+# persist" decision) — installed at build time into a location Cargo can
+# still find once HOME is redirected to /workspace/.home at runtime via
+# CARGO_HOME/RUSTUP_HOME pointed at a workspace-relative path is NOT done at
+# build time (the workspace doesn't exist yet); instead rustup installs to
+# the image's default /home/sandbox/.cargo, and the container launch env
+# additionally sets CARGO_HOME=/workspace/.home/.cargo, RUSTUP_HOME=/workspace/.home/.rustup
+# with a first-run copy step in the entrypoint script — see entrypoint change below.
+USER sandbox
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH="/home/sandbox/.cargo/bin:${PATH}"
+USER root
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/process-sandbox-entrypoint"]

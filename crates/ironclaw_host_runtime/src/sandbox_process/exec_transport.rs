@@ -843,4 +843,66 @@ mod docker_tests {
         best_effort_remove(&docker, &container_a).await;
         best_effort_remove(&docker, &container_b).await;
     }
+
+    #[tokio::test]
+    async fn fat_image_provides_git_node_python_rust_gh_tmux_under_non_root_home() {
+        if !docker_gate::docker_available() {
+            eprintln!(
+                "SKIP: no docker daemon reachable — fat_image_provides_git_node_python_rust_gh_tmux_under_non_root_home requires a real Docker daemon (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+        let image = docker_gate::configured_sandbox_image();
+        if !docker_gate::docker_image_available(&image) {
+            eprintln!(
+                "SKIP: sandbox worker image {image:?} is not built locally with the Task A7 Dockerfile changes — requires a locally-built ironclaw-worker image (CI/hosted Docker lane only)"
+            );
+            return;
+        }
+
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let config = docker_tests_config(temp.path());
+        let tenant = ironclaw_host_api::TenantId::new("fat-image-tenant").unwrap();
+        let user = ironclaw_host_api::UserId::new("fat-image-user").unwrap();
+        let key = RebornSandboxUserKey::from_tenant_user(&tenant, &user);
+        let workspace = key.workspace_path(temp.path());
+        std::fs::create_dir_all(&workspace).unwrap();
+        let container_id = ensure_container(&docker, &config, &key, &tenant, &user, &workspace)
+            .await
+            .unwrap();
+
+        let probe = exec_in_container(
+            &docker,
+            &container_id,
+            ContainerWorkdir::workspace_root(),
+            Vec::new(),
+            "command -v git node python3 cargo gh tmux && whoami && echo $HOME".to_string(),
+            Duration::from_secs(20),
+            4096,
+        )
+        .await
+        .expect("probe exec succeeds");
+
+        for binary in ["/git", "/node", "/python3", "/cargo", "/gh", "/tmux"] {
+            assert!(
+                probe.output.contains(binary),
+                "expected {binary} on PATH: {probe:?}"
+            );
+        }
+        assert!(
+            probe.output.contains("sandbox"),
+            "must run as the non-root sandbox user: {probe:?}"
+        );
+        assert!(
+            !probe.output.contains("\nroot\n"),
+            "must not run as root: {probe:?}"
+        );
+        assert!(
+            probe.output.contains("/workspace/.home"),
+            "HOME must be workspace-relative: {probe:?}"
+        );
+
+        best_effort_remove(&docker, &container_id).await;
+    }
 }

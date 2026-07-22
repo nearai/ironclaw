@@ -49,4 +49,8 @@ if [ "${IRONCLAW_EGRESS_LOCKDOWN:-}" = "broker-only" ]; then
   iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 fi
 
+mkdir -p "$HOME" 2>/dev/null || true
+[ -d /home/sandbox/.cargo ] && [ ! -d /workspace/.home/.cargo ] && cp -a /home/sandbox/.cargo /workspace/.home/.cargo 2>/dev/null || true
+[ -d /home/sandbox/.rustup ] && [ ! -d /workspace/.home/.rustup ] && cp -a /home/sandbox/.rustup /workspace/.home/.rustup 2>/dev/null || true
+
 exec capsh --drop=all --user=sandbox -- -c 'exec "$@"' process-sandbox "$@"
