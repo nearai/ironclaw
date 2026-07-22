@@ -35,26 +35,27 @@ use ironclaw_product_workflow::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
-    LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
-    ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
-    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
+    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
+    LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductSurface,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
+    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -76,11 +77,10 @@ use ironclaw_product_workflow::{
     RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    SetActiveLlmRequest, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, rejecting_reborn_services_error,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -320,9 +320,6 @@ struct StubServices {
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
     run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
     get_llm_config_calls: Mutex<usize>,
-    upsert_llm_provider_calls: Mutex<Vec<String>>,
-    delete_llm_provider_calls: Mutex<Vec<String>>,
-    set_active_llm_calls: Mutex<Vec<(String, Option<String>)>>,
     test_llm_connection_calls: Mutex<Vec<String>>,
     list_llm_models_calls: Mutex<Vec<String>>,
     next_create_thread_error: Mutex<Option<RebornServicesError>>,
@@ -1318,42 +1315,6 @@ impl RebornServicesApi for StubServices {
         Ok(operator_command_response(
             RebornOperatorArea::ServiceLifecycle,
         ))
-    }
-
-    async fn upsert_llm_provider(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: UpsertLlmProviderRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        self.upsert_llm_provider_calls
-            .lock()
-            .expect("lock")
-            .push(request.id.clone());
-        Ok(llm_snapshot(&request.id))
-    }
-
-    async fn delete_llm_provider(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        provider_id: String,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        self.delete_llm_provider_calls
-            .lock()
-            .expect("lock")
-            .push(provider_id);
-        Ok(llm_snapshot("openai"))
-    }
-
-    async fn set_active_llm(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: SetActiveLlmRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        self.set_active_llm_calls
-            .lock()
-            .expect("lock")
-            .push((request.provider_id.clone(), request.model.clone()));
-        Ok(llm_snapshot(&request.provider_id))
     }
 
     async fn test_llm_connection(
@@ -4913,7 +4874,7 @@ async fn get_extension_setup_rejects_malformed_package_id_with_400() {
 }
 
 #[tokio::test]
-async fn llm_provider_routes_dispatch_to_facade_methods() {
+async fn llm_provider_routes_use_product_surface_for_config_mutations() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
         services.clone(),
@@ -4937,6 +4898,7 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
     let get_body = read_json(get_response).await;
     assert_eq!(get_body["providers"][0]["accepts_api_key"], true);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let upsert_response = router
         .clone()
         .oneshot(
@@ -4953,6 +4915,7 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
         .expect("oneshot");
     assert_eq!(upsert_response.status(), StatusCode::OK);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let delete_response = router
         .clone()
         .oneshot(
@@ -4966,6 +4929,7 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
         .expect("oneshot");
     assert_eq!(delete_response.status(), StatusCode::OK);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let active_response = router
         .clone()
         .oneshot(
@@ -5008,7 +4972,7 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
         .expect("oneshot");
     assert_eq!(models_response.status(), StatusCode::OK);
 
-    assert_eq!(*services.get_llm_config_calls.lock().expect("lock"), 1);
+    assert_eq!(*services.get_llm_config_calls.lock().expect("lock"), 4);
     let view_ids: Vec<String> = services
         .view_queries
         .lock()
@@ -5017,29 +4981,40 @@ async fn llm_provider_routes_dispatch_to_facade_methods() {
         .map(|query| query.view_id.clone())
         .collect();
     assert!(view_ids.contains(&LLM_CONFIG_VIEW.id.to_string()));
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 3);
     assert_eq!(
-        services
-            .upsert_llm_provider_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        ["acme"]
+        invoke_calls[0].0,
+        CapabilityId::new(LLM_PROVIDER_UPSERT_CAPABILITY_ID).expect("capability id")
     );
     assert_eq!(
-        services
-            .delete_llm_provider_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        ["acme"]
+        invoke_calls[0].1,
+        serde_json::json!({
+            "id": "acme",
+            "name": "Acme",
+            "adapter": "open_ai_completions",
+            "base_url": "https://api.acme.test/v1",
+            "default_model": "acme-1",
+            "api_key": "sk-test",
+            "set_active": true,
+            "model": "acme-1"
+        })
     );
     assert_eq!(
-        services
-            .set_active_llm_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        [("openai".to_string(), Some("gpt-5".to_string()))]
+        invoke_calls[1].0,
+        CapabilityId::new(LLM_PROVIDER_DELETE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[1].1,
+        serde_json::json!({ "provider_id": "acme" })
+    );
+    assert_eq!(
+        invoke_calls[2].0,
+        CapabilityId::new(LLM_ACTIVE_SET_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[2].1,
+        serde_json::json!({ "provider_id": "openai", "model": "gpt-5" })
     );
     assert_eq!(
         services
@@ -5107,25 +5082,8 @@ async fn llm_provider_routes_require_operator_capability() {
 
     assert_eq!(*services.get_llm_config_calls.lock().expect("lock"), 0);
     assert!(
-        services
-            .upsert_llm_provider_calls
-            .lock()
-            .expect("lock")
-            .is_empty()
-    );
-    assert!(
-        services
-            .delete_llm_provider_calls
-            .lock()
-            .expect("lock")
-            .is_empty()
-    );
-    assert!(
-        services
-            .set_active_llm_calls
-            .lock()
-            .expect("lock")
-            .is_empty()
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "operator-gated LLM config routes must not reach ProductSurface invoke"
     );
     assert!(
         services

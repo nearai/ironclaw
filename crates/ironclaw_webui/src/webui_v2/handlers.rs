@@ -34,9 +34,10 @@ use ironclaw_product_workflow::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
-    LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot,
-    LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
+    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
+    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
     OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
     OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductOutboundEnvelope,
@@ -72,13 +73,12 @@ use ironclaw_product_workflow::{
     RebornUpdateProjectRequest, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    SetActiveLlmRequest, SettingsToolPermissionState, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    webui_attachment_capabilities,
+    SettingsToolPermissionState, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -2941,8 +2941,15 @@ pub async fn get_llm_config(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let page = state
-        .services()
+    let response = query_llm_config_snapshot(state.services(), caller).await?;
+    Ok(Json(response))
+}
+
+async fn query_llm_config_snapshot(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+) -> Result<LlmConfigSnapshot, RebornServicesError> {
+    let page = services
         .query(
             caller,
             RebornViewQuery {
@@ -2952,9 +2959,38 @@ pub async fn get_llm_config(
             },
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
-    Ok(Json(response))
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
+fn llm_config_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
+                Err(RebornServicesError {
+                    code: RebornServicesErrorCode::InvalidRequest,
+                    kind: RebornServicesErrorKind::Validation,
+                    status_code: 400,
+                    retryable: false,
+                    field: None,
+                    validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                })
+            }
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(extension_lifecycle_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(extension_lifecycle_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "llm config capability did not complete successfully",
+            )),
+        },
+        Resolution::Denied(_) => Err(extension_lifecycle_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => {
+            Err(extension_lifecycle_unavailable(true))
+        }
+    }
 }
 
 /// `POST /api/webchat/v2/llm/providers`
@@ -2962,10 +2998,19 @@ pub async fn upsert_llm_provider(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<UpsertLlmProviderRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state.services().upsert_llm_provider(caller, body).await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_PROVIDER_UPSERT_CAPABILITY_ID,
+        body,
+        ActivityId::new(),
+    )
+    .await?;
+    llm_config_mutation_succeeded(resolution)?;
+    let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
 }
 
@@ -2977,10 +3022,16 @@ pub async fn delete_llm_provider(
     Path(LlmProviderPath { provider_id }): Path<LlmProviderPath>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state
-        .services()
-        .delete_llm_provider(caller, provider_id)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_PROVIDER_DELETE_CAPABILITY_ID,
+        serde_json::json!({ "provider_id": provider_id }),
+        ActivityId::new(),
+    )
+    .await?;
+    llm_config_mutation_succeeded(resolution)?;
+    let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
 }
 
@@ -2989,10 +3040,19 @@ pub async fn set_active_llm(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<SetActiveLlmRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = state.services().set_active_llm(caller, body).await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        LLM_ACTIVE_SET_CAPABILITY_ID,
+        body,
+        ActivityId::new(),
+    )
+    .await?;
+    llm_config_mutation_succeeded(resolution)?;
+    let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
 }
 

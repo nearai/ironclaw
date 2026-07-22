@@ -210,6 +210,9 @@ const TOOL_CONFIG_PREFIX: &str = "tool.";
 pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
     "builtin.operator_config_set_auto_approve";
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
+pub const LLM_PROVIDER_UPSERT_CAPABILITY_ID: &str = "builtin.llm_provider_upsert";
+pub const LLM_PROVIDER_DELETE_CAPABILITY_ID: &str = "builtin.llm_provider_delete";
+pub const LLM_ACTIVE_SET_CAPABILITY_ID: &str = "builtin.llm_active_set";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
 pub const EXTENSION_IMPORT_CAPABILITY_ID: &str = "builtin.extension_import";
 pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
@@ -2280,41 +2283,6 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    /// Add or update a custom LLM provider (and optionally its key / active state).
-    ///
-    /// LLM-config mutations, probes, and login starts default to "service
-    /// unavailable" so facade impls (and test fakes) that don't wire an
-    /// [`LlmConfigService`] inherit a safe surface; the read snapshot is now a
-    /// descriptor-backed ProductSurface query.
-    async fn upsert_llm_provider(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: UpsertLlmProviderRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let _ = (caller, request);
-        Err(llm_config::llm_config_unavailable())
-    }
-
-    /// Remove a custom LLM provider and any stored key for it.
-    async fn delete_llm_provider(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        provider_id: String,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let _ = (caller, provider_id);
-        Err(llm_config::llm_config_unavailable())
-    }
-
-    /// Select the active LLM provider + model.
-    async fn set_active_llm(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: SetActiveLlmRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let _ = (caller, request);
-        Err(llm_config::llm_config_unavailable())
-    }
-
     /// Probe an LLM provider's credentials/endpoint without persisting.
     async fn test_llm_connection(
         &self,
@@ -3101,6 +3069,18 @@ where
         input: serde_json::Value,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
+        if capability.as_str() == LLM_PROVIDER_UPSERT_CAPABILITY_ID {
+            self.invoke_llm_provider_upsert(caller, input).await?;
+            return self.api_capability_success(activity_id, "llm provider updated");
+        }
+        if capability.as_str() == LLM_PROVIDER_DELETE_CAPABILITY_ID {
+            self.invoke_llm_provider_delete(caller, input).await?;
+            return self.api_capability_success(activity_id, "llm provider deleted");
+        }
+        if capability.as_str() == LLM_ACTIVE_SET_CAPABILITY_ID {
+            self.invoke_llm_active_set(caller, input).await?;
+            return self.api_capability_success(activity_id, "llm active provider updated");
+        }
         if capability.as_str() == EXTENSION_IMPORT_CAPABILITY_ID {
             extensions::import_extension_capability(self.lifecycle_facade.as_ref(), caller, input)
                 .await?;
@@ -4788,52 +4768,6 @@ where
             service_lifecycle: Some(service_lifecycle),
             diagnostics: Vec::new(),
         })
-    }
-
-    async fn upsert_llm_provider(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: UpsertLlmProviderRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let service = self
-            .llm_config
-            .as_ref()
-            .ok_or_else(llm_config::llm_config_unavailable)?;
-        validate_llm_base_url(request.base_url.as_deref())?;
-        service
-            .upsert_provider(caller, request)
-            .await
-            .map_err(llm_config::map_llm_config_error)
-    }
-
-    async fn delete_llm_provider(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        provider_id: String,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let service = self
-            .llm_config
-            .as_ref()
-            .ok_or_else(llm_config::llm_config_unavailable)?;
-        service
-            .delete_provider(caller, provider_id)
-            .await
-            .map_err(llm_config::map_llm_config_error)
-    }
-
-    async fn set_active_llm(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: SetActiveLlmRequest,
-    ) -> Result<LlmConfigSnapshot, RebornServicesError> {
-        let service = self
-            .llm_config
-            .as_ref()
-            .ok_or_else(llm_config::llm_config_unavailable)?;
-        service
-            .set_active(caller, request)
-            .await
-            .map_err(llm_config::map_llm_config_error)
     }
 
     async fn test_llm_connection(

@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use super::error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 use super::{ProductCapabilityInvoker, RebornServices, RebornViewDescriptor, RebornViewProvider};
-use crate::WebUiAuthenticatedCaller;
+use crate::{WebUiAuthenticatedCaller, WebUiInboundValidationCode, WebUiInboundValidationError};
 
 pub const LLM_CONFIG_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "llm_config",
@@ -350,6 +350,65 @@ where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
 {
+    pub(super) async fn invoke_llm_provider_upsert(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        input: serde_json::Value,
+    ) -> Result<(), RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config_unavailable)?;
+        let request: UpsertLlmProviderRequest =
+            serde_json::from_value(input).map_err(|_| llm_config_input_error("input"))?;
+        super::validate_llm_base_url(request.base_url.as_deref())?;
+        service
+            .upsert_provider(caller, request)
+            .await
+            .map_err(map_llm_config_error)?;
+        Ok(())
+    }
+
+    pub(super) async fn invoke_llm_provider_delete(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        input: serde_json::Value,
+    ) -> Result<(), RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config_unavailable)?;
+        let provider_id = input
+            .as_object()
+            .and_then(|object| object.get("provider_id"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| llm_config_input_error("provider_id"))?
+            .to_string();
+        service
+            .delete_provider(caller, provider_id)
+            .await
+            .map_err(map_llm_config_error)?;
+        Ok(())
+    }
+
+    pub(super) async fn invoke_llm_active_set(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        input: serde_json::Value,
+    ) -> Result<(), RebornServicesError> {
+        let service = self
+            .llm_config
+            .as_ref()
+            .ok_or_else(llm_config_unavailable)?;
+        let request: SetActiveLlmRequest =
+            serde_json::from_value(input).map_err(|_| llm_config_input_error("input"))?;
+        service
+            .set_active(caller, request)
+            .await
+            .map_err(map_llm_config_error)?;
+        Ok(())
+    }
+
     pub(super) async fn build_llm_config_view(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -360,4 +419,11 @@ where
             .ok_or_else(llm_config_unavailable)?;
         service.snapshot(caller).await.map_err(map_llm_config_error)
     }
+}
+
+fn llm_config_input_error(field: &'static str) -> RebornServicesError {
+    RebornServicesError::from(WebUiInboundValidationError::new(
+        field,
+        WebUiInboundValidationCode::InvalidValue,
+    ))
 }

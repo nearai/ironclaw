@@ -106,9 +106,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "trace_account_login_link",
     "authorize_trace_hold",
     // --- LLM admin config ---
-    "upsert_llm_provider",
-    "delete_llm_provider",
-    "set_active_llm",
     "test_llm_connection",
     "list_llm_models",
     "start_nearai_login",
