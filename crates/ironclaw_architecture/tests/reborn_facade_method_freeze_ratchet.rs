@@ -141,8 +141,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "get_operator_config_key",
     "set_operator_config_key",
     "validate_operator_config",
-    "get_operator_diagnostics",
-    "get_operator_status",
     "run_operator_service_lifecycle",
     // --- admin users + per-user secrets ---
     "list_admin_users",

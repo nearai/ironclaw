@@ -1700,20 +1700,6 @@ fn operator_config_key_diagnostic(key: String) -> RebornOperatorConfigDiagnostic
     }
 }
 
-fn operator_config_diagnostic_command_plane_response(
-    area: RebornOperatorArea,
-) -> RebornOperatorCommandPlaneResponse {
-    RebornOperatorCommandPlaneResponse {
-        area,
-        status: RebornOperatorSurfaceStatus::Unavailable,
-        message: "Operator config has unsupported or not-yet-wired settings.".to_string(),
-        operator_status: None,
-        logs: None,
-        service_lifecycle: None,
-        diagnostics: vec![operator_config_surface_not_wired_diagnostic()],
-    }
-}
-
 fn operator_doctor_status_diagnostic(
     check: &RebornOperatorStatusCheck,
 ) -> Option<RebornOperatorConfigDiagnostic> {
@@ -2566,26 +2552,6 @@ pub trait RebornServicesApi: Send + Sync {
             valid: diagnostics.is_empty(),
             diagnostics,
         })
-    }
-
-    async fn get_operator_diagnostics(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let _ = caller;
-        Ok(operator_config_diagnostic_command_plane_response(
-            RebornOperatorArea::Diagnostics,
-        ))
-    }
-
-    async fn get_operator_status(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let _ = caller;
-        Ok(operator_config_diagnostic_command_plane_response(
-            RebornOperatorArea::Status,
-        ))
     }
 
     async fn run_operator_service_lifecycle(
@@ -5095,40 +5061,6 @@ where
             request,
         )
         .await
-    }
-
-    async fn get_operator_diagnostics(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let page = self
-            .query(
-                caller,
-                RebornViewQuery {
-                    view_id: OPERATOR_DIAGNOSTICS_VIEW.id.to_string(),
-                    params: serde_json::json!({}),
-                    cursor: None,
-                },
-            )
-            .await?;
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
-    }
-
-    async fn get_operator_status(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        let page = self
-            .query(
-                caller,
-                RebornViewQuery {
-                    view_id: OPERATOR_STATUS_VIEW.id.to_string(),
-                    params: serde_json::json!({}),
-                    cursor: None,
-                },
-            )
-            .await?;
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
     }
 
     async fn run_operator_service_lifecycle(

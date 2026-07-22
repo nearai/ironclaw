@@ -10008,10 +10008,19 @@ async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
     let diagnostics_caller =
         caller_for_user_with_project("user-diagnostics", Some("project-diagnostics"));
 
-    let response = services
-        .get_operator_diagnostics(diagnostics_caller.clone())
+    let page = services
+        .query(
+            diagnostics_caller.clone(),
+            RebornViewQuery {
+                view_id: OPERATOR_DIAGNOSTICS_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
         .await
         .expect("operator diagnostics");
+    let response: RebornOperatorCommandPlaneResponse =
+        serde_json::from_value(page.payload).expect("operator diagnostics payload");
 
     assert_eq!(response.area.as_str(), "diagnostics");
     assert_eq!(response.status, RebornOperatorSurfaceStatus::Unavailable);
@@ -10159,10 +10168,19 @@ async fn operator_diagnostics_reports_setup_service_absence_without_failing_rout
         },
     )));
 
-    let response = services
-        .get_operator_diagnostics(caller())
+    let page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: OPERATOR_DIAGNOSTICS_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
         .await
         .expect("operator diagnostics");
+    let response: RebornOperatorCommandPlaneResponse =
+        serde_json::from_value(page.payload).expect("operator diagnostics payload");
 
     assert_eq!(response.area.as_str(), "diagnostics");
     assert!(response.diagnostics.iter().any(|diagnostic| {

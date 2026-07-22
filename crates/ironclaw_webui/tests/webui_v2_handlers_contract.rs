@@ -291,8 +291,6 @@ struct StubServices {
     set_operator_config_key_calls: Mutex<Vec<OperatorConfigSetCall>>,
     next_set_operator_config_key_error: Mutex<Option<RebornServicesError>>,
     validate_operator_config_calls: Mutex<Vec<Vec<String>>>,
-    get_operator_diagnostics_calls: Mutex<usize>,
-    get_operator_status_calls: Mutex<usize>,
     query_logs_calls: Mutex<Vec<LogsCall>>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
     run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
@@ -1350,26 +1348,6 @@ impl RebornServicesApi for StubServices {
             valid: diagnostics.is_empty(),
             diagnostics,
         })
-    }
-
-    async fn get_operator_diagnostics(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        *self.get_operator_diagnostics_calls.lock().expect("lock") += 1;
-        Ok(operator_config_diagnostic_command_plane_response(
-            RebornOperatorArea::Diagnostics,
-        ))
-    }
-
-    async fn get_operator_status(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
-        *self.get_operator_status_calls.lock().expect("lock") += 1;
-        Ok(operator_config_diagnostic_command_plane_response(
-            RebornOperatorArea::Status,
-        ))
     }
 
     async fn run_operator_service_lifecycle(
