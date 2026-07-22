@@ -102,9 +102,12 @@ pub use admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
     RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
-    RebornAdminSetRoleRequest, RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest,
+    RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
-    RebornAdminUserListResponse, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
+    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse,
 };
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use trace_credits::{
@@ -169,11 +172,12 @@ pub use types::{
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
     RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
     RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
+    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -251,8 +255,29 @@ pub const PROJECT_UPDATE_CAPABILITY: ProductCapabilityDescriptor =
 pub const PROJECT_DELETE_CAPABILITY_ID: &str = "builtin.project_delete";
 pub const PROJECT_DELETE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(PROJECT_DELETE_CAPABILITY_ID);
+pub const THREAD_DELETE_CAPABILITY_ID: &str = "builtin.thread_delete";
+pub const THREAD_DELETE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(THREAD_DELETE_CAPABILITY_ID);
+pub const ADMIN_USER_UPDATE_CAPABILITY_ID: &str = "builtin.admin_user_update";
+pub const ADMIN_USER_UPDATE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(ADMIN_USER_UPDATE_CAPABILITY_ID);
+pub const ADMIN_USER_SET_STATUS_CAPABILITY_ID: &str = "builtin.admin_user_set_status";
+pub const ADMIN_USER_SET_STATUS_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(ADMIN_USER_SET_STATUS_CAPABILITY_ID);
+pub const ADMIN_USER_SET_ROLE_CAPABILITY_ID: &str = "builtin.admin_user_set_role";
+pub const ADMIN_USER_SET_ROLE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(ADMIN_USER_SET_ROLE_CAPABILITY_ID);
+pub const ADMIN_USER_DELETE_CAPABILITY_ID: &str = "builtin.admin_user_delete";
+pub const ADMIN_USER_DELETE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(ADMIN_USER_DELETE_CAPABILITY_ID);
 pub const THREADS_VIEW: ProductView<WebUiListThreadsRequest, RebornListThreadsResponse> =
     ProductView::paginated("threads");
+pub const TIMELINE_VIEW: ProductView<RebornTimelineRequest, RebornTimelineResponse> =
+    ProductView::paginated("timeline");
+pub const GLOBAL_AUTO_APPROVE_VIEW: ProductView<
+    RebornGlobalAutoApproveRequest,
+    RebornGlobalAutoApproveResponse,
+> = ProductView::unpaginated("global_auto_approve");
 pub const AUTOMATIONS_VIEW: ProductView<
     WebUiListAutomationsRequest,
     RebornListAutomationsResponse,
@@ -277,6 +302,14 @@ pub const PROJECT_VIEW: ProductView<RebornGetProjectRequest, RebornProjectRespon
     ProductView::unpaginated("project");
 pub const PROJECT_MEMBERS_VIEW: ProductView<RebornListMembersRequest, RebornListMembersResponse> =
     ProductView::unpaginated("project_members");
+pub const ADMIN_USERS_VIEW: ProductView<RebornAdminUserListQuery, RebornAdminUserListResponse> =
+    ProductView::paginated("admin_users");
+pub const ADMIN_USER_VIEW: ProductView<RebornAdminUserRequest, RebornAdminUserResponse> =
+    ProductView::unpaginated("admin_user");
+pub const ADMIN_USER_SECRETS_VIEW: ProductView<
+    RebornAdminUserRequest,
+    RebornAdminUserSecretsListResponse,
+> = ProductView::unpaginated("admin_user_secrets");
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
 pub const SKILL_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(SKILL_INSTALL_CAPABILITY_ID);
@@ -3201,15 +3234,65 @@ where
         }
         if capability.as_str() == PROJECT_UPDATE_CAPABILITY_ID {
             let request = serde_json::from_value(input)
-                .map_err(|_| project_capability_input_error("input"))?;
+                .map_err(|_| product_capability_input_error("input"))?;
             self.update_project(caller, request).await?;
             return self.api_capability_success(activity_id, "project updated");
         }
         if capability.as_str() == PROJECT_DELETE_CAPABILITY_ID {
             let request = serde_json::from_value(input)
-                .map_err(|_| project_capability_input_error("input"))?;
+                .map_err(|_| product_capability_input_error("input"))?;
             self.delete_project(caller, request).await?;
             return self.api_capability_success(activity_id, "project deleted");
+        }
+        if capability.as_str() == THREAD_DELETE_CAPABILITY_ID {
+            let request = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.delete_thread(caller, request).await?;
+            return self.api_capability_success(activity_id, "thread deleted");
+        }
+        if capability.as_str() == ADMIN_USER_UPDATE_CAPABILITY_ID {
+            let request: RebornAdminUpdateUserProductRequest = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.update_admin_user(
+                caller,
+                request.user_id,
+                RebornAdminUpdateUserRequest {
+                    display_name: request.display_name,
+                    metadata: request.metadata,
+                },
+            )
+            .await?;
+            return self.api_capability_success(activity_id, "admin user updated");
+        }
+        if capability.as_str() == ADMIN_USER_SET_STATUS_CAPABILITY_ID {
+            let request: RebornAdminSetStatusProductRequest = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.set_admin_user_status(
+                caller,
+                request.user_id,
+                RebornAdminSetStatusRequest {
+                    status: request.status,
+                },
+            )
+            .await?;
+            return self.api_capability_success(activity_id, "admin user status updated");
+        }
+        if capability.as_str() == ADMIN_USER_SET_ROLE_CAPABILITY_ID {
+            let request: RebornAdminSetRoleProductRequest = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.set_admin_user_role(
+                caller,
+                request.user_id,
+                RebornAdminSetRoleRequest { role: request.role },
+            )
+            .await?;
+            return self.api_capability_success(activity_id, "admin user role updated");
+        }
+        if capability.as_str() == ADMIN_USER_DELETE_CAPABILITY_ID {
+            let request: RebornAdminUserRequest = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.delete_admin_user(caller, request.user_id).await?;
+            return self.api_capability_success(activity_id, "admin user deleted");
         }
         self.product_capability_invoker
             .invoke(caller, capability, input, activity_id)
@@ -3953,6 +4036,19 @@ where
                 let artifact = self.build_run_artifact(caller, request).await?;
                 views::view_page(artifact)
             }
+            id if id == GLOBAL_AUTO_APPROVE_VIEW.id => {
+                let _: RebornGlobalAutoApproveRequest = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let enabled = self.global_auto_approve_enabled(caller).await?;
+                views::view_page(RebornGlobalAutoApproveResponse { enabled })
+            }
+            id if id == TIMELINE_VIEW.id => {
+                let mut request: RebornTimelineRequest = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                request.cursor = query.cursor.or(request.cursor);
+                let response = self.get_timeline(caller, request).await?;
+                views::view_page(response)
+            }
             id if id == PROJECT_FS_LIST_VIEW.id => {
                 let request = serde_json::from_value(query.params)
                     .map_err(RebornServicesError::internal_from)?;
@@ -3999,6 +4095,27 @@ where
                 let request = serde_json::from_value(query.params)
                     .map_err(RebornServicesError::internal_from)?;
                 let response = self.list_project_members(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == ADMIN_USERS_VIEW.id => {
+                let mut request: RebornAdminUserListQuery = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                request.cursor = query.cursor.or(request.cursor);
+                let response = self.list_admin_users(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == ADMIN_USER_VIEW.id => {
+                let request: RebornAdminUserRequest = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.get_admin_user(caller, request.user_id).await?;
+                views::view_page(response)
+            }
+            id if id == ADMIN_USER_SECRETS_VIEW.id => {
+                let request: RebornAdminUserRequest = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self
+                    .list_admin_user_secrets(caller, request.user_id)
+                    .await?;
                 views::view_page(response)
             }
             id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
@@ -6136,7 +6253,7 @@ fn project_caller(caller: &WebUiAuthenticatedCaller) -> ProjectCaller {
     }
 }
 
-fn project_capability_input_error(field: &'static str) -> RebornServicesError {
+fn product_capability_input_error(field: &'static str) -> RebornServicesError {
     RebornServicesError::validation(WebUiInboundValidationError::new(
         field,
         WebUiInboundValidationCode::InvalidValue,

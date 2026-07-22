@@ -37,7 +37,9 @@ use ironclaw_product_adapters::{
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
+    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY_ID,
+    ADMIN_USER_SET_STATUS_CAPABILITY_ID, ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW,
+    ADMIN_USERS_VIEW, AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
     AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
     AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW, ActiveModelReader,
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
@@ -47,41 +49,42 @@ use ironclaw_product_workflow::{
     EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
     EXTENSIONS_VIEW, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
-    FilesystemBrowseReader, FsMount, InboundAttachmentLander, InboundAttachmentReader,
-    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
-    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecycleChannelDirections,
-    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
-    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
-    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
-    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
-    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
-    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
-    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, PROJECT_DELETE_CAPABILITY_ID,
-    PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
-    PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller, ProjectFilesystemReader,
-    ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
-    ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, InboundAttachmentLander,
+    InboundAttachmentReader, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
+    LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW,
+    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
+    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
+    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
+    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
+    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
+    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, OperatorLogsService,
+    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
+    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBERS_VIEW,
+    PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView,
+    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
+    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
+    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
     RebornDeleteThreadRequest, RebornExtensionListResponse, RebornExtensionOnboardingState,
     RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
     RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornGetRunStateRequest, RebornListAutomationsResponse, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
@@ -102,11 +105,12 @@ use ironclaw_product_workflow::{
     RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
     RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService, THREADS_VIEW,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
+    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductFacade,
+    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
     TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
@@ -117,8 +121,11 @@ use ironclaw_product_workflow::{
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
-    RebornAdminPutSecretRequest, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
+    RebornAdminPutSecretRequest, RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -2854,6 +2861,70 @@ async fn project_mutations_are_available_as_product_capabilities() {
         project_service.deleted.lock().expect("lock").as_slice(),
         ["project-alpha"]
     );
+}
+
+#[tokio::test]
+async fn session_timeline_and_thread_delete_are_available_as_product_surface() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    create_thread_for(&services, caller(), "thread-session-product-surface").await;
+
+    // safety: these are ProductSurface facade query calls in a contract test;
+    // no database transaction is involved.
+    let global_auto_approve = services
+        .query(
+            caller(),
+            GLOBAL_AUTO_APPROVE_VIEW
+                .query(RebornGlobalAutoApproveRequest {}, None)
+                .expect("global auto approve query"),
+        )
+        .await
+        .expect("global auto approve view");
+    let global_auto_approve: RebornGlobalAutoApproveResponse =
+        serde_json::from_value(global_auto_approve.payload).expect("global auto approve payload");
+    assert!(
+        !global_auto_approve.enabled,
+        "the default facade reports global auto-approve disabled"
+    );
+
+    let timeline = services
+        .query(
+            caller(),
+            TIMELINE_VIEW
+                .query(
+                    RebornTimelineRequest::new("thread-session-product-surface").set_limit(10),
+                    None,
+                )
+                .expect("timeline query"),
+        )
+        .await
+        .expect("timeline view");
+    let timeline: RebornTimelineResponse =
+        serde_json::from_value(timeline.payload).expect("timeline payload");
+    assert_eq!(
+        timeline.thread.thread_id.as_str(),
+        "thread-session-product-surface"
+    );
+    assert!(timeline.messages.is_empty());
+
+    let delete_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(THREAD_DELETE_CAPABILITY_ID).expect("capability id"),
+            serde_json::to_value(RebornDeleteThreadRequest {
+                thread_id: "thread-session-product-surface".to_string(),
+            })
+            .expect("thread delete input"),
+            ActivityId::new(),
+        )
+        .await
+        .expect("thread delete capability");
+    assert!(matches!(
+        delete_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
 }
 
 #[tokio::test]
@@ -13887,6 +13958,211 @@ fn admin_services(fake: FakeAdminUsers) -> RebornServices {
 fn assert_forbidden(err: RebornServicesError) {
     assert_eq!(err.status_code, 403, "expected a 403 authorization failure");
     assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+}
+
+#[tokio::test]
+async fn admin_users_are_available_as_product_views_and_capabilities() {
+    let services = admin_services(FakeAdminUsers::with([
+        admin_record("user-alpha", AdminUserRole::Admin, AdminUserStatus::Active),
+        admin_record("user-beta", AdminUserRole::Member, AdminUserStatus::Active),
+    ]));
+    let target = UserId::new("user-beta").expect("user");
+
+    // safety: these are ProductSurface facade query calls in a contract test;
+    // no database transaction is involved.
+    let users = services
+        .query(
+            caller(),
+            ADMIN_USERS_VIEW
+                .query(
+                    RebornAdminUserListQuery {
+                        limit: Some(2),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .expect("admin users query"),
+        )
+        .await
+        .expect("admin users view");
+    let users: RebornAdminUserListResponse =
+        serde_json::from_value(users.payload).expect("admin users payload");
+    assert_eq!(users.users.len(), 2);
+    assert_eq!(users.users[1].user_id.as_str(), "user-beta");
+    assert_eq!(users.next_cursor.as_deref(), Some("user-beta"));
+
+    let user = services
+        .query(
+            caller(),
+            ADMIN_USER_VIEW
+                .query(
+                    RebornAdminUserRequest {
+                        user_id: target.clone(),
+                    },
+                    None,
+                )
+                .expect("admin user query"),
+        )
+        .await
+        .expect("admin user view");
+    let user: RebornAdminUserResponse =
+        serde_json::from_value(user.payload).expect("admin user payload");
+    assert_eq!(user.user.user_id.as_str(), "user-beta");
+
+    let secrets = services
+        .query(
+            caller(),
+            ADMIN_USER_SECRETS_VIEW
+                .query(
+                    RebornAdminUserRequest {
+                        user_id: target.clone(),
+                    },
+                    None,
+                )
+                .expect("admin user secrets query"),
+        )
+        .await
+        .expect("admin user secrets view");
+    let secrets: RebornAdminUserSecretsListResponse =
+        serde_json::from_value(secrets.payload).expect("admin user secrets payload");
+    assert!(secrets.secrets.is_empty());
+
+    let update_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(ADMIN_USER_UPDATE_CAPABILITY_ID).expect("capability id"),
+            serde_json::to_value(RebornAdminUpdateUserProductRequest {
+                user_id: target.clone(),
+                display_name: Some("Beta Renamed".to_string()),
+                metadata: None,
+            })
+            .expect("admin update input"),
+            ActivityId::new(),
+        )
+        .await
+        .expect("admin update capability");
+    assert!(matches!(
+        update_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+
+    let updated = services
+        .query(
+            caller(),
+            ADMIN_USER_VIEW
+                .query(
+                    RebornAdminUserRequest {
+                        user_id: target.clone(),
+                    },
+                    None,
+                )
+                .expect("admin user query"),
+        )
+        .await
+        .expect("admin user view after update");
+    let updated: RebornAdminUserResponse =
+        serde_json::from_value(updated.payload).expect("admin user payload");
+    assert_eq!(updated.user.display_name.as_deref(), Some("Beta Renamed"));
+
+    let status_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(ADMIN_USER_SET_STATUS_CAPABILITY_ID).expect("capability id"),
+            serde_json::to_value(RebornAdminSetStatusProductRequest {
+                user_id: target.clone(),
+                status: AdminUserStatus::Suspended,
+            })
+            .expect("admin status input"),
+            ActivityId::new(),
+        )
+        .await
+        .expect("admin status capability");
+    assert!(matches!(
+        status_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+
+    let suspended = services
+        .query(
+            caller(),
+            ADMIN_USER_VIEW
+                .query(
+                    RebornAdminUserRequest {
+                        user_id: target.clone(),
+                    },
+                    None,
+                )
+                .expect("admin user query"),
+        )
+        .await
+        .expect("admin user view after status");
+    let suspended: RebornAdminUserResponse =
+        serde_json::from_value(suspended.payload).expect("admin user payload");
+    assert_eq!(suspended.user.status, AdminUserStatus::Suspended);
+
+    let role_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(ADMIN_USER_SET_ROLE_CAPABILITY_ID).expect("capability id"),
+            serde_json::to_value(RebornAdminSetRoleProductRequest {
+                user_id: target.clone(),
+                role: AdminUserRole::Admin,
+            })
+            .expect("admin role input"),
+            ActivityId::new(),
+        )
+        .await
+        .expect("admin role capability");
+    assert!(matches!(
+        role_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+
+    let promoted = services
+        .query(
+            caller(),
+            ADMIN_USER_VIEW
+                .query(
+                    RebornAdminUserRequest {
+                        user_id: target.clone(),
+                    },
+                    None,
+                )
+                .expect("admin user query"),
+        )
+        .await
+        .expect("admin user view after role");
+    let promoted: RebornAdminUserResponse =
+        serde_json::from_value(promoted.payload).expect("admin user payload");
+    assert_eq!(promoted.user.role, AdminUserRole::Admin);
+
+    let delete_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(ADMIN_USER_DELETE_CAPABILITY_ID).expect("capability id"),
+            serde_json::to_value(RebornAdminUserRequest {
+                user_id: target.clone(),
+            })
+            .expect("admin delete input"),
+            ActivityId::new(),
+        )
+        .await
+        .expect("admin delete capability");
+    assert!(matches!(
+        delete_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+
+    let deleted = services
+        .query(
+            caller(),
+            ADMIN_USER_VIEW
+                .query(RebornAdminUserRequest { user_id: target }, None)
+                .expect("admin user query"),
+        )
+        .await
+        .expect_err("deleted user is no longer readable");
+    assert_eq!(deleted.code, RebornServicesErrorCode::NotFound);
 }
 
 /// Drive EVERY admin verb through the facade and assert each is a 403.

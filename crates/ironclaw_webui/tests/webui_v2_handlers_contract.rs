@@ -32,12 +32,15 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    AUTOMATIONS_VIEW, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
+    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY_ID,
+    ADMIN_USER_SET_STATUS_CAPABILITY_ID, ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW,
+    ADMIN_USERS_VIEW, AUTOMATIONS_VIEW, AdminUserRecord, AdminUserRole, AdminUserSecretMeta,
+    AdminUserStatus, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
-    FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
-    LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW,
-    LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
+    FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
+    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
+    LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
     OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW,
@@ -46,7 +49,10 @@ use ironclaw_product_workflow::{
     PROJECT_FS_STAT_VIEW, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW,
     PROJECTS_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
     ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminSetRoleProductRequest,
+    RebornAdminSetStatusProductRequest, RebornAdminUpdateUserProductRequest,
+    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserRequest,
+    RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentBytes,
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
@@ -54,12 +60,12 @@ use ironclaw_product_workflow::{
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
     RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
-    RebornListMembersResponse, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
+    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListMembersResponse,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -82,11 +88,11 @@ use ironclaw_product_workflow::{
     RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
     SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
-    THREADS_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    rejecting_reborn_services_error,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -758,6 +764,65 @@ impl RebornServicesApi for StubServices {
                         next_cursor: None,
                     })
                     .expect("thread list payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == TIMELINE_VIEW.id => {
+                let mut request: RebornTimelineRequest =
+                    serde_json::from_value(query.params).expect("timeline params");
+                request.cursor = query.cursor.or(request.cursor);
+                let response = self.get_timeline(caller, request).await?;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(response).expect("timeline payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == GLOBAL_AUTO_APPROVE_VIEW.id => {
+                let _: RebornGlobalAutoApproveRequest =
+                    serde_json::from_value(query.params).expect("global auto approve params");
+                let enabled = self.global_auto_approve_enabled(caller).await?;
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornGlobalAutoApproveResponse { enabled })
+                        .expect("global auto approve payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == ADMIN_USERS_VIEW.id => {
+                let mut request: RebornAdminUserListQuery =
+                    serde_json::from_value(query.params).expect("admin users params");
+                request.cursor = query.cursor.or(request.cursor);
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornAdminUserListResponse {
+                        users: vec![sample_admin_user("user-admin")],
+                        next_cursor: None,
+                    })
+                    .expect("admin users payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == ADMIN_USER_VIEW.id => {
+                let request: RebornAdminUserRequest =
+                    serde_json::from_value(query.params).expect("admin user params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornAdminUserResponse {
+                        user: sample_admin_user(request.user_id.as_str()),
+                    })
+                    .expect("admin user payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == ADMIN_USER_SECRETS_VIEW.id => {
+                let _: RebornAdminUserRequest =
+                    serde_json::from_value(query.params).expect("admin user secrets params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornAdminUserSecretsListResponse {
+                        secrets: vec![AdminUserSecretMeta {
+                            handle: "openai_api_key".to_string(),
+                            created_at: Some("2026-06-17T00:00:00Z".to_string()),
+                            updated_at: Some("2026-06-17T00:00:00Z".to_string()),
+                        }],
+                    })
+                    .expect("admin user secrets payload"),
                     next_cursor: None,
                 })
             }
@@ -1735,6 +1800,7 @@ async fn create_thread_dispatches_through_facade() {
 #[tokio::test]
 async fn delete_thread_path_dispatches_through_facade() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
@@ -1752,9 +1818,16 @@ async fn delete_thread_path_dispatches_through_facade() {
     let body = read_json(response).await;
     assert_eq!(body["thread_id"], "thread-delete");
     assert_eq!(body["deleted"], true);
-    let calls = services.delete_thread_calls.lock().expect("lock").clone();
+    let calls = services.invoke_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].thread_id, "thread-delete");
+    assert_eq!(
+        calls[0].0,
+        CapabilityId::new(THREAD_DELETE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].1,
+        serde_json::json!({ "thread_id": "thread-delete" })
+    );
 }
 
 #[tokio::test]
@@ -1954,6 +2027,9 @@ async fn get_timeline_threads_path_into_request() {
     let calls = services.get_timeline_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].thread_id, "thread-x");
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), TIMELINE_VIEW.id);
 }
 
 #[tokio::test]
@@ -2098,6 +2174,10 @@ async fn get_timeline_forwards_query_params_to_facade() {
         Some("opaque-from-browser"),
         "?cursor= must reach the facade"
     );
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), TIMELINE_VIEW.id);
+    assert_eq!(queries[0].cursor.as_deref(), Some("opaque-from-browser"));
 }
 
 #[tokio::test]
@@ -3567,6 +3647,172 @@ async fn get_session_defaults_global_auto_approve_false_when_facade_stalls() {
     let body = read_json(response).await;
     assert_eq!(body["features"]["global_auto_approve"], false);
     assert_eq!(*services.global_auto_approve_calls.lock().expect("lock"), 1);
+}
+
+#[tokio::test]
+async fn admin_user_reads_query_product_surface_views() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let list = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/admin/users?limit=25&cursor=user-before")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("list users");
+    assert_eq!(list.status(), StatusCode::OK);
+    let body = read_json(list).await;
+    assert_eq!(body["users"][0]["user_id"], "user-admin");
+
+    let get = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/admin/users/user-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("get user");
+    assert_eq!(get.status(), StatusCode::OK);
+    let body = read_json(get).await;
+    assert_eq!(body["user"]["user_id"], "user-admin");
+
+    let secrets = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/admin/users/user-admin/secrets")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("list secrets");
+    assert_eq!(secrets.status(), StatusCode::OK);
+    let body = read_json(secrets).await;
+    assert_eq!(body["secrets"][0]["handle"], "openai_api_key");
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 3);
+    assert_eq!(queries[0].view_id.as_str(), ADMIN_USERS_VIEW.id);
+    assert_eq!(queries[0].cursor.as_deref(), Some("user-before"));
+    assert_eq!(queries[1].view_id.as_str(), ADMIN_USER_VIEW.id);
+    assert_eq!(queries[2].view_id.as_str(), ADMIN_USER_SECRETS_VIEW.id);
+}
+
+#[tokio::test]
+async fn admin_user_mutations_invoke_product_capabilities_and_read_back_user() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let update = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/api/webchat/v2/admin/users/user-admin")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"display_name":"Renamed"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("update user");
+    assert_eq!(update.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let status = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/admin/users/user-admin/status")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"status":"suspended"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("set status");
+    assert_eq!(status.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let role = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/admin/users/user-admin/role")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"role":"member"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("set role");
+    assert_eq!(role.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let delete = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/admin/users/user-admin")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("delete user");
+    assert_eq!(delete.status(), StatusCode::OK);
+    let body = read_json(delete).await;
+    assert_eq!(body["user_id"], "user-admin");
+    assert_eq!(body["deleted"], true);
+
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 4);
+    assert_eq!(
+        invoke_calls[0].0,
+        CapabilityId::new(ADMIN_USER_UPDATE_CAPABILITY_ID).expect("capability id")
+    );
+    let update_input: RebornAdminUpdateUserProductRequest =
+        serde_json::from_value(invoke_calls[0].1.clone()).expect("update input");
+    assert_eq!(update_input.user_id.as_str(), "user-admin");
+    assert_eq!(update_input.display_name.as_deref(), Some("Renamed"));
+    assert_eq!(
+        invoke_calls[1].0,
+        CapabilityId::new(ADMIN_USER_SET_STATUS_CAPABILITY_ID).expect("capability id")
+    );
+    let status_input: RebornAdminSetStatusProductRequest =
+        serde_json::from_value(invoke_calls[1].1.clone()).expect("status input");
+    assert_eq!(status_input.user_id.as_str(), "user-admin");
+    assert_eq!(status_input.status, AdminUserStatus::Suspended);
+    assert_eq!(
+        invoke_calls[2].0,
+        CapabilityId::new(ADMIN_USER_SET_ROLE_CAPABILITY_ID).expect("capability id")
+    );
+    let role_input: RebornAdminSetRoleProductRequest =
+        serde_json::from_value(invoke_calls[2].1.clone()).expect("role input");
+    assert_eq!(role_input.user_id.as_str(), "user-admin");
+    assert_eq!(role_input.role, AdminUserRole::Member);
+    assert_eq!(
+        invoke_calls[3].0,
+        CapabilityId::new(ADMIN_USER_DELETE_CAPABILITY_ID).expect("capability id")
+    );
+    let delete_input: RebornAdminUserRequest =
+        serde_json::from_value(invoke_calls[3].1.clone()).expect("delete input");
+    assert_eq!(delete_input.user_id.as_str(), "user-admin");
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 3);
+    assert!(
+        queries
+            .iter()
+            .all(|query| query.view_id == ADMIN_USER_VIEW.id)
+    );
 }
 
 #[tokio::test]
@@ -6944,6 +7190,21 @@ async fn stat_fs_path_rejects_blank_path() {
 }
 
 // --- Project route handler tests (path-param override + status codes) --------
+
+fn sample_admin_user(user_id: &str) -> AdminUserRecord {
+    AdminUserRecord {
+        user_id: UserId::new(user_id).expect("user id"),
+        email: Some(format!("{user_id}@example.test")),
+        display_name: Some("Admin User".to_string()),
+        status: AdminUserStatus::Active,
+        role: AdminUserRole::Admin,
+        created_at: "2026-06-17T00:00:00Z".to_string(),
+        updated_at: "2026-06-17T00:00:00Z".to_string(),
+        created_by: Some(UserId::new("user-alpha").expect("user id")),
+        last_login_at: None,
+        metadata: Default::default(),
+    }
+}
 
 fn sample_project_info(project_id: &str) -> RebornProjectInfo {
     RebornProjectInfo {

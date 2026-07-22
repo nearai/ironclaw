@@ -263,6 +263,14 @@ pub struct RebornDeleteThreadResponse {
     pub deleted: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornGlobalAutoApproveRequest {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornGlobalAutoApproveResponse {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RebornSubmitTurnResponse {
