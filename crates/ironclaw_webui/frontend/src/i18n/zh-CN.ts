@@ -1111,6 +1111,8 @@ registerPack("zh-CN", {
   "admin.users.member": "成员",
   "admin.users.admin": "管理员",
   "admin.users.suspend": "停用",
+  "admin.users.actionFailed": "操作失败：{message}",
+  "admin.users.lastAdminRequired": "必须至少保留一名已启用的管理员。请先添加或启用另一名管理员，再更改此用户。",
   "admin.users.activate": "启用",
   "admin.users.promote": "提升",
   "admin.users.demote": "降级",
@@ -1361,6 +1363,10 @@ registerPack("zh-CN", {
 
 registerPack("zh-CN", {
   "app.checkingSession": "正在检查会话...",
+  "app.sessionCheckFailedTitle": "无法验证你的会话",
+  "app.sessionCheckFailedDescription":
+    "目前无法验证你的会话。你的登录信息仍已保存，请稍后重试。",
+  "app.retrySession": "重试",
   "common.close": "关闭",
   "common.download": "下载",
   "common.copy": "复制",

@@ -39,7 +39,7 @@ pip install -e .
 playwright install chromium
 ```
 
-Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js with `npx`; CI installs Node 22 and runs the pinned `emulate@0.7.0` package.
+Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js. CI installs Node 24, builds `serrrfirat/emulate` at commit `e5d62318f2ee546660b974ee92d627cf39b97951`, and passes its CLI through `IRONCLAW_EMULATE_CLI`. Without that override, unrelated local Emulate tests retain the `emulate@0.7.0` fallback.
 
 ## Running Tests
 
@@ -135,13 +135,13 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | Fixture | What it does |
 |---------|-------------|
 | `ironclaw_binary` | Legacy gateway binary. Checks `target/debug/ironclaw`; if absent, runs `cargo build -p ironclaw` (timeout 600s). |
-| `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw` with default features (`libsql`) when stale/missing. Used by the v2 SPA scenarios. |
+| `ironclaw_reborn_binary` | Reborn v2 binary. Builds `target/debug/ironclaw` with default features when stale/missing. Used by the v2 SPA and full-path fixture scenarios. |
 | `reborn_v2_server` | Starts `ironclaw serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
 | `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
 | `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. Serves canned responses including delayed ones (e.g. `"editable composer slow response"` → ~5s) so tests can act while a run is in flight. |
-| `emulate_google_server` | Starts `npx --yes emulate@0.7.0 --service google` with `fixtures/emulate/google_gmail.yaml`, waits for the Gmail messages endpoint to serve the seeded account, and yields the base URL for HTTP rewrite maps. The seed covers Gmail, Calendar, and Drive. Local runs skip if `npx` is unavailable; CI fails. |
-| `emulate_slack_server` | Starts `npx --yes emulate@0.7.0 --service slack` with `fixtures/emulate/slack.yaml`, waits for seeded token auth to pass `auth.test`, and yields the base URL for Slack provider-contract assertions. |
-| `emulate_github_server` | Starts `npx --yes emulate@0.7.0 --service github` with `fixtures/emulate/github.yaml`, waits for `/user` to return the seeded actor, and yields the base URL for GitHub provider-contract assertions. |
+| `emulate_google_server` | Starts the Emulate CLI selected by `IRONCLAW_EMULATE_CLI`, or the `emulate@0.7.0` fallback, with `fixtures/emulate/google_gmail.yaml`; waits for the Gmail messages endpoint; and yields the base URL for HTTP rewrite maps. The pinned CI fork covers Gmail, Calendar, Drive, Docs, and Sheets. Local runs skip if neither the selected CLI nor `npx` is available; CI fails. |
+| `emulate_slack_server` | Starts the selected Emulate CLI with `fixtures/emulate/slack.yaml`, waits for seeded token auth to pass `auth.test`, and yields the base URL for Slack provider-contract assertions, including `search.messages` with the pinned CI fork. |
+| `emulate_github_server` | Starts the selected Emulate CLI with `fixtures/emulate/github.yaml`, waits for `/user` to return the seeded actor, and yields the base URL for GitHub provider-contract assertions. |
 | `ironclaw_server` | Starts the ironclaw binary with a minimal env (see below), waits for `/api/health` (timeout 60s). Yields the base URL. On teardown sends **SIGINT** (not SIGTERM) so the tokio ctrl_c handler triggers a graceful shutdown and LLVM coverage data is flushed. |
 | `hosted_oauth_refresh_server` | Starts a second ironclaw instance with a dedicated libSQL DB and `GOOGLE_OAUTH_CLIENT_ID=hosted-google-client-id`, while still pointing `IRONCLAW_OAUTH_EXCHANGE_URL` at `mock_llm.py`. Yields a dict with `base_url`, `db_path`, and `mock_llm_url` for hosted refresh scenarios that do not need provider API calls. |
 | `hosted_google_emulate_server` | Starts the same hosted OAuth fixture shape, but sets `IRONCLAW_TEST_HTTP_REWRITE_MAP` so Google WASM HTTP calls to `gmail.googleapis.com` and `www.googleapis.com` hit `emulate_google_server`. Yields `emulate_google_url` in addition to the hosted OAuth server fields. |
@@ -163,7 +163,7 @@ The function-scoped `page` fixture means **each test gets a clean browser contex
 ### Emulate provider coverage
 
 Use Emulate for provider APIs that map directly to Reborn features already in
-this repo: Google Gmail/Calendar/Drive, Slack delivery/reactions/user lookup,
+this repo: Google Gmail/Calendar/Drive/Docs/Sheets, Slack delivery/search/reactions/user lookup,
 and GitHub repository, issue, pull request, search, branch, release, fork, Git
 object, and Actions route workflows. The current provider contract covers
 seeded reads plus stateful writes for Gmail send, Calendar event create/delete,
@@ -173,18 +173,34 @@ create/read/list/files/review/comment/merge, branch/ref creation, Git
 blob/tree/commit read/write, fork create/list, and empty Actions route readback.
 
 Direct provider-contract tests prove the Emulate fixture layer itself. Full-path
-Reborn + Emulate tests should use `hosted_google_emulate_server` or a matching
+recorded-trace tests load harvested `LlmTrace` JSON through `mock_llm.py`'s
+`/__mock/llm_trace` endpoint. `test_reborn_qa_trace_replay.py` replays every
+model response from every case in the live-canary manifest. Its closed-set
+assertions require new fixtures and provider operations to be classified
+instead of silently losing coverage. `test_reborn_qa_trace_full_path.py`
+additionally proves the whole runtime seam for the harvested Drive connection
+case: it executes the recorded decision through standalone `ironclaw serve`,
+routes Google HTTP through
+`emulate_google_server`, and asserts Emulate-seeded Drive data rather than the
+model's final prose.
+Debug E2E binaries honor `IRONCLAW_REBORN_TEST_HTTP_REWRITE_MAP` only for
+loopback IP socket targets after the original destination has passed the normal
+network policy and DNS checks. Release binaries fail startup if that test-only
+environment variable is set.
+
+Legacy hosted full-path Reborn + Emulate tests use
+`hosted_google_emulate_server` or a matching
 provider fixture, install/auth the first-party extension through IronClaw, drive
 the scripted mock model through `/api/chat/send`, auto-resolve expected approval
 gates, and read provider state back from Emulate. This is the contract tier to
 use when the behavior being protected is extension install/auth, model-to-tool
 routing, tool execution, and provider mutation together.
 
-Google Docs, Sheets, and Slides are first-party extension assets, but Emulate
-0.7.0 does not provide those APIs directly; do not claim those are covered
-unless a separate fixture exercises the actual document API behavior. The manual
-QA rows that mention Google Docs, Google Sheets, Telegram, Twitter/X, or HN/web
-search are therefore partial unless paired with a separate fake/provider fixture.
+The pinned `serrrfirat/emulate` fork adds the Google Docs and Sheets operations
+and Slack `search.messages` used by the harvested trace catalog. Google Slides
+remains outside the provider fixture because no harvested trace uses it. Manual
+QA rows that mention Telegram, Twitter/X, or HN/web search are likewise
+model-replay-only unless paired with a separate fake/provider fixture.
 GitHub `/contents` file create/update/delete and workflow dispatch also remain
 outside direct Emulate 0.7.0 coverage: the emulator exposes Git data APIs but no
 `/contents` routes, and it exposes Actions routes but does not let fixture seeds

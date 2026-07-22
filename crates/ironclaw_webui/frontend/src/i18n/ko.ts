@@ -1111,6 +1111,8 @@ registerPack("ko", {
   "admin.users.member": "멤버",
   "admin.users.admin": "관리자",
   "admin.users.suspend": "정지",
+  "admin.users.actionFailed": "작업 실패: {message}",
+  "admin.users.lastAdminRequired": "활성 관리자가 최소 한 명 필요합니다. 이 사용자를 변경하기 전에 다른 관리자를 추가하거나 활성화하세요.",
   "admin.users.activate": "활성화",
   "admin.users.promote": "승격",
   "admin.users.demote": "강등",
@@ -1361,6 +1363,10 @@ registerPack("ko", {
 
 registerPack("ko", {
   "app.checkingSession": "세션 확인 중...",
+  "app.sessionCheckFailedTitle": "세션을 확인할 수 없습니다",
+  "app.sessionCheckFailedDescription":
+    "현재 세션을 확인할 수 없습니다. 로그인 정보는 계속 저장되어 있습니다. 잠시 후 다시 시도하세요.",
+  "app.retrySession": "다시 시도",
   "common.close": "닫기",
   "common.download": "다운로드",
   "common.copy": "복사",

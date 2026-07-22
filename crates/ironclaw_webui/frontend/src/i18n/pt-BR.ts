@@ -1111,6 +1111,8 @@ registerPack("pt-BR", {
   "admin.users.member": "Membro",
   "admin.users.admin": "Administrador",
   "admin.users.suspend": "Suspender",
+  "admin.users.actionFailed": "Falha na ação: {message}",
+  "admin.users.lastAdminRequired": "É necessário pelo menos um administrador ativo. Adicione ou ative outro administrador antes de alterar este usuário.",
   "admin.users.activate": "Ativar",
   "admin.users.promote": "Promover",
   "admin.users.demote": "Rebaixar",
@@ -1361,6 +1363,10 @@ registerPack("pt-BR", {
 
 registerPack("pt-BR", {
   "app.checkingSession": "Verificando sessão...",
+  "app.sessionCheckFailedTitle": "Não foi possível verificar sua sessão",
+  "app.sessionCheckFailedDescription":
+    "Não foi possível verificar sua sessão agora. Seu login continua salvo. Tente novamente em alguns instantes.",
+  "app.retrySession": "Tentar novamente",
   "common.close": "Fechar",
   "common.download": "Baixar",
   "common.copy": "Copiar",

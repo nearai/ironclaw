@@ -1111,6 +1111,8 @@ registerPack("de", {
   "admin.users.member": "Mitglied",
   "admin.users.admin": "Admin",
   "admin.users.suspend": "Suspendieren",
+  "admin.users.actionFailed": "Aktion fehlgeschlagen: {message}",
+  "admin.users.lastAdminRequired": "Mindestens ein aktiver Administrator ist erforderlich. Fügen Sie einen weiteren Administrator hinzu oder aktivieren Sie ihn, bevor Sie diesen Benutzer ändern.",
   "admin.users.activate": "Aktivieren",
   "admin.users.promote": "Befördern",
   "admin.users.demote": "Zurückstufen",
@@ -1361,6 +1363,10 @@ registerPack("de", {
 
 registerPack("de", {
   "app.checkingSession": "Sitzung wird geprüft...",
+  "app.sessionCheckFailedTitle": "Sitzung konnte nicht überprüft werden",
+  "app.sessionCheckFailedDescription":
+    "Ihre Sitzung konnte gerade nicht überprüft werden. Ihre Anmeldung bleibt gespeichert. Versuchen Sie es in Kürze erneut.",
+  "app.retrySession": "Erneut versuchen",
   "common.close": "Schließen",
   "common.download": "Herunterladen",
   "common.copy": "Kopieren",
