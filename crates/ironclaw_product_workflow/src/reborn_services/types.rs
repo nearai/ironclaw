@@ -620,6 +620,18 @@ pub struct RebornAutomationMutationResponse {
     pub automation: Option<RebornAutomationInfo>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornAutomationRequest {
+    pub automation_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebornRenameAutomationProductRequest {
+    pub automation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 fn default_scheduler_enabled() -> bool {
     true
 }

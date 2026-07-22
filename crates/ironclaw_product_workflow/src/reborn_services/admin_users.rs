@@ -425,6 +425,21 @@ pub struct RebornAdminPutSecretRequest {
     pub value: String,
 }
 
+/// ProductSurface mutation input for `PUT /admin/users/{id}/secrets/{handle}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminPutSecretProductRequest {
+    pub user_id: UserId,
+    pub handle: String,
+    pub value: String,
+}
+
+/// ProductSurface mutation input for `DELETE /admin/users/{id}/secrets/{handle}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebornAdminDeleteSecretProductRequest {
+    pub user_id: UserId,
+    pub handle: String,
+}
+
 /// Response for `PUT /admin/users/{id}/secrets/{handle}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebornAdminSecretResponse {

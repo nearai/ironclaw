@@ -31,9 +31,11 @@ use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_DELETE_CAPABILITY,
-    ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY, ADMIN_USER_SET_STATUS_CAPABILITY,
-    ADMIN_USER_UPDATE_CAPABILITY, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
-    CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_IMPORT_CAPABILITY,
+    ADMIN_USER_DELETE_SECRET_CAPABILITY, ADMIN_USER_PUT_SECRET_CAPABILITY, ADMIN_USER_SECRETS_VIEW,
+    ADMIN_USER_SET_ROLE_CAPABILITY, ADMIN_USER_SET_STATUS_CAPABILITY, ADMIN_USER_UPDATE_CAPABILITY,
+    ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATION_DELETE_CAPABILITY, AUTOMATION_LIST_MAX_PAGE_SIZE,
+    AUTOMATION_PAUSE_CAPABILITY, AUTOMATION_RENAME_CAPABILITY, AUTOMATION_RESUME_CAPABILITY,
+    AUTOMATIONS_VIEW, CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_IMPORT_CAPABILITY,
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
     EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
     FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY,
@@ -41,52 +43,56 @@ use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
     LlmProbeResult, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
     NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW,
-    PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBERS_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, PROJECT_DELETE_CAPABILITY,
+    PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY,
+    PROJECT_MEMBER_REMOVE_CAPABILITY, PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW,
     PROJECT_UPDATE_CAPABILITY, PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityDescriptor,
     ProductOutboundEnvelope, ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
     RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
-    RebornAdminSecretResponse, RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
+    RebornAdminCreateUserRequest, RebornAdminDeleteSecretProductRequest,
+    RebornAdminPutSecretProductRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleProductRequest,
+    RebornAdminSetRoleRequest, RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest,
     RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse, RebornAdminUserListQuery,
     RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
     RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
-    RebornCancelRunResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionOnboardingState,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
-    RebornFsStatResponse, RebornGetProjectRequest, RebornGlobalAutoApproveRequest,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
+    RebornAutomationRequest, RebornCancelRunResponse, RebornCreateProjectRequest,
+    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
+    RebornExtensionOnboardingState, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornGlobalAutoApproveRequest, RebornListAutomationsResponse, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
+    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
     RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
     RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse,
-    RebornRetryRunResponse, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewQuery,
-    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
-    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY, SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW,
-    SKILL_UPDATE_CAPABILITY, SKILLS_VIEW, SettingsToolPermissionState, THREAD_DELETE_CAPABILITY,
-    THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
-    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    RebornProjectResponse, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
+    SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
+    SettingsToolPermissionState, THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, WebUiAttachmentCapabilities,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -262,6 +268,28 @@ fn parse_admin_secret_handle(raw: String) -> Result<SecretHandle, WebUiV2HttpErr
             WebUiInboundValidationCode::InvalidId,
         )))
     })
+}
+
+async fn read_admin_user_secret(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    user_id: UserId,
+    handle: String,
+) -> Result<ironclaw_product_workflow::AdminUserSecretMeta, WebUiV2HttpError> {
+    let response = ADMIN_USER_SECRETS_VIEW
+        .query_on(
+            services.as_ref(),
+            caller,
+            RebornAdminUserRequest { user_id },
+            None,
+        )
+        .await?;
+    response
+        .secrets
+        .into_iter()
+        .find(|secret| secret.handle == handle)
+        .ok_or_else(|| RebornServicesError::internal_from("updated admin user secret missing"))
+        .map_err(WebUiV2HttpError::from)
 }
 
 /// `GET /api/webchat/v2/admin/users`
@@ -452,12 +480,22 @@ pub async fn admin_put_user_secret(
 ) -> Result<Json<RebornAdminSecretResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
     let handle = parse_admin_secret_handle(handle)?;
-    Ok(Json(
-        state
-            .services()
-            .put_admin_user_secret(caller, user_id, handle, body)
-            .await?,
-    ))
+    let handle_name = handle.as_str().to_string();
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        ADMIN_USER_PUT_SECRET_CAPABILITY,
+        RebornAdminPutSecretProductRequest {
+            user_id: user_id.clone(),
+            handle: handle_name.clone(),
+            value: body.value,
+        },
+        ActivityId::new(),
+    )
+    .await?;
+    api_capability_succeeded(resolution, "admin user secret put")?;
+    let secret = read_admin_user_secret(state.services(), caller, user_id, handle_name).await?;
+    Ok(Json(RebornAdminSecretResponse { secret }))
 }
 
 /// `DELETE /api/webchat/v2/admin/users/{user_id}/secrets/{handle}`
@@ -468,12 +506,23 @@ pub async fn admin_delete_user_secret(
 ) -> Result<Json<RebornAdminSecretDeletedResponse>, WebUiV2HttpError> {
     let user_id = parse_admin_user_id(user_id)?;
     let handle = parse_admin_secret_handle(handle)?;
-    Ok(Json(
-        state
-            .services()
-            .delete_admin_user_secret(caller, user_id, handle)
-            .await?,
-    ))
+    let handle = handle.as_str().to_string();
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        ADMIN_USER_DELETE_SECRET_CAPABILITY,
+        RebornAdminDeleteSecretProductRequest {
+            user_id,
+            handle: handle.clone(),
+        },
+        ActivityId::new(),
+    )
+    .await?;
+    api_capability_succeeded(resolution, "admin user secret delete")?;
+    Ok(Json(RebornAdminSecretDeletedResponse {
+        handle,
+        deleted: true,
+    }))
 }
 
 /// `POST /api/webchat/v2/threads/{thread_id}/messages`
@@ -883,7 +932,17 @@ pub async fn add_project_member(
     Json(mut body): Json<RebornAddMemberRequest>,
 ) -> Result<Json<RebornProjectMemberInfo>, WebUiV2HttpError> {
     body.project_id = project_id;
-    let response = state.services().add_project_member(caller, body).await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        PROJECT_MEMBER_ADD_CAPABILITY,
+        body.clone(),
+        ActivityId::new(),
+    )
+    .await?;
+    project_mutation_succeeded(resolution)?;
+    let response =
+        read_project_member(state.services(), caller, body.project_id, body.user_id).await?;
     Ok(Json(response))
 }
 
@@ -897,10 +956,17 @@ pub async fn update_project_member(
 ) -> Result<Json<RebornProjectMemberInfo>, WebUiV2HttpError> {
     body.project_id = project_id;
     body.user_id = user_id;
-    let response = state
-        .services()
-        .update_project_member_role(caller, body)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        PROJECT_MEMBER_UPDATE_CAPABILITY,
+        body.clone(),
+        ActivityId::new(),
+    )
+    .await?;
+    project_mutation_succeeded(resolution)?;
+    let response =
+        read_project_member(state.services(), caller, body.project_id, body.user_id).await?;
     Ok(Json(response))
 }
 
@@ -910,17 +976,41 @@ pub async fn remove_project_member(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path((project_id, user_id)): Path<(String, String)>,
 ) -> Result<StatusCode, WebUiV2HttpError> {
-    state
-        .services()
-        .remove_project_member(
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        PROJECT_MEMBER_REMOVE_CAPABILITY,
+        RebornRemoveMemberRequest {
+            project_id,
+            user_id,
+        },
+        ActivityId::new(),
+    )
+    .await?;
+    project_mutation_succeeded(resolution)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn read_project_member(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    project_id: String,
+    user_id: String,
+) -> Result<RebornProjectMemberInfo, WebUiV2HttpError> {
+    let response = PROJECT_MEMBERS_VIEW
+        .query_on(
+            services.as_ref(),
             caller,
-            RebornRemoveMemberRequest {
-                project_id,
-                user_id,
-            },
+            RebornListMembersRequest { project_id },
+            None,
         )
         .await?;
-    Ok(StatusCode::NO_CONTENT)
+    response
+        .members
+        .into_iter()
+        .find(|member| member.user_id == user_id)
+        .ok_or_else(|| RebornServicesError::internal_from("updated project member missing"))
+        .map_err(WebUiV2HttpError::from)
 }
 
 /// Upper bound on the sanitized `Content-Disposition` filename. A filesystem can
@@ -1533,10 +1623,19 @@ pub async fn pause_automation(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(automation_id): Path<String>,
 ) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .pause_automation(caller, automation_id)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        AUTOMATION_PAUSE_CAPABILITY,
+        RebornAutomationRequest {
+            automation_id: automation_id.clone(),
+        },
+        ActivityId::new(),
+    )
+    .await?;
+    api_capability_succeeded(resolution, "automation pause")?;
+    let response =
+        read_automation_mutation_response(state.services(), caller, automation_id).await?;
     Ok(Json(response))
 }
 
@@ -1546,10 +1645,19 @@ pub async fn resume_automation(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(automation_id): Path<String>,
 ) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .resume_automation(caller, automation_id)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        AUTOMATION_RESUME_CAPABILITY,
+        RebornAutomationRequest {
+            automation_id: automation_id.clone(),
+        },
+        ActivityId::new(),
+    )
+    .await?;
+    api_capability_succeeded(resolution, "automation resume")?;
+    let response =
+        read_automation_mutation_response(state.services(), caller, automation_id).await?;
     Ok(Json(response))
 }
 
@@ -1560,10 +1668,20 @@ pub async fn rename_automation(
     Path(automation_id): Path<String>,
     Json(request): Json<WebUiRenameAutomationRequest>,
 ) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .rename_automation(caller, automation_id, request)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        AUTOMATION_RENAME_CAPABILITY,
+        RebornRenameAutomationProductRequest {
+            automation_id: automation_id.clone(),
+            name: request.name,
+        },
+        ActivityId::new(),
+    )
+    .await?;
+    api_capability_succeeded(resolution, "automation rename")?;
+    let response =
+        read_automation_mutation_response(state.services(), caller, automation_id).await?;
     Ok(Json(response))
 }
 
@@ -1573,11 +1691,48 @@ pub async fn delete_automation(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(automation_id): Path<String>,
 ) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .delete_automation(caller, automation_id)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        AUTOMATION_DELETE_CAPABILITY,
+        RebornAutomationRequest { automation_id },
+        ActivityId::new(),
+    )
+    .await?;
+    api_capability_succeeded(resolution, "automation delete")?;
+    let response = RebornAutomationMutationResponse {
+        updated: true,
+        automation: None,
+    };
     Ok(Json(response))
+}
+
+async fn read_automation_mutation_response(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    automation_id: String,
+) -> Result<RebornAutomationMutationResponse, WebUiV2HttpError> {
+    let response = AUTOMATIONS_VIEW
+        .query_on(
+            services.as_ref(),
+            caller,
+            WebUiListAutomationsRequest {
+                limit: Some(AUTOMATION_LIST_MAX_PAGE_SIZE),
+                run_limit: None,
+                include_completed: true,
+            },
+            None,
+        )
+        .await?;
+    let automation = response
+        .automations
+        .into_iter()
+        .find(|automation| automation.automation_id == automation_id)
+        .ok_or_else(|| RebornServicesError::internal_from("updated automation missing"))?;
+    Ok(RebornAutomationMutationResponse {
+        updated: true,
+        automation: Some(automation),
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -2878,16 +3033,21 @@ pub async fn set_settings_tools_auto_approve(
     Extension(_capabilities): Extension<WebUiV2Capabilities>,
     Json(body): Json<SettingsToolsAutoApproveRequest>,
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .set_operator_config_key(
-            caller,
-            SETTINGS_TOOLS_AUTO_APPROVE_KEY.to_string(),
-            RebornOperatorConfigSetRequest {
-                value: serde_json::json!(body.enabled),
-            },
-        )
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
+        serde_json::json!({ "enabled": body.enabled }),
+        ActivityId::new(),
+    )
+    .await?;
+    api_capability_succeeded(resolution, "settings tools auto approve")?;
+    let response = query_operator_config_key_response(
+        state.services(),
+        caller,
+        SETTINGS_TOOLS_AUTO_APPROVE_KEY.to_string(),
+    )
+    .await?;
     validate_settings_tool_config_response(&response)?;
     Ok(Json(response))
 }
@@ -3010,17 +3170,12 @@ fn operator_config_key_error(code: WebUiInboundValidationCode) -> WebUiV2HttpErr
     RebornServicesError::from(WebUiInboundValidationError::new("key", code)).into()
 }
 
-/// `GET /api/webchat/v2/operator/config/{key}`
-pub async fn get_operator_config_key(
-    State(state): State<WebUiV2State>,
-    Extension(caller): Extension<WebUiAuthenticatedCaller>,
-    Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
-) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
-    require_operator_webui_config(capabilities)?;
-    let key = validate_operator_config_key(key)?;
-    let page = state
-        .services()
+async fn query_operator_config_key_response(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    key: String,
+) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
+    let page = services
         .query(
             caller,
             RebornViewQuery {
@@ -3030,8 +3185,19 @@ pub async fn get_operator_config_key(
             },
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
+/// `GET /api/webchat/v2/operator/config/{key}`
+pub async fn get_operator_config_key(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Extension(capabilities): Extension<WebUiV2Capabilities>,
+    Path(OperatorConfigKeyPath { key }): Path<OperatorConfigKeyPath>,
+) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
+    require_operator_webui_config(capabilities)?;
+    let key = validate_operator_config_key(key)?;
+    let response = query_operator_config_key_response(state.services(), caller, key).await?;
     Ok(Json(response))
 }
 

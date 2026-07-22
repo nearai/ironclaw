@@ -101,6 +101,7 @@ use admin_users::{
 pub use admin_users::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
+    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
     RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
     RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
     RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
@@ -165,19 +166,19 @@ pub use types::{
     RebornAccountBindingSource, RebornAttachmentBytes, RebornAttachmentRequest, RebornAuthAccount,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
-    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
-    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
-    RebornExtensionSetupField, RebornExtensionSetupSecret, RebornExtensionSurface,
-    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
-    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
-    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateThreadResponse,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupField, RebornExtensionSetupSecret,
+    RebornExtensionSurface, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
+    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -190,14 +191,15 @@ pub use types::{
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornResolveGateResponse, RebornResumeGateResponse, RebornRetryRunResponse,
-    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
-    RebornServiceLifecycleState, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornVendorAuthAccounts,
+    RebornRenameAutomationProductRequest, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornRetryRunResponse, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornVendorAuthAccounts,
 };
 pub use views::{
     ProductView, RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
@@ -270,6 +272,33 @@ pub const ADMIN_USER_SET_ROLE_CAPABILITY: ProductCapabilityDescriptor =
 pub const ADMIN_USER_DELETE_CAPABILITY_ID: &str = "builtin.admin_user_delete";
 pub const ADMIN_USER_DELETE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(ADMIN_USER_DELETE_CAPABILITY_ID);
+pub const ADMIN_USER_PUT_SECRET_CAPABILITY_ID: &str = "builtin.admin_user_put_secret";
+pub const ADMIN_USER_PUT_SECRET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(ADMIN_USER_PUT_SECRET_CAPABILITY_ID);
+pub const ADMIN_USER_DELETE_SECRET_CAPABILITY_ID: &str = "builtin.admin_user_delete_secret";
+pub const ADMIN_USER_DELETE_SECRET_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(ADMIN_USER_DELETE_SECRET_CAPABILITY_ID);
+pub const PROJECT_MEMBER_ADD_CAPABILITY_ID: &str = "builtin.project_member_add";
+pub const PROJECT_MEMBER_ADD_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(PROJECT_MEMBER_ADD_CAPABILITY_ID);
+pub const PROJECT_MEMBER_UPDATE_CAPABILITY_ID: &str = "builtin.project_member_update";
+pub const PROJECT_MEMBER_UPDATE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(PROJECT_MEMBER_UPDATE_CAPABILITY_ID);
+pub const PROJECT_MEMBER_REMOVE_CAPABILITY_ID: &str = "builtin.project_member_remove";
+pub const PROJECT_MEMBER_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(PROJECT_MEMBER_REMOVE_CAPABILITY_ID);
+pub const AUTOMATION_PAUSE_CAPABILITY_ID: &str = "builtin.automation_pause";
+pub const AUTOMATION_PAUSE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(AUTOMATION_PAUSE_CAPABILITY_ID);
+pub const AUTOMATION_RESUME_CAPABILITY_ID: &str = "builtin.automation_resume";
+pub const AUTOMATION_RESUME_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(AUTOMATION_RESUME_CAPABILITY_ID);
+pub const AUTOMATION_RENAME_CAPABILITY_ID: &str = "builtin.automation_rename";
+pub const AUTOMATION_RENAME_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(AUTOMATION_RENAME_CAPABILITY_ID);
+pub const AUTOMATION_DELETE_CAPABILITY_ID: &str = "builtin.automation_delete";
+pub const AUTOMATION_DELETE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(AUTOMATION_DELETE_CAPABILITY_ID);
 pub const THREADS_VIEW: ProductView<WebUiListThreadsRequest, RebornListThreadsResponse> =
     ProductView::paginated("threads");
 pub const TIMELINE_VIEW: ProductView<RebornTimelineRequest, RebornTimelineResponse> =
@@ -3244,11 +3273,60 @@ where
             self.delete_project(caller, request).await?;
             return self.api_capability_success(activity_id, "project deleted");
         }
+        if capability.as_str() == PROJECT_MEMBER_ADD_CAPABILITY_ID {
+            let request = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.add_project_member(caller, request).await?;
+            return self.api_capability_success(activity_id, "project member added");
+        }
+        if capability.as_str() == PROJECT_MEMBER_UPDATE_CAPABILITY_ID {
+            let request = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.update_project_member_role(caller, request).await?;
+            return self.api_capability_success(activity_id, "project member updated");
+        }
+        if capability.as_str() == PROJECT_MEMBER_REMOVE_CAPABILITY_ID {
+            let request = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.remove_project_member(caller, request).await?;
+            return self.api_capability_success(activity_id, "project member removed");
+        }
         if capability.as_str() == THREAD_DELETE_CAPABILITY_ID {
             let request = serde_json::from_value(input)
                 .map_err(|_| product_capability_input_error("input"))?;
             self.delete_thread(caller, request).await?;
             return self.api_capability_success(activity_id, "thread deleted");
+        }
+        if capability.as_str() == AUTOMATION_PAUSE_CAPABILITY_ID {
+            let request: RebornAutomationRequest = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.pause_automation(caller, request.automation_id).await?;
+            return self.api_capability_success(activity_id, "automation paused");
+        }
+        if capability.as_str() == AUTOMATION_RESUME_CAPABILITY_ID {
+            let request: RebornAutomationRequest = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.resume_automation(caller, request.automation_id)
+                .await?;
+            return self.api_capability_success(activity_id, "automation resumed");
+        }
+        if capability.as_str() == AUTOMATION_RENAME_CAPABILITY_ID {
+            let request: RebornRenameAutomationProductRequest = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.rename_automation(
+                caller,
+                request.automation_id,
+                WebUiRenameAutomationRequest { name: request.name },
+            )
+            .await?;
+            return self.api_capability_success(activity_id, "automation renamed");
+        }
+        if capability.as_str() == AUTOMATION_DELETE_CAPABILITY_ID {
+            let request: RebornAutomationRequest = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            self.delete_automation(caller, request.automation_id)
+                .await?;
+            return self.api_capability_success(activity_id, "automation deleted");
         }
         if capability.as_str() == ADMIN_USER_UPDATE_CAPABILITY_ID {
             let request: RebornAdminUpdateUserProductRequest = serde_json::from_value(input)
@@ -3293,6 +3371,31 @@ where
                 .map_err(|_| product_capability_input_error("input"))?;
             self.delete_admin_user(caller, request.user_id).await?;
             return self.api_capability_success(activity_id, "admin user deleted");
+        }
+        if capability.as_str() == ADMIN_USER_PUT_SECRET_CAPABILITY_ID {
+            let request: RebornAdminPutSecretProductRequest = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            let handle = SecretHandle::new(request.handle)
+                .map_err(|_| product_capability_input_error("handle"))?;
+            self.put_admin_user_secret(
+                caller,
+                request.user_id,
+                handle,
+                RebornAdminPutSecretRequest {
+                    value: request.value,
+                },
+            )
+            .await?;
+            return self.api_capability_success(activity_id, "admin user protected value updated");
+        }
+        if capability.as_str() == ADMIN_USER_DELETE_SECRET_CAPABILITY_ID {
+            let request: RebornAdminDeleteSecretProductRequest = serde_json::from_value(input)
+                .map_err(|_| product_capability_input_error("input"))?;
+            let handle = SecretHandle::new(request.handle)
+                .map_err(|_| product_capability_input_error("handle"))?;
+            self.delete_admin_user_secret(caller, request.user_id, handle)
+                .await?;
+            return self.api_capability_success(activity_id, "admin user protected value deleted");
         }
         self.product_capability_invoker
             .invoke(caller, capability, input, activity_id)

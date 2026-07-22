@@ -37,17 +37,21 @@ use ironclaw_product_adapters::{
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY_ID,
-    ADMIN_USER_SET_STATUS_CAPABILITY_ID, ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW,
-    ADMIN_USERS_VIEW, AUTOMATION_LIST_DEFAULT_PAGE_SIZE, AUTOMATION_LIST_MAX_PAGE_SIZE,
-    AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE, AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE,
-    AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW, ActiveModelReader,
-    ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
-    ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    AutomationListRequest, AutomationName, AutomationProductFacade, ChannelAuthAccountState,
-    ChannelConfigFacade, ChannelConnectionFacade, ChannelConnectionRequirement, CodexLoginStart,
-    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
-    EXTENSIONS_VIEW, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
+    ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
+    ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
+    ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW,
+    AUTOMATION_DELETE_CAPABILITY_ID, AUTOMATION_LIST_DEFAULT_PAGE_SIZE,
+    AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY_ID, AUTOMATION_RENAME_CAPABILITY_ID,
+    AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATION_RUN_HISTORY_DEFAULT_PAGE_SIZE,
+    AUTOMATION_RUN_HISTORY_MAX_PAGE_SIZE, AUTOMATION_TRIGGER_THREAD_SOURCE_TAG, AUTOMATIONS_VIEW,
+    ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
+    ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
+    AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductFacade,
+    ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
+    ChannelConnectionRequirement, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
+    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
     FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, InboundAttachmentLander,
     InboundAttachmentReader, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
@@ -68,59 +72,63 @@ use ironclaw_product_workflow::{
     OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
     OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, OperatorLogsService,
     OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
-    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBERS_VIEW,
-    PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
-    ProjectFilesystemReader, ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionListResponse, RebornExtensionOnboardingState,
-    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
-    RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
-    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
-    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
-    RebornProjectState, RebornRemoveMemberRequest, RebornResolveGateResponse, RebornRunArtifact,
-    RebornRunArtifactRequest, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
-    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductFacade,
-    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
+    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
+    PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
+    ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller, ProjectFilesystemReader,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
+    ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
+    RebornExtensionOnboardingState, RebornExtensionSurface, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse, RebornFsStatRequest,
+    RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
+    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
+    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsStatRequest,
+    RebornProjectFsStatResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
+    RebornRunArtifact, RebornRunArtifactRequest, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornServices, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
+    SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref, automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
     AdminUserSecretMeta, AdminUserService, AdminUserStatus, RebornAdminCreateUserRequest,
+    RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
     RebornAdminPutSecretRequest, RebornAdminSetRoleProductRequest, RebornAdminSetRoleRequest,
     RebornAdminSetStatusProductRequest, RebornAdminSetStatusRequest,
     RebornAdminUpdateUserProductRequest, RebornAdminUpdateUserRequest, RebornAdminUserListQuery,
@@ -2540,6 +2548,9 @@ struct RecordingProjectService {
     updated: Mutex<Vec<RebornUpdateProjectRequest>>,
     deleted: Mutex<Vec<String>>,
     listed_members: Mutex<Vec<String>>,
+    added_members: Mutex<Vec<RebornAddMemberRequest>>,
+    updated_members: Mutex<Vec<RebornUpdateMemberRoleRequest>>,
+    removed_members: Mutex<Vec<RebornRemoveMemberRequest>>,
 }
 
 #[async_trait]
@@ -2618,6 +2629,10 @@ impl ProjectService for RecordingProjectService {
         _caller: ProjectCaller,
         request: RebornAddMemberRequest,
     ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        self.added_members
+            .lock()
+            .expect("lock")
+            .push(request.clone());
         Ok(sample_reborn_project_member(&request.user_id))
     }
 
@@ -2626,14 +2641,19 @@ impl ProjectService for RecordingProjectService {
         _caller: ProjectCaller,
         request: RebornUpdateMemberRoleRequest,
     ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        self.updated_members
+            .lock()
+            .expect("lock")
+            .push(request.clone());
         Ok(sample_reborn_project_member(&request.user_id))
     }
 
     async fn remove_member(
         &self,
         _caller: ProjectCaller,
-        _request: RebornRemoveMemberRequest,
+        request: RebornRemoveMemberRequest,
     ) -> Result<(), ProjectServiceError> {
+        self.removed_members.lock().expect("lock").push(request);
         Ok(())
     }
 }
@@ -2860,6 +2880,74 @@ async fn project_mutations_are_available_as_product_capabilities() {
     assert_eq!(
         project_service.deleted.lock().expect("lock").as_slice(),
         ["project-alpha"]
+    );
+
+    let add_member_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(PROJECT_MEMBER_ADD_CAPABILITY_ID).expect("capability id"),
+            serde_json::to_value(RebornAddMemberRequest {
+                project_id: "project-alpha".to_string(),
+                user_id: "user-beta".to_string(),
+                role: RebornProjectRole::Viewer,
+            })
+            .expect("project member add input"),
+            ActivityId::new(),
+        )
+        .await
+        .expect("project member add capability");
+    assert!(matches!(
+        add_member_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+    assert_eq!(
+        project_service.added_members.lock().expect("lock")[0].user_id,
+        "user-beta"
+    );
+
+    let update_member_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(PROJECT_MEMBER_UPDATE_CAPABILITY_ID).expect("capability id"),
+            serde_json::to_value(RebornUpdateMemberRoleRequest {
+                project_id: "project-alpha".to_string(),
+                user_id: "user-beta".to_string(),
+                role: RebornProjectRole::Editor,
+            })
+            .expect("project member update input"),
+            ActivityId::new(),
+        )
+        .await
+        .expect("project member update capability");
+    assert!(matches!(
+        update_member_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+    assert_eq!(
+        project_service.updated_members.lock().expect("lock")[0].role,
+        RebornProjectRole::Editor
+    );
+
+    let remove_member_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(PROJECT_MEMBER_REMOVE_CAPABILITY_ID).expect("capability id"),
+            serde_json::to_value(RebornRemoveMemberRequest {
+                project_id: "project-alpha".to_string(),
+                user_id: "user-beta".to_string(),
+            })
+            .expect("project member remove input"),
+            ActivityId::new(),
+        )
+        .await
+        .expect("project member remove capability");
+    assert!(matches!(
+        remove_member_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+    assert_eq!(
+        project_service.removed_members.lock().expect("lock")[0].user_id,
+        "user-beta"
     );
 }
 
@@ -7406,6 +7494,74 @@ async fn automation_mutations_forward_caller_scope_to_product_facade() {
     assert_eq!(calls[3].caller.user_id, caller.user_id);
     assert_eq!(calls[3].caller.agent_id, expected_agent_id);
     assert_eq!(calls[3].caller.project_id, caller.project_id);
+}
+
+#[tokio::test]
+async fn automation_mutations_are_available_as_product_capabilities() {
+    let automation_facade = Arc::new(RecordingAutomationFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_automation_product_facade(automation_facade.clone());
+
+    for (capability_id, input) in [
+        (
+            AUTOMATION_PAUSE_CAPABILITY_ID,
+            serde_json::to_value(RebornAutomationRequest {
+                automation_id: "trigger-alpha".to_string(),
+            })
+            .expect("pause input"),
+        ),
+        (
+            AUTOMATION_RESUME_CAPABILITY_ID,
+            serde_json::to_value(RebornAutomationRequest {
+                automation_id: "trigger-alpha".to_string(),
+            })
+            .expect("resume input"),
+        ),
+        (
+            AUTOMATION_RENAME_CAPABILITY_ID,
+            serde_json::to_value(RebornRenameAutomationProductRequest {
+                automation_id: "trigger-alpha".to_string(),
+                name: Some("Renamed status".to_string()),
+            })
+            .expect("rename input"),
+        ),
+        (
+            AUTOMATION_DELETE_CAPABILITY_ID,
+            serde_json::to_value(RebornAutomationRequest {
+                automation_id: "trigger-alpha".to_string(),
+            })
+            .expect("delete input"),
+        ),
+    ] {
+        let resolution = services
+            .invoke(
+                caller(),
+                CapabilityId::new(capability_id).expect("capability id"),
+                input,
+                ActivityId::new(),
+            )
+            .await
+            .expect("automation capability");
+        assert!(matches!(
+            resolution,
+            Resolution::Done(outcome) if outcome.verdict.is_success()
+        ));
+    }
+
+    let calls = automation_facade.mutation_calls();
+    assert_eq!(calls.len(), 4);
+    assert_eq!(calls[0].action, AutomationMutationAction::Pause);
+    assert_eq!(calls[1].action, AutomationMutationAction::Resume);
+    assert_eq!(
+        calls[2].action,
+        AutomationMutationAction::Rename {
+            name: AutomationName::new("Renamed status").expect("valid automation name")
+        }
+    );
+    assert_eq!(calls[3].action, AutomationMutationAction::Delete);
 }
 
 #[tokio::test]
@@ -14063,6 +14219,43 @@ async fn admin_users_are_available_as_product_views_and_capabilities() {
     let updated: RebornAdminUserResponse =
         serde_json::from_value(updated.payload).expect("admin user payload");
     assert_eq!(updated.user.display_name.as_deref(), Some("Beta Renamed"));
+
+    let put_secret_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(ADMIN_USER_PUT_SECRET_CAPABILITY_ID).expect("capability id"),
+            serde_json::to_value(RebornAdminPutSecretProductRequest {
+                user_id: target.clone(),
+                handle: "openai_api_key".to_string(),
+                value: "sk-test".to_string(),
+            })
+            .expect("admin secret put input"),
+            ActivityId::new(),
+        )
+        .await
+        .expect("admin secret put capability");
+    assert!(matches!(
+        put_secret_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+
+    let delete_secret_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(ADMIN_USER_DELETE_SECRET_CAPABILITY_ID).expect("capability id"),
+            serde_json::to_value(RebornAdminDeleteSecretProductRequest {
+                user_id: target.clone(),
+                handle: "openai_api_key".to_string(),
+            })
+            .expect("admin secret delete input"),
+            ActivityId::new(),
+        )
+        .await
+        .expect("admin secret delete capability");
+    assert!(matches!(
+        delete_secret_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
 
     let status_resolution = services
         .invoke(

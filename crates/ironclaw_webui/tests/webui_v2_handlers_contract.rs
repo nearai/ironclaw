@@ -32,22 +32,28 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY_ID,
-    ADMIN_USER_SET_STATUS_CAPABILITY_ID, ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW,
-    ADMIN_USERS_VIEW, AUTOMATIONS_VIEW, AdminUserRecord, AdminUserRole, AdminUserSecretMeta,
-    AdminUserStatus, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
+    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
+    ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
+    ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
+    ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW,
+    AUTOMATION_DELETE_CAPABILITY_ID, AUTOMATION_PAUSE_CAPABILITY_ID,
+    AUTOMATION_RENAME_CAPABILITY_ID, AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATIONS_VIEW,
+    AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus,
+    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
     FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
     LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID,
     LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
     LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
-    OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW,
-    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
     OUTBOUND_PREFERENCES_VIEW, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
-    PROJECT_FS_STAT_VIEW, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW,
-    PROJECTS_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
+    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
+    PROJECT_VIEW, PROJECTS_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
     ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminSetRoleProductRequest,
     RebornAdminSetStatusProductRequest, RebornAdminUpdateUserProductRequest,
@@ -370,14 +376,6 @@ impl StubServices {
 
     fn fail_list_automations(&self, error: RebornServicesError) {
         *self.next_list_automations_error.lock().expect("lock") = Some(error);
-    }
-
-    fn fail_delete_automation(&self, error: RebornServicesError) {
-        *self.next_delete_automation_error.lock().expect("lock") = Some(error);
-    }
-
-    fn fail_rename_automation(&self, error: RebornServicesError) {
-        *self.next_rename_automation_error.lock().expect("lock") = Some(error);
     }
 
     fn enqueue_invoke_response(&self, response: Result<Resolution, RebornServicesError>) {
@@ -843,11 +841,10 @@ impl RebornServicesApi for StubServices {
                 }
                 Ok(RebornViewPage {
                     payload: serde_json::to_value(RebornListAutomationsResponse {
-                        automations: vec![automation_info(
-                            "automation-listed",
-                            "Daily status",
-                            "0 9 * * *",
-                        )],
+                        automations: vec![
+                            automation_info("automation-listed", "Daily status", "0 9 * * *"),
+                            automation_info("automation-alpha", "Renamed status", "0 9 * * *"),
+                        ],
                         scheduler_enabled: true,
                     })
                     .expect("automation list payload"),
@@ -1155,7 +1152,11 @@ impl RebornServicesApi for StubServices {
             }
             id if id == PROJECT_MEMBERS_VIEW.id => Ok(RebornViewPage {
                 payload: serde_json::to_value(RebornListMembersResponse {
-                    members: vec![sample_member_info("user-beta")],
+                    members: vec![
+                        sample_member_info("user-beta"),
+                        sample_member_info("body-user"),
+                        sample_member_info("path-user"),
+                    ],
                 })
                 .expect("project members payload"),
                 next_cursor: None,
@@ -2567,6 +2568,7 @@ async fn list_automations_omits_limits_and_forwards_none() {
 async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
 
     let pause_response = router
         .clone()
@@ -2584,9 +2586,10 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
     assert_eq!(pause_body["updated"], true);
     assert_eq!(
         pause_body["automation"]["automation_id"],
-        "automation-paused"
+        "automation-alpha"
     );
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let resume_response = router
         .oneshot(
             Request::builder()
@@ -2602,24 +2605,26 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
     assert_eq!(resume_body["updated"], true);
     assert_eq!(
         resume_body["automation"]["automation_id"],
-        "automation-resumed"
+        "automation-alpha"
     );
 
+    let calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 2);
     assert_eq!(
-        services
-            .pause_automation_calls
-            .lock()
-            .expect("lock")
-            .clone(),
-        vec!["automation-alpha".to_string()]
+        calls[0].0,
+        CapabilityId::new(AUTOMATION_PAUSE_CAPABILITY_ID).expect("capability id")
     );
     assert_eq!(
-        services
-            .resume_automation_calls
-            .lock()
-            .expect("lock")
-            .clone(),
-        vec!["automation-alpha".to_string()]
+        calls[0].1,
+        serde_json::json!({ "automation_id": "automation-alpha" })
+    );
+    assert_eq!(
+        calls[1].0,
+        CapabilityId::new(AUTOMATION_RESUME_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[1].1,
+        serde_json::json!({ "automation_id": "automation-alpha" })
     );
 }
 
@@ -2627,6 +2632,7 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
 async fn rename_automation_dispatches_path_id_and_body_to_facade() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
 
     let response = router
         .oneshot(
@@ -2643,17 +2649,22 @@ async fn rename_automation_dispatches_path_id_and_body_to_facade() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     assert_eq!(body["updated"], true);
-    assert_eq!(body["automation"]["automation_id"], "automation-renamed");
+    assert_eq!(body["automation"]["automation_id"], "automation-alpha");
     assert_eq!(body["automation"]["name"], "Renamed status");
 
-    let calls = services
-        .rename_automation_calls
-        .lock()
-        .expect("lock")
-        .clone();
+    let calls = services.invoke_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].0, "automation-alpha");
-    assert_eq!(calls[0].1.name.as_deref(), Some("Renamed status"));
+    assert_eq!(
+        calls[0].0,
+        CapabilityId::new(AUTOMATION_RENAME_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].1,
+        serde_json::json!({
+            "automation_id": "automation-alpha",
+            "name": "Renamed status"
+        })
+    );
 }
 
 #[tokio::test]
@@ -2689,7 +2700,7 @@ async fn rename_automation_error_maps_to_http_status() {
         ),
     ] {
         let services = Arc::new(StubServices::default());
-        services.fail_rename_automation(error);
+        services.enqueue_invoke_response(Err(error));
         let router = router_with(services.clone());
 
         let response = router
@@ -2709,18 +2720,11 @@ async fn rename_automation_error_maps_to_http_status() {
         assert_eq!(body["error"], expected_code);
         assert_eq!(body["kind"], expected_kind);
         assert_eq!(body["retryable"], expected_retryable);
+        let calls = services.invoke_calls.lock().expect("lock").clone();
+        assert_eq!(calls.len(), 1);
         assert_eq!(
-            services
-                .rename_automation_calls
-                .lock()
-                .expect("lock")
-                .iter()
-                .map(|(automation_id, request)| { (automation_id.clone(), request.name.clone()) })
-                .collect::<Vec<_>>(),
-            vec![(
-                "automation-alpha".to_string(),
-                Some("Renamed status".to_string())
-            )]
+            calls[0].0,
+            CapabilityId::new(AUTOMATION_RENAME_CAPABILITY_ID).expect("capability id")
         );
     }
 }
@@ -2892,6 +2896,7 @@ async fn trace_account_login_link_returns_minted_url_to_caller_scope() {
 async fn delete_automation_dispatches_path_id_to_facade() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
 
     let response = router
         .oneshot(
@@ -2908,13 +2913,15 @@ async fn delete_automation_dispatches_path_id_to_facade() {
     let body = read_json(response).await;
     assert_eq!(body["updated"], true);
     assert!(body.get("automation").is_none() || body["automation"].is_null());
+    let calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
     assert_eq!(
-        services
-            .delete_automation_calls
-            .lock()
-            .expect("lock")
-            .clone(),
-        vec!["automation-alpha".to_string()]
+        calls[0].0,
+        CapabilityId::new(AUTOMATION_DELETE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].1,
+        serde_json::json!({ "automation_id": "automation-alpha" })
     );
 }
 
@@ -2951,7 +2958,7 @@ async fn delete_automation_error_maps_to_http_status() {
         ),
     ] {
         let services = Arc::new(StubServices::default());
-        services.fail_delete_automation(error);
+        services.enqueue_invoke_response(Err(error));
         let router = router_with(services.clone());
 
         let response = router
@@ -2970,13 +2977,11 @@ async fn delete_automation_error_maps_to_http_status() {
         assert_eq!(body["error"], expected_code);
         assert_eq!(body["kind"], expected_kind);
         assert_eq!(body["retryable"], expected_retryable);
+        let calls = services.invoke_calls.lock().expect("lock").clone();
+        assert_eq!(calls.len(), 1);
         assert_eq!(
-            services
-                .delete_automation_calls
-                .lock()
-                .expect("lock")
-                .clone(),
-            vec!["automation-alpha".to_string()]
+            calls[0].0,
+            CapabilityId::new(AUTOMATION_DELETE_CAPABILITY_ID).expect("capability id")
         );
     }
 }
@@ -3816,6 +3821,75 @@ async fn admin_user_mutations_invoke_product_capabilities_and_read_back_user() {
 }
 
 #[tokio::test]
+async fn admin_user_secret_mutations_invoke_product_capabilities() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let put = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/admin/users/user-admin/secrets/openai_api_key")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"value":"sk-test"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("put secret");
+    assert_eq!(put.status(), StatusCode::OK);
+    let body = read_json(put).await;
+    assert_eq!(body["secret"]["handle"], "openai_api_key");
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let delete = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/admin/users/user-admin/secrets/openai_api_key")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("delete secret");
+    assert_eq!(delete.status(), StatusCode::OK);
+    let body = read_json(delete).await;
+    assert_eq!(body["handle"], "openai_api_key");
+    assert_eq!(body["deleted"], true);
+
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 2);
+    assert_eq!(
+        invoke_calls[0].0,
+        CapabilityId::new(ADMIN_USER_PUT_SECRET_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({
+            "user_id": "user-admin",
+            "handle": "openai_api_key",
+            "value": "sk-test"
+        })
+    );
+    assert_eq!(
+        invoke_calls[1].0,
+        CapabilityId::new(ADMIN_USER_DELETE_SECRET_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[1].1,
+        serde_json::json!({
+            "user_id": "user-admin",
+            "handle": "openai_api_key"
+        })
+    );
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), ADMIN_USER_SECRETS_VIEW.id);
+}
+
+#[tokio::test]
 async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
     let services = Arc::new(StubServices::default());
     let router = router_with_capabilities(
@@ -4056,6 +4130,7 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = router
         .clone()
         .oneshot(
@@ -4093,16 +4168,25 @@ async fn settings_tool_routes_do_not_require_operator_capability() {
             .lock()
             .expect("lock")
             .as_slice(),
-        [
-            (
-                "agent.auto_approve_tools".to_string(),
-                serde_json::json!(true)
-            ),
-            (
-                "tool.ext.search".to_string(),
-                serde_json::json!({ "state": "always_allow" })
-            )
-        ]
+        [(
+            "tool.ext.search".to_string(),
+            serde_json::json!({ "state": "always_allow" })
+        )]
+    );
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0,
+        CapabilityId::new(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(invoke_calls[0].1, serde_json::json!({ "enabled": true }));
+    assert_eq!(
+        services
+            .get_operator_config_key_calls
+            .lock()
+            .expect("lock")
+            .as_slice(),
+        ["agent.auto_approve_tools"]
     );
 }
 
@@ -4147,6 +4231,7 @@ async fn settings_tool_routes_fail_closed_without_capabilities_extension() {
             .expect("lock")
             .is_empty()
     );
+    assert!(services.invoke_calls.lock().expect("lock").is_empty());
 }
 
 #[tokio::test]
@@ -4191,6 +4276,7 @@ async fn settings_tool_routes_expose_only_tool_approval_config() {
         .collect::<Vec<_>>();
     assert_eq!(keys, ["agent.auto_approve_tools", "tool.ext.search"]);
 
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = router
         .clone()
         .oneshot(
@@ -4224,17 +4310,18 @@ async fn settings_tool_routes_expose_only_tool_approval_config() {
             .lock()
             .expect("lock")
             .as_slice(),
-        [
-            (
-                "agent.auto_approve_tools".to_string(),
-                serde_json::json!(false)
-            ),
-            (
-                "tool.ext.search".to_string(),
-                serde_json::json!({ "state": "disabled" })
-            )
-        ],
+        [(
+            "tool.ext.search".to_string(),
+            serde_json::json!({ "state": "disabled" })
+        )],
     );
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0,
+        CapabilityId::new(OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(invoke_calls[0].1, serde_json::json!({ "enabled": false }));
 }
 
 #[tokio::test]
@@ -7301,6 +7388,7 @@ async fn get_project_queries_product_surface_view() {
 async fn update_member_path_ids_override_body() {
     let services = Arc::new(StubServices::default());
     let app = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = app
         .oneshot(
             Request::builder()
@@ -7320,10 +7408,17 @@ async fn update_member_path_ids_override_body() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
-    let calls = services.update_project_member_calls.lock().expect("lock");
+    let calls = services.invoke_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].project_id, "path-project");
-    assert_eq!(calls[0].user_id, "path-user");
+    assert_eq!(
+        calls[0].0,
+        CapabilityId::new(PROJECT_MEMBER_UPDATE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(calls[0].1["project_id"], "path-project");
+    assert_eq!(calls[0].1["user_id"], "path-user");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_MEMBERS_VIEW.id);
 }
 
 /// `add_project_member` takes user_id from the BODY (the path has no user
@@ -7332,6 +7427,7 @@ async fn update_member_path_ids_override_body() {
 async fn add_member_takes_user_from_body_project_from_path() {
     let services = Arc::new(StubServices::default());
     let app = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = app
         .oneshot(
             Request::builder()
@@ -7351,10 +7447,20 @@ async fn add_member_takes_user_from_body_project_from_path() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
-    let calls = services.add_project_member_calls.lock().expect("lock");
+    let calls = services.invoke_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].project_id, "path-project", "project from path");
-    assert_eq!(calls[0].user_id, "body-user", "user from body");
+    assert_eq!(
+        calls[0].0,
+        CapabilityId::new(PROJECT_MEMBER_ADD_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].1["project_id"], "path-project",
+        "project from path"
+    );
+    assert_eq!(calls[0].1["user_id"], "body-user", "user from body");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_MEMBERS_VIEW.id);
 }
 
 #[tokio::test]
@@ -7409,6 +7515,7 @@ async fn delete_project_returns_204() {
 async fn remove_member_returns_204() {
     let services = Arc::new(StubServices::default());
     let app = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = app
         .oneshot(
             Request::builder()
@@ -7420,9 +7527,16 @@ async fn remove_member_returns_204() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    let calls = services.remove_project_member_calls.lock().expect("lock");
-    assert_eq!(calls[0].project_id, "p1");
-    assert_eq!(calls[0].user_id, "u1");
+    let calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].0,
+        CapabilityId::new(PROJECT_MEMBER_REMOVE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].1,
+        serde_json::json!({ "project_id": "p1", "user_id": "u1" })
+    );
 }
 
 /// Project listing is routed through the ProductSurface view boundary.
