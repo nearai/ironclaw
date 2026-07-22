@@ -29,26 +29,27 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW,
-    LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductSurface,
-    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
-    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
+    EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageRef, LlmActiveSelection,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
+    ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -313,12 +314,10 @@ struct StubServices {
     query_logs_calls: Mutex<Vec<LogsCall>>,
     query_operator_logs_calls: Mutex<Vec<OperatorLogsCall>>,
     run_operator_service_lifecycle_calls: Mutex<Vec<RebornOperatorServiceLifecycleAction>>,
-    install_extension_calls: Mutex<Vec<String>>,
     /// Raw zip bytes each `import_extension` call forwards, so the route test
     /// can assert the uploaded body reaches the facade intact.
     import_extension_calls: Mutex<Vec<Vec<u8>>>,
     activate_extension_calls: Mutex<Vec<String>>,
-    remove_extension_calls: Mutex<Vec<String>>,
     get_llm_config_calls: Mutex<usize>,
     upsert_llm_provider_calls: Mutex<Vec<String>>,
     delete_llm_provider_calls: Mutex<Vec<String>>,
@@ -1307,18 +1306,6 @@ impl RebornServicesApi for StubServices {
         ))
     }
 
-    async fn install_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        self.install_extension_calls
-            .lock()
-            .expect("lock")
-            .push(package_ref.id.as_str().to_string());
-        Ok(extension_action_response("installed"))
-    }
-
     async fn import_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1341,18 +1328,6 @@ impl RebornServicesApi for StubServices {
             .expect("lock")
             .push(package_ref.id.as_str().to_string());
         Ok(extension_action_response("activated"))
-    }
-
-    async fn remove_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        self.remove_extension_calls
-            .lock()
-            .expect("lock")
-            .push(package_ref.id.as_str().to_string());
-        Ok(extension_action_response("removed"))
     }
 
     async fn setup_extension(
@@ -4545,8 +4520,9 @@ async fn skill_content_and_mutations_use_product_surface() {
 }
 
 #[tokio::test]
-async fn install_extension_decodes_body_package_ref_to_facade_call() {
+async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
@@ -4564,13 +4540,17 @@ async fn install_extension_decodes_body_package_ref_to_facade_call() {
         .expect("oneshot");
 
     assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        services
-            .install_extension_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        ["nearai-mcp"]
+        invoke_calls[0].0,
+        CapabilityId::new(EXTENSION_INSTALL_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({ "extension_id": "nearai-mcp" })
     );
 }
 
@@ -4599,12 +4579,8 @@ async fn install_extension_rejects_non_extension_package_kind_with_400() {
     assert_eq!(body["field"], "package_ref");
     assert_eq!(body["validation_code"], "invalid_id");
     assert!(
-        services
-            .install_extension_calls
-            .lock()
-            .expect("lock")
-            .is_empty(),
-        "invalid package kind must not reach the facade"
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "invalid package kind must not reach the capability path"
     );
 }
 
@@ -4733,28 +4709,24 @@ async fn import_extension_is_stripped_alongside_operator_routes() {
 }
 
 #[tokio::test]
-async fn activate_and_remove_extension_decode_path_package_id_to_facade_call() {
+async fn activate_and_remove_extension_decode_path_package_id_to_lifecycle_paths() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
-    for uri in [
-        "/api/webchat/v2/extensions/google-calendar/activate",
-        "/api/webchat/v2/extensions/google-calendar/remove",
-    ] {
-        let response = router
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::POST)
-                    .uri(uri)
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
+    let activate_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/google-calendar/activate")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
 
-        assert_eq!(response.status(), StatusCode::OK);
-    }
+    assert_eq!(activate_response.status(), StatusCode::OK);
 
     assert_eq!(
         services
@@ -4764,13 +4736,29 @@ async fn activate_and_remove_extension_decode_path_package_id_to_facade_call() {
             .as_slice(),
         ["google-calendar"]
     );
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let remove_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/google-calendar/remove")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(remove_response.status(), StatusCode::OK);
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        services
-            .remove_extension_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        ["google-calendar"]
+        invoke_calls[0].0,
+        CapabilityId::new(EXTENSION_REMOVE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({ "extension_id": "google-calendar" })
     );
 }
 
@@ -5403,21 +5391,7 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
         ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
-        async fn install_extension(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _package_ref: LifecyclePackageRef,
-        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
         async fn activate_extension(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _package_ref: LifecyclePackageRef,
-        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn remove_extension(
             &self,
             _caller: WebUiAuthenticatedCaller,
             _package_ref: LifecyclePackageRef,

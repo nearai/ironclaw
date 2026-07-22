@@ -2367,8 +2367,12 @@ loop-facing capability result and every result mirror is deleted.
   ProductSurface invoker carrying the scoped skill-management mounts and the
   install capability's declared network policy. The learned auto-activation
   master switch uses `builtin.skill_auto_activate_learned_set`, an API-only
-  product capability over the runtime selector flag. The migrated legacy
-  `RebornServicesApi` methods were removed from the ratchet allowlist. This is
+  product capability over the runtime selector flag. Extension install/remove
+  routes now invoke `builtin.extension_install` and `builtin.extension_remove`
+  directly from the WebUI ProductSurface path; activate/import/setup remain as
+  explicit follow-ups because activation needs gate/onboarding-preserving result
+  mapping and import/setup need upload/setup-specific API capability shapes. The
+  migrated legacy `RebornServicesApi` methods were removed from the ratchet allowlist. This is
   the migration pattern for product mutations: authenticated product gesture ->
   `ProductSurface::invoke` -> descriptor-declared first-party handler ->
   authoritative `query` read-back where an authoritative read model exists.

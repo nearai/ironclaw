@@ -919,23 +919,7 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn install_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
     async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn remove_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
         _package_ref: LifecyclePackageRef,

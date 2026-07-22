@@ -209,6 +209,8 @@ const TOOL_CONFIG_PREFIX: &str = "tool.";
 pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
     "builtin.operator_config_set_auto_approve";
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
+pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
+pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
 pub const SKILL_UPDATE_CAPABILITY_ID: &str = "builtin.skill_update";
 pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
@@ -2274,12 +2276,6 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    async fn install_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
-
     /// Import a standalone extension from an uploaded bundle (zip bytes) — the
     /// WebUI "Install Tool" path. Default is unavailable so non-local impls and
     /// test stubs need no change.
@@ -2292,12 +2288,6 @@ pub trait RebornServicesApi: Send + Sync {
     }
 
     async fn activate_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
-
-    async fn remove_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
         package_ref: LifecyclePackageRef,
@@ -4743,14 +4733,6 @@ where
             .await
     }
 
-    async fn install_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::install_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
-    }
-
     async fn import_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4765,14 +4747,6 @@ where
         package_ref: LifecyclePackageRef,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         extensions::activate_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
-    }
-
-    async fn remove_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::remove_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
     }
 
     async fn setup_extension(

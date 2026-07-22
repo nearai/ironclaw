@@ -165,21 +165,7 @@ impl RebornServicesApi for RecordingServices {
     ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
-    async fn install_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
     async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-    async fn remove_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
         _package_ref: LifecyclePackageRef,
