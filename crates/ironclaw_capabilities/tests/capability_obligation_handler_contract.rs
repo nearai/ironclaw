@@ -105,13 +105,14 @@ async fn capability_host_authorize_fold_seals_authority_and_prepared_effects_to_
         },
         Obligation::ReserveResources { reservation_id },
     ]);
+    let expected_reservation = ResourceReservation {
+        id: reservation_id,
+        scope: scope.clone(),
+        estimate: estimate.clone(),
+    };
     let handler = EffectObligationHandler {
         mounts: Some(narrowed_mounts.clone()),
-        reservation: Some(ResourceReservation {
-            id: reservation_id,
-            scope: scope.clone(),
-            estimate: estimate.clone(),
-        }),
+        reservation: Some(expected_reservation.clone()),
         aborted: Arc::new(AtomicBool::new(false)),
     };
     let host =
@@ -152,13 +153,7 @@ async fn capability_host_authorize_fold_seals_authority_and_prepared_effects_to_
     assert_eq!(request.lane, RuntimeLane::Wasm);
     assert_eq!(request.run_id, None);
     assert_eq!(request.mounts, Some(narrowed_mounts));
-    assert_eq!(
-        request
-            .resource_reservation
-            .as_ref()
-            .map(|reservation| reservation.id),
-        Some(reservation_id)
-    );
+    assert_eq!(request.resource_reservation, Some(expected_reservation));
 }
 
 #[tokio::test]
