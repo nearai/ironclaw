@@ -209,6 +209,16 @@ def _parse_llm_trace(trace: object, source: str | None = None) -> dict:
                 f"trace.steps[{index}].request_hint.min_message_count "
                 "must be a non-negative integer"
             )
+        expected_failed_result = request_hint.get(
+            "expected_failed_tool_result_contains"
+        )
+        if expected_failed_result is not None and (
+            not isinstance(expected_failed_result, str) or not expected_failed_result
+        ):
+            raise ValueError(
+                f"trace.steps[{index}].request_hint."
+                "expected_failed_tool_result_contains must be a non-empty string"
+            )
         responses.append(response)
         request_hints.append(request_hint)
         pending_user_input = False
@@ -273,10 +283,20 @@ def _next_llm_trace_response(
             raise web.HTTPConflict(text=state["error"])
 
     failed_result = _failed_tool_result(messages)
-    if failed_result is not None:
+    expected_failed_result = request_hint.get("expected_failed_tool_result_contains")
+    if failed_result is None and expected_failed_result is not None:
+        state["error"] = (
+            "recorded LLM trace expected a failed capability result containing "
+            f"{expected_failed_result!r} before response {next_index}"
+        )
+        raise web.HTTPConflict(text=state["error"])
+    if failed_result is not None and (
+        expected_failed_result is None
+        or expected_failed_result not in failed_result["content"]
+    ):
         state["error"] = (
             "recorded LLM trace observed a failed capability result before response "
-            f"{next_index}: {failed_result}"
+            f"{next_index}: {failed_result['summary']}"
         )
         raise web.HTTPConflict(text=state["error"])
 
@@ -413,14 +433,17 @@ def _find_trace_result_field(value: object, fields: list[str]) -> object | None:
     return None
 
 
-def _failed_tool_result(messages: list[dict]) -> str | None:
+def _failed_tool_result(messages: list[dict]) -> dict | None:
     for message in messages:
         if message.get("role") != "tool":
             continue
         parsed = _parse_trace_result_content(message.get("content"))
         status = _find_trace_result_field(parsed, ["status"])
         if status in {"failed", "error"}:
-            return f"{message.get('name', 'unknown tool')} status={status}"
+            return {
+                "content": json.dumps(parsed, sort_keys=True),
+                "summary": f"{message.get('name', 'unknown tool')} status={status}",
+            }
     return None
 
 TOOL_FAILURE_TRIGGER = re.compile(r"issue 1780 tool failure", re.IGNORECASE)

@@ -604,14 +604,20 @@ def _normalize_google_arguments(trace: dict, case: str) -> None:
                 arguments["file_id"] = "drv_pepsico_account_brief"
 
 
-def _normalize_slack_arguments(trace: dict, slack_state: dict[str, str]) -> None:
+def _normalize_slack_arguments(
+    trace: dict, slack_state: dict[str, str], case: str
+) -> None:
     for step in trace["steps"]:
         for call in step["response"].get("tool_calls", []):
             if not call["name"].startswith("slack__"):
                 continue
             arguments = call["arguments"]
             if "channel" in arguments:
-                arguments["channel"] = slack_state["channel_id"]
+                arguments["channel"] = (
+                    "C_REBORN_QA_10E_MISSING"
+                    if case == "qa_10e_slack_error_honesty"
+                    else slack_state["channel_id"]
+                )
             if "user_id" in arguments:
                 arguments["user_id"] = slack_state["reviewer_id"]
             if "thread_ts" in arguments:
@@ -654,10 +660,14 @@ async def _load_trace(
     if trace_path.stem == "qa_9c_slack_digest_names_not_ids":
         _coalesce_independent_provider_reads(trace)
         _inject_deferred_tool_disclosure(trace)
+    elif trace_path.stem == "qa_10e_slack_error_honesty":
+        trace["steps"][-1]["request_hint"] = {
+            "expected_failed_tool_result_contains": "channel_not_found"
+        }
     if provider_prefixes is not None:
         _normalize_google_arguments(trace, trace_path.stem)
     if slack_state is not None:
-        _normalize_slack_arguments(trace, slack_state)
+        _normalize_slack_arguments(trace, slack_state, trace_path.stem)
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{mock_llm_server}/__mock/llm_trace",
@@ -861,7 +871,7 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
         replay = await _wait_for_trace_replay(
             mock_llm_server, timeout=replay_timeout
         )
-        await wait_for_assistant_message(
+        assistant = await wait_for_assistant_message(
             client, server, thread_id, timeout=replay_timeout
         )
         timeline = await _fetch_all_timeline_pages_with_retry(
@@ -884,13 +894,19 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
         for preview in previews:
             if preview["capability_id"] not in expected_counts:
                 continue
-            assert preview["status"] == "completed", json.dumps(preview)
             output = json.dumps(preview).lower()
+            if case == "qa_10e_slack_error_honesty":
+                assert preview["status"] == "failed", json.dumps(preview)
+                assert "channel_not_found" in output, preview
+                continue
+            assert preview["status"] == "completed", json.dumps(preview)
             assert "auth_required" not in output, preview
             assert "not found" not in output, preview
 
         if case == "qa_2c_drive_connect":
             assert "Secondary Private Brief" not in json.dumps(timeline)
+        elif case == "qa_10e_slack_error_honesty":
+            assert "channel_not_found" in assistant["content"]
 
     await _assert_google_provider_outcome(
         reborn_qa_emulate_provider_server["emulate_google_url"], case, trace

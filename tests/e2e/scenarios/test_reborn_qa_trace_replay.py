@@ -456,3 +456,56 @@ async def test_trace_replay_stops_after_failed_capability_result(mock_llm_server
 
     assert failed.status_code == 409
     assert "failed capability result" in failed.text
+
+
+async def test_trace_replay_accepts_exact_expected_capability_failure(mock_llm_server):
+    trace = {
+        "steps": [
+            {"response": {"type": "user_input", "content": "inspect Slack"}},
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [{"name": "slack__whoami", "arguments": {}}],
+                }
+            },
+            {
+                "request_hint": {
+                    "expected_failed_tool_result_contains": "channel_not_found"
+                },
+                "response": {"type": "text", "content": "reported honestly"},
+            },
+        ]
+    }
+    await _install_trace(mock_llm_server, "expected-failed-result", trace)
+    tools = _tool_definitions(trace)
+    messages = [{"role": "user", "content": "inspect Slack"}]
+
+    async with httpx.AsyncClient() as client:
+        first = await client.post(
+            f"{mock_llm_server}/v1/chat/completions",
+            json={"model": "mock-model", "messages": messages, "tools": tools},
+            timeout=15,
+        )
+        first.raise_for_status()
+        assistant = first.json()["choices"][0]["message"]
+        messages.extend(
+            [
+                assistant,
+                {
+                    "role": "tool",
+                    "name": "slack__whoami",
+                    "tool_call_id": assistant["tool_calls"][0]["id"],
+                    "content": json.dumps(
+                        {"status": "error", "error": "channel_not_found"}
+                    ),
+                },
+            ]
+        )
+        final = await client.post(
+            f"{mock_llm_server}/v1/chat/completions",
+            json={"model": "mock-model", "messages": messages, "tools": tools},
+            timeout=15,
+        )
+
+    final.raise_for_status()
+    assert final.json()["choices"][0]["message"]["content"] == "reported honestly"
