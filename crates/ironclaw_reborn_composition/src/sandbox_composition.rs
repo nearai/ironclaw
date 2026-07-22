@@ -9,12 +9,14 @@
 //! struct instead of `factory.rs` growing a new field and a new shutdown
 //! block per sandbox subsystem.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_api::UserId;
-use ironclaw_host_runtime::SandboxActivityRegistry;
+use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
+use ironclaw_host_runtime::{RebornSandboxUserKey, SandboxActivityRegistry};
 use ironclaw_resources::ResourceGovernor;
+use ironclaw_secrets::SecretStore;
 
 use crate::RebornBuildError;
 use crate::input::RebornLocalRuntimeIdentity;
@@ -80,13 +82,67 @@ impl SandboxEgressProxyRuntimeHandle {
     }
 }
 
-// Constructed by Phase C (egress proxy / secret-lease daemon); reserved here so
-// SandboxRuntimeBindings's shape is stable.
-#[allow(dead_code)]
+/// Owned handle to a spawned per-user
+/// [`ironclaw_host_runtime::SandboxSecretLeaseServer`]'s accept-loop task
+/// (its `bind_and_serve` method). Declared canonically here (not in
+/// `sandbox_secret_lease_task.rs`), the
+/// same split `SandboxEgressProxyRuntimeHandle` uses —
+/// `sandbox_secret_lease_task::spawn_sandbox_secret_lease_socket` constructs
+/// one via [`SandboxSecretLeaseDaemonHandle::new`] and returns it.
 pub(crate) struct SandboxSecretLeaseDaemonHandle {
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     handle: tokio::task::JoinHandle<()>,
     pub(crate) socket_path: std::path::PathBuf,
+}
+
+impl SandboxSecretLeaseDaemonHandle {
+    pub(crate) fn new(
+        shutdown_tx: tokio::sync::watch::Sender<bool>,
+        handle: tokio::task::JoinHandle<()>,
+        socket_path: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            shutdown_tx,
+            handle,
+            socket_path,
+        }
+    }
+
+    /// Signals the daemon's accept loop to stop and awaits the task,
+    /// aborting it if it has not stopped within `timeout`. Mirrors
+    /// `SandboxEgressProxyRuntimeHandle::shutdown` exactly.
+    pub(crate) async fn shutdown(self, timeout: Duration) {
+        let _ = self.shutdown_tx.send(true);
+        let socket_path = self.socket_path;
+        let mut handle = self.handle;
+        match tokio::time::timeout(timeout, &mut handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    ?error,
+                    ?socket_path,
+                    "sandbox secret lease daemon task join failed"
+                );
+            }
+            Err(_) => {
+                tracing::debug!(
+                    ?timeout,
+                    ?socket_path,
+                    "sandbox secret lease daemon did not stop before shutdown timeout; aborting"
+                );
+                handle.abort();
+                if let Err(error) = handle.await
+                    && error.is_panic()
+                {
+                    tracing::debug!(
+                        ?error,
+                        ?socket_path,
+                        "aborted sandbox secret lease daemon task panicked"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Inputs `build` needs out of `build_local_runtime`'s local scope. A
@@ -116,6 +172,14 @@ pub(crate) struct SandboxProfileBindingInputs<'a> {
     /// test construction of `SandboxProfileBindingInputs`, or a future
     /// caller that never pre-spawned one), `build` spawns its own.
     pub(crate) egress_proxy: Option<SandboxEgressProxyRuntimeHandle>,
+    /// The `Arc<dyn SecretStore>` instance `factory.rs` already builds and
+    /// exposes as `RebornServices.secret_store` — Task 5 threads the SAME
+    /// instance into the per-user secret-lease daemon rather than
+    /// constructing a second authority.
+    pub(crate) secret_store: Arc<dyn SecretStore>,
+    /// Root directory the per-user secret-lease socket is bound under:
+    /// `sandbox_workspaces_root.join(".ironclaw-broker").join("users").join(<digest>)/broker.sock`.
+    pub(crate) sandbox_workspaces_root: PathBuf,
 }
 
 pub(crate) struct SandboxRuntimeBindings {
@@ -155,6 +219,11 @@ impl SandboxRuntimeBindings {
 
         let sandbox_tenant_id =
             crate::sandbox_quota::resolve_local_runtime_tenant_id(inputs.local_runtime_identity)?;
+        // Cloned before `apply_sandbox_user_ceiling` consumes both by value —
+        // the secret-lease daemon spawn below needs the same tenant/user
+        // pair to key its per-user socket and scope.
+        let secret_lease_tenant_id = sandbox_tenant_id.clone();
+        let secret_lease_user_id = inputs.owner_user_id.clone();
         crate::sandbox_quota::apply_sandbox_user_ceiling(
             &inputs.resource_governor,
             sandbox_tenant_id,
@@ -186,11 +255,44 @@ impl SandboxRuntimeBindings {
             None => Some(crate::sandbox_egress_proxy_task::spawn_sandbox_egress_proxy().await?),
         };
 
+        // Phase C: the per-user secret-lease daemon. Resolves against the
+        // SAME `SecretStore` instance `factory.rs` exposes as
+        // `RebornServices.secret_store` — see `CompositionSandboxSecretLeaseResolver`'s
+        // doc comment for the documented OAuth-managed-secret gap in this
+        // resolver. Fails this build closed on an unbindable socket,
+        // mirroring the egress proxy rather than the best-effort reaper.
+        let secret_resolver: Arc<dyn ironclaw_host_runtime::SandboxSecretLeaseResolver> = Arc::new(
+            crate::sandbox_secret_lease_task::CompositionSandboxSecretLeaseResolver::new(
+                Arc::clone(&inputs.secret_store),
+            ),
+        );
+        let secret_lease_scope = ResourceScope {
+            tenant_id: secret_lease_tenant_id.clone(),
+            user_id: secret_lease_user_id.clone(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let secret_lease_user_key =
+            RebornSandboxUserKey::from_tenant_user(&secret_lease_tenant_id, &secret_lease_user_id);
+        let sockets_root = inputs.sandbox_workspaces_root.join(".ironclaw-broker");
+        let secret_lease = Some(
+            crate::sandbox_secret_lease_task::spawn_sandbox_secret_lease_socket(
+                secret_resolver,
+                secret_lease_scope,
+                secret_lease_user_key,
+                &sockets_root,
+            )
+            .await?,
+        );
+
         Ok(Self {
             activity: inputs.activity,
             reaper,
             egress_proxy,
-            secret_lease: None,
+            secret_lease,
         })
     }
 
@@ -206,8 +308,9 @@ impl SandboxRuntimeBindings {
         if let Some(egress_proxy) = self.egress_proxy {
             egress_proxy.shutdown(timeout).await;
         }
-        // Phase C: secret_lease daemon shutdown joins here too, once that
-        // variant is ever `Some`.
+        if let Some(secret_lease) = self.secret_lease {
+            secret_lease.shutdown(timeout).await;
+        }
     }
 }
 
@@ -221,8 +324,21 @@ mod tests {
         Arc::new(InMemoryResourceGovernor::new())
     }
 
+    /// A tempdir rooted at `/tmp` rather than `std::env::temp_dir()` — see
+    /// `RebornSandboxUserKey::socket_path`'s doc comment: macOS's `TMPDIR`
+    /// is a deep, per-process, randomized path that alone can exhaust a
+    /// Unix socket's ~104-byte `sun_path` budget before this module adds
+    /// its own `.ironclaw-broker/users/<digest>/broker.sock` suffix.
+    fn short_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("ic-sandbox-")
+            .tempdir_in("/tmp")
+            .expect("short tempdir under /tmp")
+    }
+
     #[tokio::test]
     async fn non_sandboxed_profile_yields_inert_bindings_with_no_reaper() {
+        let sockets_root = short_tempdir();
         let bindings = SandboxRuntimeBindings::build(SandboxProfileBindingInputs {
             is_sandboxed_profile: false,
             local_runtime_identity: None,
@@ -230,6 +346,8 @@ mod tests {
             activity: Arc::new(SandboxActivityRegistry::new()),
             owner_user_id: UserId::new("probe-user").unwrap(),
             egress_proxy: None,
+            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+            sandbox_workspaces_root: sockets_root.path().to_path_buf(),
         })
         .await
         .expect("non-sandboxed profile never fails to build inert bindings");
@@ -244,6 +362,7 @@ mod tests {
     async fn sandboxed_profile_applies_the_user_ceiling() {
         let governor = governor();
         let owner_user_id = UserId::new("probe-user").unwrap();
+        let sockets_root = short_tempdir();
         let bindings = SandboxRuntimeBindings::build(SandboxProfileBindingInputs {
             is_sandboxed_profile: true,
             local_runtime_identity: None,
@@ -251,6 +370,8 @@ mod tests {
             activity: Arc::new(SandboxActivityRegistry::new()),
             owner_user_id: owner_user_id.clone(),
             egress_proxy: None,
+            secret_store: Arc::new(ironclaw_secrets::FilesystemSecretStore::ephemeral()),
+            sandbox_workspaces_root: sockets_root.path().to_path_buf(),
         })
         .await
         .expect("sandboxed profile build succeeds even with no reachable Docker daemon");

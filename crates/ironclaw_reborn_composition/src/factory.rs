@@ -1755,6 +1755,27 @@ fn production_config(
     config.require_credential_broker()
 }
 
+/// Base directory the Phase C secret-lease Unix socket is bound under
+/// (`<this>/.ironclaw-broker/users/<digest>/broker.sock`, via
+/// `SandboxRuntimeBindings::build`).
+///
+/// Deliberately independent of the local-dev storage root: a Unix domain
+/// socket's `sockaddr_un.sun_path` is capped at roughly 104 bytes on macOS
+/// and 108 on Linux — far tighter than an ordinary filesystem path budget
+/// — and any real (or macOS's deep, per-session `$TMPDIR`-derived) data
+/// root routinely consumes that whole budget before
+/// `users/<digest>/broker.sock` is ever appended. `/tmp` is short and
+/// stable on every host this subsystem targets (the sandboxed profile
+/// requires a reachable Docker daemon, i.e. Linux or macOS with Docker
+/// Desktop), matching how other local daemons (postgres, ssh-agent,
+/// docker itself) keep their sockets short-pathed independent of
+/// data-directory depth. The daemon still binds the socket file at mode
+/// `0600` (see `secret_lease.rs`), so `/tmp`'s shared, world-traversable
+/// parent grants no read/connect access to other local users.
+fn sandbox_secret_lease_sockets_root() -> std::path::PathBuf {
+    std::path::PathBuf::from("/tmp/ironclaw-sandbox-broker")
+}
+
 /// Build the safe single-tenant runtime surface used by local-dev and
 /// hosted-single-tenant. Hosted single-tenant supplies a durable Postgres
 /// backend through `RebornStorageInput::HostedSingleTenantPostgres`; local-dev
@@ -2025,6 +2046,20 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     })
     .await?;
 
+    // Built before `SandboxRuntimeBindings::build` (below) so the
+    // sandboxed profile's per-user secret-lease daemon (Phase C, Task 5)
+    // can thread this SAME `Arc<dyn SecretStore>` instance in — the
+    // identical local `RebornServices.secret_store` exposes to every other
+    // caller, never a second independently constructed store.
+    let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
+    let local_dev_secret_bundle = build_secret_store(
+        &root,
+        Arc::clone(&local_dev_product_auth_filesystem),
+        secret_master_key,
+    )
+    .await?;
+    let secret_store: Arc<dyn SecretStore> = local_dev_secret_bundle.0.clone();
+
     // D3-2: bound this tenant's concurrent SpawnProcess reservations for the
     // sandboxed profile only — every other profile leaves the tenant account
     // unlimited. Turns the D3-1 `ReserveResources` obligation from a no-op
@@ -2052,6 +2087,16 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             // so `build` takes ownership of the SAME instance rather than
             // spawning a second one. `None` for non-sandboxed profiles.
             egress_proxy: sandbox_egress_proxy,
+            // Phase C, Task 5: the SAME secret store instance built above.
+            secret_store: Arc::clone(&secret_store),
+            // Base directory the per-user secret-lease socket is bound
+            // under. Deliberately NOT `root` (the local-dev storage root):
+            // `sockaddr_un.sun_path` is capped at ~104 (macOS) / 108
+            // (Linux) bytes, and `root` — especially under macOS's deep,
+            // per-session `$TMPDIR` — routinely consumes that whole budget
+            // before `users/<digest>/broker.sock` is ever appended (see
+            // `sandbox_secret_lease_sockets_root`'s doc comment).
+            sandbox_workspaces_root: sandbox_secret_lease_sockets_root(),
         },
     )
     .await?;
@@ -2059,14 +2104,6 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&store_graph.turn_state)),
     );
-    let local_dev_product_auth_filesystem = local_dev_scoped_filesystem(Arc::clone(&filesystem));
-    let local_dev_secret_bundle = build_secret_store(
-        &root,
-        Arc::clone(&local_dev_product_auth_filesystem),
-        secret_master_key,
-    )
-    .await?;
-    let secret_store: Arc<dyn SecretStore> = local_dev_secret_bundle.0.clone();
     // Admin per-user secret provisioner over the shared root + the SAME crypto
     // as the runtime's own secret store.
     let admin_secret_provisioner: Option<Arc<dyn crate::admin_secrets::AdminSecretProvisioner>> =
