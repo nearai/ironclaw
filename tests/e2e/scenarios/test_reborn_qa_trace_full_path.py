@@ -25,7 +25,6 @@ from reborn_webui_harness import (
     close_reborn_server,
     create_thread,
     enable_reborn_global_auto_approve,
-    fetch_timeline,
     reborn_bearer_headers,
     send_message,
     start_reborn_webui_v2_server,
@@ -688,17 +687,46 @@ async def _wait_for_trace_replay(mock_llm_server: str, timeout: float = 30) -> d
     )
 
 
-async def _fetch_timeline_with_retry(
+async def _fetch_all_timeline_pages_with_retry(
     client: httpx.AsyncClient, server: str, thread_id: str
 ) -> dict:
-    for _ in range(20):
-        try:
-            return await fetch_timeline(client, server, thread_id)
-        except httpx.HTTPStatusError as error:
-            if error.response.status_code != 429:
-                raise
-        await asyncio.sleep(0.5)
-    raise AssertionError("timeline remained rate-limited after replay completed")
+    timeline = None
+    messages = []
+    cursor = None
+    seen_cursors = set()
+
+    while True:
+        params = {"limit": 200}
+        if cursor is not None:
+            params["cursor"] = cursor
+
+        for _ in range(20):
+            response = await client.get(
+                f"{server}/api/webchat/v2/threads/{thread_id}/timeline",
+                params=params,
+                timeout=15,
+            )
+            if response.status_code != 429:
+                response.raise_for_status()
+                page = response.json()
+                break
+            await asyncio.sleep(0.5)
+        else:
+            raise AssertionError(
+                "timeline remained rate-limited after replay completed"
+            )
+
+        if timeline is None:
+            timeline = page
+        messages = [*page.get("messages", []), *messages]
+        cursor = page.get("next_cursor")
+        if cursor is None:
+            timeline["messages"] = messages
+            timeline["next_cursor"] = None
+            return timeline
+        assert isinstance(cursor, str) and cursor, page
+        assert cursor not in seen_cursors, f"timeline cursor repeated: {cursor}"
+        seen_cursors.add(cursor)
 
 
 def _recorded_provider_calls(trace: dict) -> list[dict]:
@@ -836,7 +864,9 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
         await wait_for_assistant_message(
             client, server, thread_id, timeout=replay_timeout
         )
-        timeline = await _fetch_timeline_with_retry(client, server, thread_id)
+        timeline = await _fetch_all_timeline_pages_with_retry(
+            client, server, thread_id
+        )
         previews = [
             preview
             for message in timeline.get("messages", [])
@@ -850,10 +880,7 @@ async def test_qa_journey_provider_leg_replays_through_emulate(
             for preview in previews
             if preview["capability_id"] in expected_counts
         )
-        if case == "qa_9c_slack_digest_names_not_ids":
-            assert actual_counts, "capped timeline retained no provider previews"
-        else:
-            assert actual_counts == expected_counts, (actual_counts, expected_counts)
+        assert actual_counts == expected_counts, (actual_counts, expected_counts)
         for preview in previews:
             if preview["capability_id"] not in expected_counts:
                 continue
