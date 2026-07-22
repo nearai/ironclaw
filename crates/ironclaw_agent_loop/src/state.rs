@@ -14,8 +14,8 @@ pub use signature::{
 pub use slots::{
     CapabilityStrategyState, CompactionEffectivenessBaseline, CompactionPromptSnapshot,
     CompactionStrategyState, ContextStrategyState, DeferredCompactionWatermark, GateStrategyState,
-    GoalRefreshStrategyState, IndexedMessageKind, MessageIndexEntry, ModelStrategyState,
-    PostCapabilityStageState, RecoveryAttemptClass, RecoveryStrategyState,
+    GoalRefreshStrategyState, IndexedMessageKind, MessageIndexEntry, ModelErrorObservationClass,
+    ModelStrategyState, PostCapabilityStageState, RecoveryAttemptClass, RecoveryStrategyState,
     RepeatedCallWarningPhase, RepeatedCallWarningState, ReplyAdmissionRejection,
     ReplyAdmissionRejectionReason, ReplyAdmissionStrategyState, StopStrategyState,
 };

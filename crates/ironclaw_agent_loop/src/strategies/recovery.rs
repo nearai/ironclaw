@@ -16,7 +16,9 @@ use ironclaw_turns::{
     run_profile::{LoopSafeSummary, ModelVisibleModelErrorObservation},
 };
 
-use crate::state::{LoopExecutionState, RecoveryAttemptClass, RecoveryStrategyState};
+use crate::state::{
+    LoopExecutionState, ModelErrorObservationClass, RecoveryAttemptClass, RecoveryStrategyState,
+};
 
 /// Decides what to do when a capability call OR a model call fails with a
 /// (sanitized) error summary.
@@ -328,13 +330,11 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                 recovery: state.recovery_state.cleared_attempts(),
                 failure_kind: kind,
             },
-            ModelErrorClass::ContentFiltered => retry_observe_or_abort(
+            ModelErrorClass::ContentFiltered => observe_once_or_abort(
                 state,
-                RecoveryAttemptClass::ModelContentFiltered,
-                0,
+                ModelErrorObservationClass::ContentFiltered,
                 kind,
                 RetryScope::Call,
-                |_| None,
                 ModelVisibleModelErrorObservation::content_filtered(),
             ),
             ModelErrorClass::StaleRequest => {
@@ -356,37 +356,21 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
                     |_| None,
                 )
             }
-            ModelErrorClass::ContextOverflow => {
-                let Some(attempt_class) = model_retry_attempt_class(err.class) else {
-                    return RecoveryOutcome::Abort {
-                        recovery: state.recovery_state.cleared_attempts(),
-                        failure_kind: LoopFailureKind::DriverBug,
-                    };
-                };
-                retry_observe_or_abort(
-                    state,
-                    attempt_class,
-                    self.max_attempts_per_class,
-                    kind,
-                    RetryScope::Iteration,
-                    |_| Some(RetryAlteration::ShrinkContext),
-                    ModelVisibleModelErrorObservation::context_overflow(),
-                )
-            }
+            ModelErrorClass::ContextOverflow => retry_observe_or_abort(
+                state,
+                ModelErrorObservationClass::ContextOverflow,
+                self.max_attempts_per_class,
+                RetryScope::Iteration,
+                |_| Some(RetryAlteration::ShrinkContext),
+                ModelVisibleModelErrorObservation::context_overflow(),
+            ),
             ModelErrorClass::InvalidOutput => {
-                let Some(attempt_class) = model_retry_attempt_class(err.class) else {
-                    return RecoveryOutcome::Abort {
-                        recovery: state.recovery_state.cleared_attempts(),
-                        failure_kind: LoopFailureKind::DriverBug,
-                    };
-                };
                 let reason =
                     ModelInvalidOutputDetailReason::from_safe_summary(err.safe_summary.as_str());
                 retry_observe_or_abort(
                     state,
-                    attempt_class,
+                    ModelErrorObservationClass::InvalidOutput,
                     self.max_attempts_per_class,
-                    kind,
                     RetryScope::Call,
                     |_| Some(RetryAlteration::RepairInvalidModelOutput),
                     ModelVisibleModelErrorObservation::invalid_output(reason),
@@ -471,13 +455,24 @@ fn retry_or_abort(
 
 fn retry_observe_or_abort(
     state: &LoopExecutionState,
-    attempt_class: RecoveryAttemptClass,
+    observation_class: ModelErrorObservationClass,
     max_attempts_per_class: u32,
-    failure_kind: LoopFailureKind,
     scope: RetryScope,
     alteration: impl FnOnce(u32) -> Option<RetryAlteration>,
     observation: ModelVisibleModelErrorObservation,
 ) -> RecoveryOutcome {
+    let model_error_class = match observation_class {
+        ModelErrorObservationClass::ContextOverflow => ModelErrorClass::ContextOverflow,
+        ModelErrorObservationClass::InvalidOutput => ModelErrorClass::InvalidOutput,
+        ModelErrorObservationClass::ContentFiltered => ModelErrorClass::ContentFiltered,
+    };
+    let Some(attempt_class) = model_retry_attempt_class(model_error_class) else {
+        return RecoveryOutcome::Abort {
+            recovery: state.recovery_state.cleared_attempts(),
+            failure_kind: LoopFailureKind::DriverBug,
+        };
+    };
+    let failure_kind = model_error_to_failure_kind(model_error_class);
     let attempts = state.recovery_state.attempts_for(attempt_class);
     let next = state
         .recovery_state
@@ -491,10 +486,10 @@ fn retry_observe_or_abort(
     }
     if !state
         .recovery_state
-        .observation_attempted_for(attempt_class)
+        .observation_attempted_for(observation_class)
     {
         return RecoveryOutcome::ModelErrorObservation {
-            recovery: next.with_observation_attempted_for(attempt_class),
+            recovery: next.with_observation_attempted_for(observation_class),
             scope,
             alter: alteration(attempts),
             observation,
@@ -503,6 +498,32 @@ fn retry_observe_or_abort(
     RecoveryOutcome::Abort {
         recovery: next,
         failure_kind,
+    }
+}
+
+fn observe_once_or_abort(
+    state: &LoopExecutionState,
+    observation_class: ModelErrorObservationClass,
+    failure_kind: LoopFailureKind,
+    scope: RetryScope,
+    observation: ModelVisibleModelErrorObservation,
+) -> RecoveryOutcome {
+    if state
+        .recovery_state
+        .observation_attempted_for(observation_class)
+    {
+        return RecoveryOutcome::Abort {
+            recovery: state.recovery_state.clone(),
+            failure_kind,
+        };
+    }
+    RecoveryOutcome::ModelErrorObservation {
+        recovery: state
+            .recovery_state
+            .with_observation_attempted_for(observation_class),
+        scope,
+        alter: None,
+        observation,
     }
 }
 
@@ -546,12 +567,12 @@ fn model_retry_attempt_class(class: ModelErrorClass) -> Option<RecoveryAttemptCl
     match class {
         ModelErrorClass::Transient => Some(RecoveryAttemptClass::ModelTransient),
         ModelErrorClass::ContextOverflow => Some(RecoveryAttemptClass::ModelContextOverflow),
-        ModelErrorClass::ContentFiltered => Some(RecoveryAttemptClass::ModelContentFiltered),
         ModelErrorClass::InvalidOutput => Some(RecoveryAttemptClass::ModelInvalidOutput),
         ModelErrorClass::Unavailable => Some(RecoveryAttemptClass::ModelUnavailable),
         ModelErrorClass::Internal => Some(RecoveryAttemptClass::ModelInternal),
         ModelErrorClass::StaleRequest => Some(RecoveryAttemptClass::ModelStaleRequest),
-        ModelErrorClass::Unauthorized
+        ModelErrorClass::ContentFiltered
+        | ModelErrorClass::Unauthorized
         | ModelErrorClass::CheckpointRejected
         | ModelErrorClass::TranscriptWriteFailed => None,
     }
@@ -1446,6 +1467,7 @@ mod tests {
                 } => {
                     assert_eq!(scope, RetryScope::Call);
                     assert_eq!(alter, None);
+                    assert!(recovery.attempts_by_class.is_empty());
                     assert_eq!(
                         observation,
                         ModelVisibleModelErrorObservation::content_filtered()

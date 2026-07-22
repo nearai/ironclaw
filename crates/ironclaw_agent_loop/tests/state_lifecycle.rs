@@ -3,8 +3,9 @@ use ironclaw_agent_loop::{
     families,
     state::{
         CapabilityCallSignature, CheckpointKind, CheckpointPayloadError,
-        DeferredCompactionWatermark, LoopExecutionState, RecoveryAttemptClass,
-        RecoveryStrategyState, RepeatedCallWarningPhase, RepeatedCallWarningState,
+        DeferredCompactionWatermark, LoopExecutionState, ModelErrorObservationClass,
+        RecoveryAttemptClass, RecoveryStrategyState, RepeatedCallWarningPhase,
+        RepeatedCallWarningState,
     },
     test_support::{
         LoopExecutionStateBuilder, MockAgentLoopDriverHost, ScenarioScript, capability_id,
@@ -65,7 +66,7 @@ fn model_error_recovery_budget_and_observation_survive_checkpoint_reload() {
     let mut state = LoopExecutionState::initial_for_run(&context);
     state.recovery_state =
         RecoveryStrategyState::with_attempts_for(RecoveryAttemptClass::ModelInvalidOutput, 2)
-            .with_observation_attempted_for(RecoveryAttemptClass::ModelInvalidOutput);
+            .with_observation_attempted_for(ModelErrorObservationClass::InvalidOutput);
     state.pending_model_error_observation =
         Some(ModelVisibleModelErrorObservation::content_filtered());
 
@@ -88,7 +89,7 @@ fn model_error_recovery_budget_and_observation_survive_checkpoint_reload() {
     assert!(
         restored
             .recovery_state
-            .observation_attempted_for(RecoveryAttemptClass::ModelInvalidOutput)
+            .observation_attempted_for(ModelErrorObservationClass::InvalidOutput)
     );
 }
 
@@ -98,7 +99,7 @@ fn legacy_checkpoint_without_model_error_observation_fields_decodes_to_defaults(
     let mut state = LoopExecutionState::initial_for_run(&context);
     state.recovery_state = state
         .recovery_state
-        .with_observation_attempted_for(RecoveryAttemptClass::ModelInvalidOutput);
+        .with_observation_attempted_for(ModelErrorObservationClass::InvalidOutput);
     state.pending_model_error_observation =
         Some(ModelVisibleModelErrorObservation::content_filtered());
     let mut value = serde_json::to_value(&state).expect("state should serialize");
@@ -116,7 +117,7 @@ fn legacy_checkpoint_without_model_error_observation_fields_decodes_to_defaults(
     assert!(
         !restored
             .recovery_state
-            .observation_attempted_for(RecoveryAttemptClass::ModelInvalidOutput)
+            .observation_attempted_for(ModelErrorObservationClass::InvalidOutput)
     );
 }
 
