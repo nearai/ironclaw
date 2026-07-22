@@ -198,7 +198,8 @@ pub struct RebornBuildInput {
     /// `SandboxRuntimeBindings::build` so `shutdown_all` shuts down the
     /// SAME proxy the container was pointed at, rather than a second,
     /// independently spawned one. `None` for every non-sandboxed profile.
-    pub(crate) sandbox_egress_proxy: Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
+    pub(crate) sandbox_egress_proxy:
+        Option<crate::sandbox_composition::SandboxEgressProxyRuntimeHandle>,
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
