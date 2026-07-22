@@ -33,26 +33,29 @@ use ironclaw_product_workflow::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, AUTOMATIONS_VIEW,
     CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_IMPORT_CAPABILITY,
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
-    LLM_ACTIVE_SET_CAPABILITY, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY,
-    LLM_PROVIDER_UPSERT_CAPABILITY, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, NearAiLoginRequest,
-    NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
-    OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
+    FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, LLM_ACTIVE_SET_CAPABILITY, LLM_CONFIG_VIEW,
+    LLM_PROVIDER_DELETE_CAPABILITY, LLM_PROVIDER_UPSERT_CAPABILITY, LOGS_VIEW,
+    LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
     OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW,
-    ProductCapabilityDescriptor, ProductOutboundEnvelope, ProductSurface, ProductWorkflowError,
-    ProjectFsFile, ProjectionCursor, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
-    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse,
-    RebornAdminUserDeletedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
-    RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentRequest,
-    RebornAutomationMutationResponse, RebornCancelRunResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
+    PROJECT_DELETE_CAPABILITY, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBERS_VIEW,
+    PROJECT_UPDATE_CAPABILITY, PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityDescriptor,
+    ProductOutboundEnvelope, ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
+    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
+    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
+    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
+    RebornCancelRunResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionOnboardingState,
+    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
+    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse, RebornGetProjectRequest, RebornListAutomationsResponse,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
     RebornListProjectsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
@@ -454,7 +457,9 @@ pub async fn list_project_files(
         thread_id,
         path: project_fs_list_path(query.path),
     };
-    let response = state.services().list_project_dir(caller, request).await?;
+    let response = PROJECT_FS_LIST_VIEW
+        .query_on(state.services().as_ref(), caller, request, None)
+        .await?;
     Ok(Json(response))
 }
 
@@ -471,7 +476,9 @@ pub async fn stat_project_file(
         thread_id,
         path: require_project_fs_path(query.path)?,
     };
-    let response = state.services().stat_project_path(caller, request).await?;
+    let response = PROJECT_FS_STAT_VIEW
+        .query_on(state.services().as_ref(), caller, request, None)
+        .await?;
     Ok(Json(response))
 }
 
@@ -547,7 +554,14 @@ pub async fn list_fs_mounts(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornFsMountsResponse>, WebUiV2HttpError> {
-    let response = state.services().list_fs_mounts(caller).await?;
+    let response = FS_MOUNTS_VIEW
+        .query_on(
+            state.services().as_ref(),
+            caller,
+            RebornFsMountsRequest {},
+            None,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -569,7 +583,9 @@ pub async fn browse_fs_dir(
             .unwrap_or_default(),
         project_id: query.project_id,
     };
-    let response = state.services().browse_fs_dir(caller, request).await?;
+    let response = FS_LIST_VIEW
+        .query_on(state.services().as_ref(), caller, request, None)
+        .await?;
     Ok(Json(response))
 }
 
@@ -586,7 +602,9 @@ pub async fn stat_fs_path(
         path: require_fs_browse_path(query.path)?,
         project_id: query.project_id,
     };
-    let response = state.services().stat_fs_path(caller, request).await?;
+    let response = FS_STAT_VIEW
+        .query_on(state.services().as_ref(), caller, request, None)
+        .await?;
     Ok(Json(response))
 }
 
@@ -659,7 +677,9 @@ pub async fn list_projects(
     Query(query): Query<ListProjectsQuery>,
 ) -> Result<Json<RebornListProjectsResponse>, WebUiV2HttpError> {
     let request = RebornListProjectsRequest { limit: query.limit };
-    let response = state.services().list_projects(caller, request).await?;
+    let response = PROJECTS_VIEW
+        .query_on(state.services().as_ref(), caller, request, None)
+        .await?;
     Ok(Json(response))
 }
 
@@ -679,9 +699,13 @@ pub async fn get_project(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(project_id): Path<String>,
 ) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .get_project(caller, RebornGetProjectRequest { project_id })
+    let response = PROJECT_VIEW
+        .query_on(
+            state.services().as_ref(),
+            caller,
+            RebornGetProjectRequest { project_id },
+            None,
+        )
         .await?;
     Ok(Json(response))
 }
@@ -695,7 +719,25 @@ pub async fn update_project(
     Json(mut body): Json<RebornUpdateProjectRequest>,
 ) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
     body.project_id = project_id;
-    let response = state.services().update_project(caller, body).await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        PROJECT_UPDATE_CAPABILITY,
+        body.clone(),
+        ActivityId::new(),
+    )
+    .await?;
+    project_mutation_succeeded(resolution)?;
+    let response = PROJECT_VIEW
+        .query_on(
+            state.services().as_ref(),
+            caller,
+            RebornGetProjectRequest {
+                project_id: body.project_id,
+            },
+            None,
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -705,10 +747,15 @@ pub async fn delete_project(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(project_id): Path<String>,
 ) -> Result<StatusCode, WebUiV2HttpError> {
-    state
-        .services()
-        .delete_project(caller, RebornDeleteProjectRequest { project_id })
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        PROJECT_DELETE_CAPABILITY,
+        RebornDeleteProjectRequest { project_id },
+        ActivityId::new(),
+    )
+    .await?;
+    project_mutation_succeeded(resolution)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -718,9 +765,13 @@ pub async fn list_project_members(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(project_id): Path<String>,
 ) -> Result<Json<RebornListMembersResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .list_project_members(caller, RebornListMembersRequest { project_id })
+    let response = PROJECT_MEMBERS_VIEW
+        .query_on(
+            state.services().as_ref(),
+            caller,
+            RebornListMembersRequest { project_id },
+            None,
+        )
         .await?;
     Ok(Json(response))
 }
@@ -1618,6 +1669,37 @@ fn outbound_preferences_mutation_succeeded(
             }
             _ => Err(RebornServicesError::internal_from(
                 "outbound preferences capability did not complete successfully",
+            )),
+        },
+        Resolution::Denied(_) => Err(outbound_preferences_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => {
+            Err(outbound_preferences_unavailable(true))
+        }
+    }
+}
+
+fn project_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
+                Err(RebornServicesError {
+                    code: RebornServicesErrorCode::InvalidRequest,
+                    kind: RebornServicesErrorKind::Validation,
+                    status_code: 400,
+                    retryable: false,
+                    field: None,
+                    validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                })
+            }
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(outbound_preferences_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(outbound_preferences_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "project capability did not complete successfully",
             )),
         },
         Resolution::Denied(_) => Err(outbound_preferences_forbidden()),

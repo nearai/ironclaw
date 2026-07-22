@@ -116,7 +116,8 @@ pub use trace_credits::{
 pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW};
 pub use fs_browse::{
     FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+    RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
+    RebornFsStatResponse,
 };
 use ironclaw_approvals::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStore,
@@ -244,12 +245,38 @@ pub const EXTENSION_REMOVE_CAPABILITY: ProductCapabilityDescriptor =
 pub const EXTENSION_SETUP_SUBMIT_CAPABILITY_ID: &str = "builtin.extension_setup_submit";
 pub const EXTENSION_SETUP_SUBMIT_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID);
+pub const PROJECT_UPDATE_CAPABILITY_ID: &str = "builtin.project_update";
+pub const PROJECT_UPDATE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(PROJECT_UPDATE_CAPABILITY_ID);
+pub const PROJECT_DELETE_CAPABILITY_ID: &str = "builtin.project_delete";
+pub const PROJECT_DELETE_CAPABILITY: ProductCapabilityDescriptor =
+    ProductCapabilityDescriptor::api_only(PROJECT_DELETE_CAPABILITY_ID);
 pub const THREADS_VIEW: ProductView<WebUiListThreadsRequest, RebornListThreadsResponse> =
     ProductView::paginated("threads");
 pub const AUTOMATIONS_VIEW: ProductView<
     WebUiListAutomationsRequest,
     RebornListAutomationsResponse,
 > = ProductView::unpaginated("automations");
+pub const PROJECT_FS_LIST_VIEW: ProductView<
+    RebornProjectFsListRequest,
+    RebornProjectFsListResponse,
+> = ProductView::unpaginated("project_fs_list");
+pub const PROJECT_FS_STAT_VIEW: ProductView<
+    RebornProjectFsStatRequest,
+    RebornProjectFsStatResponse,
+> = ProductView::unpaginated("project_fs_stat");
+pub const FS_MOUNTS_VIEW: ProductView<RebornFsMountsRequest, RebornFsMountsResponse> =
+    ProductView::unpaginated("fs_mounts");
+pub const FS_LIST_VIEW: ProductView<RebornFsListRequest, RebornFsListResponse> =
+    ProductView::unpaginated("fs_list");
+pub const FS_STAT_VIEW: ProductView<RebornFsStatRequest, RebornFsStatResponse> =
+    ProductView::unpaginated("fs_stat");
+pub const PROJECTS_VIEW: ProductView<RebornListProjectsRequest, RebornListProjectsResponse> =
+    ProductView::unpaginated("projects");
+pub const PROJECT_VIEW: ProductView<RebornGetProjectRequest, RebornProjectResponse> =
+    ProductView::unpaginated("project");
+pub const PROJECT_MEMBERS_VIEW: ProductView<RebornListMembersRequest, RebornListMembersResponse> =
+    ProductView::unpaginated("project_members");
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
 pub const SKILL_INSTALL_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(SKILL_INSTALL_CAPABILITY_ID);
@@ -3172,6 +3199,18 @@ where
             .await?;
             return self.api_capability_success(activity_id, "extension setup updated");
         }
+        if capability.as_str() == PROJECT_UPDATE_CAPABILITY_ID {
+            let request = serde_json::from_value(input)
+                .map_err(|_| project_capability_input_error("input"))?;
+            self.update_project(caller, request).await?;
+            return self.api_capability_success(activity_id, "project updated");
+        }
+        if capability.as_str() == PROJECT_DELETE_CAPABILITY_ID {
+            let request = serde_json::from_value(input)
+                .map_err(|_| project_capability_input_error("input"))?;
+            self.delete_project(caller, request).await?;
+            return self.api_capability_success(activity_id, "project deleted");
+        }
         self.product_capability_invoker
             .invoke(caller, capability, input, activity_id)
             .await
@@ -3913,6 +3952,54 @@ where
                     .map_err(RebornServicesError::internal_from)?;
                 let artifact = self.build_run_artifact(caller, request).await?;
                 views::view_page(artifact)
+            }
+            id if id == PROJECT_FS_LIST_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.list_project_dir(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == PROJECT_FS_STAT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.stat_project_path(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == FS_MOUNTS_VIEW.id => {
+                let _: RebornFsMountsRequest = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.list_fs_mounts(caller).await?;
+                views::view_page(response)
+            }
+            id if id == FS_LIST_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.browse_fs_dir(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == FS_STAT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.stat_fs_path(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == PROJECTS_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.list_projects(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == PROJECT_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.get_project(caller, request).await?;
+                views::view_page(response)
+            }
+            id if id == PROJECT_MEMBERS_VIEW.id => {
+                let request = serde_json::from_value(query.params)
+                    .map_err(RebornServicesError::internal_from)?;
+                let response = self.list_project_members(caller, request).await?;
+                views::view_page(response)
             }
             id if id == OPERATOR_CONFIG_LIST_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
@@ -6047,6 +6134,13 @@ fn project_caller(caller: &WebUiAuthenticatedCaller) -> ProjectCaller {
         tenant_id: caller.tenant_id.clone(),
         user_id: caller.user_id.clone(),
     }
+}
+
+fn project_capability_input_error(field: &'static str) -> RebornServicesError {
+    RebornServicesError::validation(WebUiInboundValidationError::new(
+        field,
+        WebUiInboundValidationCode::InvalidValue,
+    ))
 }
 
 fn map_project_service_error(error: ProjectServiceError) -> RebornServicesError {

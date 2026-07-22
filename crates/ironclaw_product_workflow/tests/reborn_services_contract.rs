@@ -46,38 +46,42 @@ use ironclaw_product_workflow::{
     ChannelConfigFacade, ChannelConnectionFacade, ChannelConnectionRequirement, CodexLoginStart,
     EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
     EXTENSIONS_VIEW, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
-    ExtensionCredentialSubmitRequest, FilesystemBrowseReader, FsMount, InboundAttachmentLander,
-    InboundAttachmentReader, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
-    LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW,
-    LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
-    LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
-    LifecycleExtensionSource, LifecycleExtensionSummary, LifecycleInstalledExtensionSummary,
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
-    LifecycleReadinessBlocker, ListPendingApprovalsRequest, ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
-    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, OperatorLogsService,
-    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
-    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
-    ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
-    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
+    FilesystemBrowseReader, FsMount, InboundAttachmentLander, InboundAttachmentReader,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
+    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecycleChannelDirections,
+    LifecycleExtensionCredentialRequirement, LifecycleExtensionCredentialSetup,
+    LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind, LifecycleExtensionSource,
+    LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
+    LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductPayload, LifecycleProductResponse, LifecycleReadinessBlocker,
+    ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
+    OperatorStatusService, OutboundPreferencesProductFacade, PROJECT_DELETE_CAPABILITY_ID,
+    PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
+    PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView, ProductAgentBoundCaller,
+    ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller, ProjectFilesystemReader,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat,
+    ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
     RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
     RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
     RebornDeleteThreadRequest, RebornExtensionListResponse, RebornExtensionOnboardingState,
-    RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
+    RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornGetRunStateRequest, RebornListAutomationsResponse, RebornListMembersRequest,
+    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
+    RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
@@ -88,14 +92,15 @@ use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectResponse, RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
-    RebornServiceLifecycleState, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornResolveGateResponse, RebornRunArtifact,
+    RebornRunArtifactRequest, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
+    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
     RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
@@ -2436,6 +2441,419 @@ impl FilesystemBrowseReader for EmptyFilesystemBrowser {
     ) -> Result<ProjectFsStat, ProjectFsError> {
         Err(ProjectFsError::NotFound)
     }
+}
+
+struct StaticProjectFilesystemReader;
+
+#[async_trait]
+impl ProjectFilesystemReader for StaticProjectFilesystemReader {
+    async fn list_dir(
+        &self,
+        _thread_scope: &ThreadScope,
+        path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Ok(vec![ProjectFsEntry {
+            name: "report.md".to_string(),
+            path: format!("{}/report.md", path.trim_end_matches('/')),
+            kind: ProjectFsEntryKind::File,
+        }])
+    }
+
+    async fn read_file(
+        &self,
+        _thread_scope: &ThreadScope,
+        _path: &str,
+    ) -> Result<ProjectFsFile, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+
+    async fn stat(
+        &self,
+        _thread_scope: &ThreadScope,
+        path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        Ok(ProjectFsStat {
+            path: path.to_string(),
+            kind: ProjectFsEntryKind::File,
+            size_bytes: 7,
+            mime_type: "text/markdown".to_string(),
+        })
+    }
+}
+
+struct StaticFilesystemBrowser;
+
+#[async_trait]
+impl FilesystemBrowseReader for StaticFilesystemBrowser {
+    fn available_mounts(&self) -> Vec<FsMount> {
+        vec![FsMount::Memory, FsMount::Workspace]
+    }
+
+    async fn list_dir(
+        &self,
+        _scope: &ResourceScope,
+        _mount: FsMount,
+        path: &str,
+    ) -> Result<Vec<ProjectFsEntry>, ProjectFsError> {
+        Ok(vec![ProjectFsEntry {
+            name: "today.md".to_string(),
+            path: format!("{}/today.md", path.trim_end_matches('/')),
+            kind: ProjectFsEntryKind::File,
+        }])
+    }
+
+    async fn read_file(
+        &self,
+        _scope: &ResourceScope,
+        _mount: FsMount,
+        _path: &str,
+    ) -> Result<ProjectFsFile, ProjectFsError> {
+        Err(ProjectFsError::NotFound)
+    }
+
+    async fn stat(
+        &self,
+        _scope: &ResourceScope,
+        _mount: FsMount,
+        path: &str,
+    ) -> Result<ProjectFsStat, ProjectFsError> {
+        Ok(ProjectFsStat {
+            path: path.to_string(),
+            kind: ProjectFsEntryKind::File,
+            size_bytes: 7,
+            mime_type: "text/markdown".to_string(),
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordingProjectService {
+    listed: Mutex<usize>,
+    read: Mutex<Vec<String>>,
+    updated: Mutex<Vec<RebornUpdateProjectRequest>>,
+    deleted: Mutex<Vec<String>>,
+    listed_members: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl ProjectService for RecordingProjectService {
+    async fn list_projects(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, ProjectServiceError> {
+        *self.listed.lock().expect("lock") += 1;
+        Ok(RebornListProjectsResponse {
+            projects: vec![sample_reborn_project("project-alpha")],
+        })
+    }
+
+    async fn create_project(
+        &self,
+        _caller: ProjectCaller,
+        request: RebornCreateProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        Ok(RebornProjectResponse {
+            project: sample_reborn_project(&request.name),
+        })
+    }
+
+    async fn get_project(
+        &self,
+        _caller: ProjectCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        self.read
+            .lock()
+            .expect("lock")
+            .push(request.project_id.clone());
+        Ok(RebornProjectResponse {
+            project: sample_reborn_project(&request.project_id),
+        })
+    }
+
+    async fn update_project(
+        &self,
+        _caller: ProjectCaller,
+        request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, ProjectServiceError> {
+        self.updated.lock().expect("lock").push(request.clone());
+        Ok(RebornProjectResponse {
+            project: sample_reborn_project(&request.project_id),
+        })
+    }
+
+    async fn delete_project(
+        &self,
+        _caller: ProjectCaller,
+        request: RebornDeleteProjectRequest,
+    ) -> Result<(), ProjectServiceError> {
+        self.deleted.lock().expect("lock").push(request.project_id);
+        Ok(())
+    }
+
+    async fn list_members(
+        &self,
+        _caller: ProjectCaller,
+        request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, ProjectServiceError> {
+        self.listed_members
+            .lock()
+            .expect("lock")
+            .push(request.project_id);
+        Ok(RebornListMembersResponse {
+            members: vec![sample_reborn_project_member("user-beta")],
+        })
+    }
+
+    async fn add_member(
+        &self,
+        _caller: ProjectCaller,
+        request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        Ok(sample_reborn_project_member(&request.user_id))
+    }
+
+    async fn update_member_role(
+        &self,
+        _caller: ProjectCaller,
+        request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, ProjectServiceError> {
+        Ok(sample_reborn_project_member(&request.user_id))
+    }
+
+    async fn remove_member(
+        &self,
+        _caller: ProjectCaller,
+        _request: RebornRemoveMemberRequest,
+    ) -> Result<(), ProjectServiceError> {
+        Ok(())
+    }
+}
+
+fn sample_reborn_project(project_id: &str) -> RebornProjectInfo {
+    RebornProjectInfo {
+        project_id: project_id.to_string(),
+        name: "Sample".to_string(),
+        description: String::new(),
+        icon: None,
+        color: None,
+        metadata: json!({}),
+        state: RebornProjectState::Active,
+        role: RebornProjectRole::Owner,
+        created_at: "1970-01-01T00:00:00Z".parse().expect("created at"),
+        updated_at: "1970-01-01T00:00:00Z".parse().expect("updated at"),
+    }
+}
+
+fn sample_reborn_project_member(user_id: &str) -> RebornProjectMemberInfo {
+    RebornProjectMemberInfo {
+        user_id: user_id.to_string(),
+        role: RebornProjectRole::Editor,
+        status: RebornProjectMemberStatus::Active,
+        granted_by: "user-alpha".to_string(),
+        created_at: "1970-01-01T00:00:00Z".parse().expect("created at"),
+        updated_at: "1970-01-01T00:00:00Z".parse().expect("updated at"),
+    }
+}
+
+#[tokio::test]
+async fn project_and_filesystem_reads_are_available_as_product_views() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let project_service = Arc::new(RecordingProjectService::default());
+    let services = RebornServices::new(thread_service, Arc::new(FakeTurnCoordinator::default()))
+        .with_project_filesystem_reader(Arc::new(StaticProjectFilesystemReader))
+        .with_filesystem_browser(Arc::new(StaticFilesystemBrowser))
+        .with_project_service(project_service.clone());
+    create_thread_for(&services, caller(), "thread-product-surface").await;
+
+    // safety: these are ProductSurface facade query calls in a contract test;
+    // no database transaction is involved.
+    let project_fs_list = services
+        .query(
+            caller(),
+            PROJECT_FS_LIST_VIEW
+                .query(
+                    RebornProjectFsListRequest {
+                        thread_id: "thread-product-surface".to_string(),
+                        path: "/workspace".to_string(),
+                    },
+                    None,
+                )
+                .expect("project fs list query"),
+        )
+        .await
+        .expect("project fs list view");
+    let project_fs_list: RebornProjectFsListResponse =
+        serde_json::from_value(project_fs_list.payload).expect("project fs list payload");
+    assert_eq!(project_fs_list.entries[0].path, "/workspace/report.md");
+
+    let project_fs_stat = services
+        .query(
+            caller(),
+            PROJECT_FS_STAT_VIEW
+                .query(
+                    RebornProjectFsStatRequest {
+                        thread_id: "thread-product-surface".to_string(),
+                        path: "/workspace/report.md".to_string(),
+                    },
+                    None,
+                )
+                .expect("project fs stat query"),
+        )
+        .await
+        .expect("project fs stat view");
+    let project_fs_stat: RebornProjectFsStatResponse =
+        serde_json::from_value(project_fs_stat.payload).expect("project fs stat payload");
+    assert_eq!(project_fs_stat.stat.mime_type, "text/markdown");
+
+    let mounts = services
+        .query(
+            caller(),
+            FS_MOUNTS_VIEW
+                .query(RebornFsMountsRequest {}, None)
+                .expect("fs mounts query"),
+        )
+        .await
+        .expect("fs mounts view");
+    let mounts: RebornFsMountsResponse =
+        serde_json::from_value(mounts.payload).expect("fs mounts payload");
+    assert_eq!(mounts.mounts.len(), 2);
+
+    let fs_list = services
+        .query(
+            caller(),
+            FS_LIST_VIEW
+                .query(
+                    RebornFsListRequest {
+                        mount: FsMount::Memory,
+                        path: "daily".to_string(),
+                        project_id: None,
+                    },
+                    None,
+                )
+                .expect("fs list query"),
+        )
+        .await
+        .expect("fs list view");
+    let fs_list: RebornFsListResponse =
+        serde_json::from_value(fs_list.payload).expect("fs list payload");
+    assert_eq!(fs_list.entries[0].path, "daily/today.md");
+
+    let fs_stat = services
+        .query(
+            caller(),
+            FS_STAT_VIEW
+                .query(
+                    RebornFsStatRequest {
+                        mount: FsMount::Memory,
+                        path: "daily/today.md".to_string(),
+                        project_id: None,
+                    },
+                    None,
+                )
+                .expect("fs stat query"),
+        )
+        .await
+        .expect("fs stat view");
+    let fs_stat: RebornFsStatResponse =
+        serde_json::from_value(fs_stat.payload).expect("fs stat payload");
+    assert_eq!(fs_stat.stat.path, "daily/today.md");
+
+    let projects = services
+        .query(
+            caller(),
+            PROJECTS_VIEW
+                .query(RebornListProjectsRequest { limit: Some(10) }, None)
+                .expect("projects query"),
+        )
+        .await
+        .expect("projects view");
+    let projects: RebornListProjectsResponse =
+        serde_json::from_value(projects.payload).expect("projects payload");
+    assert_eq!(projects.projects[0].project_id, "project-alpha");
+
+    let project = services
+        .query(
+            caller(),
+            PROJECT_VIEW
+                .query(
+                    RebornGetProjectRequest {
+                        project_id: "project-alpha".to_string(),
+                    },
+                    None,
+                )
+                .expect("project query"),
+        )
+        .await
+        .expect("project view");
+    let project: RebornProjectResponse =
+        serde_json::from_value(project.payload).expect("project payload");
+    assert_eq!(project.project.project_id, "project-alpha");
+
+    let members = services
+        .query(
+            caller(),
+            PROJECT_MEMBERS_VIEW
+                .query(
+                    RebornListMembersRequest {
+                        project_id: "project-alpha".to_string(),
+                    },
+                    None,
+                )
+                .expect("project members query"),
+        )
+        .await
+        .expect("project members view");
+    let members: RebornListMembersResponse =
+        serde_json::from_value(members.payload).expect("project members payload");
+    assert_eq!(members.members[0].user_id, "user-beta");
+}
+
+#[tokio::test]
+async fn project_mutations_are_available_as_product_capabilities() {
+    let project_service = Arc::new(RecordingProjectService::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_project_service(project_service.clone());
+
+    let update_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(PROJECT_UPDATE_CAPABILITY_ID).expect("capability id"),
+            json!({ "project_id": "project-alpha", "name": "Renamed" }),
+            ActivityId::new(),
+        )
+        .await
+        .expect("project update capability");
+    assert!(matches!(
+        update_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+    assert_eq!(
+        project_service.updated.lock().expect("lock")[0].project_id,
+        "project-alpha"
+    );
+
+    let delete_resolution = services
+        .invoke(
+            caller(),
+            CapabilityId::new(PROJECT_DELETE_CAPABILITY_ID).expect("capability id"),
+            json!({ "project_id": "project-alpha" }),
+            ActivityId::new(),
+        )
+        .await
+        .expect("project delete capability");
+    assert!(matches!(
+        delete_resolution,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
+    assert_eq!(
+        project_service.deleted.lock().expect("lock").as_slice(),
+        ["project-alpha"]
+    );
 }
 
 #[tokio::test]

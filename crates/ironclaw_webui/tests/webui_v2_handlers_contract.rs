@@ -34,15 +34,17 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     AUTOMATIONS_VIEW, EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FsMount,
-    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID,
-    LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    LlmProviderView, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
+    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
+    FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
+    LLM_PROVIDER_DELETE_CAPABILITY_ID, LLM_PROVIDER_UPSERT_CAPABILITY_ID, LOGS_VIEW,
+    LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
+    OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW,
+    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
+    PROJECT_FS_STAT_VIEW, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW,
+    PROJECTS_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
     ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
@@ -51,8 +53,9 @@ use ironclaw_product_workflow::{
     RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
     RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
-    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
+    RebornListMembersResponse, RebornListProjectsResponse, RebornListThreadsResponse,
     RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
@@ -65,11 +68,12 @@ use ironclaw_product_workflow::{
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornResumeGateResponse,
-    RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornResolveGateResponse,
+    RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
@@ -982,6 +986,115 @@ impl RebornServicesApi for StubServices {
                     next_cursor: None,
                 })
             }
+            id if id == PROJECT_FS_LIST_VIEW.id => {
+                let request: RebornProjectFsListRequest =
+                    serde_json::from_value(query.params).expect("project fs list params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornProjectFsListResponse {
+                        entries: vec![ProjectFsEntry {
+                            name: "report.md".to_string(),
+                            path: format!("{}/report.md", request.path.trim_end_matches('/')),
+                            kind: ProjectFsEntryKind::File,
+                        }],
+                    })
+                    .expect("project fs list payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == PROJECT_FS_STAT_VIEW.id => {
+                let request: RebornProjectFsStatRequest =
+                    serde_json::from_value(query.params).expect("project fs stat params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornProjectFsStatResponse {
+                        stat: ProjectFsStat {
+                            path: request.path,
+                            kind: ProjectFsEntryKind::File,
+                            size_bytes: 7,
+                            mime_type: "text/markdown".to_string(),
+                        },
+                    })
+                    .expect("project fs stat payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == FS_MOUNTS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornFsMountsResponse {
+                    mounts: vec![
+                        RebornFsMountInfo {
+                            mount: FsMount::Memory,
+                            label: "Memory".to_string(),
+                        },
+                        RebornFsMountInfo {
+                            mount: FsMount::Workspace,
+                            label: "Workspace files".to_string(),
+                        },
+                    ],
+                })
+                .expect("fs mounts payload"),
+                next_cursor: None,
+            }),
+            id if id == FS_LIST_VIEW.id => {
+                let request: RebornFsListRequest =
+                    serde_json::from_value(query.params).expect("fs list params");
+                self.browse_fs_calls
+                    .lock()
+                    .expect("lock")
+                    .push(request.clone());
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornFsListResponse {
+                        mount: request.mount,
+                        path: request.path,
+                        entries: vec![ProjectFsEntry {
+                            name: "today.md".to_string(),
+                            path: "daily/today.md".to_string(),
+                            kind: ProjectFsEntryKind::File,
+                        }],
+                    })
+                    .expect("fs list payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == FS_STAT_VIEW.id => {
+                let request: RebornFsStatRequest =
+                    serde_json::from_value(query.params).expect("fs stat params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornFsStatResponse {
+                        stat: ProjectFsStat {
+                            path: request.path,
+                            kind: ProjectFsEntryKind::File,
+                            size_bytes: 7,
+                            mime_type: "text/markdown".to_string(),
+                        },
+                    })
+                    .expect("fs stat payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == PROJECTS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornListProjectsResponse {
+                    projects: vec![sample_project_info("project-alpha")],
+                })
+                .expect("projects payload"),
+                next_cursor: None,
+            }),
+            id if id == PROJECT_VIEW.id => {
+                let request: RebornGetProjectRequest =
+                    serde_json::from_value(query.params).expect("project params");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornProjectResponse {
+                        project: sample_project_info(&request.project_id),
+                    })
+                    .expect("project payload"),
+                    next_cursor: None,
+                })
+            }
+            id if id == PROJECT_MEMBERS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornListMembersResponse {
+                    members: vec![sample_member_info("user-beta")],
+                })
+                .expect("project members payload"),
+                next_cursor: None,
+            }),
             _ => Err(rejecting_reborn_services_error()),
         }
     }
@@ -6595,7 +6708,7 @@ async fn operator_setup_accepts_secret_request_without_echoing_values() {
 #[tokio::test]
 async fn list_fs_mounts_returns_browsable_mounts() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services);
+    let router = router_with(services.clone());
 
     let response = router
         .oneshot(
@@ -6626,12 +6739,15 @@ async fn list_fs_mounts_returns_browsable_mounts() {
         mounts.contains(&"workspace"),
         "workspace mount present: {mounts:?}"
     );
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), FS_MOUNTS_VIEW.id);
 }
 
 #[tokio::test]
 async fn browse_fs_dir_lists_mount_relative_entries() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services);
+    let router = router_with(services.clone());
 
     let response = router
         .oneshot(
@@ -6649,6 +6765,8 @@ async fn browse_fs_dir_lists_mount_relative_entries() {
     assert_eq!(body["mount"], "memory");
     assert_eq!(body["entries"][0]["name"], "today.md");
     assert_eq!(body["entries"][0]["path"], "daily/today.md");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries[0].view_id.as_str(), FS_LIST_VIEW.id);
 }
 
 #[tokio::test]
@@ -6674,6 +6792,54 @@ async fn browse_fs_dir_forwards_optional_project_selector() {
         calls[0].project_id.as_ref().map(ProjectId::as_str),
         Some("project-beta")
     );
+}
+
+#[tokio::test]
+async fn list_project_files_queries_product_surface_view() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-alpha/files?path=/workspace")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["entries"][0]["path"], "/workspace/report.md");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_FS_LIST_VIEW.id);
+}
+
+#[tokio::test]
+async fn stat_project_file_queries_product_surface_view() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-alpha/files/stat?path=/workspace/report.md")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["stat"]["path"], "/workspace/report.md");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_FS_STAT_VIEW.id);
 }
 
 #[tokio::test]
@@ -6736,7 +6902,7 @@ async fn read_fs_file_rejects_blank_path() {
 #[tokio::test]
 async fn stat_fs_path_returns_metadata() {
     let services = Arc::new(StubServices::default());
-    let router = router_with(services);
+    let router = router_with(services.clone());
 
     let response = router
         .oneshot(
@@ -6754,6 +6920,8 @@ async fn stat_fs_path_returns_metadata() {
     assert_eq!(body["stat"]["path"], "daily/today.md");
     assert_eq!(body["stat"]["kind"], "file");
     assert_eq!(body["stat"]["mime_type"], "text/markdown");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries[0].view_id.as_str(), FS_STAT_VIEW.id);
 }
 
 #[tokio::test]
@@ -6809,6 +6977,7 @@ fn sample_member_info(user_id: &str) -> RebornProjectMemberInfo {
 async fn update_project_path_id_overrides_body() {
     let services = Arc::new(StubServices::default());
     let app = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = app
         .oneshot(
             Request::builder()
@@ -6824,12 +6993,46 @@ async fn update_project_path_id_overrides_body() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
-    let calls = services.update_project_calls.lock().expect("lock");
+    let body = read_json(response).await;
+    assert_eq!(body["project"]["project_id"], "path-project");
+    let calls = services.invoke_calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].project_id, "path-project",
+        calls[0].0,
+        CapabilityId::new(PROJECT_UPDATE_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].1["project_id"], "path-project",
         "path project_id must override the body value"
     );
+    assert_eq!(calls[0].1["name"], "x");
+    drop(calls);
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_VIEW.id);
+}
+
+#[tokio::test]
+async fn get_project_queries_product_surface_view() {
+    let services = Arc::new(StubServices::default());
+    let app = router_with(services.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/webchat/v2/projects/project-alpha")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["project"]["project_id"], "project-alpha");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_VIEW.id);
 }
 
 /// Both path ids (project + user) must override the body on member role update.
@@ -6894,9 +7097,33 @@ async fn add_member_takes_user_from_body_project_from_path() {
 }
 
 #[tokio::test]
+async fn list_project_members_queries_product_surface_view() {
+    let services = Arc::new(StubServices::default());
+    let app = router_with(services.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/webchat/v2/projects/project-alpha/members")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["members"][0]["user_id"], "user-beta");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECT_MEMBERS_VIEW.id);
+}
+
+#[tokio::test]
 async fn delete_project_returns_204() {
     let services = Arc::new(StubServices::default());
     let app = router_with(services.clone());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let response = app
         .oneshot(
             Request::builder()
@@ -6908,10 +7135,13 @@ async fn delete_project_returns_204() {
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
     assert_eq!(
-        services.delete_project_calls.lock().expect("lock")[0].project_id,
-        "p1"
+        calls[0].0,
+        CapabilityId::new(PROJECT_DELETE_CAPABILITY_ID).expect("capability id")
     );
+    assert_eq!(calls[0].1, serde_json::json!({ "project_id": "p1" }));
 }
 
 #[tokio::test]
@@ -6934,11 +7164,11 @@ async fn remove_member_returns_204() {
     assert_eq!(calls[0].user_id, "u1");
 }
 
-/// An unwired project service (the default trait body) surfaces 503, not 500.
+/// Project listing is routed through the ProductSurface view boundary.
 #[tokio::test]
-async fn list_projects_unwired_returns_503() {
+async fn list_projects_queries_product_surface_view() {
     let services = Arc::new(StubServices::default());
-    let app = router_with(services);
+    let app = router_with(services.clone());
     let response = app
         .oneshot(
             Request::builder()
@@ -6949,5 +7179,10 @@ async fn list_projects_unwired_returns_503() {
         )
         .await
         .expect("response");
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["projects"][0]["project_id"], "project-alpha");
+    let queries = services.view_queries.lock().expect("lock");
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id.as_str(), PROJECTS_VIEW.id);
 }
