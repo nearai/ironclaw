@@ -17,6 +17,7 @@ use crate::state::{
 };
 use crate::strategies::{
     CompactionDecision, RetryAlteration, invalid_model_output_repair_control_message,
+    model_error_observation_control_message,
 };
 
 use super::{
@@ -376,6 +377,7 @@ impl<'a> PromptPlanningPipeline<'a> {
         // available). Clearing here bounds the nudge to exactly this iteration and
         // keeps a later model-error retry from re-injecting it.
         self.state.completion_nudge_pending = false;
+        self.state.pending_model_error_observation = None;
 
         Ok(PromptStep::Prepared(Box::new(PromptOutput {
             state: self.state,
@@ -718,6 +720,15 @@ pub(super) async fn build_prompt_bundle_for_surface(
         context_request
             .inline_messages
             .push(invalid_model_output_repair_control_message());
+    }
+    if let Some(observation) = state.pending_model_error_observation.as_ref() {
+        context_request.inline_messages.push(
+            model_error_observation_control_message(observation).map_err(|_| {
+                AgentLoopExecutorError::PlannerContract {
+                    detail: "model-error observation control text was invalid",
+                }
+            })?,
+        );
     }
     // Tools-capable completion nudge scheduled by the stop handling on the prior
     // turn: inject its directive so the model finishes the task (e.g. writes a

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use ironclaw_turns::run_profile::{
     LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopPromptBundleRequest,
-    PromptMode,
+    ModelVisibleModelErrorObservation, PromptMode,
 };
 
 use crate::state::{LoopExecutionState, RepeatedCallWarningPhase};
@@ -131,6 +131,16 @@ pub(crate) fn invalid_model_output_repair_control_message() -> LoopInlineMessage
         safe_body: LoopInlineMessageBody::new(INVALID_MODEL_OUTPUT_REPAIR_CONTROL_TEXT)
             .expect("static loop-control text is non-empty and safe"), // safety: static safe ASCII words.
     }
+}
+
+pub(crate) fn model_error_observation_control_message(
+    observation: &ModelVisibleModelErrorObservation,
+) -> Result<LoopInlineMessage, String> {
+    observation.validate()?;
+    Ok(LoopInlineMessage {
+        role: LoopInlineMessageRole::System,
+        safe_body: LoopInlineMessageBody::new(observation.model_instruction())?,
+    })
 }
 
 #[cfg(test)]

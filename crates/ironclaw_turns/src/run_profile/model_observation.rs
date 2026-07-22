@@ -2,6 +2,7 @@ use ironclaw_host_api::{DispatchInputIssueCode, HostRemediation};
 use serde::{Deserialize, Serialize};
 
 use super::host::CapabilityFailureKind;
+use crate::ModelInvalidOutputDetailReason;
 
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
@@ -9,10 +10,94 @@ const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;
 const MODEL_OBSERVATION_INPUT_ISSUES_MAX: usize = 16;
 const MODEL_OBSERVATION_TEXT_MAX_BYTES: usize = 512;
 pub const MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION: u32 = 1;
+pub const MODEL_VISIBLE_MODEL_ERROR_OBSERVATION_SCHEMA_VERSION: u32 = 1;
 
 /// Maximum size of a model-visible free-text diagnostic. Larger than the
 /// summary cap because the diagnostic carries raw (secret-scrubbed) error text.
 pub const MODEL_OBSERVATION_DETAIL_MAX_BYTES: usize = 4096;
+
+/// Host-authored, model-visible recovery context for a failed model call.
+///
+/// The shape intentionally carries only typed reasons. Provider text and
+/// diagnostics remain on the existing scrubbed error channel and cannot be
+/// copied into a subsequent prompt through this contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelVisibleModelErrorObservation {
+    #[serde(default = "current_model_visible_model_error_observation_schema_version")]
+    pub schema_version: u32,
+    pub detail: ModelErrorObservationDetail,
+}
+
+impl ModelVisibleModelErrorObservation {
+    pub fn context_overflow() -> Self {
+        Self {
+            schema_version: MODEL_VISIBLE_MODEL_ERROR_OBSERVATION_SCHEMA_VERSION,
+            detail: ModelErrorObservationDetail::ContextOverflow,
+        }
+    }
+
+    pub fn content_filtered() -> Self {
+        Self {
+            schema_version: MODEL_VISIBLE_MODEL_ERROR_OBSERVATION_SCHEMA_VERSION,
+            detail: ModelErrorObservationDetail::ContentFiltered,
+        }
+    }
+
+    pub fn invalid_output(reason: Option<ModelInvalidOutputDetailReason>) -> Self {
+        Self {
+            schema_version: MODEL_VISIBLE_MODEL_ERROR_OBSERVATION_SCHEMA_VERSION,
+            detail: ModelErrorObservationDetail::InvalidOutput { reason },
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != MODEL_VISIBLE_MODEL_ERROR_OBSERVATION_SCHEMA_VERSION {
+            return Err(format!(
+                "model error observation schema version {} is unsupported",
+                self.schema_version
+            ));
+        }
+        Ok(())
+    }
+
+    /// Deterministic host-authored instruction rendered into the next model
+    /// request. The invalid-output reason remains a stable typed code rather
+    /// than free-form provider text.
+    pub fn model_instruction(&self) -> String {
+        match self.detail {
+            ModelErrorObservationDetail::ContextOverflow => {
+                "model error observation: context overflowed; transcript compacted; continue"
+                    .to_string()
+            }
+            ModelErrorObservationDetail::ContentFiltered => {
+                "model error observation: completion refused by content filter; rephrase"
+                    .to_string()
+            }
+            ModelErrorObservationDetail::InvalidOutput { reason } => {
+                let reason = reason.map_or("unspecified", ModelInvalidOutputDetailReason::as_str);
+                format!(
+                    "model error observation: invalid_output reason={reason}; repair the response and continue"
+                )
+            }
+        }
+    }
+}
+
+fn current_model_visible_model_error_observation_schema_version() -> u32 {
+    MODEL_VISIBLE_MODEL_ERROR_OBSERVATION_SCHEMA_VERSION
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ModelErrorObservationDetail {
+    ContextOverflow,
+    ContentFiltered,
+    InvalidOutput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<ModelInvalidOutputDetailReason>,
+    },
+}
 
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -397,6 +482,36 @@ fn is_disallowed_control_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_error_observation_serializes_typed_invalid_output_reason() {
+        let observation = ModelVisibleModelErrorObservation::invalid_output(Some(
+            ModelInvalidOutputDetailReason::EmptyAssistantResponse,
+        ));
+
+        observation.validate().expect("observation validates");
+        let value = serde_json::to_value(&observation).expect("serialize");
+
+        assert_eq!(value["schema_version"], serde_json::json!(1));
+        assert_eq!(value["detail"]["kind"], "invalid_output");
+        assert_eq!(
+            value["detail"]["reason"],
+            serde_json::json!("empty_assistant_response")
+        );
+        assert!(
+            observation
+                .model_instruction()
+                .contains("reason=empty_assistant_response")
+        );
+    }
+
+    #[test]
+    fn model_error_observation_rejects_unknown_schema_version() {
+        let mut observation = ModelVisibleModelErrorObservation::content_filtered();
+        observation.schema_version += 1;
+
+        assert!(observation.validate().is_err());
+    }
 
     #[test]
     fn model_visible_tool_observation_serializes_typed_recovery() {

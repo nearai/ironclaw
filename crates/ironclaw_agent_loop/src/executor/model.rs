@@ -124,6 +124,7 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         }
                     }
                     state.recovery_state = state.recovery_state.cleared_attempts();
+                    state.pending_model_error_observation = None;
                     return Ok(ModelStep::Response(Box::new(state), response));
                 }
                 Err(error) => {
@@ -183,68 +184,23 @@ impl ExecutorStage<ModelInput> for ModelStage {
                     };
                     last_error_summary = Some(summary.clone());
                     last_error_detail.clone_from(&model_failure_detail);
-                    match ctx
+                    let recovery_outcome = ctx
                         .planner
                         .recovery()
                         .on_model_error(&state, &summary)
-                        .await
-                    {
+                        .await;
+                    let (recovery, scope, alter, observation) = match recovery_outcome {
                         RecoveryOutcome::Retry {
                             recovery,
                             scope,
                             alter,
-                        } => {
-                            state.recovery_state = recovery;
-                            match CheckpointStage.cancel_if_requested(ctx, state).await? {
-                                CancelCheck::Continue(next) => state = *next,
-                                CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
-                            }
-                            let retry_action = apply_model_retry_alteration(
-                                ctx,
-                                &mut state,
-                                scope,
-                                alter.as_ref(),
-                            )
-                            .await?;
-                            // A cancel request can wake the backoff sleep
-                            // early; observe it here so cancellation exits at
-                            // this boundary instead of issuing another call.
-                            match CheckpointStage.cancel_if_requested(ctx, state).await? {
-                                CancelCheck::Continue(next) => state = *next,
-                                CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
-                            }
-                            CheckpointStage
-                                .emit_progress(
-                                    ctx,
-                                    LoopProgressEvent::driver_note(
-                                        LoopDriverNoteKind::Retrying,
-                                        "retrying model request",
-                                    )
-                                    .map_err(|_| {
-                                        AgentLoopExecutorError::PlannerContract {
-                                            detail: "retry progress summary was invalid",
-                                        }
-                                    })?,
-                                )
-                                .await;
-                            if retry_action == ModelRetryAction::RetryIteration {
-                                return Ok(ModelStep::RetryIteration(Box::new(state)));
-                            }
-                            let bundle = build_prompt_bundle_for_surface(
-                                ctx,
-                                &state,
-                                surface_version.clone(),
-                                capability_view.clone(),
-                                alter.as_ref(),
-                            )
-                            .await?;
-                            request.inline_messages = bundle.inline_messages();
-                            match CheckpointStage.cancel_if_requested(ctx, state).await? {
-                                CancelCheck::Continue(next) => state = *next,
-                                CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
-                            }
-                            request.messages = bundle.into_model_messages(&mut state);
-                        }
+                        } => (recovery, scope, alter, None),
+                        RecoveryOutcome::ModelErrorObservation {
+                            recovery,
+                            scope,
+                            alter,
+                            observation,
+                        } => (recovery, scope, alter, Some(observation)),
                         RecoveryOutcome::ToolErrorResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
                                 detail: "ToolErrorResult on model error",
@@ -279,7 +235,55 @@ impl ExecutorStage<ModelInput> for ModelStage {
                                 },
                             )?));
                         }
+                    };
+                    state.recovery_state = recovery;
+                    state.pending_model_error_observation = observation;
+                    match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                        CancelCheck::Continue(next) => state = *next,
+                        CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
                     }
+                    let retry_action =
+                        apply_model_retry_alteration(ctx, &mut state, scope, alter.as_ref())
+                            .await?;
+                    // A cancel request can wake the backoff sleep early;
+                    // observe it here so cancellation exits at this boundary
+                    // instead of issuing another call.
+                    match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                        CancelCheck::Continue(next) => state = *next,
+                        CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+                    }
+                    CheckpointStage
+                        .emit_progress(
+                            ctx,
+                            LoopProgressEvent::driver_note(
+                                LoopDriverNoteKind::Retrying,
+                                "retrying model request",
+                            )
+                            .map_err(|_| {
+                                AgentLoopExecutorError::PlannerContract {
+                                    detail: "retry progress summary was invalid",
+                                }
+                            })?,
+                        )
+                        .await;
+                    if retry_action == ModelRetryAction::RetryIteration {
+                        return Ok(ModelStep::RetryIteration(Box::new(state)));
+                    }
+                    let bundle = build_prompt_bundle_for_surface(
+                        ctx,
+                        &state,
+                        surface_version.clone(),
+                        capability_view.clone(),
+                        alter.as_ref(),
+                    )
+                    .await?;
+                    request.inline_messages = bundle.inline_messages();
+                    state.pending_model_error_observation = None;
+                    match CheckpointStage.cancel_if_requested(ctx, state).await? {
+                        CancelCheck::Continue(next) => state = *next,
+                        CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
+                    }
+                    request.messages = bundle.into_model_messages(&mut state);
                 }
             }
         }

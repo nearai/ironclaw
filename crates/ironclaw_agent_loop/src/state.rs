@@ -102,6 +102,13 @@ pub struct LoopExecutionState {
     #[serde(default)]
     pub completion_nudge_pending: bool,
 
+    /// One-shot, typed host-authored repair context for the next model call
+    /// after a model-error retry budget is exhausted. Prompt construction
+    /// consumes it only after successfully building the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_model_error_observation:
+        Option<ironclaw_turns::run_profile::ModelVisibleModelErrorObservation>,
+
     /// Whether the most recent admitted assistant reply "trailed off" without a
     /// real closing answer (empty after trim, or ends with a colon — a narrated
     /// next step with no follow-through). Populated by `AssistantReplyStage`; read
@@ -315,6 +322,7 @@ impl LoopExecutionState {
             final_answer_nudges_used: 0,
             completion_nudges_used: 0,
             completion_nudge_pending: false,
+            pending_model_error_observation: None,
             last_reply_trailed_off: false,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),

@@ -295,7 +295,8 @@ pub struct SanitizedFailure {
 
 const MODEL_INVALID_OUTPUT_DETAIL_MAX_BYTES: usize = 512;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelInvalidOutputDetailReason {
     EmptyAssistantResponse,
     TextualToolCallSyntax,
@@ -329,6 +330,21 @@ impl ModelInvalidOutputDetailReason {
             Self::InvalidReturnedToolName => "model returned an invalid provider tool name",
             Self::InvalidToolCallArguments => "model returned invalid tool-call arguments",
             Self::MalformedToolCallArguments => Self::TOOL_CALL_ARGUMENTS_PARSE_ERROR_PREFIX,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EmptyAssistantResponse => "empty_assistant_response",
+            Self::TextualToolCallSyntax => "textual_tool_call_syntax",
+            Self::OutsideCapabilitySurface => "outside_capability_surface",
+            Self::ToolUseFinishWithoutToolCalls => "tool_use_finish_without_tool_calls",
+            Self::UnsupportedToolCallsForTextOnlyLoop => {
+                "unsupported_tool_calls_for_text_only_loop"
+            }
+            Self::InvalidReturnedToolName => "invalid_returned_tool_name",
+            Self::InvalidToolCallArguments => "invalid_tool_call_arguments",
+            Self::MalformedToolCallArguments => "malformed_tool_call_arguments",
         }
     }
 

@@ -10,12 +10,13 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, LlmError, LlmProvider, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 use rust_decimal::Decimal;
 use tokio::sync::oneshot;
@@ -182,6 +183,78 @@ impl LlmProvider for ParkingLlm {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.gate.park().await;
+        self.inner.complete_with_tools(request).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One-shot content-filter provider (E-GATEWAY seam) — model recovery coverage.
+// ---------------------------------------------------------------------------
+
+/// A raw provider that reports one content-filtered completion, then delegates
+/// every later call to the scripted provider. This keeps the failure at the
+/// vendor-SDK seam while the real model gateway, loop host, recovery strategy,
+/// and prompt renderer handle the retry.
+pub struct ContentFilterOnceLlm {
+    inner: Arc<TraceLlm>,
+    filtered: AtomicBool,
+}
+
+pub fn content_filter_once_trace_llm(inner: Arc<TraceLlm>) -> ContentFilterOnceLlm {
+    ContentFilterOnceLlm {
+        inner,
+        filtered: AtomicBool::new(false),
+    }
+}
+
+impl ContentFilterOnceLlm {
+    fn should_filter(&self) -> bool {
+        !self.filtered.swap(true, Ordering::AcqRel)
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ContentFilterOnceLlm {
+    fn model_name(&self) -> &str {
+        self.inner.model_name()
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        self.inner.cost_per_token()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        if self.should_filter() {
+            return Ok(CompletionResponse {
+                content: String::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::ContentFilter,
+                reasoning: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            });
+        }
+        self.inner.complete(request).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        if self.should_filter() {
+            return Ok(ToolCompletionResponse {
+                content: None,
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::ContentFilter,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: None,
+                reasoning_details: None,
+            });
+        }
         self.inner.complete_with_tools(request).await
     }
 }

@@ -27,6 +27,30 @@ use reborn_support::reply::RebornScriptedReply;
 use reborn_support::scripted_provider::ParkingModelGate;
 
 #[tokio::test]
+async fn content_filtered_completion_recovers_with_model_visible_observation() {
+    let harness = RebornIntegrationHarness::test_default()
+        .content_filter_model_once()
+        .script([RebornScriptedReply::text("recovered after content filter")])
+        .build()
+        .await
+        .expect("harness builds");
+    harness
+        .submit_turn("answer safely")
+        .await
+        .expect("turn recovers after the provider filters one completion");
+    harness
+        .assert_reply_contains("recovered after content filter")
+        .await
+        .expect("recovered reply persisted");
+    harness
+        .assert_model_message_content_contains(
+            "model error observation: completion refused by content filter; rephrase",
+        )
+        .await
+        .expect("retry request carries the typed model-error observation");
+}
+
+#[tokio::test]
 async fn cancels_a_parked_mid_turn_run() {
     let gate = ParkingModelGate::new();
     let harness = RebornIntegrationHarness::test_default()

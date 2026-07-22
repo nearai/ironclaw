@@ -1329,6 +1329,38 @@ async fn model_context_overflow_retries_through_canonical_compaction_stage() {
 }
 
 #[tokio::test]
+async fn model_context_overflow_exhaustion_gives_model_one_observation_assisted_attempt() {
+    let overflow = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::BudgetExceeded,
+            "model request exceeded its context budget",
+        )
+    };
+    let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
+        overflow(),
+        overflow(),
+        overflow(),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("context-overflow observation should let the model recover");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("context overflowed; transcript compacted; continue")
+    }));
+}
+
+#[tokio::test]
 async fn model_budget_approval_required_with_gate_ref_blocks_resource_gate() {
     let gate_ref = LoopGateRef::new("gate:budget-test-approval").expect("gate ref");
     let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
@@ -3658,8 +3690,8 @@ async fn model_checkpoint_and_transcript_kinds_fail_with_precise_categories() {
 }
 
 #[tokio::test]
-async fn model_invalid_output_failed_exit_carries_safe_summary_detail() {
-    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+async fn model_invalid_output_exhaustion_gives_model_structured_repair_attempt() {
+    let host = MockHost::new(vec![reply_response()]).with_model_errors(vec![
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidOutput,
             "model returned an empty assistant response",
@@ -3681,6 +3713,37 @@ async fn model_invalid_output_failed_exit_carries_safe_summary_detail() {
         .await
         .expect("execute");
 
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[3].inline_messages.iter().any(|message| {
+        let body = message.safe_body.as_str();
+        body.contains("invalid_output") && body.contains("empty_assistant_response")
+    }));
+}
+
+#[tokio::test]
+async fn model_error_observation_attempt_is_bounded_before_terminal_failure() {
+    let invalid = || {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidOutput,
+            "model returned an empty assistant response",
+        )
+    };
+    let host = MockHost::new(Vec::new()).with_model_errors(vec![
+        invalid(),
+        invalid(),
+        invalid(),
+        invalid(),
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("bounded observation retry should end in a typed failure");
+
     match exit {
         LoopExit::Failed(failed) => {
             assert_eq!(failed.reason_kind, LoopFailureKind::InvalidModelOutput);
@@ -3693,6 +3756,45 @@ async fn model_invalid_output_failed_exit_carries_safe_summary_detail() {
         }
         other => panic!("expected invalid-model-output failed exit, got {other:?}"),
     }
+    assert_eq!(host.model_requests().len(), 4);
+    assert_eq!(
+        host.model_requests()
+            .iter()
+            .flat_map(|request| &request.inline_messages)
+            .filter(|message| message
+                .safe_body
+                .as_str()
+                .contains("model error observation"))
+            .count(),
+        1,
+        "the exhausted class gets exactly one observation-assisted attempt"
+    );
+}
+
+#[tokio::test]
+async fn model_content_filter_gives_model_one_rephrase_attempt() {
+    let host =
+        MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ContentFiltered,
+            "model completion was filtered",
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("content-filter observation should let the model rephrase");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("completion refused by content filter; rephrase")
+    }));
 }
 
 #[tokio::test]

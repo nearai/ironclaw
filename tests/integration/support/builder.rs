@@ -149,6 +149,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// selected fixed non-retryable `LlmError`. Threaded into the degenerate
     /// one-thread group. See [`RebornThreadBuilder::fail_model`].
     fail_model: Option<ErrLlmKind>,
+    /// E-GATEWAY recovery seam: report one provider content-filter finish
+    /// reason, then resume normal scripted playback.
+    content_filter_model_once: bool,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
     /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
@@ -264,6 +267,13 @@ impl RebornIntegrationHarnessBuilder {
     /// provider-error mapping (E-GATEWAY seam, C-ERRORS).
     pub fn fail_model_auth(mut self) -> Self {
         self.fail_model = Some(ErrLlmKind::AuthFailed);
+        self
+    }
+
+    /// Report one provider content-filter finish reason, then resume scripted
+    /// playback through the real model gateway and recovery path.
+    pub fn content_filter_model_once(mut self) -> Self {
+        self.content_filter_model_once = true;
         self
     }
 
@@ -569,6 +579,7 @@ impl RebornIntegrationHarnessBuilder {
         group
             .thread(self.conversation_id)
             .script(self.replies)
+            .content_filter_model_once_opt(self.content_filter_model_once)
             .park_model_opt(self.park_gate)
             .fail_model_opt(self.fail_model)
             .build()
@@ -667,6 +678,7 @@ impl RebornIntegrationHarness {
             shell_mode: ShellMode::default(),
             park_gate: None,
             fail_model: None,
+            content_filter_model_once: false,
             turn_event_sink: false,
             tool_disclosure: None,
             budget_accounting: false,

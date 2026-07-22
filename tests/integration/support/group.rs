@@ -123,8 +123,8 @@ use super::product_workflow::RebornProductWorkflowHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
-    ErrLlm, ErrLlmKind, ParkingModelGate, SCRIPTED_MODEL_NAME, parking_trace_llm,
-    scripted_trace_llm,
+    ErrLlm, ErrLlmKind, ParkingModelGate, SCRIPTED_MODEL_NAME, content_filter_once_trace_llm,
+    parking_trace_llm, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -1112,9 +1112,9 @@ pub struct RebornThreadBuilder<'g> {
 }
 
 /// A thread's model-call behavior: exactly one of normal scripted playback,
-/// parked-until-released, or unconditional failure. One enum instead of an
-/// `Option<ParkingModelGate>` + `bool` pair (mirrors `ShellMode` in
-/// `builder.rs`) so the three modes are mutually exclusive BY CONSTRUCTION —
+/// parked-until-released, recoverable content filtering, or unconditional
+/// failure. One enum instead of an `Option<ParkingModelGate>` + `bool` pair
+/// (mirrors `ShellMode` in `builder.rs`) so the four modes are mutually exclusive BY CONSTRUCTION —
 /// no tuple-priority rule needed at the dispatch site, and no state can
 /// silently ask for "parked AND failing" at once.
 #[derive(Default)]
@@ -1125,6 +1125,9 @@ enum ThreadModelMode {
     /// This thread's model call parks until the gate is released (E-GATEWAY
     /// seam), enabling a mid-turn cancel test.
     Parked(ParkingModelGate),
+    /// The first completion reports `FinishReason::ContentFilter`; subsequent
+    /// calls resume normal scripted playback.
+    ContentFilterOnce,
     /// This thread's model call always fails with a fixed non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
     /// `replies`. See [`super::scripted_provider::ErrLlm`].
@@ -1144,6 +1147,23 @@ impl<'g> RebornThreadBuilder<'g> {
     /// provider, so the real decorator chain still runs on top.
     pub fn park_model(self, gate: ParkingModelGate) -> Self {
         self.park_model_opt(Some(gate))
+    }
+
+    /// Report one provider content-filter finish reason, then resume scripted
+    /// playback. This exercises model-error recovery through the real gateway.
+    pub fn content_filter_model_once(mut self) -> Self {
+        if matches!(self.model_mode, ThreadModelMode::Normal) {
+            self.model_mode = ThreadModelMode::ContentFilterOnce;
+        }
+        self
+    }
+
+    pub(crate) fn content_filter_model_once_opt(self, enabled: bool) -> Self {
+        if enabled {
+            self.content_filter_model_once()
+        } else {
+            self
+        }
     }
 
     /// Internal: set the optional park gate (used by the flat builder to thread
@@ -1265,6 +1285,9 @@ impl<'g> RebornThreadBuilder<'g> {
         let raw: Arc<dyn LlmProvider> = match self.model_mode {
             ThreadModelMode::Parked(gate) => {
                 Arc::new(parking_trace_llm(gate, scripted_llm.clone()))
+            }
+            ThreadModelMode::ContentFilterOnce => {
+                Arc::new(content_filter_once_trace_llm(scripted_llm.clone()))
             }
             ThreadModelMode::Failing(kind) => Arc::new(ErrLlm::new(kind)),
             ThreadModelMode::Normal => scripted_llm.clone(),

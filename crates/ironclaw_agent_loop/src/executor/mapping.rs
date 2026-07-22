@@ -92,6 +92,7 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         AgentLoopHostErrorKind::Unavailable => Some(ModelErrorClass::Unavailable),
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
         AgentLoopHostErrorKind::InvalidOutput => Some(ModelErrorClass::InvalidOutput),
+        AgentLoopHostErrorKind::ContentFiltered => Some(ModelErrorClass::ContentFiltered),
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
         // Accounting storage failed before the host could establish a
         // trustworthy budget outcome. Preserve the typed host error instead
