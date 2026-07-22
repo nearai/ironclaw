@@ -58,17 +58,18 @@ use ironclaw_product_workflow::{
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
-    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
-    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
-    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
-    RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, OperatorLogsService,
+    OperatorServiceLifecycleService, OperatorStatusService, OutboundPreferencesProductFacade,
+    PendingApprovalInteractionView, ProductAgentBoundCaller, ProductCapabilityInvoker,
+    ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
+    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornExtensionSurface,
+    RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
     RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
@@ -1366,16 +1367,10 @@ impl AutomationProductFacade for ErroringAutomationFacade {
     }
 }
 
-#[derive(Debug, Clone)]
-struct OutboundPreferencesSetCall {
-    caller: WebUiAuthenticatedCaller,
-    request: RebornSetOutboundPreferencesRequest,
-}
-
 #[derive(Default)]
 struct RecordingOutboundPreferencesFacade {
     get_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
-    set_calls: Mutex<Vec<OutboundPreferencesSetCall>>,
+    set_calls: Mutex<usize>,
     list_calls: Mutex<Vec<WebUiAuthenticatedCaller>>,
 }
 
@@ -1384,12 +1379,42 @@ impl RecordingOutboundPreferencesFacade {
         self.get_calls.lock().expect("lock").clone()
     }
 
-    fn set_calls(&self) -> Vec<OutboundPreferencesSetCall> {
-        self.set_calls.lock().expect("lock").clone()
+    fn set_calls(&self) -> usize {
+        *self.set_calls.lock().expect("lock")
     }
 
     fn list_calls(&self) -> Vec<WebUiAuthenticatedCaller> {
         self.list_calls.lock().expect("lock").clone()
+    }
+}
+
+type OutboundPreferencesInvokeCall = (WebUiAuthenticatedCaller, CapabilityId, serde_json::Value);
+
+#[derive(Default, Clone)]
+struct RecordingOutboundPreferencesInvoker {
+    calls: Arc<Mutex<Vec<OutboundPreferencesInvokeCall>>>,
+}
+
+impl RecordingOutboundPreferencesInvoker {
+    fn calls(&self) -> Vec<OutboundPreferencesInvokeCall> {
+        self.calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl ProductCapabilityInvoker for RecordingOutboundPreferencesInvoker {
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push((caller, capability, input));
+        Ok(operator_config_success_resolution(activity_id))
     }
 }
 
@@ -1412,10 +1437,8 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
         caller: WebUiAuthenticatedCaller,
         request: RebornSetOutboundPreferencesRequest,
     ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        self.set_calls
-            .lock()
-            .expect("lock")
-            .push(OutboundPreferencesSetCall { caller, request });
+        let _ = (caller, request);
+        *self.set_calls.lock().expect("lock") += 1;
         Ok(RebornOutboundPreferencesResponse {
             final_reply_target: Some(outbound_target_summary("slack-dm-beta")),
             final_reply_target_status: RebornOutboundDeliveryTargetStatus::Available,
@@ -6128,11 +6151,11 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
     );
 
     let set_error = services
-        .set_outbound_preferences(
+        .invoke(
             caller(),
-            RebornSetOutboundPreferencesRequest {
-                final_reply_target_id: Some(outbound_target_id("slack-dm-alpha")),
-            },
+            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
+            json!({ "final_reply_target_id": "slack-dm-alpha" }),
+            ActivityId::new(),
         )
         .await
         .expect_err("unwired preference mutation");
@@ -6159,9 +6182,11 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
 #[tokio::test]
 async fn outbound_preferences_facade_forwards_caller_and_request() {
     let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
-    let services = RebornServices::new(
+    let invoker = RecordingOutboundPreferencesInvoker::default();
+    let services = RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
+        invoker.clone(),
     )
     .with_outbound_preferences_facade(outbound_facade.clone());
 
@@ -6186,21 +6211,34 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
         Some("slack-dm-alpha")
     );
 
-    let set_response = services
-        .set_outbound_preferences(
+    services
+        .invoke(
             caller_for_user_with_project("user-bravo", None),
-            RebornSetOutboundPreferencesRequest {
-                final_reply_target_id: Some(outbound_target_id("slack-dm-beta")),
-            },
+            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
+            json!({ "final_reply_target_id": "slack-dm-beta" }),
+            ActivityId::new(),
         )
         .await
         .expect("set outbound preferences");
+    let set_page = services
+        .query(
+            caller_for_user_with_project("user-bravo", None),
+            RebornViewQuery {
+                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("read outbound preferences after mutation");
+    let set_response: RebornOutboundPreferencesResponse =
+        serde_json::from_value(set_page.payload).expect("outbound preferences payload");
     assert_eq!(
         set_response
             .final_reply_target
             .as_ref()
             .map(|target| target.target_id.as_str()),
-        Some("slack-dm-beta")
+        Some("slack-dm-alpha")
     );
 
     let targets_page = services
@@ -6224,22 +6262,24 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
     assert!(targets.targets[0].capabilities.final_replies);
 
     let get_calls = outbound_facade.get_calls();
-    assert_eq!(get_calls.len(), 1);
+    assert_eq!(get_calls.len(), 2);
     assert_eq!(get_calls[0].tenant_id.as_str(), "tenant-alpha");
     assert_eq!(get_calls[0].user_id.as_str(), "user-alpha");
+    assert_eq!(get_calls[1].user_id.as_str(), "user-bravo");
 
-    let set_calls = outbound_facade.set_calls();
-    assert_eq!(set_calls.len(), 1);
-    assert_eq!(set_calls[0].caller.user_id.as_str(), "user-bravo");
-    assert!(set_calls[0].caller.agent_id.is_some());
-    assert!(set_calls[0].caller.project_id.is_none());
+    assert_eq!(outbound_facade.set_calls(), 0);
+    let invoke_calls = invoker.calls();
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(invoke_calls[0].0.user_id.as_str(), "user-bravo");
+    assert!(invoke_calls[0].0.agent_id.is_some());
+    assert!(invoke_calls[0].0.project_id.is_none());
     assert_eq!(
-        set_calls[0]
-            .request
-            .final_reply_target_id
-            .as_ref()
-            .map(|target_id| target_id.as_str()),
-        Some("slack-dm-beta")
+        invoke_calls[0].1.as_str(),
+        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
+    );
+    assert_eq!(
+        invoke_calls[0].2,
+        json!({ "final_reply_target_id": "slack-dm-beta" })
     );
 
     let list_calls = outbound_facade.list_calls();
@@ -6355,25 +6395,32 @@ async fn trace_reads_are_available_as_product_views() {
 #[tokio::test]
 async fn set_outbound_preferences_can_clear_final_target() {
     let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
-    let services = RebornServices::new(
+    let invoker = RecordingOutboundPreferencesInvoker::default();
+    let services = RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
+        invoker.clone(),
     )
     .with_outbound_preferences_facade(outbound_facade.clone());
 
     services
-        .set_outbound_preferences(
+        .invoke(
             caller(),
-            RebornSetOutboundPreferencesRequest {
-                final_reply_target_id: None,
-            },
+            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
+            json!({}),
+            ActivityId::new(),
         )
         .await
         .expect("clear outbound preferences");
 
-    let set_calls = outbound_facade.set_calls();
-    assert_eq!(set_calls.len(), 1);
-    assert!(set_calls[0].request.final_reply_target_id.is_none());
+    assert_eq!(outbound_facade.set_calls(), 0);
+    let invoke_calls = invoker.calls();
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].1.as_str(),
+        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
+    );
+    assert_eq!(invoke_calls[0].2, json!({}));
 }
 
 #[tokio::test]
@@ -6402,31 +6449,33 @@ async fn set_outbound_preferences_rejects_malformed_target_id_before_facade() {
 #[tokio::test]
 async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
     let outbound_facade = Arc::new(RecordingOutboundPreferencesFacade::default());
-    let services = RebornServices::new(
+    let invoker = RecordingOutboundPreferencesInvoker::default();
+    let services = RebornServices::new_with_product_capability_invoker(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
+        invoker.clone(),
     )
     .with_outbound_preferences_facade(outbound_facade.clone());
 
     let max_length_target_id = "a".repeat(512);
     services
-        .set_outbound_preferences(
+        .invoke(
             caller(),
-            RebornSetOutboundPreferencesRequest {
-                final_reply_target_id: Some(outbound_target_id(&max_length_target_id)),
-            },
+            CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
+            json!({ "final_reply_target_id": max_length_target_id }),
+            ActivityId::new(),
         )
         .await
         .expect("max-length target id");
 
-    let set_calls = outbound_facade.set_calls();
-    assert_eq!(set_calls.len(), 1);
+    assert_eq!(outbound_facade.set_calls(), 0);
+    let invoke_calls = invoker.calls();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        set_calls[0]
-            .request
-            .final_reply_target_id
-            .as_ref()
-            .map(|target_id| target_id.as_str()),
+        invoke_calls[0]
+            .2
+            .get("final_reply_target_id")
+            .and_then(serde_json::Value::as_str),
         Some(max_length_target_id.as_str())
     );
 }

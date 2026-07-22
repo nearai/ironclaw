@@ -33,42 +33,43 @@ use ironclaw_product_workflow::{
     NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
     OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
-    OUTBOUND_PREFERENCES_VIEW, ProductOutboundEnvelope, ProductSurface, ProductWorkflowError,
-    ProjectFsFile, ProjectionCursor, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
-    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse,
-    RebornAdminUserDeletedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
-    RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentRequest,
-    RebornAutomationMutationResponse, RebornCancelRunResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornListAutomationsResponse, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
-    RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
-    RebornOperatorSetupResponse, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsReadRequest, RebornProjectFsStatRequest, RebornProjectFsStatResponse,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornRemoveMemberRequest,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewQuery, SetActiveLlmRequest, SettingsToolPermissionState,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, UpsertLlmProviderRequest,
-    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, webui_attachment_capabilities,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductOutboundEnvelope,
+    ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
+    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
+    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
+    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
+    RebornCancelRunResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundPreferencesResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornRemoveMemberRequest, RebornResolveGateResponse,
+    RebornRetryRunResponse, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
+    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewQuery,
+    SetActiveLlmRequest, SettingsToolPermissionState, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1503,11 +1504,83 @@ pub async fn set_outbound_preferences(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<RebornSetOutboundPreferencesRequest>,
 ) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
-    let response = state
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+        body,
+        ActivityId::new(),
+    )
+    .await?;
+    outbound_preferences_mutation_succeeded(resolution)?;
+
+    let page = state
         .services()
-        .set_outbound_preferences(caller, body)
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
         .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
+}
+
+fn outbound_preferences_mutation_succeeded(
+    resolution: Resolution,
+) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput) => Err(RebornServicesError {
+                code: RebornServicesErrorCode::InvalidRequest,
+                kind: RebornServicesErrorKind::Validation,
+                status_code: 400,
+                retryable: false,
+                field: None,
+                validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+            }),
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(outbound_preferences_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(outbound_preferences_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "outbound preferences capability did not complete successfully",
+            )),
+        },
+        Resolution::Denied(_) => Err(outbound_preferences_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => {
+            Err(outbound_preferences_unavailable(true))
+        }
+    }
+}
+
+fn outbound_preferences_forbidden() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn outbound_preferences_unavailable(retryable: bool) -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable,
+        field: None,
+        validation_code: None,
+    }
 }
 
 /// `GET /api/webchat/v2/outbound/targets`

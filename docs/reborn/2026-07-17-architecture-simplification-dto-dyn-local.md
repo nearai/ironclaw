@@ -63,6 +63,9 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   No design changes to §1–§13 other than the §5.3.4 addition and the §11.7
   extension noted above; §14 and the status log are mutable, the contract
   above them is frozen.
+- **r9** 2026-07-22 — status-only update for the ProductSurface facade collapse:
+  descriptor-backed reads are underway and the outbound preference mutation now
+  follows the API-only first-party capability + query read-back approach.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -2200,7 +2203,7 @@ knobs to calibrate against measured latency, not open architectural questions.
 
 ---
 
-## 14. Implementation status (as of 2026-07-20)
+## 14. Implementation status (as of 2026-07-22)
 
 This section tracks what has landed against the slices (§9) and axes (§10). It is
 the **mutable status log** — the design in §1–§13 is the frozen contract; this
@@ -2346,11 +2349,20 @@ loop-facing capability result and every result mirror is deleted.
   §11.9), the model-error observation channel, `read_diagnostic(diag_ref)`, and
   the per-kind remediation generalization. Gated on the flip stack landing
   #6273's `Resolution` vocabulary.
-- **§5.2 `ProductSurface`** facade collapse — the 88-method `RebornServicesApi`
-  freeze has landed (§10 ratchet, above), so the surface can only shrink; the
-  actual migration of mutations to capability descriptors and reads to view
-  descriptors (Slice 1 = the synthetic-capability promotion, §13.3) has not
-  started, nor has the products-in-composition ratchet (§5.8).
+- **§5.2 `ProductSurface`** facade collapse — the `RebornServicesApi` freeze has
+  landed (§10 ratchet, above), so the surface can only shrink. Initial reads now
+  flow through view descriptors (`query`) rather than per-feature methods:
+  LLM config, operator status/diagnostics/setup/config validation, outbound
+  preferences/targets, trace credits/account traces, and run artifacts. The
+  outbound preference write now flows through
+  `builtin.outbound_preferences_set`, an API-only first-party capability invoked
+  directly by the WebUI product adapter and verified by reading back
+  `OUTBOUND_PREFERENCES_VIEW`; the legacy `RebornServicesApi` setter was
+  removed from the ratchet allowlist. This is the migration pattern for product
+  mutations: authenticated product gesture -> `ProductSurface::invoke` ->
+  descriptor-declared first-party handler -> authoritative `query` read-back.
+  Remaining facade methods still need migration or explicit turn-lifecycle
+  classification before the trait can collapse to the §5.2 end state.
 
 ---
 

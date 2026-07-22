@@ -207,6 +207,7 @@ const AUTO_APPROVE_CONFIG_KEY: &str = "agent.auto_approve_tools";
 const TOOL_CONFIG_PREFIX: &str = "tool.";
 pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
     "builtin.operator_config_set_auto_approve";
+pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornOperatorToolInfo {
@@ -2253,17 +2254,6 @@ pub trait RebornServicesApi: Send + Sync {
             })?;
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
-
-    /// Persist the authenticated caller's outbound delivery preference.
-    ///
-    /// Implementations must scope mutations by the caller's tenant/user
-    /// identity and fail closed when no writable outbound-preferences facade is
-    /// wired.
-    async fn set_outbound_preferences(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError>;
 
     async fn list_extensions(
         &self,
@@ -4769,16 +4759,6 @@ where
         };
         self.automation_facade
             .delete_automation(caller, automation_id)
-            .await
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        self.outbound_preferences_facade
-            .set_outbound_preferences(caller, request)
             .await
     }
 

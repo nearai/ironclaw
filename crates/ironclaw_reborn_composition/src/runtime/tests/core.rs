@@ -593,9 +593,9 @@ use ironclaw_events::{EventStreamKey, ReadScope};
 use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
-    Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId, CorrelationId,
-    EffectKind, InvocationFingerprint, InvocationId, Principal, ResourceEstimate, ResourceScope,
-    TenantId, ThreadId, UserId,
+    Action, ActivityId, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
+    CorrelationId, EffectKind, InvocationFingerprint, InvocationId, Principal, Resolution,
+    ResourceEstimate, ResourceScope, TenantId, ThreadId, UserId,
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -611,8 +611,8 @@ use ironclaw_loop_host::{
 use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleReadinessBlocker,
-    RebornExtensionCredentialSetup, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_gate_ref,
@@ -5344,21 +5344,52 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
 
     let cleared = bundle
         .api
-        .set_outbound_preferences(
+        .invoke(
             caller.clone(),
-            RebornSetOutboundPreferencesRequest {
-                final_reply_target_id: None,
-            },
+            ironclaw_host_api::CapabilityId::new(
+                ironclaw_product_workflow::OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+            )
+            .expect("outbound preferences capability id"),
+            serde_json::json!({}),
+            ActivityId::new(),
         )
         .await
         .expect("outbound preference clear uses composed facade");
-    assert!(cleared.final_reply_target.is_none());
-
-    let targets = bundle
+    assert!(matches!(cleared, Resolution::Done(_)));
+    let cleared_page = bundle
         .api
-        .list_outbound_delivery_targets(caller)
+        .query(
+            caller.clone(),
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::OUTBOUND_PREFERENCES_VIEW
+                    .id
+                    .to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("outbound preference read-back uses composed view");
+    let cleared_preferences: RebornOutboundPreferencesResponse =
+        serde_json::from_value(cleared_page.payload).expect("outbound preferences payload");
+    assert!(cleared_preferences.final_reply_target.is_none());
+
+    let targets_page = bundle
+        .api
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::OUTBOUND_DELIVERY_TARGETS_VIEW
+                    .id
+                    .to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
         .await
         .expect("outbound target listing uses composed facade");
+    let targets: ironclaw_product_workflow::RebornOutboundDeliveryTargetListResponse =
+        serde_json::from_value(targets_page.payload).expect("outbound targets payload");
     assert!(targets.targets.is_empty());
 
     runtime.shutdown().await.expect("runtime shutdown");

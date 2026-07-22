@@ -1,5 +1,6 @@
 pub(crate) mod outbound_delivery_capability_surface;
 pub(crate) mod outbound_preferences;
+pub(crate) mod outbound_preferences_capability;
 
 pub(crate) use outbound_delivery_capability_surface::{
     OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,

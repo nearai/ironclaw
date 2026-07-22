@@ -514,6 +514,29 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "required": ["key", "enabled", "tenant_id", "user_id"],
             "additionalProperties": false
         }),
+        "schemas/builtin/outbound_preferences_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "final_reply_target_id": {
+                    "type": ["string", "null"],
+                    "maxLength": 512,
+                    "description": "Outbound delivery target id to use for final replies. Omit or pass null to clear the preference."
+                }
+            },
+            "additionalProperties": false
+        }),
+        "schemas/builtin/outbound_preferences_set.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "final_reply_target": {
+                    "type": ["object", "null"]
+                },
+                "final_reply_target_status": { "type": "string" },
+                "default_modality": { "type": "string" }
+            },
+            "required": ["final_reply_target", "final_reply_target_status", "default_modality"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_list.input.v1.json" => json!({
             "type": "object",
             "properties": {},
@@ -769,6 +792,31 @@ mod tests {
         assert_eq!(
             output["properties"]["key"]["const"],
             "agent.auto_approve_tools"
+        );
+    }
+
+    #[test]
+    fn outbound_preferences_set_schemas_are_registered() {
+        let input = resolve_builtin_input_schema_ref(
+            "schemas/builtin/outbound_preferences_set.input.v1.json",
+        )
+        .expect("outbound preferences set input schema is registered");
+        let output = resolve_builtin_input_schema_ref(
+            "schemas/builtin/outbound_preferences_set.output.v1.json",
+        )
+        .expect("outbound preferences set output schema is registered");
+
+        assert_eq!(
+            input["properties"]["final_reply_target_id"]["type"],
+            serde_json::json!(["string", "null"])
+        );
+        assert_eq!(
+            output["required"],
+            serde_json::json!([
+                "final_reply_target",
+                "final_reply_target_status",
+                "default_modality"
+            ])
         );
     }
 }

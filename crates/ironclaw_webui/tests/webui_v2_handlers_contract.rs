@@ -18,8 +18,9 @@ use axum::http::{HeaderName, Method, Request, StatusCode, header};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, CapabilityId, ExtensionId, InstallationState, InvocationId, ProjectId,
-    Resolution, RuntimeKind, TenantId, ThreadId, UserId,
+    ActivityId, AgentId, CapabilityId, ExtensionId, InstallationState, InvocationId, Outcome,
+    OutcomeRefs, ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, RuntimeKind,
+    SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -32,21 +33,22 @@ use ironclaw_product_workflow::{
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry,
-    ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornListAutomationsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
+    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
+    ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
+    RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetRequest, RebornOperatorConfigValidateRequest,
     RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
     RebornOperatorServiceLifecycleAction, RebornOperatorServiceLifecycleRequest,
@@ -60,17 +62,17 @@ use ironclaw_product_workflow::{
     RebornRemoveMemberRequest, RebornResolveGateResponse, RebornResumeGateResponse,
     RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillActionResponse,
-    RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornStreamEventsSubscription,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornViewPage, RebornViewQuery, RunArtifactLogs, RunArtifactRedaction, SetActiveLlmRequest,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
+    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornStreamEventsSubscription, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
+    RunArtifactLogs, RunArtifactRedaction, SetActiveLlmRequest, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -142,6 +144,23 @@ fn service_unavailable_error(retryable: bool) -> RebornServicesError {
         field: None,
         validation_code: None,
     }
+}
+
+fn successful_resolution(activity_id: ActivityId) -> Resolution {
+    Resolution::Done(Outcome {
+        refs: OutcomeRefs {
+            result: ResultRef::from_uuid(activity_id.as_uuid()),
+            byte_len: 0,
+            preview: None,
+            preview_meta: ResultPreviewMeta::default(),
+            origin: None,
+            output_digest: None,
+        },
+        verdict: ToolVerdict::Success,
+        summary: SafeSummary::new("ok").expect("static summary is redaction-safe"),
+        progress: ResultProgress::MadeProgress,
+        terminate_hint: TerminateHint::Continue,
+    })
 }
 
 type OperatorSetupCall = (Option<String>, Option<String>, bool, bool);
@@ -258,6 +277,7 @@ struct StubServices {
     next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
     view_queries: Mutex<Vec<RebornViewQuery>>,
     invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
+    next_invoke_response: Mutex<Option<Result<Resolution, RebornServicesError>>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
     stream_events_calls: Mutex<Vec<RebornStreamEventsRequest>>,
@@ -280,8 +300,6 @@ struct StubServices {
     next_rename_automation_error: Mutex<Option<RebornServicesError>>,
     next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
-    set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
-    next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
@@ -356,11 +374,8 @@ impl StubServices {
         *self.next_rename_automation_error.lock().expect("lock") = Some(error);
     }
 
-    fn fail_set_outbound_preferences(&self, error: RebornServicesError) {
-        *self
-            .next_set_outbound_preferences_error
-            .lock()
-            .expect("lock") = Some(error);
+    fn enqueue_invoke_response(&self, response: Result<Resolution, RebornServicesError>) {
+        *self.next_invoke_response.lock().expect("lock") = Some(response);
     }
 
     fn fail_set_operator_config_key(&self, error: RebornServicesError) {
@@ -625,6 +640,9 @@ impl RebornServicesApi for StubServices {
             .lock()
             .expect("lock")
             .push((capability, input, activity_id));
+        if let Some(response) = self.next_invoke_response.lock().expect("lock").take() {
+            return response;
+        }
         Err(service_unavailable_error(false))
     }
 
@@ -1323,37 +1341,6 @@ impl RebornServicesApi for StubServices {
         Ok(operator_command_response(
             RebornOperatorArea::ServiceLifecycle,
         ))
-    }
-
-    async fn set_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        if let Some(err) = self
-            .next_set_outbound_preferences_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(err);
-        }
-        let target_id = request
-            .final_reply_target_id
-            .as_ref()
-            .map(|id| id.as_str().to_string());
-        self.set_outbound_preferences_calls
-            .lock()
-            .expect("lock")
-            .push(request);
-        Ok(match target_id {
-            Some(id) => outbound_preferences_response(&id),
-            None => RebornOutboundPreferencesResponse {
-                final_reply_target: None,
-                final_reply_target_status: RebornOutboundDeliveryTargetStatus::NoneConfigured,
-                default_modality: Default::default(),
-            },
-        })
     }
 
     async fn list_extension_registry(
@@ -3107,8 +3094,9 @@ async fn get_outbound_preferences_dispatches_through_facade() {
 }
 
 #[tokio::test]
-async fn set_outbound_preferences_dispatches_body_through_facade() {
+async fn set_outbound_preferences_dispatches_body_through_invoke() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
@@ -3125,24 +3113,32 @@ async fn set_outbound_preferences_dispatches_body_through_facade() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-beta");
-    let calls = services
-        .set_outbound_preferences_calls
-        .lock()
-        .expect("lock");
-    assert_eq!(calls.len(), 1);
+    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-alpha");
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        calls[0]
-            .final_reply_target_id
-            .as_ref()
-            .map(|target_id| target_id.as_str()),
-        Some("slack-dm-beta")
+        invoke_calls[0].0.as_str(),
+        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
     );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({ "final_reply_target_id": "slack-dm-beta" })
+    );
+    drop(invoke_calls);
+    let view_ids: Vec<String> = services
+        .view_queries
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|query| query.view_id.clone())
+        .collect();
+    assert_eq!(view_ids, vec![OUTBOUND_PREFERENCES_VIEW.id.to_string()]);
 }
 
 #[tokio::test]
 async fn set_outbound_preferences_accepts_explicit_clear() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
@@ -3159,27 +3155,35 @@ async fn set_outbound_preferences_accepts_explicit_clear() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
-    assert!(body.get("final_reply_target").is_none());
-    assert_eq!(body["final_reply_target_status"], "none_configured");
-    let calls = services
-        .set_outbound_preferences_calls
-        .lock()
-        .expect("lock");
-    assert_eq!(calls.len(), 1);
-    assert!(calls[0].final_reply_target_id.is_none());
+    assert_eq!(body["final_reply_target"]["target_id"], "slack-dm-alpha");
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(
+        invoke_calls[0].0.as_str(),
+        OUTBOUND_PREFERENCES_SET_CAPABILITY_ID
+    );
+    assert_eq!(invoke_calls[0].1, serde_json::json!({}));
+    drop(invoke_calls);
+    assert_eq!(
+        *services
+            .get_outbound_preferences_calls
+            .lock()
+            .expect("lock"),
+        1
+    );
 }
 
 #[tokio::test]
 async fn set_outbound_preferences_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
-    services.fail_set_outbound_preferences(RebornServicesError {
+    services.enqueue_invoke_response(Err(RebornServicesError {
         code: RebornServicesErrorCode::NotFound,
         kind: RebornServicesErrorKind::NotFound,
         status_code: 404,
         retryable: false,
         field: None,
         validation_code: None,
-    });
+    }));
     let router = router_with(services);
 
     let response = router
@@ -3202,9 +3206,8 @@ async fn set_outbound_preferences_error_maps_to_http_status() {
     assert_eq!(body["kind"], "not_found");
     assert_eq!(body["retryable"], false);
 }
-
 #[tokio::test]
-async fn list_outbound_delivery_targets_dispatches_through_facade() {
+async fn list_outbound_delivery_targets_uses_product_view() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
 
@@ -5268,13 +5271,6 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: WebUiListAutomationsRequest,
         ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn set_outbound_preferences(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: RebornSetOutboundPreferencesRequest,
-        ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn list_extensions(

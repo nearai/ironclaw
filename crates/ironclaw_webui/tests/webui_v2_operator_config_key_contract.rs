@@ -156,14 +156,6 @@ impl RebornServicesApi for RecordingServices {
         Err(service_unavailable_error())
     }
 
-    async fn set_outbound_preferences(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
     async fn list_extensions(
         &self,
         _caller: WebUiAuthenticatedCaller,
