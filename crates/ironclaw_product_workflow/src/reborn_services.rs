@@ -355,18 +355,12 @@ pub const SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID: &str =
     "builtin.skill_auto_activate_learned_set";
 pub const SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID);
-pub const SKILLS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "skills",
-    paginated: false,
-};
-pub const SKILL_SEARCH_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "skill_search",
-    paginated: false,
-};
-pub const SKILL_CONTENT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
-    id: "skill_content",
-    paginated: false,
-};
+pub const SKILLS_VIEW: ProductView<serde_json::Value, RebornSkillListResponse> =
+    ProductView::unpaginated("skills");
+pub const SKILL_SEARCH_VIEW: ProductView<serde_json::Value, RebornSkillSearchResponse> =
+    ProductView::unpaginated("skill_search");
+pub const SKILL_CONTENT_VIEW: ProductView<serde_json::Value, RebornSkillContentResponse> =
+    ProductView::unpaginated("skill_content");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornOperatorToolInfo {

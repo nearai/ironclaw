@@ -1770,19 +1770,14 @@ pub async fn trace_credits(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
+    let response = TRACE_CREDITS_VIEW
+        .query_on(
+            state.services().as_ref(),
             caller,
-            RebornViewQuery {
-                view_id: TRACE_CREDITS_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
+            serde_json::json!({}),
+            None,
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1795,19 +1790,14 @@ pub async fn trace_account_traces(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornAccountTracesResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
+    let response = TRACE_ACCOUNT_TRACES_VIEW
+        .query_on(
+            state.services().as_ref(),
             caller,
-            RebornViewQuery {
-                view_id: TRACE_ACCOUNT_TRACES_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
+            serde_json::json!({}),
+            None,
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1849,19 +1839,14 @@ pub async fn get_outbound_preferences(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
+    let response = OUTBOUND_PREFERENCES_VIEW
+        .query_on(
+            state.services().as_ref(),
             caller,
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
+            serde_json::json!({}),
+            None,
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1884,19 +1869,14 @@ pub async fn set_outbound_preferences(
     .await?;
     outbound_preferences_mutation_succeeded(resolution)?;
 
-    let page = state
-        .services()
-        .query(
+    let response = OUTBOUND_PREFERENCES_VIEW
+        .query_on(
+            state.services().as_ref(),
             caller,
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
+            serde_json::json!({}),
+            None,
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2036,19 +2016,14 @@ pub async fn list_outbound_delivery_targets(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
+    let response = OUTBOUND_DELIVERY_TARGETS_VIEW
+        .query_on(
+            state.services().as_ref(),
             caller,
-            RebornViewQuery {
-                view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
+            serde_json::json!({}),
+            None,
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2057,19 +2032,14 @@ pub async fn list_extensions(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornExtensionListResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
+    let response = EXTENSIONS_VIEW
+        .query_on(
+            state.services().as_ref(),
             caller,
-            RebornViewQuery {
-                view_id: EXTENSIONS_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
+            serde_json::json!({}),
+            None,
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2078,19 +2048,14 @@ pub async fn list_skills(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornSkillListResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
+    let response = SKILLS_VIEW
+        .query_on(
+            state.services().as_ref(),
             caller,
-            RebornViewQuery {
-                view_id: SKILLS_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
+            serde_json::json!({}),
+            None,
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2100,19 +2065,14 @@ pub async fn search_skills(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<SearchSkillsBody>,
 ) -> Result<Json<RebornSkillSearchResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
+    let response = SKILL_SEARCH_VIEW
+        .query_on(
+            state.services().as_ref(),
             caller,
-            RebornViewQuery {
-                view_id: SKILL_SEARCH_VIEW.id.to_string(),
-                params: serde_json::json!({ "query": body.query }),
-                cursor: None,
-            },
+            serde_json::json!({ "query": body.query }),
+            None,
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2147,19 +2107,14 @@ pub async fn get_skill_content(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SkillPath { name }): Path<SkillPath>,
 ) -> Result<Json<RebornSkillContentResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
+    let response = SKILL_CONTENT_VIEW
+        .query_on(
+            state.services().as_ref(),
             caller,
-            RebornViewQuery {
-                view_id: SKILL_CONTENT_VIEW.id.to_string(),
-                params: serde_json::json!({ "name": name }),
-                cursor: None,
-            },
+            serde_json::json!({ "name": name }),
+            None,
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -2320,19 +2275,14 @@ pub async fn list_extension_registry(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornExtensionRegistryResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
+    let response = EXTENSION_REGISTRY_VIEW
+        .query_on(
+            state.services().as_ref(),
             caller,
-            RebornViewQuery {
-                view_id: EXTENSION_REGISTRY_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
+            serde_json::json!({}),
+            None,
         )
         .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
