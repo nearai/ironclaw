@@ -26,12 +26,11 @@ use ironclaw_product_workflow::{
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
     RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
     RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -918,40 +917,6 @@ impl RebornServicesApi for StubServices {
             automations: Vec::new(),
             scheduler_enabled: true,
         })
-    }
-
-    async fn install_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn read_skill_content(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn update_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn remove_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(unused_services_error())
     }
 
     async fn install_extension(

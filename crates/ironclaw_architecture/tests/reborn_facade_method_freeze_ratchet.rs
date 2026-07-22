@@ -106,12 +106,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "trace_account_login_link",
     "authorize_trace_hold",
     // --- extensions + skills ---
-    "install_skill",
-    "read_skill_content",
-    "update_skill",
-    "remove_skill",
-    "set_skill_auto_activate",
-    "set_auto_activate_learned",
     "install_extension",
     "import_extension",
     "activate_extension",

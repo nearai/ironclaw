@@ -22,10 +22,13 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_product_workflow::{
     ProductCapabilityInvoker, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, WebUiAuthenticatedCaller,
+    RebornServicesErrorKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, WebUiAuthenticatedCaller,
 };
 
-use crate::factory::{RebornProductionRuntimeServices, RebornServices};
+use crate::factory::{
+    RebornProductionRuntimeServices, RebornServices, production_skill_management_mount_view,
+};
 
 const PRODUCT_RESULT_MAX_BYTES: usize = 4 * 1024 * 1024;
 const PRODUCT_RESULT_ROOT: &str = "/product-results";
@@ -37,6 +40,7 @@ pub(crate) enum RuntimeProductCapabilityInvoker {
         host_runtime: Arc<dyn HostRuntime>,
         registry: Arc<ExtensionRegistry>,
         results: ProductResultFilesystem,
+        mounts: ProductCapabilityMounts,
     },
     Unavailable,
 }
@@ -48,27 +52,36 @@ pub(crate) enum ProductResultFilesystem {
     Postgres(Arc<ScopedFilesystem<PostgresRootFilesystem>>),
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ProductCapabilityMounts {
+    LocalDev,
+    Production,
+}
+
 impl RuntimeProductCapabilityInvoker {
     pub(crate) fn from_services(services: &RebornServices) -> Self {
         let Some(host_runtime) = services.host_runtime.as_ref().map(Arc::clone) else {
             return Self::Unavailable;
         };
-        let (results, registry) = if let Some(local) = &services.local_runtime {
+        let (results, registry, mounts) = if let Some(local) = &services.local_runtime {
             (
                 ProductResultFilesystem::Composite(crate::wrap_scoped(Arc::clone(
                     &local.extension_filesystem,
                 ))),
                 Arc::clone(&local.extension_registry),
+                ProductCapabilityMounts::LocalDev,
             )
         } else if let Some(production) = &services.production_runtime {
             match production {
                 RebornProductionRuntimeServices::LibSql(graph) => (
                     ProductResultFilesystem::LibSql(Arc::clone(&graph.scoped_filesystem)),
                     Arc::clone(&graph.extension_registry),
+                    ProductCapabilityMounts::Production,
                 ),
                 RebornProductionRuntimeServices::Postgres(graph) => (
                     ProductResultFilesystem::Postgres(Arc::clone(&graph.scoped_filesystem)),
                     Arc::clone(&graph.extension_registry),
+                    ProductCapabilityMounts::Production,
                 ),
             }
         } else {
@@ -78,6 +91,7 @@ impl RuntimeProductCapabilityInvoker {
             host_runtime,
             registry,
             results,
+            mounts,
         }
     }
 }
@@ -95,6 +109,7 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
             host_runtime,
             registry,
             results,
+            mounts,
         } = self
         else {
             return Err(product_runtime_unavailable());
@@ -105,7 +120,7 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         // so a concurrent stronger replacement no longer fits this attenuated
         // grant and fails closed.
         let descriptor = registry.get_capability(&capability);
-        let context = product_execution_context(&caller, activity_id, descriptor)?;
+        let context = product_execution_context(&caller, activity_id, descriptor, *mounts)?;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let requested_capability = capability.clone();
@@ -127,6 +142,7 @@ fn product_execution_context(
     caller: &WebUiAuthenticatedCaller,
     activity_id: ActivityId,
     descriptor: Option<&CapabilityDescriptor>,
+    mounts: ProductCapabilityMounts,
 ) -> Result<ExecutionContext, RebornServicesError> {
     let invocation_id = InvocationId::from_uuid(activity_id.as_uuid());
     let scope = ResourceScope {
@@ -140,9 +156,14 @@ fn product_execution_context(
     };
     let extension_id = ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID)
         .map_err(RebornServicesError::internal_from)?;
+    let invocation_mounts = product_invocation_mounts(&scope, descriptor, mounts)?;
     let grants = descriptor
         .map(|descriptor| CapabilitySet {
-            grants: vec![product_gesture_grant(descriptor, &extension_id)],
+            grants: vec![product_gesture_grant(
+                descriptor,
+                &extension_id,
+                invocation_mounts.clone(),
+            )],
         })
         .unwrap_or_default();
     let context = ExecutionContext {
@@ -167,7 +188,7 @@ fn product_execution_context(
         runtime: RuntimeKind::FirstParty,
         trust: TrustClass::Sandbox,
         grants,
-        mounts: MountView::default(),
+        mounts: invocation_mounts,
         resource_scope: scope,
     };
     context
@@ -179,6 +200,7 @@ fn product_execution_context(
 fn product_gesture_grant(
     descriptor: &CapabilityDescriptor,
     product_ingress: &ExtensionId,
+    mounts: MountView,
 ) -> CapabilityGrant {
     let mut secrets = Vec::new();
     let mut network_targets = descriptor.network_targets.clone();
@@ -190,7 +212,23 @@ fn product_gesture_grant(
             network_targets.push(credential.audience.clone());
         }
     }
-    let has_network_targets = !network_targets.is_empty();
+    let network =
+        if descriptor.id.as_str() == SKILL_INSTALL_CAPABILITY_ID && network_targets.is_empty() {
+            crate::builtin_capability_policy::dev_wildcard_network_policy()
+        } else {
+            let has_network_targets = !network_targets.is_empty();
+            NetworkPolicy {
+                allowed_targets: network_targets,
+                // An empty policy must remain unconstrained. Marking it as
+                // private-range constrained would synthesize an `ApplyNetworkPolicy`
+                // obligation for a capability that has no network surface, and fail
+                // before dispatch when no network-policy store is composed.
+                // Networked capabilities retain the private-IP guard on their
+                // manifest allowlist.
+                deny_private_ip_ranges: has_network_targets,
+                max_egress_bytes: None,
+            }
+        };
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: descriptor.id.clone(),
@@ -198,24 +236,45 @@ fn product_gesture_grant(
         issued_by: Principal::HostRuntime,
         constraints: GrantConstraints {
             allowed_effects: descriptor.effects.clone(),
-            mounts: MountView::default(),
-            network: NetworkPolicy {
-                allowed_targets: network_targets,
-                // An empty policy must remain unconstrained. Marking it as
-                // private-range constrained would synthesize an
-                // `ApplyNetworkPolicy` obligation for a capability that has
-                // no network surface, and fail before dispatch when no
-                // network-policy store is composed. Networked capabilities
-                // retain the private-IP guard on their manifest allowlist.
-                deny_private_ip_ranges: has_network_targets,
-                max_egress_bytes: None,
-            },
+            mounts,
+            network,
             secrets,
             resource_ceiling: None,
             expires_at: None,
             max_invocations: Some(1),
         },
     }
+}
+
+fn product_invocation_mounts(
+    scope: &ResourceScope,
+    descriptor: Option<&CapabilityDescriptor>,
+    mounts: ProductCapabilityMounts,
+) -> Result<MountView, RebornServicesError> {
+    let Some(descriptor) = descriptor else {
+        return Ok(MountView::default());
+    };
+    if !is_skill_management_capability(&descriptor.id) {
+        return Ok(MountView::default());
+    }
+    match mounts {
+        ProductCapabilityMounts::LocalDev => {
+            crate::local_dev_mounts::scoped_skill_management_mount_view(scope)
+                .map_err(RebornServicesError::internal_from)
+        }
+        ProductCapabilityMounts::Production => production_skill_management_mount_view(scope)
+            .map_err(RebornServicesError::internal_from),
+    }
+}
+
+fn is_skill_management_capability(capability: &CapabilityId) -> bool {
+    matches!(
+        capability.as_str(),
+        SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_UPDATE_CAPABILITY_ID
+            | SKILL_REMOVE_CAPABILITY_ID
+            | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
+    )
 }
 
 async fn product_resolution(
@@ -451,6 +510,7 @@ mod tests {
         let grant = product_gesture_grant(
             &descriptor,
             &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+            MountView::default(),
         );
 
         assert_eq!(grant.constraints.network, NetworkPolicy::default());
@@ -468,6 +528,7 @@ mod tests {
         let grant = product_gesture_grant(
             &descriptor,
             &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+            MountView::default(),
         );
 
         assert_eq!(grant.constraints.network.allowed_targets, vec![target]);
@@ -498,6 +559,7 @@ mod tests {
         let grant = product_gesture_grant(
             &descriptor,
             &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+            MountView::default(),
         );
 
         assert_eq!(grant.constraints.network.allowed_targets, vec![target]);

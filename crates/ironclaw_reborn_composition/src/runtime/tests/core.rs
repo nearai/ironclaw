@@ -612,10 +612,10 @@ use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleReadinessBlocker,
     RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    approval_gate_ref,
+    RebornServicesErrorKind, RebornSkillListResponse, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_skills::SkillTrust;
@@ -5391,6 +5391,82 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
     let targets: ironclaw_product_workflow::RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
     assert!(targets.targets.is_empty());
+
+    runtime.shutdown().await.expect("runtime shutdown");
+}
+
+#[tokio::test]
+async fn local_dev_webui_bundle_invokes_skill_install_with_scoped_mounts() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let gateway = Arc::new(RecordingGateway {
+        reply: "webui skill ok".to_string(),
+        requests: Arc::new(StdMutex::new(Vec::new())),
+    });
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("runtime-webui-skill-owner", root.path().join("local-dev"))
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-webui-skill-tenant".to_string(),
+        agent_id: "runtime-webui-skill-agent".to_string(),
+        source_binding_id: "runtime-webui-skill-source".to_string(),
+        reply_target_binding_id: "runtime-webui-skill-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(3),
+    })
+    .with_model_gateway_override(gateway);
+
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+    let caller = WebUiAuthenticatedCaller::new(
+        TenantId::new("runtime-webui-skill-tenant").unwrap(),
+        UserId::new("runtime-webui-skill-owner").unwrap(),
+        Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
+        None,
+    );
+
+    let installed = bundle
+        .api
+        .invoke(
+            caller.clone(),
+            ironclaw_host_api::CapabilityId::new(
+                ironclaw_product_workflow::SKILL_INSTALL_CAPABILITY_ID,
+            )
+            .expect("skill install capability id"),
+            serde_json::json!({
+                "name": "product-surface-skill",
+                "content": "---\nname: product-surface-skill\n---\n# Product Surface\n"
+            }),
+            ActivityId::new(),
+        )
+        .await
+        .expect("skill install uses product capability path");
+    match installed {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => {}
+        other => panic!("skill install did not succeed: {other:?}"),
+    }
+    let skills_page = bundle
+        .api
+        .query(
+            caller,
+            ironclaw_product_workflow::RebornViewQuery {
+                view_id: ironclaw_product_workflow::SKILLS_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("skill list uses product view");
+    let skills: RebornSkillListResponse =
+        serde_json::from_value(skills_page.payload).expect("skills payload");
+    assert!(
+        skills
+            .skills
+            .iter()
+            .any(|skill| skill.name == "product-surface-skill")
+    );
 
     runtime.shutdown().await.expect("runtime shutdown");
 }

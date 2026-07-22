@@ -542,6 +542,15 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             "properties": {},
             "additionalProperties": false
         }),
+        "schemas/builtin/skill_list.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "skills": { "type": "array" },
+                "count": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["skills", "count"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_install.input.v1.json" => json!({
             "type": "object",
             "properties": {
@@ -564,12 +573,102 @@ pub(crate) fn resolve_builtin_input_schema_ref(reference: &str) -> Option<Value>
             ],
             "additionalProperties": false
         }),
+        "schemas/builtin/skill_install.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "installed": { "type": "boolean" },
+                "name": { "type": "string" },
+                "path": { "type": "string" },
+                "source": { "type": "string" },
+                "files_installed": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["installed", "name", "path", "source", "files_installed"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_update.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the installed skill to update"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Replacement SKILL.md content"
+                }
+            },
+            "required": ["name", "content"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_update.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "updated": { "type": "boolean" },
+                "name": { "type": "string" }
+            },
+            "required": ["updated", "name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_auto_activate_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Name of the installed skill to update"
+                },
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Whether criteria-based activation is enabled for this skill"
+                }
+            },
+            "required": ["name", "enabled"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_auto_activate_set.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "updated": { "type": "boolean" },
+                "name": { "type": "string" },
+                "auto_activate": { "type": "boolean" }
+            },
+            "required": ["updated", "name", "auto_activate"],
+            "additionalProperties": false
+        }),
         "schemas/builtin/skill_remove.input.v1.json" => json!({
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Name of the installed skill to remove" }
             },
             "required": ["name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_remove.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "removed": { "type": "boolean" },
+                "name": { "type": "string" }
+            },
+            "required": ["removed", "name"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_auto_activate_learned_set.input.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean",
+                    "description": "Whether criteria-based learned skill activation is enabled by default"
+                }
+            },
+            "required": ["enabled"],
+            "additionalProperties": false
+        }),
+        "schemas/builtin/skill_auto_activate_learned_set.output.v1.json" => json!({
+            "type": "object",
+            "properties": {
+                "success": { "type": "boolean" },
+                "message": { "type": "string" }
+            },
+            "required": ["success", "message"],
             "additionalProperties": false
         }),
         "schemas/builtin/trigger_create.input.v1.json" => json!({
@@ -818,5 +917,22 @@ mod tests {
                 "default_modality"
             ])
         );
+    }
+
+    #[test]
+    fn skill_management_mutation_schemas_are_registered() {
+        for reference in [
+            "schemas/builtin/skill_update.input.v1.json",
+            "schemas/builtin/skill_update.output.v1.json",
+            "schemas/builtin/skill_auto_activate_set.input.v1.json",
+            "schemas/builtin/skill_auto_activate_set.output.v1.json",
+            "schemas/builtin/skill_auto_activate_learned_set.input.v1.json",
+            "schemas/builtin/skill_auto_activate_learned_set.output.v1.json",
+        ] {
+            assert!(
+                resolve_builtin_input_schema_ref(reference).is_some(),
+                "{reference} should be registered"
+            );
+        }
     }
 }

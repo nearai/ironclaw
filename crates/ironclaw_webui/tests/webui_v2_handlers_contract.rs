@@ -62,13 +62,15 @@ use ironclaw_product_workflow::{
     RebornRemoveMemberRequest, RebornResolveGateResponse, RebornResumeGateResponse,
     RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest, RebornServicesApi,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornStreamEventsSubscription, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    RunArtifactLogs, RunArtifactRedaction, SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, UpsertLlmProviderRequest,
+    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, RunArtifactLogs,
+    RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
+    SetActiveLlmRequest, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, UpsertLlmProviderRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
@@ -337,9 +339,6 @@ struct StubServices {
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
-    /// Records the `enabled` value each `set_auto_activate_learned` call passes,
-    /// so the handler test can assert the request body reaches the facade.
-    set_auto_activate_learned_calls: Mutex<Vec<bool>>,
     // Project routes — recorded requests so path-param-override behavior can be
     // asserted (the path id must win over any body value).
     update_project_calls: Mutex<Vec<RebornUpdateProjectRequest>>,
@@ -896,6 +895,17 @@ impl RebornServicesApi for StubServices {
                 .expect("skill search payload"),
                 next_cursor: None,
             }),
+            id if id == SKILL_CONTENT_VIEW.id => {
+                let name = query.params["name"].as_str().expect("skill name param");
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornSkillContentResponse {
+                        name: name.to_string(),
+                        content: format!("# {name}\n"),
+                    })
+                    .expect("skill content payload"),
+                    next_cursor: None,
+                })
+            }
             _ => Err(rejecting_reborn_services_error()),
         }
     }
@@ -1224,58 +1234,6 @@ impl RebornServicesApi for StubServices {
         Ok(RebornAutomationMutationResponse {
             updated: true,
             automation: None,
-        })
-    }
-
-    async fn install_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn read_skill_content(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn update_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-        _content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn remove_skill(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn set_auto_activate_learned(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.set_auto_activate_learned_calls
-            .lock()
-            .expect("lock")
-            .push(enabled);
-        Ok(RebornSkillActionResponse {
-            success: true,
-            message: format!(
-                "Default skill auto-activation {}",
-                if enabled { "enabled" } else { "disabled" }
-            ),
         })
     }
 
@@ -1813,12 +1771,13 @@ async fn send_message_rejected_busy_wire_shape() {
 }
 
 // Test-through-the-caller: the handler must forward the request body's
-// `enabled` flag to `RebornServicesApi::set_auto_activate_learned`, not a
-// hardcoded value. Posting `false` and asserting the facade recorded `false`
-// catches the arg-loss class (e.g. a handler that always passes `true`).
+// `enabled` flag through ProductSurface::invoke, not a hardcoded value.
+// Posting `false` and asserting the capability input recorded `false` catches
+// the arg-loss class (e.g. a handler that always passes `true`).
 #[tokio::test]
-async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
+async fn set_auto_activate_learned_invokes_capability_with_enabled_flag() {
     let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
 
     let response = router
@@ -1836,14 +1795,13 @@ async fn set_auto_activate_learned_forwards_enabled_flag_to_facade() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = read_json(response).await;
     assert_eq!(body["success"], true);
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        *services
-            .set_auto_activate_learned_calls
-            .lock()
-            .expect("lock"),
-        vec![false],
-        "handler must forward body.enabled=false to the facade verbatim"
+        invoke_calls[0].0.as_str(),
+        SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID
     );
+    assert_eq!(invoke_calls[0].1, serde_json::json!({ "enabled": false }));
 }
 
 // Replay-path variant: run metadata is None — wire must omit active_run_id, status,
@@ -4462,6 +4420,131 @@ async fn skill_list_and_search_use_product_views() {
 }
 
 #[tokio::test]
+async fn skill_content_and_mutations_use_product_surface() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let content_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/skills/demo-skill")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(content_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let install_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"name":"demo-skill","content":"---\nname: demo-skill\n---\n"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(install_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let update_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/skills/demo-skill")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"content":"---\nname: demo-skill\n---\n# Demo\n"}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(update_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let toggle_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/demo-skill/auto-activate")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(toggle_response.status(), StatusCode::OK);
+
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let remove_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::DELETE)
+                .uri("/api/webchat/v2/skills/demo-skill")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(remove_response.status(), StatusCode::OK);
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, SKILL_CONTENT_VIEW.id);
+    assert_eq!(
+        queries[0].params,
+        serde_json::json!({ "name": "demo-skill" })
+    );
+
+    let invoke_calls = services.invoke_calls.lock().expect("lock");
+    let calls = invoke_calls
+        .iter()
+        .map(|(capability, input, _activity_id)| (capability.as_str(), input.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls,
+        vec![
+            (
+                SKILL_INSTALL_CAPABILITY_ID,
+                serde_json::json!({
+                    "name": "demo-skill",
+                    "content": "---\nname: demo-skill\n---\n",
+                }),
+            ),
+            (
+                SKILL_UPDATE_CAPABILITY_ID,
+                serde_json::json!({
+                    "name": "demo-skill",
+                    "content": "---\nname: demo-skill\n---\n# Demo\n",
+                }),
+            ),
+            (
+                SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+                serde_json::json!({
+                    "name": "demo-skill",
+                    "enabled": false,
+                }),
+            ),
+            (
+                SKILL_REMOVE_CAPABILITY_ID,
+                serde_json::json!({ "name": "demo-skill" }),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn install_extension_decodes_body_package_ref_to_facade_call() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
@@ -5318,36 +5401,6 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: WebUiListAutomationsRequest,
         ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn install_skill(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _name: String,
-            _content: Option<String>,
-        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn read_skill_content(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _name: String,
-        ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn update_skill(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _name: String,
-            _content: String,
-        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn remove_skill(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _name: String,
-        ) -> Result<RebornSkillActionResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn install_extension(

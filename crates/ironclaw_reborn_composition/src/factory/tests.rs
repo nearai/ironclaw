@@ -23,8 +23,9 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
-    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
-    TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
+    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
@@ -2232,6 +2233,41 @@ async fn local_dev_skill_management_invokes_through_first_party_runtime() {
             .any(|skill| { skill["name"] == "runtime-sentinel" && skill["source"] == "user" })
     );
 
+    let update_output = invoke_json(
+        &services,
+        SKILL_UPDATE_CAPABILITY_ID,
+        skill_context(SKILL_UPDATE_CAPABILITY_ID),
+        serde_json::json!({
+            "name": "runtime-sentinel",
+            "content": skill_md("runtime-sentinel", "updated runtime skill", "UPDATED_SENTINEL")
+        }),
+    )
+    .await
+    .expect("skill update succeeds");
+    assert_eq!(update_output["updated"], true);
+    assert_eq!(update_output["name"], "runtime-sentinel");
+
+    let auto_activate_output = invoke_json(
+        &services,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+        skill_context(SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID),
+        serde_json::json!({
+            "name": "runtime-sentinel",
+            "enabled": false
+        }),
+    )
+    .await
+    .expect("skill auto-activate update succeeds");
+    assert_eq!(auto_activate_output["updated"], true);
+    assert_eq!(auto_activate_output["name"], "runtime-sentinel");
+    assert_eq!(auto_activate_output["auto_activate"], false);
+    let updated_skill = std::fs::read_to_string(
+        storage_root
+            .join("tenants/default/users/local-dev-test-user/skills/runtime-sentinel/SKILL.md"),
+    )
+    .expect("updated skill");
+    assert!(updated_skill.contains("auto_activate: false"));
+
     let remove_output = invoke_json(
         &services,
         SKILL_REMOVE_CAPABILITY_ID,
@@ -2373,6 +2409,8 @@ fn builtin_first_party_package_declares_skill_management_tools() {
     assert!(ids.contains(&SKILL_LIST_CAPABILITY_ID));
     assert!(!ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
     assert!(ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
+    assert!(ids.contains(&SKILL_UPDATE_CAPABILITY_ID));
+    assert!(ids.contains(&SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID));
     assert!(ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
     assert!(ids.contains(&TRIGGER_CREATE_CAPABILITY_ID));
     assert!(ids.contains(&TRIGGER_LIST_CAPABILITY_ID));
@@ -2385,6 +2423,8 @@ fn builtin_first_party_package_declares_skill_management_tools() {
     for id in [
         SKILL_LIST_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
+        SKILL_UPDATE_CAPABILITY_ID,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
         SKILL_REMOVE_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,

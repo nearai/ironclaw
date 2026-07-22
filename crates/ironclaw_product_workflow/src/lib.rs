@@ -250,13 +250,16 @@ pub use reborn_services::{
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornVendorAuthAccounts,
     RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery, RunArtifactLogs,
-    RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SettingsToolPermissionState, SkillsProductFacade,
-    StaticOperatorStatusService, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
-    TriggerRunThreadScope, UnavailableRebornViewProvider, UnsupportedAutomationProductFacade,
-    UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
-    UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
-    UpsertLlmProviderRequest, normalize_operator_log_context_value,
+    RunArtifactMessage, RunArtifactRedaction, RunArtifactToolCall,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW,
+    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, SetActiveLlmRequest, SettingsToolPermissionState,
+    SkillsProductFacade, StaticOperatorStatusService, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UnavailableRebornViewProvider,
+    UnsupportedAutomationProductFacade, UnsupportedOperatorLogsService,
+    UnsupportedOperatorServiceLifecycleService, UnsupportedOperatorStatusService,
+    UnsupportedOutboundPreferencesProductFacade, UpsertLlmProviderRequest,
+    normalize_operator_log_context_value,
 };
 
 pub use webui_inbound::{

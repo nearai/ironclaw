@@ -51,6 +51,7 @@ pub(crate) mod operator_config_capability;
 pub(crate) mod provider_instance_readiness;
 pub(crate) mod reply_contexts;
 pub(crate) mod run_delivery_ports;
+pub(crate) mod skill_auto_activate_capability;
 pub(crate) mod skill_learning;
 pub(crate) mod skill_listing;
 pub(crate) mod webui_extension_credentials;

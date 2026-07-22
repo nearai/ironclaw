@@ -89,14 +89,15 @@ use ironclaw_product_workflow::{
     RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
     RebornServiceLifecycleState, RebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewQuery, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest,
-    SkillsProductFacade, StaticOperatorStatusService, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
+    RebornViewQuery, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
+    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductFacade,
+    StaticOperatorStatusService, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
@@ -9657,6 +9658,22 @@ async fn skill_reads_are_available_as_product_views() {
         skills.search_queries.lock().expect("lock").as_slice(),
         ["registry"]
     );
+
+    let content_page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: SKILL_CONTENT_VIEW.id.to_string(),
+                params: json!({ "name": "local-skill" }),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("skill content view");
+    let content: RebornSkillContentResponse =
+        serde_json::from_value(content_page.payload).expect("skill content payload");
+    assert_eq!(content.name, "local-skill");
+    assert_eq!(content.content, "# local-skill\n");
 }
 
 fn skill_info(name: &str) -> RebornSkillInfo {
@@ -9709,6 +9726,17 @@ impl SkillsProductFacade for RecordingSkillsFacade {
             installed: vec![skill_info("local-skill")],
             registry_url: "https://skills.example.test".to_string(),
             catalog_error: None,
+        })
+    }
+
+    async fn read_skill_content(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        name: String,
+    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
+        Ok(RebornSkillContentResponse {
+            content: format!("# {name}\n"),
+            name,
         })
     }
 }

@@ -22,9 +22,9 @@ mod tests {
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
         HTTP_SAVE_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-        READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
-        SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID,
-        WRITE_FILE_CAPABILITY_ID,
+        READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+        SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+        SKILL_UPDATE_CAPABILITY_ID, SPAWN_SUBAGENT_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
     };
     use ironclaw_loop_host::{
         CapabilityWriteResult, DurablePersistence, HostManagedModelError,
@@ -1971,6 +1971,8 @@ mod tests {
         // wrap_synthetic_capabilities, not a policy capability.
         assert!(!capability_ids.contains(&SKILL_ACTIVATE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_INSTALL_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_UPDATE_CAPABILITY_ID));
+        assert!(capability_ids.contains(&SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID));
         assert!(capability_ids.contains(&SKILL_REMOVE_CAPABILITY_ID));
         assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
         assert!(capability_ids.contains(&HTTP_CAPABILITY_ID));
@@ -2188,6 +2190,36 @@ mod tests {
         assert_eq!(
             skill_install_grant.constraints.network,
             local_dev_shell_network_policy
+        );
+
+        let skill_update_grant = grant_for(SKILL_UPDATE_CAPABILITY_ID);
+        assert_eq!(
+            skill_update_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ]
+        );
+        assert_eq!(skill_update_grant.constraints.mounts, skill_mounts);
+        assert_eq!(
+            skill_update_grant.constraints.network,
+            NetworkPolicy::default()
+        );
+
+        let skill_auto_activate_grant = grant_for(SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID);
+        assert_eq!(
+            skill_auto_activate_grant.constraints.allowed_effects,
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ]
+        );
+        assert_eq!(skill_auto_activate_grant.constraints.mounts, skill_mounts);
+        assert_eq!(
+            skill_auto_activate_grant.constraints.network,
+            NetworkPolicy::default()
         );
 
         let skill_remove_grant = grant_for(SKILL_REMOVE_CAPABILITY_ID);

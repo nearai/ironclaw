@@ -209,12 +209,22 @@ const TOOL_CONFIG_PREFIX: &str = "tool.";
 pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
     "builtin.operator_config_set_auto_approve";
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
+pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
+pub const SKILL_UPDATE_CAPABILITY_ID: &str = "builtin.skill_update";
+pub const SKILL_REMOVE_CAPABILITY_ID: &str = "builtin.skill_remove";
+pub const SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID: &str = "builtin.skill_auto_activate_set";
+pub const SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID: &str =
+    "builtin.skill_auto_activate_learned_set";
 pub const SKILLS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "skills",
     paginated: false,
 };
 pub const SKILL_SEARCH_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     id: "skill_search",
+    paginated: false,
+};
+pub const SKILL_CONTENT_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "skill_content",
     paginated: false,
 };
 
@@ -2264,59 +2274,6 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    async fn install_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
-
-    async fn read_skill_content(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError>;
-
-    async fn update_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
-
-    async fn remove_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError>;
-
-    /// Toggle a skill's automatic activation (see
-    /// [`SkillsProductFacade::set_skill_auto_activate`]). Defaults to
-    /// unavailable so impls that do not surface skill management inherit a
-    /// fail-closed response.
-    async fn set_skill_auto_activate(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, name, enabled);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Toggle the global default criteria-based skill auto-activation master
-    /// switch (see [`SkillsProductFacade::set_auto_activate_learned`]).
-    /// Defaults to unavailable so impls that do not surface skill management
-    /// inherit a fail-closed response.
-    async fn set_auto_activate_learned(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        let _ = (caller, enabled);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     async fn install_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4003,6 +3960,11 @@ where
                     .await?;
                 views::view_page(response)
             }
+            id if id == SKILL_CONTENT_VIEW.id => {
+                let name = views::required_string_view_param(query.params, "name")?;
+                let response = self.skills_facade.read_skill_content(caller, name).await?;
+                views::view_page(response)
+            }
             id if id == OPERATOR_DIAGNOSTICS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_operator_diagnostics_view(caller).await?;
@@ -4779,63 +4741,6 @@ where
         self.automation_facade
             .delete_automation(caller, automation_id)
             .await
-    }
-
-    async fn install_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: Option<String>,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.skills_facade
-            .install_skill(caller, name, content)
-            .await
-    }
-
-    async fn read_skill_content(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillContentResponse, RebornServicesError> {
-        self.skills_facade.read_skill_content(caller, name).await
-    }
-
-    async fn update_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        content: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.skills_facade.update_skill(caller, name, content).await
-    }
-
-    async fn set_skill_auto_activate(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.skills_facade
-            .set_skill_auto_activate(caller, name, enabled)
-            .await
-    }
-
-    async fn set_auto_activate_learned(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        enabled: bool,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.skills_facade
-            .set_auto_activate_learned(caller, enabled)
-            .await
-    }
-
-    async fn remove_skill(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        name: String,
-    ) -> Result<RebornSkillActionResponse, RebornServicesError> {
-        self.skills_facade.remove_skill(caller, name).await
     }
 
     async fn install_extension(

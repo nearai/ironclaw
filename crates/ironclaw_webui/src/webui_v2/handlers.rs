@@ -63,14 +63,16 @@ use ironclaw_product_workflow::{
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewQuery, SKILL_SEARCH_VIEW,
-    SKILLS_VIEW, SetActiveLlmRequest, SettingsToolPermissionState, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    webui_attachment_capabilities,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewQuery,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW,
+    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, SetActiveLlmRequest, SettingsToolPermissionState,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, UpsertLlmProviderRequest,
+    WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1675,11 +1677,23 @@ pub async fn install_skill(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<InstallSkillBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .install_skill(caller, body.name, body.content)
-        .await?;
-    Ok(Json(response))
+    let name = body.name;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        SKILL_INSTALL_CAPABILITY_ID,
+        serde_json::json!({
+            "name": name.clone(),
+            "content": body.content,
+        }),
+        ActivityId::new(),
+    )
+    .await?;
+    skill_mutation_succeeded(resolution)?;
+    Ok(Json(RebornSkillActionResponse {
+        success: true,
+        message: format!("Skill '{name}' installed"),
+    }))
 }
 
 /// `GET /api/webchat/v2/skills/{name}`
@@ -1688,7 +1702,19 @@ pub async fn get_skill_content(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SkillPath { name }): Path<SkillPath>,
 ) -> Result<Json<RebornSkillContentResponse>, WebUiV2HttpError> {
-    let response = state.services().read_skill_content(caller, name).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: SKILL_CONTENT_VIEW.id.to_string(),
+                params: serde_json::json!({ "name": name }),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1699,11 +1725,22 @@ pub async fn update_skill(
     Path(SkillPath { name }): Path<SkillPath>,
     Json(body): Json<UpdateSkillBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .update_skill(caller, name, body.content)
-        .await?;
-    Ok(Json(response))
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        SKILL_UPDATE_CAPABILITY_ID,
+        serde_json::json!({
+            "name": name.clone(),
+            "content": body.content,
+        }),
+        ActivityId::new(),
+    )
+    .await?;
+    skill_mutation_succeeded(resolution)?;
+    Ok(Json(RebornSkillActionResponse {
+        success: true,
+        message: format!("Skill '{name}' updated"),
+    }))
 }
 
 /// `DELETE /api/webchat/v2/skills/{name}`
@@ -1712,8 +1749,19 @@ pub async fn remove_skill(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SkillPath { name }): Path<SkillPath>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state.services().remove_skill(caller, name).await?;
-    Ok(Json(response))
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        SKILL_REMOVE_CAPABILITY_ID,
+        serde_json::json!({ "name": name.clone() }),
+        ActivityId::new(),
+    )
+    .await?;
+    skill_mutation_succeeded(resolution)?;
+    Ok(Json(RebornSkillActionResponse {
+        success: true,
+        message: format!("Skill '{name}' removed"),
+    }))
 }
 
 /// `POST /api/webchat/v2/skills/{name}/auto-activate`
@@ -1723,11 +1771,27 @@ pub async fn set_skill_auto_activate(
     Path(SkillPath { name }): Path<SkillPath>,
     Json(body): Json<SetSkillAutoActivateBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .set_skill_auto_activate(caller, name, body.enabled)
-        .await?;
-    Ok(Json(response))
+    let enabled = body.enabled;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+        serde_json::json!({
+            "name": name.clone(),
+            "enabled": enabled,
+        }),
+        ActivityId::new(),
+    )
+    .await?;
+    skill_mutation_succeeded(resolution)?;
+    Ok(Json(RebornSkillActionResponse {
+        success: true,
+        message: format!(
+            "Skill '{}' auto-activation {}",
+            name,
+            if enabled { "enabled" } else { "disabled" }
+        ),
+    }))
 }
 
 /// `POST /api/webchat/v2/skills/auto-activate-learned`
@@ -1736,11 +1800,74 @@ pub async fn set_auto_activate_learned(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<SetSkillAutoActivateBody>,
 ) -> Result<Json<RebornSkillActionResponse>, WebUiV2HttpError> {
-    let response = state
-        .services()
-        .set_auto_activate_learned(caller, body.enabled)
-        .await?;
-    Ok(Json(response))
+    let enabled = body.enabled;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller,
+        SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+        serde_json::json!({ "enabled": enabled }),
+        ActivityId::new(),
+    )
+    .await?;
+    skill_mutation_succeeded(resolution)?;
+    Ok(Json(RebornSkillActionResponse {
+        success: true,
+        message: format!(
+            "Default skill auto-activation {}",
+            if enabled { "enabled" } else { "disabled" }
+        ),
+    }))
+}
+
+fn skill_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
+                Err(RebornServicesError {
+                    code: RebornServicesErrorCode::InvalidRequest,
+                    kind: RebornServicesErrorKind::Validation,
+                    status_code: 400,
+                    retryable: false,
+                    field: None,
+                    validation_code: Some(WebUiInboundValidationCode::InvalidValue),
+                })
+            }
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(skill_mutation_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(skill_mutation_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "skill capability did not complete successfully",
+            )),
+        },
+        Resolution::Denied(_) => Err(skill_mutation_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => Err(skill_mutation_unavailable(true)),
+    }
+}
+
+fn skill_mutation_forbidden() -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
+        status_code: 403,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    }
+}
+
+fn skill_mutation_unavailable(retryable: bool) -> RebornServicesError {
+    RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
+        status_code: 503,
+        retryable,
+        field: None,
+        validation_code: None,
+    }
 }
 
 /// `GET /api/webchat/v2/extensions/registry`

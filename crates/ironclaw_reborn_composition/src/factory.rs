@@ -38,6 +38,10 @@ use crate::extension_host::{
     provider_instance_readiness::{
         ProviderInstanceReadinessInput, provider_instance_readiness_map,
     },
+    skill_auto_activate_capability::{
+        extend_builtin_first_party_package as extend_builtin_skill_auto_activate_package,
+        insert_handler as insert_skill_auto_activate_handler,
+    },
 };
 use crate::input::{RebornLocalRuntimeIdentity, RebornRuntimeProcessBinding, RebornStorageInput};
 use crate::local_dev_authorization::{StoreApprovalSettingsProvider, local_dev_authorizer};
@@ -2418,6 +2422,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!("outbound preferences handler is invalid: {error}"),
         })?;
+    insert_skill_auto_activate_handler(
+        &mut first_party_registry,
+        Arc::clone(&store_graph.local_runtime.skill_auto_activate_learned),
+    )
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("skill auto-activation handler is invalid: {error}"),
+    })?;
     services = services.with_first_party_capabilities(Arc::new(first_party_registry));
 
     // Generic extension host (extension-runtime P2): loaders over the fully
@@ -4518,6 +4529,11 @@ fn local_dev_builtin_extension_registry() -> Result<ExtensionRegistry, RebornBui
             reason: format!("local-dev outbound preferences package is invalid: {error}"),
         }
     })?;
+    let package = extend_builtin_skill_auto_activate_package(package).map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("local-dev skill auto-activation package is invalid: {error}"),
+        }
+    })?;
     registry
         .insert(package)
         .map_err(|error| RebornBuildError::InvalidConfig {
@@ -5233,7 +5249,7 @@ where
     .await
 }
 
-fn production_skill_management_mount_view(
+pub(crate) fn production_skill_management_mount_view(
     scope: &ResourceScope,
 ) -> Result<MountView, HostApiError> {
     MountView::new(vec![

@@ -65,7 +65,11 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   above them is frozen.
 - **r9** 2026-07-22 — status-only update for the ProductSurface facade collapse:
   descriptor-backed reads are underway and the outbound preference mutation now
-  follows the API-only first-party capability + query read-back approach.
+  follows the API-only first-party capability + query read-back approach. Skill
+  management now follows the same split: content reads are a view, document
+  install/update/remove and per-skill auto-activation are first-party capability
+  invocations, and the learned auto-activation master toggle is an API-only
+  product capability.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -2353,15 +2357,21 @@ loop-facing capability result and every result mirror is deleted.
   landed (§10 ratchet, above), so the surface can only shrink. Initial reads now
   flow through view descriptors (`query`) rather than per-feature methods:
   LLM config, operator status/diagnostics/setup/config validation, extension
-  inventory/registry, skill list/search, outbound preferences/targets, trace
-  credits/account traces, and run artifacts. The
-  outbound preference write now flows through
-  `builtin.outbound_preferences_set`, an API-only first-party capability invoked
-  directly by the WebUI product adapter and verified by reading back
-  `OUTBOUND_PREFERENCES_VIEW`; the legacy `RebornServicesApi` setter was
-  removed from the ratchet allowlist. This is the migration pattern for product
-  mutations: authenticated product gesture -> `ProductSurface::invoke` ->
-  descriptor-declared first-party handler -> authoritative `query` read-back.
+  inventory/registry, skill list/search/content, outbound preferences/targets,
+  trace credits/account traces, and run artifacts. Outbound preference writes
+  now flow through `builtin.outbound_preferences_set`, an API-only first-party
+  capability invoked directly by the WebUI product adapter and verified by
+  reading back `OUTBOUND_PREFERENCES_VIEW`; skill document writes now flow
+  through `builtin.skill_install`, `builtin.skill_update`,
+  `builtin.skill_auto_activate_set`, and `builtin.skill_remove`, with the
+  ProductSurface invoker carrying the scoped skill-management mounts and the
+  install capability's declared network policy. The learned auto-activation
+  master switch uses `builtin.skill_auto_activate_learned_set`, an API-only
+  product capability over the runtime selector flag. The migrated legacy
+  `RebornServicesApi` methods were removed from the ratchet allowlist. This is
+  the migration pattern for product mutations: authenticated product gesture ->
+  `ProductSurface::invoke` -> descriptor-declared first-party handler ->
+  authoritative `query` read-back where an authoritative read model exists.
   Remaining facade methods still need migration or explicit turn-lifecycle
   classification before the trait can collapse to the §5.2 end state.
 
