@@ -408,7 +408,7 @@ fn lifecycle_error(error: ProductWorkflowError) -> FirstPartyCapabilityError {
             FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode)
         }
         ProductWorkflowError::Transient { .. } => {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed)
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Backend)
         }
         _ => FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OperationFailed),
     }
@@ -1762,6 +1762,18 @@ mod tests {
             panic!("expected a Diagnostic detail, got {detail:?}");
         };
         assert!(text.contains("mounted host"));
+    }
+
+    #[test]
+    fn transient_lifecycle_errors_map_to_retryable_backend_failure() {
+        let mapped = lifecycle_error(ProductWorkflowError::Transient {
+            reason: "temporary lifecycle store outage".to_string(),
+        });
+
+        let FirstPartyCapabilityError::Dispatch { kind, .. } = mapped else {
+            panic!("expected a Dispatch failure, got {mapped:?}");
+        };
+        assert_eq!(kind, RuntimeDispatchErrorKind::Backend);
     }
 
     /// The provenance regression itself, at the unit seam: a reason carrying
