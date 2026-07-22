@@ -41,6 +41,7 @@ pub enum ResumeTurnPrecondition {
     BlockedResourceGate,
     BlockedDependentRunGate,
     BlockedExternalToolGate,
+    BlockedAttestedGate,
 }
 
 impl ResumeTurnPrecondition {
@@ -58,6 +59,7 @@ impl ResumeTurnPrecondition {
             Self::BlockedResourceGate => Some(GateKind::Resource),
             Self::BlockedDependentRunGate => Some(GateKind::AwaitDependentRun),
             Self::BlockedExternalToolGate => Some(GateKind::ExternalTool),
+            Self::BlockedAttestedGate => Some(GateKind::Attested),
         }
     }
 
@@ -127,6 +129,12 @@ pub struct ResumeTurnRequest {
     pub idempotency_key: IdempotencyKey,
     #[serde(default, skip_serializing_if = "ResumeTurnPrecondition::is_default")]
     pub precondition: ResumeTurnPrecondition,
+    /// Opaque, untrusted attestation claim carried on a `BlockedAttested`
+    /// resume. Verified crypto-side by the injected `AttestedResumePort`; this
+    /// crate never interprets it. Serde-additive; `None` for every standard
+    /// gate resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<crate::AttestationClaimRef>,
     #[serde(
         rename = "auth_resume_disposition",
         default,
@@ -183,6 +191,7 @@ mod tests {
                 .expect("valid reply target ref"),
             idempotency_key: IdempotencyKey::new("idempotency-key").expect("valid idempotency key"),
             precondition: ResumeTurnPrecondition::default(),
+            attestation: None,
             resume_disposition: disposition,
         }
     }

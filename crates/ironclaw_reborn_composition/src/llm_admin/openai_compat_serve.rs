@@ -1411,6 +1411,7 @@ impl OpenAiCompatExternalToolResume for OpenAiCompatRuntimeExternalToolResume {
         let idempotency_key = openai_compat_external_tool_resume_idempotency_key(&gate_ref)?;
         self.coordinator
             .resume_turn(ResumeTurnRequest {
+                attestation: None,
                 scope: state.scope.clone(),
                 actor,
                 run_id,

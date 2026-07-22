@@ -23,6 +23,17 @@ pub enum TurnStatus {
     /// parked, control returns to the API client, and the client resumes the run
     /// by submitting the tool output. Non-terminal; keeps the active lock.
     BlockedExternalTool,
+    /// Blocked awaiting an attested-signing ceremony. Resume validates the
+    /// untrusted attestation claim through the injected `AttestedResumePort`
+    /// and, on success, transitions to [`Self::AttestedResolved`] — never back
+    /// onto the normal agent-loop queue.
+    BlockedAttested,
+    /// An attested-signing gate has been validated and the run is handed off to
+    /// a straight-line signer continuation in the reborn/runner layer. This is
+    /// the deterministic transition for a resolved attested gate: this
+    /// crypto-free crate sets the status only, and never invokes a signer or
+    /// performs chain I/O itself.
+    AttestedResolved,
     CancelRequested,
     Cancelled,
     Completed,
@@ -172,6 +183,14 @@ pub enum BlockedReason {
     ExternalTool {
         gate_ref: GateRef,
     },
+    /// Attested-signing ceremony. Carries only the OPAQUE approved-tx-hash ref:
+    /// this crate stays crypto-free, so the binding itself lives in the
+    /// attestation layer and is never interpreted here.
+    Attested {
+        gate_ref: GateRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_tx_hash: Option<crate::ApprovedTxHashRef>,
+    },
 }
 
 /// The canonical kind of gate a run can park on. One value per blocked
@@ -188,6 +207,10 @@ pub enum GateKind {
     Resource,
     AwaitDependentRun,
     ExternalTool,
+    /// Attested-signing ceremony (external wallet / hardware device or
+    /// custodial+WebAuthn). Resolution is verified crypto-side outside this
+    /// crate; the store only validates and transitions.
+    Attested,
 }
 
 impl GateKind {
@@ -200,6 +223,7 @@ impl GateKind {
             Self::Resource => TurnStatus::BlockedResource,
             Self::AwaitDependentRun => TurnStatus::BlockedDependentRun,
             Self::ExternalTool => TurnStatus::BlockedExternalTool,
+            Self::Attested => TurnStatus::BlockedAttested,
         }
     }
 
@@ -213,7 +237,10 @@ impl GateKind {
             TurnStatus::BlockedResource => Some(Self::Resource),
             TurnStatus::BlockedDependentRun => Some(Self::AwaitDependentRun),
             TurnStatus::BlockedExternalTool => Some(Self::ExternalTool),
-            TurnStatus::Queued
+            TurnStatus::BlockedAttested => Some(Self::Attested),
+            // `AttestedResolved` is a post-gate handoff state, not a park.
+            TurnStatus::AttestedResolved
+            | TurnStatus::Queued
             | TurnStatus::Running
             | TurnStatus::CancelRequested
             | TurnStatus::Cancelled
@@ -239,6 +266,10 @@ impl GateKind {
             Self::Resource => BlockedReason::Resource { gate_ref },
             Self::AwaitDependentRun => BlockedReason::AwaitDependentRun { gate_ref },
             Self::ExternalTool => BlockedReason::ExternalTool { gate_ref },
+            Self::Attested => BlockedReason::Attested {
+                gate_ref,
+                expected_tx_hash: None,
+            },
         }
     }
 }
@@ -252,11 +283,21 @@ impl BlockedReason {
             Self::Resource { .. } => GateKind::Resource,
             Self::AwaitDependentRun { .. } => GateKind::AwaitDependentRun,
             Self::ExternalTool { .. } => GateKind::ExternalTool,
+            Self::Attested { .. } => GateKind::Attested,
         }
     }
 
     pub fn status(&self) -> TurnStatus {
         self.gate_kind().blocked_status()
+    }
+
+    /// The opaque approved-tx-hash binding, present only for the attested gate.
+    /// `None` for every standard gate kind.
+    pub fn expected_tx_hash(&self) -> Option<&crate::ApprovedTxHashRef> {
+        match self {
+            Self::Attested { expected_tx_hash, .. } => expected_tx_hash.as_ref(),
+            _ => None,
+        }
     }
 
     pub fn gate_ref(&self) -> &GateRef {
@@ -265,7 +306,8 @@ impl BlockedReason {
             | Self::Auth { gate_ref, .. }
             | Self::Resource { gate_ref }
             | Self::AwaitDependentRun { gate_ref }
-            | Self::ExternalTool { gate_ref } => gate_ref,
+            | Self::ExternalTool { gate_ref }
+            | Self::Attested { gate_ref, .. } => gate_ref,
         }
     }
 

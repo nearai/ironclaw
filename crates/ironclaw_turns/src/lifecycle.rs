@@ -480,12 +480,17 @@ fn event_kind_for_state(state: &TurnRunState) -> TurnEventKind {
         | TurnStatus::BlockedAuth
         | TurnStatus::BlockedResource
         | TurnStatus::BlockedDependentRun
-        | TurnStatus::BlockedExternalTool => TurnEventKind::Blocked,
+        | TurnStatus::BlockedExternalTool
+        | TurnStatus::BlockedAttested => TurnEventKind::Blocked,
         TurnStatus::Completed => TurnEventKind::Completed,
         TurnStatus::Cancelled => TurnEventKind::Cancelled,
         TurnStatus::Failed => TurnEventKind::Failed,
         TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
-        TurnStatus::Queued | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
+        // Resolved attested gate: the signer continuation runs in the reborn
+        // layer; from the turns view this is a non-terminal handoff.
+        TurnStatus::AttestedResolved
+        | TurnStatus::Queued
+        | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
     }
 }
 

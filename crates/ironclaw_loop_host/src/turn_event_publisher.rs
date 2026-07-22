@@ -79,12 +79,17 @@ impl EventPublishingTurnRunTransitionPort {
             | TurnStatus::BlockedAuth
             | TurnStatus::BlockedResource
             | TurnStatus::BlockedDependentRun
-            | TurnStatus::BlockedExternalTool => TurnEventKind::Blocked,
+            | TurnStatus::BlockedExternalTool
+            | TurnStatus::BlockedAttested => TurnEventKind::Blocked,
             TurnStatus::Completed => TurnEventKind::Completed,
             TurnStatus::Cancelled => TurnEventKind::Cancelled,
             TurnStatus::Failed => TurnEventKind::Failed,
             TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
-            TurnStatus::Queued | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
+            // Resolved attested gate: signer continuation runs in the reborn
+            // layer; a non-terminal handoff from the turn-event view.
+            TurnStatus::AttestedResolved
+            | TurnStatus::Queued
+            | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
         }
     }
 

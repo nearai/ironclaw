@@ -1161,6 +1161,7 @@ fn subagent_definition(allow_nesting: bool) -> SubagentDefinition {
 fn turn_record(run_context: &LoopRunContext, subagent_depth: u32) -> TurnRunRecord {
     let lineage_root = (subagent_depth > 0).then(TurnRunId::new);
     TurnRunRecord {
+        expected_tx_hash: None,
         run_id: run_context.run_id,
         turn_id: run_context.turn_id,
         scope: run_context.scope.clone(),

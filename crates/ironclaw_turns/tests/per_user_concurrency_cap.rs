@@ -272,6 +272,7 @@ async fn running_counter_decrements_on_block_and_resets_on_resume() {
     // Resume re-queues the run.
     store
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: scope.clone(),
             actor: actor_for(&user_u()),
             run_id,

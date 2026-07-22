@@ -3080,6 +3080,7 @@ async fn turn_runner_blocks_on_approval_then_coordinator_resume_completes_same_r
     let coordinator = DefaultTurnCoordinator::new(turn_store.clone());
     let resume = coordinator
         .resume_turn(ResumeTurnRequest {
+            attestation: None,
             scope: fixture.context.scope.clone(),
             actor: TurnActor::new(UserId::new("user-text-host").unwrap()),
             run_id,

@@ -672,6 +672,7 @@ where
                 .unwrap_or_else(|| gate_ref("resume-fallback"));
             store
                 .resume_turn(ResumeTurnRequest {
+            attestation: None,
                     scope: scope_list[h.scope_idx].clone(),
                     actor: turn_actor(),
                     run_id: h.run_id,

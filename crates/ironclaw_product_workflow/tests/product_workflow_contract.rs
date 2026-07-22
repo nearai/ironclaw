@@ -264,6 +264,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 ApprovalInteractionDecision::ApproveOnce
                 | ApprovalInteractionDecision::AlwaysAllow => {
                     ResolveApprovalInteractionResponse::Approved(ResumeTurnResponse {
+                        replayed: false,
                         run_id,
                         status: TurnStatus::Queued,
                         event_cursor: EventCursor(21),
@@ -271,6 +272,7 @@ impl ApprovalInteractionService for RecordingApprovalInteractionService {
                 }
                 ApprovalInteractionDecision::Deny => {
                     ResolveApprovalInteractionResponse::Resumed(ResumeTurnResponse {
+                        replayed: false,
                         run_id,
                         status: TurnStatus::Queued,
                         event_cursor: EventCursor(22),
@@ -358,6 +360,7 @@ impl ApprovalInteractionService for ScopedPendingApprovalInteractionService {
         };
         Ok(ResolveApprovalInteractionResponse::Approved(
             ResumeTurnResponse {
+                replayed: false,
                 run_id,
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(21),
@@ -419,6 +422,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
             AuthInteractionDecision::CredentialProvided { .. }
             | AuthInteractionDecision::CallbackCompleted { .. } => {
                 ResolveAuthInteractionResponse::Resumed(ResumeTurnResponse {
+                    replayed: false,
                     run_id,
                     status: TurnStatus::Queued,
                     event_cursor: EventCursor(31),
@@ -472,6 +476,7 @@ impl ApprovalInteractionService for MissingGateThenRecordingApprovalService {
         };
         Ok(ResolveApprovalInteractionResponse::Approved(
             ResumeTurnResponse {
+                replayed: false,
                 run_id,
                 status: TurnStatus::Queued,
                 event_cursor: EventCursor(41),
@@ -527,6 +532,7 @@ impl AuthInteractionService for MissingAuthThenRecordingAuthService {
             AuthInteractionDecision::CredentialProvided { .. }
             | AuthInteractionDecision::CallbackCompleted { .. } => {
                 ResolveAuthInteractionResponse::Resumed(ResumeTurnResponse {
+                    replayed: false,
                     run_id,
                     status: TurnStatus::Queued,
                     event_cursor: EventCursor(43),

@@ -54,6 +54,7 @@ impl Inner {
                     reply_target_binding_ref: run.reply_target_binding_ref,
                     checkpoint_id: run.checkpoint_id,
                     gate_ref: run.gate_ref,
+                    expected_tx_hash: run.expected_tx_hash,
                     blocked_activity_id: run.blocked_activity_id,
                     credential_requirements: run.credential_requirements,
                     failure: run.failure,

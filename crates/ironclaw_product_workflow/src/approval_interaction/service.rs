@@ -235,6 +235,7 @@ impl DefaultApprovalInteractionService {
         let response = match self
             .turn_coordinator
             .resume_turn(ResumeTurnRequest {
+                attestation: None,
                 scope: request.scope,
                 actor: request.actor,
                 run_id,
@@ -375,6 +376,7 @@ impl DefaultApprovalInteractionService {
         let response = self
             .turn_coordinator
             .resume_turn(ResumeTurnRequest {
+                attestation: None,
                 scope: request.scope,
                 actor: request.actor,
                 run_id,
@@ -398,6 +400,7 @@ impl DefaultApprovalInteractionService {
         let response = self
             .turn_coordinator
             .resume_turn(ResumeTurnRequest {
+                attestation: None,
                 scope: request.scope,
                 actor: request.actor,
                 run_id,

@@ -453,6 +453,8 @@ async fn blocked_prompt_payload(
         // Responses surface reads them via its own projection path. No generic
         // gate-prompt payload here.
         | TurnStatus::BlockedExternalTool
+        | TurnStatus::BlockedAttested
+        | TurnStatus::AttestedResolved
         | TurnStatus::RecoveryRequired
         | TurnStatus::CancelRequested
         | TurnStatus::Completed
@@ -811,6 +813,9 @@ fn product_gate_kind(kind: TurnBlockedGateKind) -> ProductGateKind {
         TurnBlockedGateKind::Resource => ProductGateKind::Resource,
         TurnBlockedGateKind::AwaitDependentRun => ProductGateKind::Generic,
         TurnBlockedGateKind::ExternalTool => ProductGateKind::Generic,
+        // Generic until the attested gate family lands with the webui ingress
+        // work; deliberately NOT a parallel projection pipeline.
+        TurnBlockedGateKind::Attested => ProductGateKind::Generic,
     }
 }
 
@@ -821,6 +826,7 @@ fn gate_projection_headline(kind: TurnBlockedGateKind) -> &'static str {
         TurnBlockedGateKind::Resource => "Resource unavailable",
         TurnBlockedGateKind::AwaitDependentRun => "Waiting for dependent run",
         TurnBlockedGateKind::ExternalTool => "External tool call pending",
+        TurnBlockedGateKind::Attested => "Signature required",
     }
 }
 
@@ -831,6 +837,9 @@ fn gate_projection_body(kind: TurnBlockedGateKind) -> &'static str {
         TurnBlockedGateKind::Resource => "Resolve this resource gate to continue the run.",
         TurnBlockedGateKind::AwaitDependentRun => "Waiting for a dependent run to finish.",
         TurnBlockedGateKind::ExternalTool => "Submit the external tool output to continue the run.",
+        TurnBlockedGateKind::Attested => {
+            "Review and sign this transaction on your device to continue the run."
+        }
     }
 }
 
@@ -1045,6 +1054,8 @@ pub(super) fn turn_status_wire(status: TurnStatus) -> &'static str {
         TurnStatus::BlockedResource => "blocked_resource",
         TurnStatus::BlockedDependentRun => "blocked_dependent_run",
         TurnStatus::BlockedExternalTool => "blocked_external_tool",
+        TurnStatus::BlockedAttested => "blocked_attested",
+        TurnStatus::AttestedResolved => "attested_resolved",
         TurnStatus::RecoveryRequired => "recovery_required",
         TurnStatus::CancelRequested => "cancel_requested",
         TurnStatus::Completed => "completed",

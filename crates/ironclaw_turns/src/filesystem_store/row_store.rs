@@ -1,6 +1,6 @@
 use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
+    collections::{HashMap, HashSet, VecDeque},
+    sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
 
@@ -96,6 +96,40 @@ impl RowCollection {
 /// Transitions still delegate to [`TurnStateEngine`]; only the durable
 /// representation changes from whole-snapshot CAS to a typed append log plus a
 /// process-local hot snapshot cache.
+/// RAII reservation of an attested-resume idempotency key.
+///
+/// Releases on drop, so an early return, an error path, or a panic between
+/// reservation and commit cannot leave the key permanently reserved — a leaked
+/// reservation would wedge that resume forever, which is strictly worse than
+/// the duplicate verification it exists to prevent.
+struct AttestedInFlightGuard {
+    set: Arc<StdMutex<HashSet<String>>>,
+    key: String,
+}
+
+impl AttestedInFlightGuard {
+    /// Reserve `key`, or return `None` if another caller already holds it.
+    fn try_acquire(set: &Arc<StdMutex<HashSet<String>>>, key: String) -> Option<Self> {
+        let mut guard = set.lock().ok()?;
+        if !guard.insert(key.clone()) {
+            return None;
+        }
+        drop(guard);
+        Some(Self {
+            set: Arc::clone(set),
+            key,
+        })
+    }
+}
+
+impl Drop for AttestedInFlightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.set.lock() {
+            guard.remove(&self.key);
+        }
+    }
+}
+
 pub struct FilesystemTurnStateRowStore<F>
 where
     F: RootFilesystem,
@@ -103,6 +137,23 @@ where
     filesystem: Arc<ScopedFilesystem<F>>,
     limits: TurnStateStoreLimits,
     admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
+    /// Injected crypto-free verifier for `BlockedAttested` resumes. `None`
+    /// (the default) means no attested gate can be resolved — resume fails
+    /// closed. The real port is wired by the reborn composition layer; this
+    /// crate never performs the crypto itself.
+    // arch-exempt: optional_arc, genuinely optional — only the attested-signing
+    // product path injects it; every other build resumes standard gates without.
+    attested_resume_port: Option<Arc<dyn crate::AttestedResumePort>>,
+    /// Idempotency keys with an attested verification currently in flight.
+    ///
+    /// The attested resume path deliberately runs the external verifier with no
+    /// lock held, which leaves a window where two callers racing on the SAME
+    /// idempotency key could both reach the port. Only one can win the commit
+    /// (it re-validates under the lock) and the one-shot signer continuation is
+    /// separately guarded, so the unsafe outcome was already impossible — but
+    /// the duplicate verification work and duplicate audit entry were not.
+    /// Reserving the key across that window collapses the race.
+    attested_in_flight: Arc<StdMutex<HashSet<String>>>,
     snapshot_state: AsyncMutex<Option<RowSnapshotState>>,
     legacy_migration_gate: Arc<AsyncMutex<()>>,
     materialize_gate: Arc<AsyncMutex<()>>,
@@ -158,6 +209,8 @@ where
             filesystem: Arc::clone(&filesystem),
             limits: TurnStateStoreLimits::default(),
             admission_limit_provider: Arc::new(AllowAllTurnAdmissionLimitProvider),
+            attested_resume_port: None,
+            attested_in_flight: Arc::new(StdMutex::new(HashSet::new())),
             snapshot_state: AsyncMutex::new(None),
             legacy_migration_gate: Arc::new(AsyncMutex::new(())),
             materialize_gate: Arc::clone(&materialize_gate),
@@ -179,6 +232,16 @@ where
         admission_limit_provider: Arc<dyn TurnAdmissionLimitProvider>,
     ) -> Self {
         self.admission_limit_provider = admission_limit_provider;
+        self
+    }
+
+    /// Inject the verifier used to validate `BlockedAttested` resumes. Without
+    /// it, attested resumes fail closed with [`TurnError::Unavailable`].
+    pub fn with_attested_resume_port(
+        mut self,
+        port: Arc<dyn crate::AttestedResumePort>,
+    ) -> Self {
+        self.attested_resume_port = Some(port);
         self
     }
 

@@ -516,6 +516,7 @@ fn turn_persistence_snapshot_legacy_run_defaults_resume_disposition_to_none() {
     // confirm the key is absent (proving the legacy simulation is correct) then
     // deserialize the full snapshot.
     let record = TurnRunRecord {
+        expected_tx_hash: None,
         run_id,
         turn_id,
         scope: scope.clone(),
@@ -655,6 +656,7 @@ fn turn_persistence_snapshot_legacy_run_preserves_denied_resume_disposition() {
     // serialized form (skip_serializing_if = "Option::is_none"), then inject
     // the legacy wire key before deserializing.
     let record = TurnRunRecord {
+        expected_tx_hash: None,
         run_id,
         turn_id,
         scope: scope.clone(),
