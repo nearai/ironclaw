@@ -69,7 +69,10 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   management now follows the same split: content reads are a view, document
   install/update/remove and per-skill auto-activation are first-party capability
   invocations, and the learned auto-activation master toggle is an API-only
-  product capability.
+  product capability. Extension install/remove/activate now use lifecycle
+  capability invocations from the WebUI ProductSurface path; activation keeps a
+  query read-back for active state and maps auth-blocked outcomes onto the
+  existing extension onboarding response shape.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -2369,10 +2372,12 @@ loop-facing capability result and every result mirror is deleted.
   master switch uses `builtin.skill_auto_activate_learned_set`, an API-only
   product capability over the runtime selector flag. Extension install/remove
   routes now invoke `builtin.extension_install` and `builtin.extension_remove`
-  directly from the WebUI ProductSurface path; activate/import/setup remain as
-  explicit follow-ups because activation needs gate/onboarding-preserving result
-  mapping and import/setup need upload/setup-specific API capability shapes. The
-  migrated legacy `RebornServicesApi` methods were removed from the ratchet allowlist. This is
+  directly from the WebUI ProductSurface path; activation now invokes
+  `builtin.extension_activate`, reads back `EXTENSIONS_VIEW` for active state
+  after success, and maps auth-blocked outcomes onto the existing extension
+  onboarding response shape. Import/setup remain explicit follow-ups because
+  they need upload/setup-specific API capability shapes. The migrated legacy
+  `RebornServicesApi` methods were removed from the ratchet allowlist. This is
   the migration pattern for product mutations: authenticated product gesture ->
   `ProductSurface::invoke` -> descriptor-declared first-party handler ->
   authoritative `query` read-back where an authoritative read model exists.

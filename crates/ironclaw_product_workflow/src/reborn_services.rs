@@ -210,6 +210,7 @@ pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
     "builtin.operator_config_set_auto_approve";
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
 pub const EXTENSION_INSTALL_CAPABILITY_ID: &str = "builtin.extension_install";
+pub const EXTENSION_ACTIVATE_CAPABILITY_ID: &str = "builtin.extension_activate";
 pub const EXTENSION_REMOVE_CAPABILITY_ID: &str = "builtin.extension_remove";
 pub const SKILL_INSTALL_CAPABILITY_ID: &str = "builtin.skill_install";
 pub const SKILL_UPDATE_CAPABILITY_ID: &str = "builtin.skill_update";
@@ -2286,12 +2287,6 @@ pub trait RebornServicesApi: Send + Sync {
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         Err(RebornServicesError::service_unavailable(false))
     }
-
-    async fn activate_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError>;
 
     /// Run a step in a v2-native extension onboarding flow. Today the
     /// facade returns
@@ -4739,14 +4734,6 @@ where
         bundle: Vec<u8>,
     ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
         extensions::import_extension(self.lifecycle_facade.as_ref(), caller, bundle).await
-    }
-
-    async fn activate_extension(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        extensions::activate_extension(self.lifecycle_facade.as_ref(), caller, package_ref).await
     }
 
     async fn setup_extension(

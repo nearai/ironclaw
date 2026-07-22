@@ -29,20 +29,21 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
-    EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageRef, LlmActiveSelection,
-    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
-    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile,
-    ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentBytes,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionRegistryResponse,
+    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW,
+    LifecyclePackageKind, LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot,
+    LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView, OPERATOR_CONFIG_KEY_VIEW,
+    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
+    OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductSurface,
+    ProjectFsEntry, ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA,
+    RUN_ARTIFACT_VIEW, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
+    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionRegistryResponse,
     RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse,
     RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
@@ -317,7 +318,6 @@ struct StubServices {
     /// Raw zip bytes each `import_extension` call forwards, so the route test
     /// can assert the uploaded body reaches the facade intact.
     import_extension_calls: Mutex<Vec<Vec<u8>>>,
-    activate_extension_calls: Mutex<Vec<String>>,
     get_llm_config_calls: Mutex<usize>,
     upsert_llm_provider_calls: Mutex<Vec<String>>,
     delete_llm_provider_calls: Mutex<Vec<String>>,
@@ -863,7 +863,7 @@ impl RebornServicesApi for StubServices {
             }),
             id if id == EXTENSIONS_VIEW.id => Ok(RebornViewPage {
                 payload: serde_json::to_value(RebornExtensionListResponse {
-                    extensions: Vec::new(),
+                    extensions: vec![extension_info("google-calendar", true)],
                 })
                 .expect("extensions payload"),
                 next_cursor: None,
@@ -1318,18 +1318,6 @@ impl RebornServicesApi for StubServices {
         Ok(extension_action_response("discovered"))
     }
 
-    async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        self.activate_extension_calls
-            .lock()
-            .expect("lock")
-            .push(package_ref.id.as_str().to_string());
-        Ok(extension_action_response("activated"))
-    }
-
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1470,6 +1458,33 @@ fn extension_action_response(message: &str) -> RebornExtensionActionResponse {
         instructions: None,
         onboarding_state: None,
         onboarding: None,
+    }
+}
+
+fn extension_info(id: &str, active: bool) -> RebornExtensionInfo {
+    RebornExtensionInfo {
+        package_ref: LifecyclePackageRef::new(LifecyclePackageKind::Extension, id.to_string())
+            .expect("extension package ref"),
+        display_name: id.to_string(),
+        runtime: "first_party".to_string(),
+        description: format!("{id} extension"),
+        authenticated: true,
+        active,
+        tools: Vec::new(),
+        needs_setup: !active,
+        has_auth: false,
+        installation_state: if active {
+            InstallationState::Active
+        } else {
+            InstallationState::Installed
+        },
+        activation_error: None,
+        version: Some("1.0.0".to_string()),
+        onboarding_state: None,
+        onboarding: None,
+        auth_accounts: Vec::new(),
+        surfaces: Vec::new(),
+        install_scope: None,
     }
 }
 
@@ -4727,15 +4742,21 @@ async fn activate_and_remove_extension_decode_path_package_id_to_lifecycle_paths
         .expect("oneshot");
 
     assert_eq!(activate_response.status(), StatusCode::OK);
+    let activate_body = read_json(activate_response).await;
+    assert_eq!(activate_body["success"], true);
+    assert_eq!(activate_body["activated"], true);
 
+    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        services
-            .activate_extension_calls
-            .lock()
-            .expect("lock")
-            .as_slice(),
-        ["google-calendar"]
+        invoke_calls[0].0,
+        CapabilityId::new(EXTENSION_ACTIVATE_CAPABILITY_ID).expect("capability id")
     );
+    assert_eq!(
+        invoke_calls[0].1,
+        serde_json::json!({ "extension_id": "google-calendar" })
+    );
+    drop(invoke_calls);
 
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let remove_response = router
@@ -4751,13 +4772,13 @@ async fn activate_and_remove_extension_decode_path_package_id_to_lifecycle_paths
 
     assert_eq!(remove_response.status(), StatusCode::OK);
     let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
-    assert_eq!(invoke_calls.len(), 1);
+    assert_eq!(invoke_calls.len(), 2);
     assert_eq!(
-        invoke_calls[0].0,
+        invoke_calls[1].0,
         CapabilityId::new(EXTENSION_REMOVE_CAPABILITY_ID).expect("capability id")
     );
     assert_eq!(
-        invoke_calls[0].1,
+        invoke_calls[1].1,
         serde_json::json!({ "extension_id": "google-calendar" })
     );
 }
@@ -5389,13 +5410,6 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: WebUiListAutomationsRequest,
         ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn activate_extension(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _package_ref: LifecyclePackageRef,
-        ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn setup_extension(

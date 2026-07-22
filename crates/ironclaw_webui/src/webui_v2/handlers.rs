@@ -28,23 +28,24 @@ use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
     ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID, ADMIN_CONFIGURATION_VIEW, CodexLoginStart,
-    EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
-    EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
-    NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
-    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, ProductOutboundEnvelope, ProductSurface, ProductWorkflowError,
-    ProjectFsFile, ProjectionCursor, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
-    RebornAddMemberRequest, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
-    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
-    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse,
-    RebornAdminUserDeletedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
-    RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentRequest,
-    RebornAutomationMutationResponse, RebornCancelRunResponse, RebornCreateProjectRequest,
-    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
+    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSIONS_VIEW, FsMount, LLM_CONFIG_VIEW, LOGS_VIEW,
+    LifecyclePackageKind, LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
+    LlmProbeResult, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW, ProductOutboundEnvelope,
+    ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
+    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
+    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
+    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
+    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
+    RebornCancelRunResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionOnboardingState,
     RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
     RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
     RebornGetProjectRequest, RebornListAutomationsResponse, RebornListMembersRequest,
@@ -1940,10 +1941,16 @@ pub async fn activate_extension(
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, package_id),
         "package_id",
     )?;
-    let response = state
-        .services()
-        .activate_extension(caller, package_ref)
-        .await?;
+    let resolution = invoke_product_capability(
+        state.services(),
+        caller.clone(),
+        EXTENSION_ACTIVATE_CAPABILITY_ID,
+        serde_json::json!({ "extension_id": package_ref.id.as_str() }),
+        ActivityId::new(),
+    )
+    .await?;
+    let response =
+        extension_activation_response(state.services(), caller, package_ref, resolution).await?;
     Ok(Json(response))
 }
 
@@ -1999,6 +2006,67 @@ fn extension_lifecycle_mutation_succeeded(
             Err(extension_lifecycle_unavailable(true))
         }
     }
+}
+
+async fn extension_activation_response(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    package_ref: LifecyclePackageRef,
+    resolution: Resolution,
+) -> Result<RebornExtensionActionResponse, RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => {
+            let activated = query_extension_active_state(services, caller, &package_ref).await?;
+            Ok(extension_action_completed(
+                "Extension activated.",
+                Some(activated),
+            ))
+        }
+        Resolution::Blocked(Blocked::Auth(_)) => Ok(RebornExtensionActionResponse {
+            success: true,
+            message: "Extension authentication required.".to_string(),
+            activated: Some(false),
+            auth_url: None,
+            awaiting_token: None,
+            instructions: Some(
+                "Configure the extension credentials, then activate it again.".to_string(),
+            ),
+            onboarding_state: Some(RebornExtensionOnboardingState::AuthRequired),
+            onboarding: None,
+        }),
+        other => {
+            extension_lifecycle_mutation_succeeded(other)?;
+            Ok(extension_action_completed(
+                "Extension activated.",
+                Some(false),
+            ))
+        }
+    }
+}
+
+async fn query_extension_active_state(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    package_ref: &LifecyclePackageRef,
+) -> Result<bool, RebornServicesError> {
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: EXTENSIONS_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response: RebornExtensionListResponse =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    response
+        .extensions
+        .iter()
+        .find(|extension| extension.package_ref == *package_ref)
+        .map(|extension| extension.active)
+        .ok_or_else(|| extension_lifecycle_unavailable(true))
 }
 
 fn extension_lifecycle_forbidden() -> RebornServicesError {

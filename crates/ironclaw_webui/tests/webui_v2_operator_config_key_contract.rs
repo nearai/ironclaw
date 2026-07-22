@@ -156,14 +156,6 @@ impl RebornServicesApi for RecordingServices {
         Err(service_unavailable_error())
     }
 
-    async fn activate_extension(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _package_ref: LifecyclePackageRef,
-    ) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,

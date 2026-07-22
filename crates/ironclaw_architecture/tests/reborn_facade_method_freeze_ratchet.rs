@@ -107,7 +107,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "authorize_trace_hold",
     // --- extensions + skills ---
     "import_extension",
-    "activate_extension",
     "setup_extension",
     // --- LLM admin config ---
     "upsert_llm_provider",

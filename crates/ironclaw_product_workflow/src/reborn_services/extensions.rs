@@ -9,13 +9,13 @@ use ironclaw_host_api::{CapabilitySurfaceKind, ExtensionId, InstallationState};
 
 use crate::{
     ChannelAuthAccountState, ChannelConnectionFacade, LifecycleExtensionSummary,
-    LifecycleInstalledExtensionSummary, LifecyclePackageRef, LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleProductSurfaceContext, RebornAccountBindingSource,
-    RebornAuthAccount, RebornExtensionActionResponse, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSurface, RebornServicesError,
-    RebornVendorAuthAccounts, RebornViewDescriptor, WebUiAuthenticatedCaller,
+    LifecycleInstalledExtensionSummary, LifecycleProductAction, LifecycleProductContext,
+    LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
+    LifecycleProductSurfaceContext, RebornAccountBindingSource, RebornAuthAccount,
+    RebornExtensionActionResponse, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionOnboardingState, RebornExtensionRegistryEntry, RebornExtensionRegistryResponse,
+    RebornExtensionSurface, RebornServicesError, RebornVendorAuthAccounts, RebornViewDescriptor,
+    WebUiAuthenticatedCaller,
 };
 
 use super::{
@@ -134,26 +134,6 @@ pub(super) async fn import_extension(
     Ok(action_response(&lifecycle, None, None))
 }
 
-pub(super) async fn activate_extension(
-    facade: &dyn LifecycleProductFacade,
-    caller: WebUiAuthenticatedCaller,
-    package_ref: LifecyclePackageRef,
-) -> Result<RebornExtensionActionResponse, RebornServicesError> {
-    let context = lifecycle_surface_context(caller);
-    let lifecycle = execute_lifecycle(
-        facade,
-        context.clone(),
-        LifecycleProductAction::ExtensionActivate { package_ref },
-    )
-    .await?;
-    let projection = project_action_package_best_effort(facade, context, &lifecycle).await;
-    Ok(action_response(
-        &lifecycle,
-        Some(lifecycle.phase == InstallationState::Active),
-        projection.as_ref(),
-    ))
-}
-
 async fn execute_lifecycle(
     facade: &dyn LifecycleProductFacade,
     context: LifecycleProductContext,
@@ -163,35 +143,6 @@ async fn execute_lifecycle(
         .execute(context, action)
         .await
         .map_err(map_lifecycle_error)
-}
-
-async fn project_action_package(
-    facade: &dyn LifecycleProductFacade,
-    context: LifecycleProductContext,
-    lifecycle: &LifecycleProductResponse,
-) -> Result<Option<LifecycleProductResponse>, RebornServicesError> {
-    let Some(package_ref) = lifecycle.package_ref.clone() else {
-        return Ok(None);
-    };
-    facade
-        .project_package(context, package_ref)
-        .await
-        .map(Some)
-        .map_err(map_lifecycle_error)
-}
-
-async fn project_action_package_best_effort(
-    facade: &dyn LifecycleProductFacade,
-    context: LifecycleProductContext,
-    lifecycle: &LifecycleProductResponse,
-) -> Option<LifecycleProductResponse> {
-    // Install/activate already mutated lifecycle state. Projection only enriches
-    // the response with onboarding copy, so failure must not turn a completed
-    // action into a browser-visible mutation error.
-    project_action_package(facade, context, lifecycle)
-        .await
-        .ok()
-        .flatten()
 }
 
 fn lifecycle_surface_context(caller: WebUiAuthenticatedCaller) -> LifecycleProductContext {
