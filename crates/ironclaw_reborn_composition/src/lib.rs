@@ -71,8 +71,7 @@ pub use extension_host::extension_ingress::{
     InboundPayloadClassifier, PostAdmissionObserver, StaticIngressSecrets, VerifiedEvidenceMint,
 };
 pub use extension_host::extension_ingress::{
-    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_alias_route_mount,
-    extension_ingress_route_mount, forward_alias_request,
+    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount,
 };
 pub use extension_host::extension_lifecycle_command::{
     RebornExtensionLifecycleCommand, RebornExtensionLifecycleCommandError,

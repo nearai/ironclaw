@@ -141,6 +141,14 @@ pub enum RunNotificationOrigin {
     Triggered {
         trigger: TriggerCommunicationContext,
     },
+    /// A triggered run whose creator selected a durable per-trigger target.
+    /// Ordinary notifications use this exact binding; authority-bearing
+    /// approval/auth prompts still resolve through the creator's dedicated
+    /// preference fields.
+    TriggeredWithTarget {
+        trigger: TriggerCommunicationContext,
+        target: ReplyTargetBindingRef,
+    },
     TriggeredFromSourceRoute {
         trigger: TriggerCommunicationContext,
         source_route: SourceRouteContext,
@@ -292,6 +300,14 @@ mod tests {
     fn run_notification_origin_round_trips_triggered() {
         assert_json_round_trip(RunNotificationOrigin::Triggered {
             trigger: trigger_context(),
+        });
+    }
+
+    #[test]
+    fn run_notification_origin_round_trips_triggered_with_target() {
+        assert_json_round_trip(RunNotificationOrigin::TriggeredWithTarget {
+            trigger: trigger_context(),
+            target: ReplyTargetBindingRef::new("reply:trigger-target").expect("target"),
         });
     }
 

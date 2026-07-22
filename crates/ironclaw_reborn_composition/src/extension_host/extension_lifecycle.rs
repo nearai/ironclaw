@@ -158,11 +158,11 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// Late-binding slot for the generic per-user channel-connection facade
     /// (extension-runtime §6.4), shared with
     /// `RebornLocalRuntimeServices::channel_disconnect_slot`. Removing
-    /// an extension whose manifest declares a channel surface backed by an
-    /// auth vendor disconnects the authenticated caller through it (revoke
-    /// personal vendor credential → vendor cleanup → delete identity
-    /// bindings) at this single convergence point, so `builtin.extension_remove`
-    /// and the WebUI remove route cannot drift apart (issue #6091 shape).
+    /// an extension whose manifest declares a channel surface disconnects the
+    /// authenticated caller through it (revoke any personal vendor credential
+    /// → vendor/pairing cleanup → delete identity bindings) at this single
+    /// convergence point, so `builtin.extension_remove` and the WebUI remove
+    /// route cannot drift apart (issue #6091 shape).
     /// Fail-closed contract: removing such an extension with an authenticated
     /// actor while the slot is still empty FAILS the removal with a typed
     /// retryable error instead of skipping the disconnect — an unobservable
@@ -1698,14 +1698,15 @@ impl RebornLocalExtensionManagementPort {
             let removed_providers =
                 Self::removed_extension_providers_from_manifest(&removal_manifest)?;
             let cleanup_requirements = removal_manifest.removal_cleanup_requirements().to_vec();
-            // §6.4: a channel surface backed by an auth vendor holds
-            // per-caller identity bindings; removal runs the real per-caller
-            // disconnect (below) while the installation still exists. Same
-            // predicate the generic facade's discovery uses
-            // (`discover_channel_extensions`).
+            // §6.4: every channel surface can hold per-caller connection state.
+            // OAuth channels own vendor credentials/identity bindings, while
+            // proof-code channels own pairing records, identity bindings, DM
+            // targets, and conversation-actor bindings. Removal runs the real
+            // per-caller disconnect below while the installation still exists.
+            // The generic facade discovers the same manifest-derived set.
             let removes_connectable_channel = {
                 let resolved = removal_manifest.resolved();
-                resolved.channel.is_some() && !resolved.auth.is_empty()
+                resolved.channel.is_some()
             };
             // Deliberately validate cleanup actors only after caller
             // authorization and manifest/provider preflight. Hoisting this
@@ -1749,10 +1750,10 @@ impl RebornLocalExtensionManagementPort {
             // retryable, mirroring the credential cleanup below.
             if removes_connectable_channel && let Some(actor_user_id) = authenticated_actor_user_id
             {
-                // Fail closed on an empty slot: a channel surface backed by
-                // an auth vendor may hold per-caller identity bindings, and a
-                // composition that gives this path no facade to disconnect
-                // them through must not report the removal as successful.
+                // Fail closed on an empty slot: a channel surface may hold
+                // per-caller OAuth or pairing state, and a composition that
+                // gives this path no facade to disconnect it through must not
+                // report the removal as successful.
                 // Surface the same typed retryable error a failing disconnect
                 // does; compositions that legitimately remove channel
                 // extensions fill the slot (runtime composition in
@@ -4189,6 +4190,77 @@ team_id = "/team/id"
         )
     }
 
+    /// A channel-only v3 fixture mirroring Telegram's manifest shape: the
+    /// user's connection is owned by proof-code pairing, so there is no
+    /// `[auth.*]` vendor even though removal must still disconnect the caller.
+    fn fixture_pairing_channel_package() -> AvailableExtensionPackage {
+        let manifest_toml = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "pairchat"
+name = "PairChat"
+version = "0.1.0"
+description = "proof-code paired channel removal fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "pairchat.extension/v1"
+
+[channel]
+id = "messages"
+display_name = "PairChat messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+
+[channel.ingress]
+route_suffix = "updates"
+method = "post"
+body_limit_bytes = 1048576
+
+[channel.ingress.verification]
+kind = "shared_secret_header"
+secret_handle = "pairchat_webhook_secret"
+header = "X-PairChat-Secret"
+
+[channel.config]
+fields = [
+  { handle = "pairchat_bot_token", label = "Bot token", secret = true },
+  { handle = "pairchat_webhook_secret", label = "Webhook secret", secret = true },
+]
+
+[[channel.egress]]
+scheme = "https"
+host = "api.pairchat.example"
+methods = ["post"]
+credential_handle = "pairchat_bot_token"
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+[channel.presentation]
+supports_markdown = false
+supports_threads = true
+"#;
+        let record = ExtensionManifestRecord::from_toml(
+            manifest_toml,
+            ManifestSource::HostBundled,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            None,
+            &product_extension_host_api_contract_registry().expect("host API contracts"),
+        )
+        .expect("pairing channel fixture manifest");
+        let manifest: ExtensionManifest = record
+            .manifest()
+            .clone()
+            .try_into()
+            .expect("pairing channel fixture manifest lowers to a package manifest");
+        fixture_extension_package_from_parsed_manifest(
+            manifest_toml,
+            "pairchat",
+            manifest,
+            Arc::new(record.resolved().clone()),
+        )
+    }
+
     /// Recording double for the §6.4 per-caller disconnect the removal path
     /// dispatches through the late-bound facade slot. `fail_next(n)` scripts
     /// the next `n` disconnects to fail so retry convergence can be pinned.
@@ -4352,6 +4424,61 @@ team_id = "/team/id"
                 .expect("installation lookup")
                 .is_some(),
             "fail-closed removal must keep the installation for a retry"
+        );
+    }
+
+    /// Channel removal cleanup is keyed by the manifest's channel surface,
+    /// not by OAuth. Proof-code paired channels hold the same caller-owned
+    /// identity and conversation bindings and must cross the shared
+    /// disconnect boundary before their installation row is deleted.
+    #[tokio::test]
+    async fn extension_remove_of_pairing_channel_disconnects_the_caller() {
+        let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "pairchat")
+            .expect("valid ref");
+        let channel_connection = Arc::new(RecordingChannelConnectionFacade::default());
+        let slot: Arc<std::sync::OnceLock<Arc<dyn ChannelConnectionFacade>>> =
+            Arc::new(std::sync::OnceLock::new());
+        slot.set(channel_connection.clone() as Arc<dyn ChannelConnectionFacade>)
+            .ok();
+        let (_dir, _storage_root, facade, _active_registry, installation_store) =
+            extension_lifecycle_fixture_with_all_cleanup(
+                AvailableExtensionCatalog::from_packages(vec![fixture_pairing_channel_package()]),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+                None,
+                Arc::new(ExtensionRemovalCleanupRegistry::empty()),
+                Some(slot),
+            );
+
+        facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("alice installs pairchat");
+        facade
+            .execute(
+                lifecycle_surface_context_for_user("alice"),
+                LifecycleProductAction::ExtensionRemove { package_ref },
+            )
+            .await
+            .expect("alice removes pairchat");
+
+        let disconnects = channel_connection.disconnects();
+        assert_eq!(disconnects.len(), 1, "removal runs exactly one disconnect");
+        assert_eq!(disconnects[0].1, "pairchat");
+        assert_eq!(disconnects[0].0.user_id.as_str(), "alice");
+        assert!(
+            installation_store
+                .get_installation(
+                    &ExtensionInstallationId::new("pairchat").expect("valid installation id")
+                )
+                .await
+                .expect("installation lookup")
+                .is_none(),
+            "the installation is deleted only after disconnect succeeds"
         );
     }
 

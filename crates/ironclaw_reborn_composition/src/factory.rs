@@ -1409,8 +1409,8 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// `RebornRuntime::generic_channel_connection_facade`) or by the
     /// channel-connection test bundle over a services-only harness.
     /// Fail-closed contract: a composition that leaves the slot empty cannot
-    /// remove a channel+auth extension — the removal path surfaces a typed
-    /// retryable error instead of skipping the per-caller disconnect (see
+    /// remove a channel extension — the removal path surfaces a typed
+    /// retryable error instead of skipping OAuth or pairing cleanup (see
     /// `RebornLocalExtensionManagementPort::channel_disconnect_slot`).
     pub(crate) channel_disconnect_slot:
         Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>,
@@ -2270,9 +2270,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         .with_account_setup_registry(account_setups.clone())
         .with_removal_cleanup_registry(removal_cleanup)
         .with_provider_instance_readiness(provider_instance_readiness)
-        // Removal of a channel+auth extension disconnects the caller through
-        // the facade this late-bound slot carries once composition (runtime
-        // build or the channel-connection test bundle) fills it.
+        // Removal of any channel extension disconnects the caller through the
+        // facade this late-bound slot carries once composition (runtime build
+        // or the channel-connection test bundle) fills it. The facade chooses
+        // OAuth cleanup or proof-code unpairing from its generic registries.
         .with_channel_disconnect_slot(Arc::clone(
             &store_graph.local_runtime.channel_disconnect_slot,
         )),

@@ -634,10 +634,7 @@ pub(crate) fn build_extension_ingress(
     }
 }
 
-pub use serve_mount::{
-    EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_alias_route_mount,
-    extension_ingress_route_mount, forward_alias_request,
-};
+pub use serve_mount::{EXTENSION_INGRESS_ROUTE_PATTERN, extension_ingress_route_mount};
 
 mod serve_mount {
     use std::num::{NonZeroU32, NonZeroU64};
@@ -739,26 +736,6 @@ mod serve_mount {
         })
     }
 
-    /// Build a fixed-path compatibility alias over the same generic router and
-    /// public-webhook policy as the canonical manifest route.
-    pub fn extension_ingress_alias_route_mount(
-        parts: &ExtensionIngressParts,
-        route_id: &'static str,
-        legacy_path: &'static str,
-        extension_id: &'static str,
-        route_suffix: &'static str,
-    ) -> Result<PublicRouteMount, crate::RebornBuildError> {
-        let descriptor = ingress_route_descriptor(route_id, legacy_path)?;
-        let router = Router::new()
-            .route(legacy_path, post(alias_handler))
-            .with_state(AliasState {
-                router: Arc::clone(&parts.router),
-                extension_id,
-                route_suffix,
-            });
-        Ok(PublicRouteMount::new(router, vec![descriptor]))
-    }
-
     struct RegistryDrain {
         registry: Arc<ExtensionIngressRegistry>,
     }
@@ -781,49 +758,6 @@ mod serve_mount {
                 extension_id,
                 route_suffix,
                 &headers,
-                body,
-            ))
-            .await;
-        into_axum_response(response)
-    }
-
-    #[derive(Clone)]
-    struct AliasState {
-        router: Arc<ExtensionIngressRouter>,
-        extension_id: &'static str,
-        route_suffix: &'static str,
-    }
-
-    async fn alias_handler(
-        State(state): State<AliasState>,
-        headers: HeaderMap,
-        body: Bytes,
-    ) -> Response {
-        forward_alias_request(
-            &state.router,
-            state.extension_id,
-            state.route_suffix,
-            &headers,
-            body,
-        )
-        .await
-    }
-
-    /// Drive the generic router for a legacy fixed-path alias
-    /// (one-release forwarding shims, migration MIG-5).
-    pub async fn forward_alias_request(
-        router: &ExtensionIngressRouter,
-        extension_id: &str,
-        route_suffix: &str,
-        headers: &HeaderMap,
-        body: Bytes,
-    ) -> Response {
-        let response = router
-            .handle(ingress_request(
-                "POST",
-                extension_id.to_string(),
-                route_suffix.to_string(),
-                headers,
                 body,
             ))
             .await;

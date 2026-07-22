@@ -37,7 +37,7 @@ Slack is disabled unless the mounted or seeded Reborn config enables it.
 Slack Events API must reach the Reborn listener over a public HTTPS URL:
 
 ```text
-https://<public-host>/webhooks/slack/events
+https://<public-host>/webhooks/extensions/slack/events
 ```
 
 Slack personal OAuth must also redirect back to the Reborn product-auth
@@ -106,7 +106,7 @@ enabled = true
 overrides only the route enablement gate: `true`/`1` mounts Slack, while
 `false`/`0` acts as a deployment kill switch.
 
-Slack enablement mounts `POST /webhooks/slack/events`, exposes Slack channel
+Slack enablement mounts `POST /webhooks/extensions/slack/events`, exposes Slack channel
 setup in WebUI, and makes personal Slack connection available through the Slack
 extension's OAuth configuration flow.
 Slack installation ids, team/app ids, the bot token, the signing secret,
@@ -168,7 +168,7 @@ Event Subscriptions:
 - Set Request URL to:
 
 ```text
-https://<public-host>/webhooks/slack/events
+https://<public-host>/webhooks/extensions/slack/events
 ```
 
 - Subscribe to bot events:
@@ -213,7 +213,7 @@ oauth_config:
       - users:read
 settings:
   event_subscriptions:
-    request_url: https://<public-host>/webhooks/slack/events
+    request_url: https://<public-host>/webhooks/extensions/slack/events
     bot_events:
       - app_mention
       - message.im
@@ -252,7 +252,7 @@ docker run --rm \
 Verification checklist:
 
 - Slack Event Subscriptions shows the Request URL as verified.
-- `POST /webhooks/slack/events` returns the Slack URL-verification challenge
+- `POST /webhooks/extensions/slack/events` returns the Slack URL-verification challenge
   during setup.
 - After the user installs and configures the Slack extension, the OAuth callback
   binds that Slack user to the authenticated Reborn user.
@@ -268,7 +268,7 @@ Confirm the Reborn config sets [slack].enabled = true, or that the deployment en
 
 ### Slack route never receives events
 
-Confirm the Slack Request URL is exactly https://<public-host>/webhooks/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host path.
+Confirm the Slack Request URL is exactly https://<public-host>/webhooks/extensions/slack/events, the public URL reaches the Reborn listener, and Socket Mode is disabled for this host path.
 
 ### Slack URL verification fails
 

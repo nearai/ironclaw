@@ -1,3 +1,4 @@
+// arch-exempt: large_file, channel-neutral timeout and trigger-target regressions reuse the shared delivery harness, plan #4088
 //! Contract rows for the generic run-delivery components (§5.4, 9b): the
 //! live observer and the triggered driver, driven with scripted run states
 //! and a scripted channel adapter, asserting at the coordinator/store seam.
@@ -543,6 +544,26 @@ fn build_harness(
     auth_url: Option<&str>,
     max_wait: Duration,
 ) -> Harness {
+    build_harness_with_settings(
+        states,
+        bind_fails,
+        auth_url,
+        RunDeliverySettings {
+            poll_interval: Duration::from_millis(1),
+            max_wait,
+            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
+            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_harness_with_settings(
+    states: Vec<ScriptedRunState>,
+    bind_fails: bool,
+    auth_url: Option<&str>,
+    settings: RunDeliverySettings,
+) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
@@ -584,12 +605,7 @@ fn build_harness(
     let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
     let observer = Arc::new(RunDeliveryObserver::with_settings_and_connection_notices(
         services,
-        RunDeliverySettings {
-            poll_interval: Duration::from_millis(1),
-            max_wait,
-            max_concurrent_deliveries: NonZeroUsize::new(4).expect("nz"),
-            max_pending_deliveries: NonZeroUsize::new(8).expect("nz"),
-        },
+        settings,
         connection_notices.clone(),
     ));
     Harness {
@@ -780,6 +796,48 @@ async fn observer_posts_working_indicator_and_retracts_it_after_final_reply() {
             .iter()
             .all(|a| a.status == ironclaw_outbound::OutboundDeliveryStatus::Delivered)
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn observer_keeps_watching_a_healthy_run_past_the_previous_two_minute_cutoff() {
+    let settings = RunDeliverySettings::default();
+    assert!(
+        settings.max_wait > Duration::from_secs(2 * 60),
+        "the live channel watcher must outlive a healthy run that exceeds the old two-minute cutoff"
+    );
+
+    // The foreign-run existence guard consumes the first state. The wait
+    // loop then remains Running for more than two minutes of virtual time
+    // before observing Completed. This is channel-neutral: every adapter
+    // reaches final replies through this observer.
+    let mut states = vec![scripted_state(TurnStatus::Running, None)];
+    states.extend(std::iter::repeat_with(|| scripted_state(TurnStatus::Running, None)).take(32));
+    states.push(scripted_state(TurnStatus::Completed, None));
+    let harness = build_harness_with_settings(states, false, None, settings);
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "slow run finished").await;
+
+    let started = tokio::time::Instant::now();
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-slow-run"),
+            accepted_ack(run_id),
+        )
+        .await;
+
+    assert!(
+        tokio::time::Instant::now().duration_since(started) > Duration::from_secs(2 * 60),
+        "the scripted run must cross the previous delivery deadline"
+    );
+    assert_eq!(
+        harness.adapter.texts(),
+        vec![
+            "Ironclaw is thinking...".to_string(),
+            "slow run finished".to_string()
+        ]
+    );
+    assert_eq!(harness.adapter.retracted_refs().len(), 1);
 }
 
 #[tokio::test]
@@ -1263,6 +1321,7 @@ fn triggered_request(run_id: TurnRunId, project_scoped: bool) -> TriggeredRunDel
         creator_user_id: user(),
         project_scoped,
         prompt: "watch the deploys".to_string(),
+        delivery_target: None,
         trigger_context: trigger_context(),
     }
 }
@@ -1440,6 +1499,26 @@ async fn triggered_final_reply_reaches_the_preference_target_with_footer() {
         "dm-creator",
         "delivered to the decoded preference target"
     );
+}
+
+#[tokio::test]
+async fn triggered_final_reply_honors_per_trigger_target_without_global_default() {
+    let harness = build_triggered_harness(
+        vec![scripted_state(TurnStatus::Completed, None)],
+        None,
+        true,
+    );
+    let run_id = TurnRunId::new();
+    seed_final_message(&harness.threads, run_id, "pinned route complete").await;
+    let mut request = triggered_request(run_id, false);
+    request.delivery_target =
+        Some(ReplyTargetBindingRef::new("reply:pinned-trigger").expect("target"));
+
+    harness.driver.on_trigger_submitted(request).await;
+
+    let outcome = wait_for_outcome(&harness.delivery_store, run_id).await;
+    assert_eq!(outcome, TriggeredRunDeliveryOutcomeKind::Delivered);
+    assert_eq!(harness.adapter.texts().len(), 1);
 }
 
 #[tokio::test]
