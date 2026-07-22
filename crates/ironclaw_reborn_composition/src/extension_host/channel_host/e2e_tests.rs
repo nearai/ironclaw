@@ -32,6 +32,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use hmac::{Hmac, KeyInit, Mac};
 use http_body_util::BodyExt;
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_extensions::{
     ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
     ExtensionInstallationStore as _, ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
@@ -55,21 +56,21 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
-    ConversationBindingService, DeliveryCoordinator, DeliveryRetryPolicy,
+    ConversationBindingService, DeliveryCoordinator, DeliveryRetryPolicy, InboundAttachmentLander,
     ListPendingApprovalsRequest, ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
     ListPendingAuthInteractionsResponse, NoReplyContext, PendingApprovalInteractionView,
-    ProductWorkflowError, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, ResolveBindingRequest,
-    ResolvedBinding, RunDeliveryServices, RunDeliverySettings, TriggeredRunDeliveryDriver,
-    TriggeredRunDeliveryRequest,
+    ProductWorkflowError, RebornServicesError, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, ResolveBindingRequest, ResolvedBinding, RunDeliveryServices,
+    RunDeliverySettings, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
 };
 use ironclaw_secrets::FilesystemSecretStore;
 use ironclaw_slack_extension::{
     SLACK_USER_ACTOR_KIND, SLACK_V2_ADAPTER_ID, SlackPreferenceTargetCodec,
 };
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
-    SessionThreadService, ThreadScope,
+    AppendAssistantDraftRequest, AttachmentRef, EnsureThreadRequest, InMemorySessionThreadService,
+    MessageContent, SessionThreadService, ThreadScope,
 };
 use ironclaw_triggers::{TriggerFire, TriggerFireIdentity, TriggerId};
 use ironclaw_turns::{
@@ -123,6 +124,20 @@ const SECRET: &str = "topsecret";
 const GATE: &str = "gate:approval-00000000-0000-0000-0000-000000000001";
 const GATE_B: &str = "gate:approval-00000000-0000-0000-0000-000000000002";
 const AUTH_GATE: &str = "gate:auth-slack";
+
+struct UnexpectedAttachmentLander;
+
+#[async_trait]
+impl InboundAttachmentLander for UnexpectedAttachmentLander {
+    async fn land(
+        &self,
+        _thread_scope: &ThreadScope,
+        _message_id: &str,
+        _attachments: Vec<InboundAttachment>,
+    ) -> Result<Vec<AttachmentRef>, RebornServicesError> {
+        unreachable!("text-only channel host fixtures must not land attachments")
+    }
+}
 
 fn slack_manifest_from_bundled_inventory() -> String {
     ironclaw_first_party_extensions::packages::bundled_packages()
@@ -389,12 +404,12 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             ),
         ),
     );
+    let delivery_resolver: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver> = Arc::new(
+        SnapshotChannelDeliveryResolver::new(host.snapshot_watch(), Arc::new(egress.clone())),
+    );
     let delivery_coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&outbound_store),
-        Arc::new(SnapshotChannelDeliveryResolver::new(
-            host.snapshot_watch(),
-            Arc::new(egress.clone()),
-        )),
+        Arc::clone(&delivery_resolver),
         Arc::new(IngressReplyContextSource::new(Arc::clone(
             &ingress.reply_context,
         ))),
@@ -420,6 +435,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         ))),
         thread_service: Arc::new(threads.clone()),
         turn_coordinator: Arc::new(coordinator.clone()),
+        inbound_attachments: Arc::new(UnexpectedAttachmentLander),
         approval_interaction: Some(approval_interaction),
         auth_interaction: Some(auths.clone() as Arc<dyn AuthInteractionService>),
         identity: ChannelHostIdentity {
@@ -432,6 +448,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>),
         delivery: Some(ChannelHostDeliveryDeps {
             coordinator: delivery_coordinator,
+            resolver: delivery_resolver,
             outbound_store,
             route_store: Arc::clone(&route_store),
             communication_preferences: preferences,

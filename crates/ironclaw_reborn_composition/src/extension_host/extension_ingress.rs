@@ -476,6 +476,7 @@ impl InboundSink for GenericChannelInboundSink {
         )
         .map_err(Self::permanent)?;
 
+        let channel_attachment_refs = message.attachments.clone();
         let payload = match self
             .config
             .classifier
@@ -503,8 +504,9 @@ impl InboundSink for GenericChannelInboundSink {
             payload,
         )
         .map_err(Self::permanent)?;
-        let envelope =
-            ProductInboundEnvelope::from_trusted_parse(context, parsed).map_err(Self::permanent)?;
+        let envelope = ProductInboundEnvelope::from_trusted_parse(context, parsed)
+            .and_then(|envelope| envelope.with_channel_attachment_refs(channel_attachment_refs))
+            .map_err(Self::permanent)?;
 
         // Durable dedupe + admission commit (idempotency ledger keyed by
         // installation + external event fingerprint) plus identity/
@@ -800,7 +802,8 @@ mod tests {
 
     use ironclaw_host_api::UserId;
     use ironclaw_product_adapters::{
-        ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAdapterError,
+        AttachmentRef, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+        ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind,
         ProductTriggerReason,
     };
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
@@ -810,17 +813,27 @@ mod tests {
 
     struct CountingWorkflow {
         submissions: AtomicUsize,
+        envelopes: std::sync::Mutex<Vec<ProductInboundEnvelope>>,
     }
 
     impl CountingWorkflow {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
+                envelopes: std::sync::Mutex::new(Vec::new()),
             }
         }
 
         fn submit_count(&self) -> usize {
             self.submissions.load(Ordering::SeqCst)
+        }
+
+        fn take_envelope(&self) -> ProductInboundEnvelope {
+            self.envelopes
+                .lock()
+                .expect("envelope lock")
+                .pop()
+                .expect("one submitted envelope")
         }
     }
 
@@ -828,9 +841,10 @@ mod tests {
     impl ProductWorkflow for CountingWorkflow {
         async fn submit_inbound(
             &self,
-            _envelope: ProductInboundEnvelope,
+            envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {
             self.submissions.fetch_add(1, Ordering::SeqCst);
+            self.envelopes.lock().expect("envelope lock").push(envelope);
             Ok(ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
                     .expect("accepted message ref"),
@@ -869,6 +883,23 @@ mod tests {
                 reply_context: None,
             },
         }
+    }
+
+    fn admission_with_attachment() -> InboundAdmission {
+        let mut admission = admission_for("review the attached report");
+        admission.message.attachments.push(AttachmentRef {
+            descriptor: ProductAttachmentDescriptor::new(
+                "file-1",
+                "application/pdf",
+                Some("report.pdf".to_string()),
+                Some(4),
+                ProductAttachmentKind::Document,
+            )
+            .expect("attachment descriptor"),
+            vendor_ref: "opaque-provider-file-reference".to_string(),
+            mime_hint: Some("application/pdf".to_string()),
+        });
+        admission
     }
 
     fn pairing_sink(
@@ -1033,5 +1064,26 @@ mod tests {
         sink.drain().await;
         assert_eq!(workflow.submit_count(), 1);
         assert_eq!(observer.lock().expect("outcomes lock").pop(), None);
+    }
+
+    #[tokio::test]
+    async fn generic_sink_preserves_transient_attachment_sources_for_workflow_intake() {
+        let (sink, workflow, _observer) = pairing_sink(ChannelPairingInterception::NotHandled);
+
+        sink.admit(admission_with_attachment())
+            .await
+            .expect("attachment message reaches workflow");
+
+        let envelope = workflow.take_envelope();
+        assert_eq!(envelope.channel_attachment_refs().len(), 1);
+        assert_eq!(
+            envelope.channel_attachment_refs()[0].vendor_ref,
+            "opaque-provider-file-reference"
+        );
+        let serialized = serde_json::to_string(&envelope).expect("envelope serializes");
+        assert!(
+            !serialized.contains("opaque-provider-file-reference"),
+            "provider transfer references must remain transient"
+        );
     }
 }

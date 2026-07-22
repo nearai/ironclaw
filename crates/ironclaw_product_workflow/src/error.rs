@@ -119,6 +119,10 @@ pub enum ProductWorkflowError {
     #[error("before-inbound policy failed: {reason}")]
     BeforeInboundPolicyFailed { reason: String, permanent: bool },
 
+    /// Deferred channel attachment transfer failed before message acceptance.
+    #[error("inbound attachment transfer failed: {reason}")]
+    InboundAttachmentFailed { reason: String, retryable: bool },
+
     /// The action was identified as a duplicate and the prior outcome should be replayed.
     #[error("duplicate action")]
     DuplicateAction {
@@ -262,6 +266,20 @@ impl From<ProductWorkflowError> for ProductAdapterError {
                     }
                 }
             }
+            ProductWorkflowError::InboundAttachmentFailed { reason, retryable } => {
+                if retryable {
+                    ProductAdapterError::WorkflowTransient {
+                        reason: RedactedString::new(reason),
+                    }
+                } else {
+                    ProductAdapterError::WorkflowRejected {
+                        kind: ProductWorkflowRejectionKind::InvalidRequest,
+                        status_code: 400,
+                        retryable: false,
+                        reason: RedactedString::new(reason),
+                    }
+                }
+            }
             ProductWorkflowError::DuplicateAction { .. } => ProductAdapterError::Internal {
                 detail: RedactedString::new("duplicate action escaped workflow layer"),
             },
@@ -313,6 +331,32 @@ mod tests {
         .into();
         assert!(!err.is_retryable());
         assert!(matches!(err, ProductAdapterError::WorkflowRejected { .. }));
+    }
+
+    #[test]
+    fn attachment_failures_preserve_retryability_without_exposing_provider_detail() {
+        let retryable: ProductAdapterError = ProductWorkflowError::InboundAttachmentFailed {
+            reason: "channel attachment transfer failed".into(),
+            retryable: true,
+        }
+        .into();
+        assert!(retryable.is_retryable());
+
+        let permanent: ProductAdapterError = ProductWorkflowError::InboundAttachmentFailed {
+            reason: "attachment exceeds the per-file byte limit".into(),
+            retryable: false,
+        }
+        .into();
+        assert!(!permanent.is_retryable());
+        assert!(matches!(
+            permanent,
+            ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -1647,6 +1647,13 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
             ProductRejectionKind::PolicyDenied,
             reason.clone(),
         ))),
+        ProductWorkflowError::InboundAttachmentFailed {
+            reason,
+            retryable: false,
+        } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+            ProductRejectionKind::InvalidRequest,
+            reason.clone(),
+        ))),
         ProductWorkflowError::BindingResolutionFailed { .. }
         | ProductWorkflowError::TurnSubmissionRejected { .. }
         | ProductWorkflowError::TurnSubmissionFailed { .. }
@@ -1658,6 +1665,9 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         | ProductWorkflowError::Transient { .. }
         | ProductWorkflowError::BeforeInboundPolicyFailed {
             permanent: false, ..
+        }
+        | ProductWorkflowError::InboundAttachmentFailed {
+            retryable: true, ..
         }
         | ProductWorkflowError::OutboundTargetNotDirectMessage
         | ProductWorkflowError::DuplicateAction { .. } => None,
@@ -1912,6 +1922,29 @@ mod tests {
             })
             .is_none()
         );
+        assert!(
+            terminal_ack_for_error(&ProductWorkflowError::InboundAttachmentFailed {
+                reason: "channel attachment transfer failed".to_string(),
+                retryable: true,
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_ack_for_error_settles_permanent_attachment_failure() {
+        let ack = terminal_ack_for_error(&ProductWorkflowError::InboundAttachmentFailed {
+            reason: "attachment exceeds the count limit".to_string(),
+            retryable: false,
+        })
+        .expect("permanent attachment failure is terminal");
+        assert!(matches!(
+            ack,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::InvalidRequest
+                    && rejection.disposition()
+                        == ironclaw_product_adapters::ProductRejectionDisposition::Permanent
+        ));
     }
 
     #[test]

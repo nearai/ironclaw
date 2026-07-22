@@ -15,6 +15,7 @@
 
 use async_trait::async_trait;
 
+use ironclaw_attachments::InboundAttachment;
 use ironclaw_host_api::RestrictedEgress;
 
 use crate::external::{
@@ -50,6 +51,18 @@ pub trait ChannelAdapter: Send + Sync {
     /// Parse one host-verified inbound request into a normalized outcome.
     /// Pure protocol work: no I/O, no secrets, bounded input.
     fn inbound(&self, request: VerifiedInbound<'_>) -> Result<InboundOutcome, ChannelError>;
+
+    /// Fetch one inbound attachment's bytes through the channel's restricted
+    /// egress. The generic workflow calls this only after duplicate replay has
+    /// missed and before-inbound policy has returned Allow or Rewrite, then
+    /// lands the returned bytes through the canonical project filesystem path.
+    async fn fetch_attachment(
+        &self,
+        _attachment: &AttachmentRef,
+        _egress: &dyn RestrictedEgress,
+    ) -> Result<InboundAttachment, ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
 
     /// Render and send one normalized outbound envelope through restricted
     /// egress. Owns vendor formatting, splitting, target syntax, DM
@@ -127,7 +140,7 @@ pub const MAX_REPLY_CONTEXT_BYTES: usize = 4 * 1024;
 /// An attachment reference — the vendor URL/id plus a mime hint. Bytes are
 /// fetched host-side through restricted egress with the channel credential
 /// only when a consumer needs them, keeping `inbound` pure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachmentRef {
     pub descriptor: ProductAttachmentDescriptor,
     pub vendor_ref: String,
@@ -230,6 +243,8 @@ pub enum ChannelError {
     Render { reason: String },
     #[error("vendor wiring failed: {reason}")]
     VendorWiring { reason: String },
+    #[error("attachment transfer failed: {reason}")]
+    AttachmentTransfer { reason: String, retryable: bool },
     #[error("channel operation is not supported by this adapter")]
     Unsupported,
 }

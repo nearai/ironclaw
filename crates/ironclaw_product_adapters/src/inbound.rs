@@ -6,6 +6,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use crate::auth::{ProtocolAuthEvidence, VerifiedAuthClaim};
+use crate::channel_adapter::AttachmentRef;
 use crate::error::ProductAdapterError;
 use crate::external::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ProductAttachmentDescriptor,
@@ -663,6 +664,12 @@ pub struct ProductInboundEnvelope {
     auth_claim: VerifiedAuthClaim,
     received_at: DateTime<Utc>,
     payload: ProductInboundPayload,
+    /// Provider transfer references for channel attachments. Host-only and
+    /// transient: the serializable payload carries descriptors, while these
+    /// refs survive only long enough for accepted workflow intake to fetch
+    /// bytes through restricted egress.
+    #[serde(skip)]
+    channel_attachment_refs: Vec<AttachmentRef>,
 }
 
 impl ProductInboundEnvelope {
@@ -679,6 +686,7 @@ impl ProductInboundEnvelope {
             auth_claim: context.auth_claim,
             received_at: context.received_at,
             payload: parsed.payload,
+            channel_attachment_refs: Vec::new(),
         })
     }
 
@@ -712,6 +720,43 @@ impl ProductInboundEnvelope {
 
     pub fn payload(&self) -> &ProductInboundPayload {
         &self.payload
+    }
+
+    /// Attach the transient channel transfer references corresponding exactly
+    /// to the user-message descriptors already present in this envelope.
+    pub fn with_channel_attachment_refs(
+        mut self,
+        channel_attachment_refs: Vec<AttachmentRef>,
+    ) -> Result<Self, ProductAdapterError> {
+        let ProductInboundPayload::UserMessage(payload) = &self.payload else {
+            if channel_attachment_refs.is_empty() {
+                return Ok(self);
+            }
+            return Err(malformed(
+                "channel attachment references require a user-message payload",
+            ));
+        };
+        let descriptors = channel_attachment_refs
+            .iter()
+            .map(|attachment| &attachment.descriptor)
+            .collect::<Vec<_>>();
+        if descriptors
+            != payload
+                .attachments
+                .iter()
+                .collect::<Vec<&ProductAttachmentDescriptor>>()
+        {
+            return Err(malformed(
+                "channel attachment references do not match payload descriptors",
+            ));
+        }
+        self.channel_attachment_refs = channel_attachment_refs;
+        Ok(self)
+    }
+
+    /// Host-only transient provider references for deferred attachment fetch.
+    pub fn channel_attachment_refs(&self) -> &[AttachmentRef] {
+        &self.channel_attachment_refs
     }
 
     /// Preserve host-stamped trusted context while replacing only the
