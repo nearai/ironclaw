@@ -82,6 +82,7 @@ mod llm_config;
 mod log_views;
 mod operator_command_views;
 mod operator_config_views;
+mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod outbound_views;
 mod project_fs;
@@ -145,6 +146,17 @@ pub use operator_command_views::{
 };
 pub use operator_config_views::{
     OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
+};
+pub use outbound_delivery_capability_surface::{
+    OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID, OUTBOUND_DELIVERY_TARGET_SET_DESCRIPTION,
+    OUTBOUND_DELIVERY_TARGET_SET_PROVIDER_TOOL_NAME, OUTBOUND_DELIVERY_TARGETS_LIST_CAPABILITY_ID,
+    OUTBOUND_DELIVERY_TARGETS_LIST_DESCRIPTION, OUTBOUND_DELIVERY_TARGETS_LIST_PROVIDER_TOOL_NAME,
+    OutboundDeliveryCapabilityInputError, OutboundDeliveryTargetSetInput,
+    OutboundDeliveryTargetsListInput, list_outbound_delivery_targets_for_model,
+    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
+    outbound_delivery_target_set_operator_tool_info, outbound_delivery_targets_list_input_schema,
+    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
+    set_outbound_delivery_target_for_model,
 };
 pub use outbound_preferences::{
     MutableOutboundDeliveryTargetRegistry, OutboundDeliveryTargetEntry,
