@@ -566,6 +566,7 @@ impl ironclaw_auth::EngineOAuthConfigurationSource for StaticVendorClientCredent
 
     async fn resolve_non_secret_value(
         &self,
+        _vendor: &str,
         _handle: &SecretHandle,
     ) -> Result<Option<String>, AuthProductError> {
         Ok(None)

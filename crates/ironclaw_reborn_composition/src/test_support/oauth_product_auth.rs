@@ -318,6 +318,7 @@ impl ironclaw_auth::EngineOAuthConfigurationSource for TestStaticClientCredentia
 
     async fn resolve_non_secret_value(
         &self,
+        _vendor: &str,
         _handle: &ironclaw_host_api::SecretHandle,
     ) -> Result<Option<String>, ironclaw_auth::AuthProductError> {
         Ok(None)

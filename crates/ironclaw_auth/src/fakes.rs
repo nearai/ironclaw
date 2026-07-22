@@ -556,7 +556,8 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         match record.state {
             AuthFlowState::Resolved(AuthFlowOutcome::UserAborted) => return Ok(record.clone()),
             AuthFlowState::Resolved(_) => return Err(AuthProductError::FlowAlreadyTerminal),
-            AuthFlowState::Open | AuthFlowState::Processing => {}
+            AuthFlowState::Processing => return Err(AuthProductError::FlowAlreadyTerminal),
+            AuthFlowState::Open => {}
         }
         record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
         record.updated_at = now;

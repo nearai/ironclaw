@@ -164,13 +164,14 @@ impl EngineOAuthConfigurationSource for CompositionOAuthConfiguration {
 
     async fn resolve_non_secret_value(
         &self,
+        vendor: &str,
         handle: &SecretHandle,
     ) -> Result<Option<String>, AuthProductError> {
         let Some(service) = self.channel_config.as_ref().and_then(|slot| slot.get()) else {
             return Ok(None);
         };
         service
-            .non_secret_handle_value(handle)
+            .non_secret_handle_value(vendor, handle)
             .await
             .map_err(|error| {
                 tracing::warn!(

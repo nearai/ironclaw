@@ -1132,6 +1132,104 @@ async fn filesystem_oauth_callback_claim_is_atomic_across_service_instances() {
 }
 
 #[tokio::test]
+async fn filesystem_lifecycle_cleanup_retries_after_cross_instance_callback_finishes() {
+    use ironclaw_auth::{
+        ProviderCallbackOutcome, SecretCleanupAction, SecretCleanupRequest, SecretCleanupService,
+    };
+
+    let filesystem = test_filesystem();
+    let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
+    let callback_service = test_service(Arc::clone(&filesystem), Arc::clone(&secret_store));
+    let cleanup_service = test_service(filesystem, secret_store);
+    let scope = test_scope();
+    let flow = callback_service
+        .create_flow(NewAuthFlow {
+            id: None,
+            scope: scope.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: google_provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: OAuthAuthorizationUrl::new("https://provider.example/oauth")
+                    .expect("authorization URL"),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
+            opaque_state_hash: Some(state_hash("cleanup-race-state")),
+            pkce_verifier_hash: Some(pkce_hash("cleanup-race-pkce")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("flow");
+    callback_service
+        .claim_oauth_callback(
+            &scope,
+            OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("cleanup-race-state"),
+                provider: google_provider(),
+                pkce_verifier_hash: pkce_hash("cleanup-race-pkce"),
+            },
+        )
+        .await
+        .expect("callback claim");
+
+    let cleanup_request = SecretCleanupRequest {
+        scope: scope.clone(),
+        extension_id: ExtensionId::new("google-extension").expect("extension id"),
+        provider: Some(google_provider()),
+        lifecycle_package: None,
+        action: SecretCleanupAction::Uninstall,
+    };
+    assert_eq!(
+        cleanup_service
+            .cleanup_for_lifecycle(cleanup_request.clone())
+            .await
+            .expect_err("cleanup must not race ahead of a claimed callback"),
+        AuthProductError::BackendConflict,
+    );
+
+    let completed = callback_service
+        .complete_oauth_callback(
+            &scope,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("cleanup-race-state"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: Box::new(OAuthProviderExchange {
+                        provider: google_provider(),
+                        account_label: account_label(),
+                        authorization_code_hash: code_hash("cleanup-race-code"),
+                        pkce_verifier_hash: pkce_hash("cleanup-race-pkce"),
+                        access_secret: SecretHandle::new("cleanup-race-access")
+                            .expect("secret handle"),
+                        refresh_secret: None,
+                        scopes: vec![ProviderScope::new("gmail.readonly").unwrap()],
+                        account_id: None,
+                        provider_identity: None,
+                    }),
+                },
+            },
+        )
+        .await
+        .expect("claimed callback completes");
+    let account_id = authorized_account_id(&completed).expect("authorized account id");
+
+    let report = cleanup_service
+        .cleanup_for_lifecycle(cleanup_request)
+        .await
+        .expect("retry observes and revokes the callback account");
+    assert_eq!(report.revoked_accounts, vec![account_id]);
+    let account = cleanup_service
+        .get_account(CredentialAccountLookupRequest::new(scope, account_id))
+        .await
+        .expect("account lookup")
+        .expect("revoked account remains auditable");
+    assert_eq!(account.status, CredentialAccountStatus::Revoked);
+    assert!(account.access_secret.is_none());
+}
+
+#[tokio::test]
 async fn filesystem_manual_token_submit_allows_only_one_concurrent_consumer() {
     let filesystem = test_filesystem();
     let secret_store: Arc<dyn SecretStore> = Arc::new(FilesystemSecretStore::ephemeral());
@@ -2745,12 +2843,12 @@ async fn filesystem_cancel_flow_and_terminal_state_rejection() {
         AuthFlowState::Resolved(AuthFlowOutcome::UserAborted)
     );
 
-    // Second cancel on already-terminal flow returns Canceled error.
-    let err = service
+    // Replaying the same cancel is idempotent and returns the durable winner.
+    let replay = service
         .cancel_flow(&scope, flow.id)
         .await
-        .expect_err("second cancel must fail");
-    assert_eq!(err, AuthProductError::Canceled);
+        .expect("second cancel returns the existing resolution");
+    assert_eq!(replay.state, cancelled.state);
 }
 
 #[tokio::test]

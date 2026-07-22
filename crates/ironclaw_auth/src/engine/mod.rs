@@ -124,7 +124,9 @@ impl fmt::Debug for EngineOAuthClientMaterial {
 ///
 /// Implementations look handles up in operator-managed deployment
 /// configuration. Client credentials remain redacted; values explicitly
-/// declared non-secret may be returned for vendor authorize parameters.
+/// declared non-secret may be returned for vendor authorize parameters. The
+/// vendor argument keeps a handle bound to the manifests that supplied that
+/// recipe instead of treating handle names as deployment-global identities.
 /// Returning `MalformedConfig` means required deployment configuration is
 /// missing or invalid.
 #[async_trait]
@@ -137,6 +139,7 @@ pub trait EngineOAuthConfigurationSource: Send + Sync + fmt::Debug {
 
     async fn resolve_non_secret_value(
         &self,
+        _vendor: &str,
         _handle: &SecretHandle,
     ) -> Result<Option<String>, AuthProductError> {
         Ok(None)
@@ -327,7 +330,9 @@ impl AuthEngine {
             .map_err(|_| AuthProductError::MalformedConfig)?;
         let requested_scopes =
             effective_requested_scopes(&recipe, request.requested_scopes.clone())?;
-        let authorize_params = self.resolve_authorize_params(&recipe).await?;
+        let authorize_params = self
+            .resolve_authorize_params(&request.vendor, &recipe)
+            .await?;
         let client = self
             .oauth_client_material(
                 &request.scope.resource,
@@ -374,11 +379,16 @@ impl AuthEngine {
 
     async fn resolve_authorize_params(
         &self,
+        vendor: &str,
         recipe: &OAuth2CodeRecipe,
     ) -> Result<BTreeMap<String, String>, AuthProductError> {
         let mut resolved = BTreeMap::new();
         for (parameter, handle) in &recipe.authorize_params_from_config {
-            let Some(value) = self.configuration.resolve_non_secret_value(handle).await? else {
+            let Some(value) = self
+                .configuration
+                .resolve_non_secret_value(vendor, handle)
+                .await?
+            else {
                 tracing::debug!(
                     parameter,
                     handle = handle.as_str(),

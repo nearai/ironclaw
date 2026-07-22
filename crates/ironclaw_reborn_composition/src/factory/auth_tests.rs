@@ -572,6 +572,7 @@ async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boun
 
         async fn resolve_non_secret_value(
             &self,
+            _vendor: &str,
             _handle: &ironclaw_host_api::SecretHandle,
         ) -> Result<Option<String>, ironclaw_auth::AuthProductError> {
             Ok(None)

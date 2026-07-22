@@ -460,6 +460,7 @@ async fn webui_event_stream_creates_vendor_oauth_prompt_for_runtime_credential_g
 
         async fn resolve_non_secret_value(
             &self,
+            _vendor: &str,
             _handle: &ironclaw_host_api::SecretHandle,
         ) -> Result<Option<String>, ironclaw_auth::AuthProductError> {
             Ok(None)

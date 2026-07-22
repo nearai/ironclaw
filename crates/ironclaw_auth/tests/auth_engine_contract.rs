@@ -176,6 +176,7 @@ impl EngineOAuthConfigurationSource for StaticClientCredentials {
 
     async fn resolve_non_secret_value(
         &self,
+        _vendor: &str,
         handle: &SecretHandle,
     ) -> Result<Option<String>, AuthProductError> {
         Ok(self.non_secret_by_handle.get(handle.as_str()).cloned())

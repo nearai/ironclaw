@@ -68,8 +68,22 @@ where
                     _ => match self.cancel_flow(&flow.scope, flow.id).await {
                         Ok(canceled) => canceled,
                         Err(AuthProductError::Canceled)
-                        | Err(AuthProductError::FlowAlreadyTerminal)
                         | Err(AuthProductError::UnknownOrExpiredFlow) => flow,
+                        Err(AuthProductError::FlowAlreadyTerminal) => {
+                            let current = self
+                                .get_flow(&flow.scope, flow.id)
+                                .await?
+                                .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
+                            if current.state == AuthFlowState::Processing {
+                                // A callback durably owns this flow. Abort the
+                                // lifecycle cleanup so its account scan cannot
+                                // race ahead of the callback's account write;
+                                // the caller can retry once the callback has
+                                // resolved and the account is visible.
+                                return Err(AuthProductError::BackendConflict);
+                            }
+                            current
+                        }
                         Err(error) => return Err(error),
                     },
                 };

@@ -571,11 +571,12 @@ where
         if !scope_matches(scope, &record.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
-        if let AuthFlowState::Resolved(outcome) = record.state {
-            return Err(match outcome {
-                AuthFlowOutcome::UserAborted => AuthProductError::Canceled,
-                _ => AuthProductError::FlowAlreadyTerminal,
-            });
+        match record.state {
+            AuthFlowState::Resolved(AuthFlowOutcome::UserAborted) => return Ok(record),
+            AuthFlowState::Resolved(_) | AuthFlowState::Processing => {
+                return Err(AuthProductError::FlowAlreadyTerminal);
+            }
+            AuthFlowState::Open => {}
         }
         record.state = AuthFlowState::Resolved(AuthFlowOutcome::UserAborted);
         record.updated_at = Utc::now();

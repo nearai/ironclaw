@@ -132,10 +132,65 @@ pub async fn assert_auth_flow_callback_conformance(
 ) {
     completed_flow_claim_idempotent_and_complete_rejects_replay(flows, scope, provider).await;
     processing_replays_and_terminal_failure_rejects(flows, scope, provider).await;
+    processing_claim_fences_explicit_cancel(flows, scope, provider).await;
     expired_flow_rejects_and_marks_expired(flows, scope, provider).await;
     canceled_flow_rejects_completion_as_canceled(flows, scope, provider).await;
     unknown_flow_rejects_completion(flows, scope, provider).await;
     state_hash_mismatch_denies_without_burning_the_flow(flows, scope, provider).await;
+}
+
+/// Once a callback owns `Processing`, a concurrent explicit cancel cannot
+/// replace that durable claim. Otherwise the callback could persist a
+/// credential account and then lose its final flow write to `UserAborted`,
+/// leaving an authorized account with no authorized flow.
+async fn processing_claim_fences_explicit_cancel(
+    flows: &dyn AuthFlowManager,
+    scope: &AuthProductScope,
+    provider: &AuthProviderId,
+) {
+    const CASE: &str = "processing claim fences cancel";
+    let tag = "conformance-processing-cancel";
+    let flow = flows
+        .create_flow(new_flow(
+            scope,
+            provider,
+            tag,
+            Utc::now() + Duration::minutes(5),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] create flow: {error:?}"));
+    let claim = flows
+        .claim_oauth_callback(
+            scope,
+            crate::OAuthCallbackClaimRequest {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash(tag),
+                provider: provider.clone(),
+                pkce_verifier_hash: pkce_hash(tag),
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] claim callback: {error:?}"));
+    assert!(matches!(claim, OAuthCallbackClaim::Acquired(_))); // safety: test-support contract assertion.
+
+    let cancel = flows
+        .cancel_flow(scope, flow.id)
+        .await
+        .expect_err("a callback-owned Processing flow must reject explicit cancel");
+    assert_eq!(cancel, AuthProductError::FlowAlreadyTerminal); // safety: test-support contract assertion.
+
+    let completed = flows
+        .complete_oauth_callback(
+            scope,
+            callback_input(flow.id, tag, authorized_outcome(provider, tag)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("[{CASE}] claimed callback completes: {error:?}"));
+    let authorized = matches!(
+        completed.state,
+        AuthFlowState::Resolved(AuthFlowOutcome::Authorized { .. })
+    );
+    assert!(authorized); // safety: test-support contract assertion.
 }
 
 /// An in-flight claim is an idempotent replay for every continuation, while a
