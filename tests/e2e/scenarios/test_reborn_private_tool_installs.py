@@ -30,6 +30,7 @@ import httpx
 
 from reborn_webui_harness import (
     create_thread,
+    enable_reborn_global_auto_approve,
     reborn_bearer_headers,
     reborn_v2_private_installs_yolo_server,  # noqa: F401 - imported fixture
     send_and_settle,
@@ -121,6 +122,11 @@ async def test_private_tool_installs_full_path(
         # 3. Operator creates alice and bob.
         alice = await _create_member_user(operator, base_url, display_name="Alice")
         bob = await _create_member_user(operator, base_url, display_name="Bob")
+
+        # Auto-approve is caller-scoped, so the fixture's operator setting does
+        # not grant it to newly-created members.
+        await enable_reborn_global_auto_approve(base_url, token=alice["token"])
+        await enable_reborn_global_auto_approve(base_url, token=bob["token"])
 
     try:
         async with _user_client(base_url, alice["token"]) as alice_client:
