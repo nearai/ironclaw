@@ -12,6 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ironclaw_host_api::UserId;
 use ironclaw_host_runtime::SandboxActivityRegistry;
 use ironclaw_resources::ResourceGovernor;
 
@@ -58,6 +59,10 @@ pub(crate) struct SandboxProfileBindingInputs<'a> {
     /// constructed registry, or its idle/activity reads would never match
     /// what the transport records.
     pub(crate) activity: Arc<SandboxActivityRegistry>,
+    /// Task A6: the sandbox concurrency ceiling is scoped per-user (not
+    /// per-tenant), so one user cannot starve every other user in the
+    /// tenant.
+    pub(crate) owner_user_id: UserId,
 }
 
 pub(crate) struct SandboxRuntimeBindings {
@@ -82,7 +87,7 @@ impl SandboxRuntimeBindings {
     }
 
     /// Builds the sandboxed profile's runtime bindings: applies the
-    /// tenant concurrency ceiling and spawns the orphan-container reaper.
+    /// per-user concurrency ceiling and spawns the orphan-container reaper.
     /// Moved verbatim out of `build_local_runtime`'s inline
     /// `if is_sandboxed_profile` block (D3-2/D4-1) — behavior-preserving,
     /// this task only relocates the wiring behind one seam. Non-sandboxed
@@ -97,13 +102,14 @@ impl SandboxRuntimeBindings {
 
         let sandbox_tenant_id =
             crate::sandbox_quota::resolve_local_runtime_tenant_id(inputs.local_runtime_identity)?;
-        crate::sandbox_quota::apply_sandbox_tenant_ceiling(
+        crate::sandbox_quota::apply_sandbox_user_ceiling(
             &inputs.resource_governor,
             sandbox_tenant_id,
+            inputs.owner_user_id,
             crate::sandbox_quota::sandbox_max_concurrent_from_env(),
         )
         .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!("sandbox tenant concurrency ceiling could not be set: {error}"),
+            reason: format!("sandbox user concurrency ceiling could not be set: {error}"),
         })?;
 
         // D4-1: spawn the orphan-container reaper. Guarded internally —
@@ -154,6 +160,7 @@ mod tests {
             local_runtime_identity: None,
             resource_governor: governor(),
             activity: Arc::new(SandboxActivityRegistry::new()),
+            owner_user_id: UserId::new("probe-user").unwrap(),
         })
         .await
         .expect("non-sandboxed profile never fails to build inert bindings");
@@ -165,13 +172,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sandboxed_profile_applies_the_tenant_ceiling() {
+    async fn sandboxed_profile_applies_the_user_ceiling() {
         let governor = governor();
+        let owner_user_id = UserId::new("probe-user").unwrap();
         let bindings = SandboxRuntimeBindings::build(SandboxProfileBindingInputs {
             is_sandboxed_profile: true,
             local_runtime_identity: None,
             resource_governor: Arc::clone(&governor),
             activity: Arc::new(SandboxActivityRegistry::new()),
+            owner_user_id: owner_user_id.clone(),
         })
         .await
         .expect("sandboxed profile build succeeds even with no reachable Docker daemon");
@@ -182,7 +191,7 @@ mod tests {
         let tenant_id = crate::sandbox_quota::resolve_local_runtime_tenant_id(None).unwrap();
         let scope = ResourceScope {
             tenant_id,
-            user_id: UserId::new("probe-user").unwrap(),
+            user_id: owner_user_id,
             agent_id: None,
             project_id: None,
             mission_id: None,

@@ -1957,6 +1957,10 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     // Same local-dev deployment identity anchors channel egress credentials
     // ([channel.config] secret handles) and their vendor calls.
     let channel_egress_scope = nearai_mcp_owner_scope.clone();
+    // Task A6: the sandbox concurrency ceiling call site (below) needs
+    // `owner_user_id` too, but `owner_user_id` is moved into
+    // `RebornStoreGraphInput` next — clone it first.
+    let sandbox_owner_user_id_for_ceiling = owner_user_id.clone();
     let mut store_graph = build_local_runtime_store_graph(RebornStoreGraphInput {
         filesystem: Arc::clone(&filesystem),
         owner_user_id,
@@ -1995,6 +1999,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             activity: sandbox_activity
                 .clone()
                 .unwrap_or_else(|| Arc::new(ironclaw_host_runtime::SandboxActivityRegistry::new())),
+            owner_user_id: sandbox_owner_user_id_for_ceiling,
         },
     )
     .await?;

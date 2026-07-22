@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_resources::{ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits};
 
 /// Overrides the sandboxed profile's per-tenant concurrent `SpawnProcess`
@@ -52,25 +52,27 @@ pub(crate) fn resolve_sandbox_max_concurrent_from_raw(raw: Option<String>) -> u3
         .unwrap_or(DEFAULT_SANDBOX_MAX_CONCURRENT)
 }
 
-/// Sets the tenant-scoped `max_concurrency_slots` ceiling on `governor` for
-/// `tenant_id`. Composition calls this once at boot, only for the
-/// `hosted-single-tenant-volume-sandboxed` profile — every other profile
-/// leaves the tenant account unlimited, matching D3-1's "no-op until D3-2"
-/// note.
+/// Sets the per-user `max_concurrency_slots` ceiling on `governor` for
+/// `user_id` within `tenant_id`. Composition calls this once at boot, only
+/// for the `hosted-single-tenant-volume-sandboxed` profile — every other
+/// profile leaves the account unlimited, matching D3-1's "no-op until D3-2"
+/// note. Scoped per-user (not per-tenant) so one user cannot starve every
+/// other user in the tenant by exhausting the shared ceiling.
 ///
 /// This is what turns the D3-1 `ReserveResources` obligation from a no-op
 /// into an actual gate: `FilesystemResourceGovernor`/
 /// `InMemoryResourceGovernor::reserve_with_outcome` check `max_concurrency_slots`
 /// against the account's current outstanding reservations, so the
-/// `N+1`th concurrent `SpawnProcess` reservation for this tenant is denied as
+/// `N+1`th concurrent `SpawnProcess` reservation for this user is denied as
 /// a model-visible outcome (never a host error) once this ceiling is set.
-pub(crate) fn apply_sandbox_tenant_ceiling(
+pub(crate) fn apply_sandbox_user_ceiling(
     governor: &Arc<dyn ResourceGovernor>,
     tenant_id: TenantId,
+    user_id: UserId,
     max_concurrent: u32,
 ) -> Result<(), ResourceError> {
     governor.set_limit(
-        ResourceAccount::tenant(tenant_id),
+        ResourceAccount::user(tenant_id, user_id),
         ResourceLimits::default().set_max_concurrency_slots(max_concurrent),
     )
 }
@@ -105,10 +107,10 @@ mod tests {
         TenantId::new(id.to_string()).expect("valid tenant id")
     }
 
-    fn scope(tenant_id: &TenantId) -> ResourceScope {
+    fn scope_for(tenant_id: &TenantId, user_id: &UserId) -> ResourceScope {
         ResourceScope {
             tenant_id: tenant_id.clone(),
-            user_id: UserId::new("sandbox-quota-test-user").expect("valid user id"),
+            user_id: user_id.clone(),
             agent_id: None,
             project_id: None,
             mission_id: None,
@@ -144,45 +146,47 @@ mod tests {
         );
     }
 
-    /// D3-2's headline behavior: once the tenant ceiling is applied, the
-    /// `N+1`th concurrent reservation for that tenant is *denied* — a
-    /// model-visible outcome from `ResourceGovernor::reserve`, never a host
-    /// panic/error — while a distinct tenant is unaffected.
+    /// D3-2's headline behavior, now scoped per-user (not per-tenant): once
+    /// a user's ceiling is applied, the `N+1`th concurrent reservation for
+    /// that same user is *denied* — a model-visible outcome from
+    /// `ResourceGovernor::reserve`, never a host panic/error — while a
+    /// sibling user in the same tenant is unaffected. This strictly
+    /// supersedes the old per-tenant test: the old behavior let one user
+    /// starve every other user in the tenant, which this change fixes.
     #[test]
-    fn ceiling_denies_the_second_concurrent_reservation_for_the_same_tenant() {
+    fn ceiling_denies_the_second_concurrent_reservation_for_the_same_user_but_not_a_sibling_user() {
         let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
         let tenant_id = tenant("sandboxed-tenant");
+        let user_id = UserId::new("user-a").expect("valid user id");
 
-        apply_sandbox_tenant_ceiling(&governor, tenant_id.clone(), 1)
+        apply_sandbox_user_ceiling(&governor, tenant_id.clone(), user_id.clone(), 1)
             .expect("setting a finite ceiling on an empty account succeeds");
 
-        let first_scope = scope(&tenant_id);
         let first = governor
             .reserve(
-                first_scope,
+                scope_for(&tenant_id, &user_id),
                 ResourceEstimate::default().set_concurrency_slots(1),
             )
             .expect("first reservation is within the ceiling");
-
-        let second_scope = scope(&tenant_id);
         let second = governor.reserve(
-            second_scope,
+            scope_for(&tenant_id, &user_id),
             ResourceEstimate::default().set_concurrency_slots(1),
         );
         assert!(
             second.is_err(),
-            "second concurrent reservation for a tenant capped at 1 must be denied, not succeed"
+            "second concurrent reservation for a capped user must be denied"
         );
 
-        // A different tenant is never affected by this tenant's ceiling.
-        let other_tenant = tenant("other-tenant");
-        let other_scope = scope(&other_tenant);
+        // A sibling user in the SAME tenant is unaffected — this is the
+        // headline behavior change from the old per-tenant ceiling, where one
+        // user could starve every other user in the tenant.
+        let sibling_user = UserId::new("user-b").expect("valid user id");
         governor
             .reserve(
-                other_scope,
+                scope_for(&tenant_id, &sibling_user),
                 ResourceEstimate::default().set_concurrency_slots(1),
             )
-            .expect("an unrelated tenant's account is unaffected by this ceiling");
+            .expect("a sibling user in the same tenant is unaffected by user-a's ceiling");
 
         drop(first);
     }
