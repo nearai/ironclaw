@@ -59,9 +59,12 @@ async def _create_response(client: httpx.AsyncClient, path="/v1/responses", **pa
     # request races the backend/LLM warm-up (a cold-start 503 was flaking this
     # smoke). Any non-transient status breaks immediately.
     transient_statuses = {429, 502, 503, 504}
-    for attempt in range(6):
+    attempts = 6
+    for attempt in range(attempts):
         response = await client.post(path, json={"model": "default", **payload})
-        if response.status_code not in transient_statuses:
+        # Break on a non-transient status, or after the final attempt (no point
+        # sleeping when no further request will be made).
+        if response.status_code not in transient_statuses or attempt == attempts - 1:
             break
         await asyncio.sleep(1 + attempt * 0.5)
     assert response is not None

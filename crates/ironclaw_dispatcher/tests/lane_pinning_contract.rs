@@ -92,8 +92,7 @@ async fn resolver_lane_differs_from_pinned_lane_fails_closed() {
         resolved("echo", RuntimeKind::Script, binding.clone()),
     )]);
     let events = InMemoryEventSink::new();
-    let dispatcher =
-        RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
+    let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
 
     let error = dispatcher
         .dispatch_json(dispatch_request(&scope, Some(RuntimeLane::Wasm)))

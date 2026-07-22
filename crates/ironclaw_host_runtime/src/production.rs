@@ -2198,6 +2198,17 @@ mod tests {
                 DispatchFailureKind::AuthRequired,
                 RuntimeFailureKind::Authorization,
             ),
+            // The registry-swap (§5.3.2 finding C) and execution-boundary
+            // deadline (finding #5) fail-closed arms must classify as
+            // Authorization, so a later remapping cannot silently weaken them.
+            (
+                DispatchFailureKind::LaneMismatch,
+                RuntimeFailureKind::Authorization,
+            ),
+            (
+                DispatchFailureKind::AuthorizationExpired,
+                RuntimeFailureKind::Authorization,
+            ),
         ];
         for (kind, expected) in cases {
             assert_eq!(RuntimeFailureKind::from(*kind), *expected, "kind {kind:?}");
