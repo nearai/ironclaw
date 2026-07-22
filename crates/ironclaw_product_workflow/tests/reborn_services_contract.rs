@@ -57,18 +57,18 @@ use ironclaw_product_workflow::{
     NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW,
-    OperatorLogsService, OperatorServiceLifecycleService, OperatorStatusService,
-    OutboundPreferencesProductFacade, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError,
-    ProjectFsFile, ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
-    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
-    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
-    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionOnboardingState, RebornExtensionSurface,
-    RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
+    OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
+    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
+    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
+    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
+    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
+    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionOnboardingState,
+    RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
     RebornListProjectsResponse, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
@@ -9532,6 +9532,23 @@ async fn query_operator_config_key<S: RebornServicesApi + ?Sized>(
     serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
 }
 
+async fn query_operator_setup<S: RebornServicesApi + ?Sized>(
+    services: &S,
+    caller: WebUiAuthenticatedCaller,
+) -> Result<ironclaw_product_workflow::RebornOperatorSetupResponse, RebornServicesError> {
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: OPERATOR_SETUP_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
 fn operator_policy_scope_for_test(tenant_id: &str, user_id: &str) -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new(tenant_id).expect("tenant id"),
@@ -10268,8 +10285,7 @@ async fn get_operator_setup_returns_snapshot_from_llm_config() {
     llm_config.use_active_snapshot("openai", "gpt-5-mini");
     let services = services_with_setup_llm_config(llm_config.clone());
 
-    let response = services
-        .get_operator_setup(caller())
+    let response = query_operator_setup(&services, caller())
         .await
         .expect("setup response");
 
@@ -10295,8 +10311,7 @@ async fn get_operator_setup_without_llm_config_returns_service_unavailable() {
         Arc::new(FakeTurnCoordinator::default()),
     );
 
-    let err = services
-        .get_operator_setup(caller())
+    let err = query_operator_setup(&services, caller())
         .await
         .expect_err("setup service is unavailable");
 

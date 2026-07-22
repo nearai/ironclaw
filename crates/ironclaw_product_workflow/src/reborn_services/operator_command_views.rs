@@ -2,12 +2,12 @@
 
 use super::{
     OperatorSetupHostState, ProductCapabilityInvoker, RebornOperatorArea,
-    RebornOperatorCommandPlaneResponse, RebornOperatorSurfaceStatus, RebornServices,
-    RebornServicesError, RebornViewDescriptor, RebornViewProvider, WebUiAuthenticatedCaller,
-    operator_config_surface_not_wired_diagnostic, operator_diagnostics_surface_status,
-    operator_doctor_setup_unavailable_diagnostic, operator_doctor_status_diagnostic,
-    operator_doctor_status_response, operator_doctor_status_unavailable_diagnostic,
-    setup_response_from_llm_snapshot,
+    RebornOperatorCommandPlaneResponse, RebornOperatorSetupResponse, RebornOperatorSurfaceStatus,
+    RebornServices, RebornServicesError, RebornViewDescriptor, RebornViewProvider,
+    WebUiAuthenticatedCaller, llm_config, operator_config_surface_not_wired_diagnostic,
+    operator_diagnostics_surface_status, operator_doctor_setup_unavailable_diagnostic,
+    operator_doctor_status_diagnostic, operator_doctor_status_response,
+    operator_doctor_status_unavailable_diagnostic, setup_response_from_llm_snapshot,
 };
 
 pub const OPERATOR_DIAGNOSTICS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -20,11 +20,34 @@ pub const OPERATOR_STATUS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
     paginated: false,
 };
 
+pub const OPERATOR_SETUP_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "operator_setup",
+    paginated: false,
+};
+
 impl<I, V> RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
 {
+    pub(super) async fn build_operator_setup_view(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        let Some(llm_config) = &self.llm_config else {
+            return Err(llm_config::llm_config_unavailable());
+        };
+        let snapshot = llm_config
+            .snapshot(caller)
+            .await
+            .map_err(llm_config::map_llm_config_error)?;
+        Ok(setup_response_from_llm_snapshot(
+            snapshot,
+            Vec::new(),
+            OperatorSetupHostState::default(),
+        ))
+    }
+
     pub(super) async fn build_operator_diagnostics_view(
         &self,
         caller: WebUiAuthenticatedCaller,

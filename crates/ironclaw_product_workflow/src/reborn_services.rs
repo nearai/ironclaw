@@ -132,7 +132,9 @@ pub use llm_config::{
     UpsertLlmProviderRequest,
 };
 pub use log_views::{LOGS_VIEW, OPERATOR_LOGS_VIEW};
-pub use operator_command_views::{OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_STATUS_VIEW};
+pub use operator_command_views::{
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
+};
 pub use operator_config_views::{
     OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
 };
@@ -2469,14 +2471,6 @@ pub trait RebornServicesApi: Send + Sync {
         Err(llm_config::llm_config_unavailable())
     }
 
-    async fn get_operator_setup(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        let _ = caller;
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     async fn run_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3455,24 +3449,6 @@ where
             })
     }
 
-    async fn get_operator_setup(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        let Some(llm_config) = &self.llm_config else {
-            return Err(llm_config::llm_config_unavailable());
-        };
-        let snapshot = llm_config
-            .snapshot(caller)
-            .await
-            .map_err(llm_config::map_llm_config_error)?;
-        Ok(setup_response_from_llm_snapshot(
-            snapshot,
-            Vec::new(),
-            OperatorSetupHostState::default(),
-        ))
-    }
-
     async fn run_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -4011,6 +3987,11 @@ where
             }
             id if id == OPERATOR_CONFIG_VALIDATE_VIEW.id => {
                 let response = self.build_operator_config_validate_view(query.params)?;
+                views::view_page(response)
+            }
+            id if id == OPERATOR_SETUP_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.build_operator_setup_view(caller).await?;
                 views::view_page(response)
             }
             id if id == OPERATOR_DIAGNOSTICS_VIEW.id => {

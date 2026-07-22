@@ -31,7 +31,7 @@ use ironclaw_product_workflow::{
     FsMount, LLM_CONFIG_VIEW, LOGS_VIEW, LifecyclePackageRef, LlmActiveSelection,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW,
-    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_STATUS_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
     OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_VIEW, ProductSurface, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
     RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
@@ -283,7 +283,6 @@ struct StubServices {
     set_outbound_preferences_calls: Mutex<Vec<RebornSetOutboundPreferencesRequest>>,
     next_set_outbound_preferences_error: Mutex<Option<RebornServicesError>>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
-    get_operator_setup_calls: Mutex<usize>,
     run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
     operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
@@ -821,6 +820,19 @@ impl RebornServicesApi for StubServices {
                     next_cursor: None,
                 })
             }
+            id if id == OPERATOR_SETUP_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornOperatorSetupResponse {
+                    area: RebornOperatorArea::Setup,
+                    status: RebornOperatorSetupStatus::Incomplete,
+                    message: "setup incomplete".to_string(),
+                    active_provider_id: None,
+                    active_model: None,
+                    steps: Vec::new(),
+                    diagnostics: Vec::new(),
+                })
+                .expect("operator setup payload"),
+                next_cursor: None,
+            }),
             id if id == OPERATOR_DIAGNOSTICS_VIEW.id => Ok(RebornViewPage {
                 payload: serde_json::to_value(operator_config_diagnostic_command_plane_response(
                     RebornOperatorArea::Diagnostics,
@@ -1240,22 +1252,6 @@ impl RebornServicesApi for StubServices {
                 "Default skill auto-activation {}",
                 if enabled { "enabled" } else { "disabled" }
             ),
-        })
-    }
-
-    async fn get_operator_setup(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        *self.get_operator_setup_calls.lock().expect("lock") += 1;
-        Ok(RebornOperatorSetupResponse {
-            area: RebornOperatorArea::Setup,
-            status: RebornOperatorSetupStatus::Incomplete,
-            message: "setup incomplete".to_string(),
-            active_provider_id: None,
-            active_model: None,
-            steps: Vec::new(),
-            diagnostics: Vec::new(),
         })
     }
 
@@ -3661,7 +3657,6 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::OK);
 
-    assert_eq!(*services.get_operator_setup_calls.lock().expect("lock"), 1);
     assert_eq!(
         services
             .run_operator_setup_calls
@@ -3697,6 +3692,7 @@ async fn operator_routes_dispatch_to_facade_with_body_and_query_inputs() {
         .iter()
         .map(|query| query.view_id.clone())
         .collect();
+    assert!(view_ids.contains(&OPERATOR_SETUP_VIEW.id.to_string()));
     assert!(view_ids.contains(&OPERATOR_CONFIG_LIST_VIEW.id.to_string()));
     assert!(view_ids.contains(&OPERATOR_CONFIG_VALIDATE_VIEW.id.to_string()));
     assert!(view_ids.contains(&OPERATOR_DIAGNOSTICS_VIEW.id.to_string()));
@@ -3759,7 +3755,6 @@ async fn operator_config_routes_require_operator_capability() {
         .expect("oneshot");
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
-    assert_eq!(*services.get_operator_setup_calls.lock().expect("lock"), 0);
     assert!(
         services
             .run_operator_setup_calls
