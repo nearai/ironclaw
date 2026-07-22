@@ -4105,6 +4105,7 @@ pub async fn build_reborn_runtime(
                 Arc::clone(assembly),
                 Arc::clone(&local_runtime.triggered_run_delivery),
                 Arc::clone(&local_runtime.outbound_preferences),
+                Arc::clone(&local_runtime.outbound_delivery_targets),
             ),
         );
         if slot.set(generic_trigger_hook).is_err() {

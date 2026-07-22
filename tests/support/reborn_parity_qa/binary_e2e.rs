@@ -60,15 +60,15 @@ use ironclaw_threads::{
     ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_turns::{
-    CancelRunRequest, FilesystemTurnStateRowStore, GateRef, GetLoopCheckpointRequest,
-    GetRunStateRequest, IdempotencyKey, LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStore,
-    ReplyTargetBindingRef, ResumeTurnRequest, RetryTurnRequest, RetryTurnResponse,
-    SanitizedCancelReason, SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId,
-    TurnRunRecord, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    CancelRunRequest, CheckpointStateStore, FilesystemTurnStateRowStore, GateRef,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopBlockedKind,
+    LoopCheckpointKind, LoopCheckpointStore, ReplyTargetBindingRef, ResumeTurnRequest,
+    RetryTurnRequest, RetryTurnResponse, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnCoordinator, TurnError, TurnRunId, TurnRunRecord, TurnRunState, TurnScope,
+    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
     run_profile::{
-        CapabilityCallCandidate, CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion, LoopHostMilestone, LoopHostMilestoneKind, ParentLoopOutput,
-        ProviderToolCallReplay,
+        CapabilityCallCandidate, CapabilityInputRef, CapabilitySurfaceVersion, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopRequest, ParentLoopOutput, ProviderToolCallReplay,
     },
 };
 use serde_json::json;
@@ -779,7 +779,8 @@ impl RebornBinaryE2EHarness {
         let turn_store = Arc::new(FilesystemTurnStateRowStore::new(Arc::clone(
             &turns_scoped_fs,
         )));
-        let checkpoint_state_store = in_memory_checkpoint_state_store();
+        let checkpoint_state_store: Arc<dyn CheckpointStateStore> =
+            in_memory_checkpoint_state_store();
         let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
         let milestone_sink =
             Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default());
@@ -843,7 +844,8 @@ impl RebornBinaryE2EHarness {
                 Arc::clone(&await_edge_store)
                     as Arc<dyn ironclaw_runner::loop_exit_applier::AwaitDependentRunEvidenceStore>,
                 thread_scope.clone(),
-            ),
+            )
+            .with_checkpoint_state_store(Arc::clone(&checkpoint_state_store)),
             loop_checkpoint_store: Arc::clone(&loop_checkpoint_store),
             accept_harness_blocked_evidence,
         });
@@ -1341,7 +1343,7 @@ impl RebornBinaryE2EHarness {
         self.model_gateway.assert_exhausted();
     }
 
-    pub fn capability_invocations(&self) -> Vec<CapabilityInvocation> {
+    pub fn capability_invocations(&self) -> Vec<LoopRequest> {
         self.capability_recorder.invocations()
     }
 
@@ -1355,6 +1357,11 @@ impl RebornBinaryE2EHarness {
 
     pub fn network_http_requests(&self) -> Vec<NetworkHttpRequest> {
         self.capability_recorder.network_http_requests()
+    }
+
+    pub fn install_network_response_script(&self, status: u16, body: Vec<u8>) -> HarnessResult<()> {
+        self.capability_recorder
+            .install_network_response_script(status, body)
     }
 
     pub fn host_workspace_file_path(&self, relative: &str) -> HarnessResult<PathBuf> {

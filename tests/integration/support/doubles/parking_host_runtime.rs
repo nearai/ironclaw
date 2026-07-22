@@ -10,9 +10,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityAuthResumeRequest,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
-    RuntimeStatusRequest, VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalResume, RuntimeAuthResume,
+    RuntimeCapabilityOutcome, RuntimeInvocation, RuntimeStatusRequest,
+    VisibleCapabilityRequest as RuntimeVisibleCapabilityRequest,
     VisibleCapabilitySurface as RuntimeVisibleCapabilitySurface,
 };
 use tokio::sync::watch;
@@ -119,7 +119,7 @@ impl ParkingHostRuntime {
 impl HostRuntime for ParkingHostRuntime {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.gate.park().await;
         self.inner.invoke_capability(request).await
@@ -127,7 +127,7 @@ impl HostRuntime for ParkingHostRuntime {
 
     async fn spawn_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.gate.park().await;
         self.inner.spawn_capability(request).await
@@ -135,21 +135,21 @@ impl HostRuntime for ParkingHostRuntime {
 
     async fn resume_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.inner.resume_capability(request).await
     }
 
     async fn auth_resume_capability(
         &self,
-        request: RuntimeCapabilityAuthResumeRequest,
+        request: RuntimeAuthResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.inner.auth_resume_capability(request).await
     }
 
     async fn resume_spawn_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
         self.inner.resume_spawn_capability(request).await
     }
@@ -201,35 +201,35 @@ mod tests {
     impl HostRuntime for StubHostRuntime {
         async fn invoke_capability(
             &self,
-            _request: RuntimeCapabilityRequest,
+            _request: RuntimeInvocation,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             panic!("test does not drive invoke_capability");
         }
 
         async fn spawn_capability(
             &self,
-            _request: RuntimeCapabilityRequest,
+            _request: RuntimeInvocation,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             Err(HostRuntimeError::unavailable("stub forwards after release"))
         }
 
         async fn resume_capability(
             &self,
-            _request: RuntimeCapabilityResumeRequest,
+            _request: RuntimeApprovalResume,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             panic!("test does not drive resume_capability");
         }
 
         async fn auth_resume_capability(
             &self,
-            _request: RuntimeCapabilityAuthResumeRequest,
+            _request: RuntimeAuthResume,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             panic!("test does not drive auth_resume_capability");
         }
 
         async fn resume_spawn_capability(
             &self,
-            _request: RuntimeCapabilityResumeRequest,
+            _request: RuntimeApprovalResume,
         ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
             panic!("test does not drive resume_spawn_capability");
         }
@@ -260,7 +260,7 @@ mod tests {
         }
     }
 
-    fn stub_capability_request() -> RuntimeCapabilityRequest {
+    fn stub_capability_request() -> RuntimeInvocation {
         let context = ExecutionContext::local_default(
             UserId::new("user").unwrap(),
             ExtensionId::new("caller").unwrap(),
@@ -270,7 +270,7 @@ mod tests {
             MountView::default(),
         )
         .unwrap();
-        RuntimeCapabilityRequest::new(
+        (
             context,
             CapabilityId::new("echo.say").unwrap(),
             ResourceEstimate::default(),

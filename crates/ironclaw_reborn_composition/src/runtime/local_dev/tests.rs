@@ -49,9 +49,9 @@ mod tests {
         TurnActor, TurnId, TurnRunId, TurnScope,
         run_profile::{
             CapabilityApprovalResume, CapabilityCallCandidate, CapabilityInputIssue,
-            CapabilityInputRef, CapabilityInvocation, CapabilityResumeToken,
-            InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
-            RegisterProviderToolCallRequest, VisibleCapabilityRequest,
+            CapabilityInputRef, CapabilityResumeToken, InMemoryLoopHostMilestoneSink,
+            InMemoryRunProfileResolver, LoopRequest, RegisterProviderToolCallRequest,
+            VisibleCapabilityRequest,
         },
     };
 
@@ -299,8 +299,8 @@ mod tests {
         provider_tool_call_with_name("builtin_echo", arguments)
     }
 
-    fn invocation_for_candidate(candidate: &CapabilityCallCandidate) -> CapabilityInvocation {
-        CapabilityInvocation {
+    fn invocation_for_candidate(candidate: &CapabilityCallCandidate) -> LoopRequest {
+        LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version.clone(),
             capability_id: candidate.capability_id.clone(),
@@ -4022,7 +4022,7 @@ mod tests {
             .id;
 
         let missing_set_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: missing_set_activity_id,
                 surface_version: missing_set_surface_version,
                 capability_id: missing_set_capability_id_from_candidate,
@@ -4222,7 +4222,7 @@ mod tests {
         .expect("approval issues dispatch lease");
 
         let set_outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: set_activity_id,
                 surface_version: set_surface_version,
                 capability_id: set_capability_id_from_candidate,
@@ -4864,7 +4864,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version.clone(),
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
@@ -4898,7 +4898,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
@@ -5010,7 +5010,7 @@ mod tests {
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
 
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(SKILL_INSTALL_CAPABILITY_ID)
@@ -5181,7 +5181,7 @@ mod tests {
             .await
             .expect("input ref"); // safety: test-only assertion in #[cfg(test)] module.
         let outcome = port
-            .invoke_capability(CapabilityInvocation {
+            .invoke_capability(LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: surface.version,
                 capability_id: CapabilityId::new(READ_FILE_CAPABILITY_ID)
@@ -5589,7 +5589,7 @@ mod tests {
         );
 
         let batch_result = port
-            .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
+            .invoke_capability_batch(ironclaw_turns::run_profile::LoopRequestBatch {
                 invocations: vec![
                     invocation_for_candidate(&candidate1),
                     invocation_for_candidate(&candidate2),

@@ -43,4 +43,3 @@ env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
 provider_id = "nearai"
 model = "deepseek-ai/DeepSeek-V4-Flash"
 api_key_env = "NEARAI_API_KEY"
-

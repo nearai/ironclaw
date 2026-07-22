@@ -1111,6 +1111,8 @@ registerPack("ko", {
   "admin.users.member": "멤버",
   "admin.users.admin": "관리자",
   "admin.users.suspend": "정지",
+  "admin.users.actionFailed": "작업 실패: {message}",
+  "admin.users.lastAdminRequired": "활성 관리자가 최소 한 명 필요합니다. 이 사용자를 변경하기 전에 다른 관리자를 추가하거나 활성화하세요.",
   "admin.users.activate": "활성화",
   "admin.users.promote": "승격",
   "admin.users.demote": "강등",
@@ -1253,6 +1255,13 @@ registerPack("ko", {
   "extensions.removeFailed": "제거 실패",
   "extensions.openingAuth": "인증 여는 중...",
   "extensions.configurationRequired": "설정 필요",
+  "extensions.setupFailed": "설정에 실패했습니다",
+  "extensions.oauthSetupFailed": "OAuth 설정에 실패했습니다",
+  "extensions.oauthInvalidAuthorizationUrl": "승인 URL은 HTTPS를 사용해야 합니다.",
+  "extensions.oauthFailed": "승인에 실패했습니다. 다시 연결해 보세요.",
+  "extensions.oauthExpired": "승인이 만료되었습니다. 다시 연결해 보세요.",
+  "extensions.oauthCanceled": "승인이 취소되었습니다. 다시 연결해 보세요.",
+  "extensions.oauthTimedOut": "승인 시간이 초과되었습니다. 다시 연결해 보세요.",
   "extensions.getCredentials": "자격 증명 가져오기",
   "extensions.keepSecretPlaceholder": "••••••• (유지하려면 비워 두세요)",
   "extensions.runtime.wasm": "WASM 도구",
@@ -1361,6 +1370,10 @@ registerPack("ko", {
 
 registerPack("ko", {
   "app.checkingSession": "세션 확인 중...",
+  "app.sessionCheckFailedTitle": "세션을 확인할 수 없습니다",
+  "app.sessionCheckFailedDescription":
+    "현재 세션을 확인할 수 없습니다. 로그인 정보는 계속 저장되어 있습니다. 잠시 후 다시 시도하세요.",
+  "app.retrySession": "다시 시도",
   "common.close": "닫기",
   "common.download": "다운로드",
   "common.copy": "복사",

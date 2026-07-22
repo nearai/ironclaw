@@ -23,12 +23,12 @@ async fn capability_host_blocks_auth_when_obligation_requires_secret_recovery() 
     let invocation_id = context.invocation_id;
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs auth"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs auth"}),
+        )
         .await
         .unwrap_err();
 
@@ -56,12 +56,12 @@ async fn capability_host_blocks_auth_when_dispatch_returns_auth_required() {
     let invocation_id = context.invocation_id;
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "dispatch auth required"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "dispatch auth required"}),
+        )
         .await
         .unwrap_err();
 
@@ -95,12 +95,12 @@ async fn capability_host_fails_post_dispatch_auth_required_without_retryable_gat
     let invocation_id = context.invocation_id;
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "post dispatch auth"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "post dispatch auth"}),
+        )
         .await
         .unwrap_err();
 

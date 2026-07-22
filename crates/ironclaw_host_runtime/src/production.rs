@@ -22,9 +22,8 @@ use ironclaw_approvals::{
 };
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_capabilities::{
-    CapabilityAuthResumeRequest, CapabilityHost, CapabilityInvocationError,
-    CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityObligationHandler,
-    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityHost, CapabilityInvocationError, CapabilityInvocationResult,
+    CapabilityObligationHandler, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 use ironclaw_extensions::{ExtensionRegistry, SharedExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
@@ -98,12 +97,12 @@ fn trace_capability_latency_error<E: ?Sized>(
 use crate::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelRuntimeWorkOutcome,
     CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime, HostRuntimeError,
-    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeAuthGate,
-    RuntimeBackendHealth, RuntimeBlockedReason, RuntimeCapabilityAuthResumeRequest,
+    HostRuntimeHealth, HostRuntimeStatus, RuntimeApprovalGate, RuntimeApprovalResume,
+    RuntimeAuthGate, RuntimeAuthResume, RuntimeBackendHealth, RuntimeBlockedReason,
     RuntimeCapabilityCompleted, RuntimeCapabilityFailure, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind, RuntimeGateId,
-    RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, obligations::secret_owner_scope, surface::CapabilityCatalog,
+    RuntimeFailureKind, RuntimeGateId, RuntimeInvocation, RuntimeStatusRequest, RuntimeWorkId,
+    RuntimeWorkSummary, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    obligations::secret_owner_scope, surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -410,14 +409,9 @@ impl DefaultHostRuntime {
 impl HostRuntime for DefaultHostRuntime {
     async fn invoke_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityRequest {
-            context,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, capability_id, estimate, input) = request;
         let scope = context.resource_scope.clone();
         let invocation_id = context.invocation_id;
         let total_started_at = live_latency_started_at();
@@ -426,7 +420,7 @@ impl HostRuntime for DefaultHostRuntime {
 
         // Validate the execution context before the kernel's credential pre-flight
         // queries the secret store. Without this guard a malformed
-        // RuntimeCapabilityRequest could probe secret-store presence under a forged
+        // HostRuntime::invoke_capability could probe secret-store presence under a forged
         // resource_scope that does not match the top-level
         // tenant/user/agent/project fields. Trust classification and runtime-policy
         // planning now run inside the kernel's `authorize()` fold — no host_runtime
@@ -445,15 +439,11 @@ impl HostRuntime for DefaultHostRuntime {
 
         let host = self.capability_host(&registry);
 
-        let invocation = CapabilityInvocationRequest {
-            context,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-        };
-
         let dispatch_started_at = live_latency_started_at();
-        match host.invoke_json(invocation).await {
+        match host
+            .invoke_json(context, capability_id.clone(), estimate, input)
+            .await
+        {
             Ok(result) => {
                 trace_capability_latency_ok(
                     "capability_host_invoke_json",
@@ -514,14 +504,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn spawn_capability(
         &self,
-        request: RuntimeCapabilityRequest,
+        request: RuntimeInvocation,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityRequest {
-            context,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, capability_id, estimate, input) = request;
         let input = match host_runtime_spawn_input_for_capability(&capability_id, input)? {
             SpawnInputPreparation::Ready(input) => input,
             SpawnInputPreparation::ModelInputRejected(failure) => {
@@ -539,7 +524,7 @@ impl HostRuntime for DefaultHostRuntime {
 
         // Validate the execution context before the kernel's credential pre-flight
         // queries the secret store. Without this guard a malformed
-        // RuntimeCapabilityRequest could probe secret-store presence under a forged
+        // HostRuntime::spawn_capability could probe secret-store presence under a forged
         // resource_scope that does not match the top-level
         // tenant/user/agent/project fields. Trust classification and runtime-policy
         // planning now run inside the kernel's spawn authorize fold — no
@@ -580,15 +565,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn resume_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, approval_request_id, capability_id, estimate, input) = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -601,15 +580,16 @@ impl HostRuntime for DefaultHostRuntime {
         // host_runtime pre-authorization + `context.trust` stamp).
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
-        let resume = CapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-        };
-
-        match host.resume_json(resume).await {
+        match host
+            .resume_json(
+                context,
+                approval_request_id,
+                capability_id.clone(),
+                estimate,
+                input,
+            )
+            .await
+        {
             Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 completed_outcome_from(result, capability_id),
             ))),
@@ -643,15 +623,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn auth_resume_capability(
         &self,
-        request: RuntimeCapabilityAuthResumeRequest,
+        request: RuntimeAuthResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityAuthResumeRequest {
-            context,
-            capability_id,
-            estimate,
-            input,
-            approval_request_id,
-        } = request;
+        let (context, capability_id, estimate, input, approval_request_id) = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -669,15 +643,16 @@ impl HostRuntime for DefaultHostRuntime {
         // stamp.
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
-        let auth_resume = CapabilityAuthResumeRequest {
-            context,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-            approval_request_id,
-        };
-
-        match host.auth_resume_json(auth_resume).await {
+        match host
+            .auth_resume_json(
+                context,
+                capability_id.clone(),
+                estimate,
+                input,
+                approval_request_id,
+            )
+            .await
+        {
             Ok(result) => Ok(RuntimeCapabilityOutcome::Completed(Box::new(
                 completed_outcome_from(result, capability_id),
             ))),
@@ -708,15 +683,9 @@ impl HostRuntime for DefaultHostRuntime {
 
     async fn resume_spawn_capability(
         &self,
-        request: RuntimeCapabilityResumeRequest,
+        request: RuntimeApprovalResume,
     ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
-        let RuntimeCapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id,
-            estimate,
-            input,
-        } = request;
+        let (context, approval_request_id, capability_id, estimate, input) = request;
         if let Some(outcome) = self
             .resume_actor_preflight_guard(&context, &capability_id)
             .await?
@@ -740,15 +709,16 @@ impl HostRuntime for DefaultHostRuntime {
         // stamp.
         let registry = self.registry.snapshot();
         let host = self.capability_host(&registry);
-        let resume = CapabilityResumeRequest {
-            context,
-            approval_request_id,
-            capability_id: capability_id.clone(),
-            estimate,
-            input,
-        };
-
-        match host.resume_spawn_json(resume).await {
+        match host
+            .resume_spawn_json(
+                context,
+                approval_request_id,
+                capability_id.clone(),
+                estimate,
+                input,
+            )
+            .await
+        {
             Ok(result) => Ok(RuntimeCapabilityOutcome::SpawnedProcess(
                 spawned_process_outcome_from(result, capability_id),
             )),
@@ -1586,7 +1556,7 @@ fn host_runtime_spawn_input_for_capability(
     }
     let plan = match serde_json::from_value::<SandboxProcessPlan>(input) {
         Ok(plan) => plan,
-        Err(_) => {
+        Err(error) => {
             return Ok(SpawnInputPreparation::ModelInputRejected(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
@@ -1594,13 +1564,17 @@ fn host_runtime_spawn_input_for_capability(
                     Some(
                         "process sandbox capability input must be a SandboxProcessPlan".to_string(),
                     ),
-                ),
+                )
+                // The parse cause ("missing field `run`", …) rides the
+                // model-visible Diagnostic channel — scrubbed at the loop
+                // seam — so the model can correct the plan shape on retry.
+                .with_model_visible_cause(error.to_string()),
             ));
         }
     };
     let plan = match ValidatedSandboxProcessPlan::new(plan) {
         Ok(plan) => plan,
-        Err(_) => {
+        Err(error) => {
             return Ok(SpawnInputPreparation::ModelInputRejected(
                 RuntimeCapabilityFailure::new(
                     capability_id.clone(),
@@ -1609,7 +1583,10 @@ fn host_runtime_spawn_input_for_capability(
                         "process sandbox capability input failed SandboxProcessPlan validation"
                             .to_string(),
                     ),
-                ),
+                )
+                // `ProcessSandboxPlanError` names the offending field and rule
+                // ("run command must not be empty"); carry it to the model.
+                .with_model_visible_cause(error.to_string()),
             ));
         }
     };
@@ -1868,10 +1845,17 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability) => {
                 RuntimeFailureKind::InvalidInput
             }
+            // A guest trap is an extension-local execution failure. It can be
+            // an extension defect or a call-specific failure, but retrying the
+            // same guest invocation as host infrastructure cannot repair it.
+            // Surface it as an operation failure so the model can change
+            // approach or report the broken extension.
+            DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest) => {
+                RuntimeFailureKind::OperationFailed
+            }
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
-            | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
             | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
                 RuntimeFailureKind::Backend
@@ -2086,7 +2070,10 @@ mod tests {
                 RuntimeDispatchErrorKind::FilesystemDenied,
                 RuntimeFailureKind::Authorization,
             ),
-            (RuntimeDispatchErrorKind::Guest, RuntimeFailureKind::Backend),
+            (
+                RuntimeDispatchErrorKind::Guest,
+                RuntimeFailureKind::OperationFailed,
+            ),
             (
                 RuntimeDispatchErrorKind::InputEncode,
                 RuntimeFailureKind::InvalidInput,
@@ -2250,6 +2237,15 @@ mod tests {
                     failure.disposition(),
                     crate::CapabilityFailureDisposition::ModelVisibleToolError
                 );
+                // The serde cause must ride the model-visible Diagnostic channel
+                // so the model learns WHAT is malformed, not just that it is.
+                let cause = failure
+                    .model_visible_cause()
+                    .expect("malformed plan rejection must carry the parse cause");
+                assert!(
+                    cause.contains("missing field"),
+                    "cause must name the missing field, got: {cause}"
+                );
             }
             SpawnInputPreparation::Ready(_) => {
                 panic!("malformed plan must be rejected as model-visible InvalidInput")
@@ -2273,6 +2269,15 @@ mod tests {
                 assert_eq!(
                     failure.disposition(),
                     crate::CapabilityFailureDisposition::ModelVisibleToolError
+                );
+                // The validation cause must ride the model-visible Diagnostic
+                // channel so the model learns which field broke which rule.
+                let cause = failure
+                    .model_visible_cause()
+                    .expect("invalid plan rejection must carry the validation cause");
+                assert!(
+                    cause.contains("run command must not be empty"),
+                    "cause must name the offending field and rule, got: {cause}"
                 );
             }
             SpawnInputPreparation::Ready(_) => {

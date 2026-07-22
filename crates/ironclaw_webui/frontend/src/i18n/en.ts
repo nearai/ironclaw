@@ -1211,6 +1211,8 @@ registerPack("en", {
   "admin.users.member": "Member",
   "admin.users.admin": "Admin",
   "admin.users.suspend": "Suspend",
+  "admin.users.actionFailed": "Action failed: {message}",
+  "admin.users.lastAdminRequired": "At least one active administrator is required. Add or activate another administrator before changing this user.",
   "admin.users.activate": "Activate",
   "admin.users.promote": "Promote",
   "admin.users.demote": "Demote",
@@ -1355,6 +1357,13 @@ registerPack("en", {
   "extensions.removeFailed": "Remove failed",
   "extensions.openingAuth": "Opening authentication...",
   "extensions.configurationRequired": "Configuration required",
+  "extensions.setupFailed": "Setup failed",
+  "extensions.oauthSetupFailed": "OAuth setup failed",
+  "extensions.oauthInvalidAuthorizationUrl": "Authorization URL must use HTTPS.",
+  "extensions.oauthFailed": "Authorization failed. Try connecting again.",
+  "extensions.oauthExpired": "Authorization expired. Try connecting again.",
+  "extensions.oauthCanceled": "Authorization was canceled. Try connecting again.",
+  "extensions.oauthTimedOut": "Authorization timed out. Try connecting again.",
   "extensions.getCredentials": "Get credentials",
   "extensions.keepSecretPlaceholder": "••••••• (leave blank to keep)",
   "extensions.runtime.wasm": "WASM Tool",
@@ -1410,6 +1419,10 @@ registerPack("en", {
 
 registerPack("en", {
   "app.checkingSession": "Checking session...",
+  "app.sessionCheckFailedTitle": "Couldn't verify your session",
+  "app.sessionCheckFailedDescription":
+    "We couldn't verify your session right now. Your sign-in is still saved. Try again in a moment.",
+  "app.retrySession": "Retry",
   "common.close": "Close",
   "common.download": "Download",
   "common.copy": "Copy",

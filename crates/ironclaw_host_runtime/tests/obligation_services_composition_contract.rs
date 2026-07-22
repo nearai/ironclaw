@@ -11,7 +11,7 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeCapabilityOutcome,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
@@ -86,7 +86,7 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
         .await
         .unwrap();
 
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context,
         capability_id(),
         ResourceEstimate::default(),
@@ -229,14 +229,21 @@ impl ObligationAwareDispatcher {
 impl CapabilityDispatcher for ObligationAwareDispatcher {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: Authorized,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let (invocation, _lane, _mounts, resource_reservation) = request
+            .into_parts(chrono::Utc::now())
+            .map_err(|authorized| {
+                let capability = authorized.invocation().capability.clone();
+                let _ = authorized.abort();
+                DispatchError::AuthorizationExpired { capability }
+            })?;
         let egress_response = self
             .egress
             .execute(RuntimeHttpEgressRequest {
                 runtime: RuntimeKind::Wasm,
-                scope: request.scope.clone(),
-                capability_id: request.capability_id.clone(),
+                scope: invocation.scope.clone(),
+                capability_id: invocation.capability.clone(),
                 method: NetworkMethod::Post,
                 url: "https://api.example.com/v1/run".to_string(),
                 headers: Vec::new(),
@@ -245,7 +252,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
                 credential_injections: vec![RuntimeCredentialInjection {
                     handle: self.secret_handle.clone(),
                     source: RuntimeCredentialSource::StagedObligation {
-                        capability_id: request.capability_id.clone(),
+                        capability_id: invocation.capability.clone(),
                     },
                     target: RuntimeCredentialTarget::Header {
                         name: "authorization".to_string(),
@@ -264,8 +271,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
             })?;
         assert_eq!(egress_response.status, 200);
 
-        let reservation = request
-            .resource_reservation
+        let reservation = resource_reservation
             .as_ref()
             .expect("configured resource governor should reserve before dispatch");
         let receipt = self.resource_governor.release(reservation.id).unwrap();
@@ -275,7 +281,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
 
         Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
+            capability_id: invocation.capability,
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
@@ -326,7 +332,7 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
             max_invocations: None,
         },
     });
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -334,7 +340,9 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn capability_id() -> CapabilityId {

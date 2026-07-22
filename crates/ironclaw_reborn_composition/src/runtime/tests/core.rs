@@ -2479,6 +2479,53 @@ async fn provider_factory_survives_live_reload() {
     );
 }
 
+/// Regression guard for the trace-recording gap: `IRONCLAW_RECORD_TRACE=1` on
+/// the serve/run path must place a `RecordingLlm` in the turn provider chain.
+/// The runtime builds turns through `wrap_swappable_gateway`, which never calls
+/// `RecordingLlm::from_env`, and hot-reloads through
+/// `build_provider_chain_components`, which also does not — so the recorder is
+/// wired *only* via `ResolvedRebornLlm::with_env_trace_recording`. Nothing
+/// pinned "serve + IRONCLAW_RECORD_TRACE ⇒ recorder attached" before, which is
+/// exactly why the env "enabled" recording yet serve emitted nothing (the
+/// committed reborn_qa fixtures were recorded through the in-process harness,
+/// whose `build_provider_chain` path *does* wire the recorder).
+///
+/// This asserts the gate at the exact serve/run resolution seam. That the
+/// attached factory actually wraps a recorder which records and flushes to disk
+/// incrementally (no explicit `flush()`, matching serve's signalled shutdown)
+/// is proven in
+/// `ironclaw_llm::recording::tests::complete_flushes_incrementally_without_explicit_flush`
+/// — the crate that owns `RecordingLlm` and can set real env vars, which this
+/// `#![forbid(unsafe_code)]` crate cannot.
+#[tokio::test]
+async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
+    let session_dir = tempfile::tempdir().expect("session tempdir");
+    let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
+
+    // Disabled: no factory attached; the resolved LLM is returned unchanged.
+    {
+        let _guard = RuntimeEnvGuard::with([("IRONCLAW_RECORD_TRACE", None)]).await;
+        let disabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
+            .with_env_trace_recording();
+        assert!(
+            disabled.provider_factory.is_none(),
+            "no recording factory should attach when IRONCLAW_RECORD_TRACE is unset"
+        );
+    }
+
+    // Enabled: the serve/run resolution path attaches the recording factory.
+    {
+        let _guard = RuntimeEnvGuard::set("IRONCLAW_RECORD_TRACE", "1").await;
+        let enabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+            .with_env_trace_recording();
+        assert!(
+            enabled.provider_factory.is_some(),
+            "IRONCLAW_RECORD_TRACE must attach the recording provider factory on the \
+             serve/run resolution path"
+        );
+    }
+}
+
 /// Regression guard for the benchmark instrumentation seam: a
 /// `ResolvedRebornLlm` carrying a `provider_factory` must have that factory
 /// invoked during `build_reborn_runtime`, i.e. the caller's instrumentation

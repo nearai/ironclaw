@@ -32,4 +32,3 @@ env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"
 # - Railway env (NEARAI_API_KEY et al) is complete, so env-fallback
 #   (resolve_reborn_runtime_llm) resolves the LLM with no slot needed
 # - existing volumes with the old baked-in stub: see entrypoint.sh migration
-

@@ -197,13 +197,13 @@ caller / shipped reference loop / future custom loop / turn coordinator
 `RuntimeDispatcher` is deliberately lower-level:
 
 ```text
-already-authorized CapabilityDispatchRequest
-  -> runtime-kind selection
+sealed Authorized witness
+  -> runtime-lane selection (`Authorized` in `crates/ironclaw_host_api/src/authorized.rs`)
   -> registered RuntimeAdapter backend
   -> normalized CapabilityDispatchResult
 ```
 
-The dispatcher does not own authorization, approval semantics, extension discovery, run-state, product workflows, prompt assembly, transport behavior, or concrete WASM/Script/MCP runtime execution. Concrete runtime crates are adapted outside the dispatcher boundary.
+The dispatcher does not own authorization, approval semantics, extension discovery, run-state, product workflows, prompt assembly, transport behavior, or concrete WASM/Script/MCP runtime execution. It consumes the sealed witness, checks expiry, and routes by the sealed `RuntimeLane` in `crates/ironclaw_dispatcher/src/lib.rs`; concrete runtime crates are adapted outside the dispatcher boundary.
 
 ---
 

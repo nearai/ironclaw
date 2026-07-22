@@ -17,9 +17,7 @@ use ironclaw_host_api::{
     ResultRef, ResumeToken, RuntimeKind, SafeSummary, ScopedPath, Suspension, TerminateHint,
     ToolVerdict, TrustClass,
 };
-use ironclaw_host_runtime::{
-    HostRuntime, RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
-};
+use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
 use ironclaw_product_workflow::{
     ProductCapabilityInvoker, RebornServicesError, RebornServicesErrorCode,
     RebornServicesErrorKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID,
@@ -125,12 +123,7 @@ impl ProductCapabilityInvoker for RuntimeProductCapabilityInvoker {
         let invocation_id = context.invocation_id;
         let requested_capability = capability.clone();
         let outcome = host_runtime
-            .invoke_capability(RuntimeCapabilityRequest::new(
-                context,
-                capability,
-                ResourceEstimate::default(),
-                input,
-            ))
+            .invoke_capability((context, capability, ResourceEstimate::default(), input))
             .await
             .map_err(RebornServicesError::internal_from)?;
         ensure_matching_capability(&requested_capability, &outcome)?;

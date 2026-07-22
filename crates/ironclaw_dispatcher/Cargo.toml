@@ -7,8 +7,13 @@ publish = false
 [package.metadata.ironclaw]
 layer = "kernel"
 
+[features]
+# Sole dev-only seam: exposes host-API test constructors to downstream integration tests.
+test-support = ["ironclaw_host_api/test-support"]
+
 [dependencies]
 async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_resources = { path = "../ironclaw_resources" }
@@ -16,6 +21,7 @@ serde_json = "1"
 tracing = "0.1"
 
 [dev-dependencies]
+ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
 tracing-test = { version = "0.2", features = ["no-env-filter"] }

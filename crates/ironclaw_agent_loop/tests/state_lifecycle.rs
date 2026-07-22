@@ -78,6 +78,27 @@ fn model_invalid_output_recovery_attempts_survive_checkpoint_reload() {
 }
 
 #[test]
+fn model_stale_request_recovery_attempts_survive_checkpoint_reload() {
+    let context = test_run_context("model-stale-request-recovery-round-trip");
+    let mut state = LoopExecutionState::initial_for_run(&context);
+    state.recovery_state =
+        RecoveryStrategyState::with_attempts_for(RecoveryAttemptClass::ModelStaleRequest, 2);
+
+    let payload = serde_json::to_vec(&state).expect("state should serialize");
+    let restored =
+        LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeModel)
+            .expect("checkpoint payload should reload");
+
+    assert_eq!(restored.recovery_state, state.recovery_state);
+    assert_eq!(
+        restored
+            .recovery_state
+            .attempts_for(RecoveryAttemptClass::ModelStaleRequest),
+        2
+    );
+}
+
+#[test]
 fn from_checkpoint_payload_rejects_non_state_payload() {
     let payload = serde_json::to_vec(&json!({
         "schema_id": "wrong",

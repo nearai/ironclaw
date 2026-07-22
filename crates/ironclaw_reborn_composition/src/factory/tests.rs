@@ -14,7 +14,7 @@ use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
     NetworkPolicy, NetworkScheme, NetworkTargetPattern, Principal, ResourceEstimate, ResourceScope,
-    ResourceUsage, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
+    ResourceUsage, RunId, RuntimeKind, ScopedPath, SecretHandle, TenantId, TrustClass, UserId,
     VirtualPath,
 };
 use ironclaw_host_api::{
@@ -22,10 +22,10 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     MEMORY_SEARCH_CAPABILITY_ID, MEMORY_TREE_CAPABILITY_ID, MEMORY_WRITE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID,
-    SKILL_REMOVE_CAPABILITY_ID, SKILL_UPDATE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID,
-    TRIGGER_LIST_CAPABILITY_ID, TRIGGER_REMOVE_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, RuntimeFailureKind, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
+    SKILL_INSTALL_CAPABILITY_ID, SKILL_LIST_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,
+    SKILL_UPDATE_CAPABILITY_ID, TRIGGER_CREATE_CAPABILITY_ID, TRIGGER_LIST_CAPABILITY_ID,
+    TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
 use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
@@ -1271,7 +1271,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .host_runtime
         .as_ref()
         .expect("host runtime")
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new("notion.notion-search").unwrap(),
             ResourceEstimate::default(),
@@ -1328,7 +1328,7 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
         .host_runtime
         .as_ref()
         .expect("host runtime")
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             CapabilityId::new("web-access.search").unwrap(),
             ResourceEstimate::default(),
@@ -2558,7 +2558,7 @@ fn memory_context(capability_id: &str) -> ExecutionContext {
 
 fn gsuite_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::FirstParty,
@@ -2587,7 +2587,9 @@ fn gsuite_context(capability_id: &str) -> ExecutionContext {
         },
         MountView::new(Vec::new()).expect("valid empty mount view"),
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 /// Turn on the global auto-approve switch for `context`'s actor scope so a
@@ -2614,7 +2616,7 @@ use crate::approval_test_support::disable_global_auto_approve;
 
 fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::Mcp,
@@ -2638,12 +2640,14 @@ fn notion_mcp_context(capability_id: &str) -> ExecutionContext {
         },
         MountView::new(Vec::new()).expect("valid empty mount view"),
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn web_access_context(capability_id: &str) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::FirstParty,
@@ -2667,7 +2671,9 @@ fn web_access_context(capability_id: &str) -> ExecutionContext {
         },
         MountView::new(Vec::new()).expect("valid empty mount view"),
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn web_access_network_policy() -> NetworkPolicy {
@@ -2684,7 +2690,7 @@ fn web_access_network_policy() -> NetworkPolicy {
 
 fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext {
     let extension_id = ExtensionId::new("caller").expect("valid extension id");
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("local-dev-test-user").expect("valid user id"),
         extension_id.clone(),
         RuntimeKind::FirstParty,
@@ -2698,7 +2704,9 @@ fn execution_context(capability_id: &str, mounts: MountView) -> ExecutionContext
         },
         mounts,
     )
-    .expect("valid execution context")
+    .expect("valid execution context");
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn capability_grant(

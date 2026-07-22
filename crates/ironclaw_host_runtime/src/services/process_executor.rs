@@ -1,7 +1,8 @@
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{CapabilityDispatchRequest, CapabilityDispatcher, RuntimeKind};
+use ironclaw_capabilities::ProcessAuthorizationRemintPort;
+use ironclaw_host_api::{CapabilityDispatcher, RuntimeKind};
 use ironclaw_observability::live_latency_started_at;
 use ironclaw_processes::{
     ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
@@ -186,11 +187,18 @@ fn is_process_sandbox_request(request: &ProcessExecutionRequest) -> bool {
 #[derive(Clone)]
 pub(super) struct RuntimeDispatchProcessExecutor {
     dispatcher: Arc<dyn CapabilityDispatcher>,
+    reminter: Arc<dyn ProcessAuthorizationRemintPort>,
 }
 
 impl RuntimeDispatchProcessExecutor {
-    pub(super) fn new(dispatcher: Arc<dyn CapabilityDispatcher>) -> Self {
-        Self { dispatcher }
+    pub(super) fn new(
+        dispatcher: Arc<dyn CapabilityDispatcher>,
+        reminter: Arc<dyn ProcessAuthorizationRemintPort>,
+    ) -> Self {
+        Self {
+            dispatcher,
+            reminter,
+        }
     }
 }
 
@@ -212,32 +220,32 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
             );
             return Err(error);
         }
+        let authorized = match self.reminter.remint(&request).await {
+            Ok(authorized) => authorized,
+            Err(error) => {
+                let error_kind = error.kind();
+                trace_process_latency_error(
+                    "runtime_dispatch_execute",
+                    fields.as_ref(),
+                    started_at,
+                    &error,
+                );
+                return Err(ProcessExecutionError::new(error_kind));
+            }
+        };
         let result = self
             .dispatcher
-            .dispatch_json(CapabilityDispatchRequest {
-                // Spawned processes are long-running and outlive loop runs, so
-                // they carry no run-scoped identity.
-                run_id: None,
-                capability_id: request.capability_id,
-                scope: request.scope,
-                authenticated_actor_user_id: request.authenticated_actor_user_id,
-                estimate: request.estimate,
-                mounts: Some(request.mounts),
-                resource_reservation: request.resource_reservation,
-                input: request.input,
-            })
+            .dispatch_json(authorized)
             .await
-            .map_err(|error| ProcessExecutionError::new(error.event_kind()))?;
-        if request.cancellation.is_cancelled() {
-            let error = ProcessExecutionError::new("cancelled");
-            trace_process_latency_error(
-                "runtime_dispatch_execute",
-                fields.as_ref(),
-                started_at,
-                &error,
-            );
-            return Err(error);
-        }
+            .map_err(|error| {
+                trace_process_latency_error(
+                    "runtime_dispatch_execute",
+                    fields.as_ref(),
+                    started_at,
+                    &error,
+                );
+                ProcessExecutionError::new(error.event_kind())
+            })?;
         let result = Ok(ProcessExecutionResult {
             output: result.output,
         });
@@ -256,12 +264,14 @@ mod tests {
 
     use ironclaw_host_api::dispatch_test_support::TestDispatcher;
     use ironclaw_host_api::{
-        AgentId, CapabilityDispatchResult, CapabilityId, DispatchError, ExtensionId, InvocationId,
-        MountView, ProcessId, ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt,
-        ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, TenantId,
-        ThreadId, UserId,
+        ActivityId, Actor, AgentId, CapabilityDispatchResult, CapabilityId, CorrelationId,
+        DispatchError, ExtensionId, InvocationId, InvocationOrigin, MountView,
+        ProcessAuthorizedContinuation, ProcessAuthorizedInvocation, ProcessId, ProductKind,
+        ProjectId, ReservationStatus, ResourceEstimate, ResourceReceipt, ResourceReservationId,
+        ResourceScope, ResourceUsage, RuntimeDispatchErrorKind, RuntimeLane, TenantId, ThreadId,
+        UserId,
     };
-    use ironclaw_processes::ProcessCancellationToken;
+    use ironclaw_processes::{ProcessCancellationToken, ProcessStart, ProcessStore};
     use serde_json::json;
 
     #[derive(Default)]
@@ -419,7 +429,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_dispatch_executor_returns_cancelled_after_dispatch() {
+    async fn runtime_dispatch_executor_returns_completed_result_after_dispatch() {
         // safety: test executor call is an in-memory process executor call, not a DB write.
         let cancellation = ProcessCancellationToken::new();
         let signal = cancellation.clone();
@@ -427,33 +437,67 @@ mod tests {
             signal.cancel();
             Ok(dispatch_result())
         }));
-        let executor = RuntimeDispatchProcessExecutor::new(dispatcher);
         let mut request = sample_process_request("demo.background", RuntimeKind::Script);
         request.cancellation = cancellation;
+        let executor = runtime_dispatch_executor(dispatcher.clone(), &request).await;
+
+        let result = executor.execute(request).await.unwrap();
+
+        assert_eq!(result.output, dispatch_result().output);
+        assert_eq!(dispatcher.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn runtime_dispatch_executor_rejects_missing_authorized_continuation() {
+        // safety: test dispatcher is in-memory and should not be called.
+        let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
+        let mut request = sample_process_request("demo.background", RuntimeKind::Script);
+        request.authorized_continuation = None;
+        let executor = runtime_dispatch_executor(dispatcher.clone(), &request).await;
 
         let error = executor.execute(request).await.unwrap_err();
 
-        assert_eq!(error.kind, "cancelled");
+        assert_eq!(error.kind, "missing_process_authorization");
+        assert_eq!(dispatcher.call_count(), 0);
     }
 
     #[tokio::test]
     async fn runtime_dispatch_executor_preserves_authenticated_actor() {
         // safety: test dispatcher call is in-memory and does not execute an external capability.
         let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
-        let executor = RuntimeDispatchProcessExecutor::new(dispatcher.clone());
         let mut request = sample_process_request("demo.background", RuntimeKind::Script);
         let actor = UserId::new("slack-alice").unwrap();
         request.authenticated_actor_user_id = Some(actor.clone());
+        if let Some(continuation) = &mut request.authorized_continuation {
+            continuation.invocation.actor = Actor::Sealed(actor.clone());
+        }
         let expected_scope = request.scope.clone();
         let expected_capability_id = request.capability_id.clone();
+        let executor = runtime_dispatch_executor(dispatcher.clone(), &request).await;
 
         executor.execute(request).await.unwrap();
 
         let calls = dispatcher.recorded();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].authenticated_actor_user_id, Some(actor));
-        assert_eq!(calls[0].scope, expected_scope);
-        assert_eq!(calls[0].capability_id, expected_capability_id);
+        assert_eq!(calls[0].invocation.scope, expected_scope);
+        assert_eq!(calls[0].invocation.capability, expected_capability_id);
+    }
+
+    #[tokio::test]
+    async fn runtime_dispatch_executor_rejects_request_not_matching_persisted_authorization() {
+        let dispatcher = Arc::new(TestDispatcher::ok(dispatch_result()));
+        let persisted = sample_process_request("demo.background", RuntimeKind::Script);
+        let mut request = persisted.clone();
+        if let Some(continuation) = &mut request.authorized_continuation {
+            continuation.invocation.actor = Actor::Sealed(UserId::new("forged-user").unwrap());
+        }
+        let executor = runtime_dispatch_executor(dispatcher.clone(), &persisted).await;
+
+        let error = executor.execute(request).await.unwrap_err();
+
+        assert_eq!(error.kind, "process_authorization_mismatch");
+        assert_eq!(dispatcher.call_count(), 0);
     }
 
     #[test]
@@ -528,27 +572,91 @@ mod tests {
         capability_id: &str,
         runtime: RuntimeKind,
     ) -> ProcessExecutionRequest {
-        ProcessExecutionRequest {
-            process_id: ProcessId::new(),
+        let process_id = ProcessId::new();
+        let invocation_id = InvocationId::new();
+        let scope = ResourceScope {
+            tenant_id: TenantId::new("tenant").unwrap(),
+            user_id: UserId::new("user").unwrap(),
+            agent_id: Some(AgentId::new("agent").unwrap()),
+            project_id: Some(ProjectId::new("project").unwrap()),
+            mission_id: None,
+            thread_id: Some(ThreadId::new("thread").unwrap()),
             invocation_id: InvocationId::new(),
-            scope: ResourceScope {
-                tenant_id: TenantId::new("tenant").unwrap(),
-                user_id: UserId::new("user").unwrap(),
-                agent_id: Some(AgentId::new("agent").unwrap()),
-                project_id: Some(ProjectId::new("project").unwrap()),
-                mission_id: None,
-                thread_id: Some(ThreadId::new("thread").unwrap()),
-                invocation_id: InvocationId::new(),
-            },
+        };
+        let capability_id = CapabilityId::new(capability_id).unwrap();
+        let estimate = ResourceEstimate::default();
+        let authorized_continuation =
+            RuntimeLane::from_runtime_kind(runtime).map(|lane| ProcessAuthorizedContinuation {
+                invocation: ProcessAuthorizedInvocation {
+                    activity_id: ActivityId::from_uuid(invocation_id.as_uuid()),
+                    capability: capability_id.clone(),
+                    scope: scope.clone(),
+                    actor: Actor::System,
+                    origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+                    estimate: estimate.clone(),
+                    correlation_id: CorrelationId::new(),
+                    process_id,
+                    parent_process_id: None,
+                },
+                lane,
+                mounts: Some(MountView::default()),
+                resource_reservation: None,
+            });
+        ProcessExecutionRequest {
+            process_id,
+            invocation_id,
+            scope,
             authenticated_actor_user_id: None,
             extension_id: ExtensionId::new("system").unwrap(),
-            capability_id: CapabilityId::new(capability_id).unwrap(),
+            capability_id,
             runtime,
-            estimate: ResourceEstimate::default(),
+            estimate,
             mounts: MountView::default(),
             resource_reservation: None,
+            authorized_continuation,
             input: json!({}),
             cancellation: ProcessCancellationToken::new(),
+        }
+    }
+
+    async fn runtime_dispatch_executor(
+        dispatcher: Arc<TestDispatcher>,
+        request: &ProcessExecutionRequest,
+    ) -> RuntimeDispatchProcessExecutor {
+        let store = Arc::new(ironclaw_processes::in_memory_backed_process_store());
+        store
+            .start(process_start_from_request(request))
+            .await
+            .unwrap();
+        let process_store: Arc<dyn ProcessStore> = store;
+        RuntimeDispatchProcessExecutor::new(
+            dispatcher,
+            ironclaw_capabilities::process_authorization_remint_port(process_store),
+        )
+    }
+
+    fn process_start_from_request(request: &ProcessExecutionRequest) -> ProcessStart {
+        ProcessStart {
+            process_id: request.process_id,
+            parent_process_id: request
+                .authorized_continuation
+                .as_ref()
+                .and_then(|continuation| continuation.invocation.parent_process_id),
+            invocation_id: request.invocation_id,
+            scope: request.scope.clone(),
+            authenticated_actor_user_id: request.authenticated_actor_user_id.clone(),
+            extension_id: request.extension_id.clone(),
+            capability_id: request.capability_id.clone(),
+            runtime: request.runtime,
+            grants: Default::default(),
+            mounts: request.mounts.clone(),
+            estimated_resources: request.estimate.clone(),
+            resource_reservation_id: request
+                .resource_reservation
+                .as_ref()
+                .map(|reservation| reservation.id),
+            authorized_continuation: request.authorized_continuation.clone(),
+            input: request.input.clone(),
         }
     }
 }

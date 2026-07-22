@@ -8,8 +8,7 @@ use ironclaw_turns::{
     TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
-        CancellationPolicy, CapabilityBatchInvocation, CapabilityCallCandidate,
-        CapabilityDescriptorView, CapabilityInputRef, CapabilityInvocation,
+        CancellationPolicy, CapabilityCallCandidate, CapabilityDescriptorView, CapabilityInputRef,
         CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
         ConcurrencyClass, ContextProfileId, FinalizeAssistantMessage, LoopCancelReasonKind,
         LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
@@ -17,12 +16,12 @@ use ironclaw_turns::{
         LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInputAck, LoopInputAckToken,
         LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
         LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopRunContext, ModelProfileId, ModelStreamChunk, ParentLoopOutput, PromptMode,
-        ProviderToolCall, ProviderToolCallReplay, RedactedRunProfileProvenance,
-        RegisterProviderToolCallRequest, ResolvedRunProfile, ResourceBudgetPolicy,
-        ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-        SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopRequest, LoopRequestBatch, LoopRunContext, ModelProfileId, ModelStreamChunk,
+        ParentLoopOutput, PromptMode, ProviderToolCall, ProviderToolCallReplay,
+        RedactedRunProfileProvenance, RegisterProviderToolCallRequest, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -56,8 +55,8 @@ pub(super) struct MockHost {
     batch_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::ResolutionBatch>>>,
     single_outcomes: Arc<Mutex<VecDeque<ironclaw_host_api::Resolution>>>,
     checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
-    batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
-    single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    batch_invocations: Arc<Mutex<Vec<LoopRequestBatch>>>,
+    single_invocations: Arc<Mutex<Vec<LoopRequest>>>,
     registered_provider_calls: Arc<Mutex<Vec<ProviderToolCall>>>,
     provider_registration_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
     provider_registration_activity_remap: Arc<Mutex<Option<ironclaw_turns::CapabilityActivityId>>>,
@@ -248,11 +247,11 @@ impl MockHost {
         self.checkpoints.lock().expect("lock").clone()
     }
 
-    pub(super) fn batch_invocations(&self) -> Vec<CapabilityBatchInvocation> {
+    pub(super) fn batch_invocations(&self) -> Vec<LoopRequestBatch> {
         self.batch_invocations.lock().expect("lock").clone()
     }
 
-    pub(super) fn single_invocations(&self) -> Vec<CapabilityInvocation> {
+    pub(super) fn single_invocations(&self) -> Vec<LoopRequest> {
         self.single_invocations.lock().expect("lock").clone()
     }
 
@@ -777,7 +776,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         self.single_invocations.lock().expect("lock").push(request);
         self.single_outcomes
@@ -791,7 +790,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for MockHost {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         self.batch_invocations.lock().expect("lock").push(request);
         if let Some(kind) = *self.fail_batch_with.lock().expect("lock") {

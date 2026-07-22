@@ -945,20 +945,29 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
 }
 
-fn dispatch_request(capability: &str, input: Value) -> CapabilityDispatchRequest {
-    CapabilityDispatchRequest {
-        run_id: None,
-        capability_id: CapabilityId::new(capability).unwrap(),
-        scope: sample_scope(),
-        authenticated_actor_user_id: None,
-        estimate: ResourceEstimate::default()
-            .set_concurrency_slots(1)
-            .set_process_count(1)
-            .set_output_bytes(10_000),
-        mounts: None,
-        resource_reservation: None,
-        input,
-    }
+fn dispatch_request(capability: &str, input: Value) -> Authorized {
+    let estimate = ResourceEstimate::default()
+        .set_concurrency_slots(1)
+        .set_process_count(1)
+        .set_output_bytes(10_000);
+    Authorized::seal_for_test(
+        Invocation {
+            activity_id: ActivityId::new(),
+            capability: CapabilityId::new(capability).unwrap(),
+            input,
+            scope: sample_scope(),
+            actor: Actor::System,
+            origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+            estimate,
+            correlation_id: CorrelationId::new(),
+            process_id: None,
+            parent_process_id: None,
+        },
+        RuntimeLane::Wasm,
+        MountView::default(),
+        None,
+        Timestamp::MAX_UTC,
+    )
 }
 
 fn sample_scope() -> ResourceScope {

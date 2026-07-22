@@ -136,7 +136,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
     let dispatcher = RuntimeDispatcher::new(&resolver, &governor);
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
@@ -148,7 +148,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
             mounts: None,
             resource_reservation: Some(reservation.clone()),
             input: json!({"message": "unknown capability"}),
-        })
+        }))
         .instrument(tracing::info_span!(
             "dispatcher_logs_release_failure_without_masking_dispatch_error"
         ))
@@ -219,7 +219,7 @@ async fn dispatcher_emits_failed_event_for_unknown_capability_without_reserving(
     let dispatcher = RuntimeDispatcher::new(&resolver, governor.as_ref()).with_event_sink(&events);
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("echo-script.say").unwrap(),
             scope,
@@ -231,7 +231,7 @@ async fn dispatcher_emits_failed_event_for_unknown_capability_without_reserving(
             mounts: None,
             resource_reservation: None,
             input: json!({"message": "blocked"}),
-        })
+        }))
         .await
         .unwrap_err();
 
@@ -368,8 +368,42 @@ where
     }
 }
 
-fn sample_request(capability_id: &str, input: Value) -> CapabilityDispatchRequest {
-    CapabilityDispatchRequest {
+fn authorized(request: CapabilityDispatchRequest) -> Authorized {
+    let lane = match request.capability_id.as_str() {
+        id if id.contains("mcp") => RuntimeLane::Mcp,
+        id if id.contains("script") => RuntimeLane::Process,
+        id if id.contains("first_party") => RuntimeLane::FirstParty,
+        _ => RuntimeLane::Wasm,
+    };
+    let invocation = Invocation {
+        activity_id: ActivityId::new(),
+        capability: request.capability_id,
+        input: request.input,
+        scope: request.scope,
+        actor: request
+            .authenticated_actor_user_id
+            .map(Actor::Sealed)
+            .unwrap_or(Actor::System),
+        origin: request
+            .run_id
+            .map(InvocationOrigin::LoopRun)
+            .unwrap_or_else(|| InvocationOrigin::Product(ProductKind::new("test").unwrap())),
+        estimate: request.estimate,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+    };
+    Authorized::seal_for_test_with_mounts(
+        invocation,
+        lane,
+        request.mounts,
+        request.resource_reservation,
+        chrono::DateTime::<chrono::Utc>::MAX_UTC,
+    )
+}
+
+fn sample_request(capability_id: &str, input: Value) -> Authorized {
+    authorized(CapabilityDispatchRequest {
         run_id: None,
         capability_id: CapabilityId::new(capability_id).unwrap(),
         scope: sample_scope(),
@@ -382,7 +416,7 @@ fn sample_request(capability_id: &str, input: Value) -> CapabilityDispatchReques
         mounts: None,
         resource_reservation: None,
         input,
-    }
+    })
 }
 
 fn sample_scope() -> ResourceScope {

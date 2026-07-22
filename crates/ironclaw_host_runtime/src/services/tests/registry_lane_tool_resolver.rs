@@ -9,6 +9,9 @@ use ironclaw_dispatcher::{
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::SharedExtensionRegistry;
+use ironclaw_host_api::{
+    ActivityId, Actor, Authorized, CorrelationId, Invocation, InvocationOrigin, ProductKind,
+};
 use ironclaw_resources::{ResourceLimits, ResourceReservation};
 
 use super::super::tool_resolver::RegistryLaneToolResolver;
@@ -61,7 +64,7 @@ struct EchoLane {
 impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoLane {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
+        request: RuntimeLaneRequest<'_, DiskFilesystem, InMemoryResourceGovernor>,
     ) -> Result<RuntimeAdapterResult, DispatchError> {
         let output = request.input;
         let usage = ResourceUsage {
@@ -95,8 +98,38 @@ impl RuntimeAdapter<DiskFilesystem, InMemoryResourceGovernor> for EchoLane {
     }
 }
 
-fn wasm_capability_request(input: Value) -> CapabilityDispatchRequest {
-    CapabilityDispatchRequest {
+fn authorized(request: CapabilityDispatchRequest) -> Authorized {
+    let lane = RuntimeLane::from_runtime_kind(RuntimeKind::Wasm)
+        .expect("test runtime must map to an execution lane");
+    let invocation = Invocation {
+        activity_id: ActivityId::new(),
+        capability: request.capability_id,
+        input: request.input,
+        scope: request.scope,
+        actor: request
+            .authenticated_actor_user_id
+            .map(Actor::Sealed)
+            .unwrap_or(Actor::System),
+        origin: request
+            .run_id
+            .map(InvocationOrigin::LoopRun)
+            .unwrap_or_else(|| InvocationOrigin::Product(ProductKind::new("test").unwrap())),
+        estimate: request.estimate,
+        correlation_id: CorrelationId::new(),
+        process_id: None,
+        parent_process_id: None,
+    };
+    Authorized::seal_for_test_with_mounts(
+        invocation,
+        lane,
+        request.mounts,
+        request.resource_reservation,
+        chrono::DateTime::<chrono::Utc>::MAX_UTC,
+    )
+}
+
+fn wasm_capability_request(input: Value) -> Authorized {
+    authorized(CapabilityDispatchRequest {
         run_id: None,
         capability_id: CapabilityId::new("test-wasm.run").unwrap(),
         scope: sample_scope(),
@@ -109,7 +142,7 @@ fn wasm_capability_request(input: Value) -> CapabilityDispatchRequest {
         mounts: None,
         resource_reservation: None,
         input,
-    }
+    })
 }
 
 #[tokio::test]
@@ -193,7 +226,7 @@ async fn unconfigured_lane_fails_missing_backend_and_releases_prepared_reservati
         .with_event_sink_arc(Arc::new(events.clone()));
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
+        .dispatch_json(authorized(CapabilityDispatchRequest {
             run_id: None,
             capability_id: CapabilityId::new("test-wasm.run").unwrap(),
             scope,
@@ -202,7 +235,7 @@ async fn unconfigured_lane_fails_missing_backend_and_releases_prepared_reservati
             mounts: None,
             resource_reservation: Some(reservation),
             input: json!({"message":"blocked"}),
-        })
+        }))
         .await
         .unwrap_err();
 

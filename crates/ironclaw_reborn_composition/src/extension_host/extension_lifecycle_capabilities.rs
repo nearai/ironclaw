@@ -1350,7 +1350,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         let discovery_script = std::sync::Arc::new(
-            crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search"),
+            crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name("notion-search")
+                // Real hosted MCP providers may return verbose prose. The
+                // generic MCP boundary must bound it without dropping the
+                // entire catalog or preventing activation.
+                .with_tool_description("provider documentation ".repeat(320)),
         );
         let services = build_reborn_services(
             RebornBuildInput::local_dev("extension-tools-hosted-mcp-owner", storage_root.clone())
@@ -1603,6 +1607,7 @@ mod tests {
         )
         .expect("valid execution context");
         context.authenticated_actor_user_id = Some(user_id);
+        context.run_id = Some(ironclaw_host_api::RunId::new());
         context
     }
 

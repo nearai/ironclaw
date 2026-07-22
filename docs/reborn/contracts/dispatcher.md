@@ -10,20 +10,27 @@ Crate: `crates/ironclaw_dispatcher`
 
 `ironclaw_dispatcher` is the composition-only runtime dispatch layer for Reborn.
 
-It connects already-validated extension capabilities to runtime lanes:
+It connects already-validated extension capabilities to prebound runtime
+bindings:
 
 ```text
-ExtensionRegistry + RootFilesystem + ResourceGovernor + registered RuntimeAdapter backends
-  -> RuntimeDispatcher::dispatch_json(...)
-  -> selected adapter for RuntimeKind
+ToolResolver + ResourceGovernor
+  -> RuntimeDispatcher::dispatch_json(Authorized)
+  -> resolved BoundCapabilityAdapter
   -> normalized CapabilityDispatchResult
 ```
 
-The dispatcher does not discover extensions, parse manifests, implement policy, open files directly, resolve secrets, or execute product workflows. It wires service crates together and fails closed when a required lane or declaration is missing.
+The dispatcher does not discover extensions, parse manifests, implement policy,
+open files directly, resolve secrets, or execute product workflows. Binding
+construction happens before dispatch in resolver owners such as
+`ironclaw_host_runtime` and `ironclaw_extension_host`; the dispatcher consumes a
+sealed `Authorized` witness, resolves the prebound binding by capability id, and
+fails closed when the resolved runtime does not match the sealed lane.
 
 The dispatch port contracts live in `ironclaw_host_api`:
 
 ```rust
+Authorized
 CapabilityDispatchRequest
 CapabilityDispatchResult
 CapabilityDispatcher
@@ -37,37 +44,61 @@ RuntimeDispatchErrorKind
 
 ## 2. Inputs
 
-The dispatcher receives an already-authorized `CapabilityDispatchRequest`:
+The dispatcher receives an already-authorized sealed `Authorized` witness:
 
 ```rust
-pub struct CapabilityDispatchRequest {
-    pub capability_id: CapabilityId,
-    pub scope: ResourceScope,
-    pub authenticated_actor_user_id: Option<UserId>,
-    pub estimate: ResourceEstimate,
-    pub input: serde_json::Value,
+pub struct Authorized {
+    /* private: sealed invocation + RuntimeLane + mounts + reservation + deadline */
+}
+
+pub trait CapabilityDispatcher {
+    async fn dispatch_json(
+        &self,
+        authorized: Authorized,
+    ) -> Result<CapabilityDispatchResult, DispatchError>;
 }
 ```
+
+The dispatcher unpacks the witness at execution time, rejects expired witnesses,
+derives the internal `CapabilityDispatchRequest` handed to the binding, resolves
+the capability through `ToolResolver`, and verifies that
+`RuntimeLane::from_runtime_kind(resolved.runtime)` matches the sealed lane before
+any backend call. `RuntimeKind::System` maps to no lane and is therefore rejected
+before binding execution.
 
 The dispatcher can be constructed from borrowed service boundaries for request-scoped composition:
 
 ```rust
-RuntimeDispatcher::new(&registry, &root_filesystem, &resource_governor)
-    .with_runtime_adapter(RuntimeKind::Wasm, &wasm_adapter)
-    .with_runtime_adapter(RuntimeKind::Script, &script_adapter)
-    .with_runtime_adapter(RuntimeKind::Mcp, &mcp_adapter)
+RuntimeDispatcher::new(&tool_resolver, &resource_governor)
+    .with_event_sink(&event_sink)
 ```
 
 For detached background execution, it can also own shared service handles:
 
 ```rust
-RuntimeDispatcher::from_arcs(registry, root_filesystem, resource_governor)
-    .with_runtime_adapter_arc(RuntimeKind::Script, script_adapter)
+RuntimeDispatcher::from_arcs(tool_resolver, resource_governor)
+    .with_event_sink_arc(event_sink)
 ```
 
-The owned form keeps dispatcher composition-only while allowing `DispatchProcessExecutor` to run capability-backed processes without leaking borrowed app state into a spawned task.
+The owned form keeps dispatcher composition-only while allowing detached
+processes to run capability-backed work without leaking borrowed app state into
+a spawned task.
 
-`ExtensionRegistry` remains the authority for what can run. Runtime adapter owners remain the authority for how a lane runs. The concrete WASM, Script, and MCP adapters now live in `ironclaw_host_runtime`, so `ironclaw_dispatcher` no longer has normal dependencies on `ironclaw_wasm`, `ironclaw_scripts`, or `ironclaw_mcp`.
+`ToolResolver` remains the authority for what can run. Runtime adapter owners
+remain the authority for how a lane runs. The concrete WASM, Script, MCP, and
+first-party adapters live outside `ironclaw_dispatcher`, so this crate has no
+normal dependencies on concrete runtime crates.
+
+Implementation evidence:
+
+- `crates/ironclaw_dispatcher/src/lib.rs` defines `RuntimeDispatcher`,
+  `ToolResolver`, and `BoundCapabilityAdapter`.
+- `crates/ironclaw_host_api/src/dispatch.rs` defines the sealed
+  `CapabilityDispatcher::dispatch_json(Authorized)` port and internal
+  `CapabilityDispatchRequest`.
+- `crates/ironclaw_dispatcher/tests/dispatch_contract.rs` covers sealed-lane
+  mismatch rejection, `None` mount preservation, resolver misses, and prepared
+  reservation validation.
 
 ---
 
@@ -76,49 +107,52 @@ The owned form keeps dispatcher composition-only while allowing `DispatchProcess
 V1 `dispatch_json` performs only routing and consistency checks:
 
 ```text
-1. lookup capability in ExtensionRegistry
-2. lookup provider package in ExtensionRegistry
-3. verify descriptor.runtime == package.manifest.runtime_kind()
-4. select the registered `RuntimeAdapter` for `RuntimeKind`
-5. call the configured adapter for that lane, forwarding the authenticated actor unchanged
-6. return normalized result or typed failure with a stable redacted `RuntimeDispatchErrorKind`
+1. consume the sealed `Authorized` witness and reject expired witnesses
+2. derive the internal adapter request from the witness parts
+3. resolve a prebound binding by capability id through `ToolResolver`
+4. re-derive `RuntimeLane` from the resolved runtime and compare it to the sealed lane
+5. validate any prepared `ResourceReservation` before binding execution
+6. call the resolved `BoundCapabilityAdapter`, forwarding actor, mounts, run id, estimate, reservation, and input unchanged
+7. return normalized result or typed failure with a stable redacted `RuntimeDispatchErrorKind`
 ```
 
-`RuntimeAdapter` is the open extension seam:
+`BoundCapabilityAdapter` is the open extension seam:
 
 ```rust
 #[async_trait]
-pub trait RuntimeAdapter<F, G>
-where
-    F: RootFilesystem,
-    G: ResourceGovernor,
-{
+pub trait BoundCapabilityAdapter {
     async fn dispatch_json(
         &self,
-        request: RuntimeAdapterRequest<'_, F, G>,
+        request: CapabilityDispatchRequest,
     ) -> Result<RuntimeAdapterResult, DispatchError>;
 }
 ```
 
-Each runtime adapter owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher does not duplicate the resource-governor protocol and does not import concrete runtime crates.
+Each runtime adapter owns its local reserve/prepare/invoke/reconcile/release lifecycle. The dispatcher validates a prepared reservation is still active before adapter execution, but it does not own the full resource-governor protocol and does not import concrete runtime crates.
 
-`RuntimeAdapterRequest.authenticated_actor_user_id` is copied directly from the already-authorized dispatch request. It is not recomputed from `ResourceScope.user_id`; a shared subject may be acted on by a separately authenticated human actor.
+`CapabilityDispatchRequest.authenticated_actor_user_id` is copied directly from
+the already-authorized dispatch request. It is not recomputed from
+`ResourceScope.user_id`; a shared subject may be acted on by a separately
+authenticated human actor.
 
 ---
 
 ## 4. Runtime lane status
 
-V1 routes any `RuntimeKind` through a registered adapter:
+V1 routes by the prebound adapter returned by `ToolResolver`, after rechecking
+that the resolved runtime maps to the sealed `RuntimeLane` carried by
+`Authorized`:
 
 | Runtime kind | Dispatch behavior |
 | --- | --- |
-| `Wasm` | Executes through a configured WASM adapter, usually composed by `ironclaw_host_runtime` |
-| `Script` | Executes through a configured Script adapter, usually composed by `ironclaw_host_runtime` |
-| `Mcp` | Executes through a configured MCP adapter, usually composed by `ironclaw_host_runtime` |
-| `FirstParty` | Requires a registered host-service adapter |
-| `System` | Requires a registered system-service adapter |
+| `Wasm` | Resolved runtime must map to sealed `RuntimeLane::Wasm`; executes through the resolved adapter, usually composed by `ironclaw_host_runtime` |
+| `Script` | Resolved runtime must map to sealed `RuntimeLane::Process`; executes through the resolved adapter, usually composed by `ironclaw_host_runtime` |
+| `Mcp` | Resolved runtime must map to sealed `RuntimeLane::Mcp`; executes through the resolved adapter, usually composed by `ironclaw_host_runtime` |
+| `FirstParty` | Resolved runtime must map to sealed `RuntimeLane::FirstParty`; requires a registered host-service adapter |
+| `System` | Rejected as `MissingRuntimeBackend` before backend calls |
 
-If the selected runtime kind has no adapter configured, dispatch returns `MissingRuntimeBackend` before reserving resources.
+If the capability id has no resolved binding, dispatch returns
+`UnknownCapability` before adapter execution.
 
 Runtime-specific failures are collapsed to stable categories (`Backend`, `ExitFailure`, `OutputDecode`, `Resource`, and similar) before crossing the dispatch port. Raw backend strings, stderr, host paths, and internal runtime detail strings stay inside the runtime crate.
 
@@ -129,10 +163,9 @@ Runtime-specific failures are collapsed to stable categories (`Backend`, `ExitFa
 The dispatcher fails before execution when:
 
 - capability ID is not registered
-- provider package is not registered
-- capability descriptor runtime does not match package manifest runtime
-- selected runtime adapter is missing
-- selected runtime adapter returns a typed dispatch failure
+- resolved runtime does not map to the sealed lane
+- prepared reservation validation fails
+- selected binding returns a typed dispatch failure
 
 Configured event sink failures are not dispatch failures. Event emission is best-effort observability and must not alter the success value or mask the original runtime/control-plane error.
 
@@ -169,7 +202,7 @@ This PR does not add:
 - approval prompts
 - full audit/event projection persistence
 - script filesystem mounts, artifact export, network access, or secret injection
-- MCP protocol handshake/lifecycle management beyond a registered adapter contract
+- MCP protocol handshake/lifecycle management beyond a resolved binding contract
 - host service dispatch for first-party/system capabilities
 - filesystem mount selection
 - network or secret injection
@@ -184,13 +217,12 @@ Those belong in dedicated service crates or later narrow dispatcher composition 
 
 The crate test suite covers:
 
-- WASM capability dispatch through a registered adapter
+- WASM capability dispatch through a resolved adapter
 - unknown capability failure before resource reservation
-- descriptor/package runtime mismatch failure before execution
-- Script capability dispatch through a registered adapter
-- MCP capability dispatch through a registered adapter
-- first-party and system lanes require registered adapters
-- missing WASM, Script, or MCP adapter failure before resource reservation
+- sealed lane mismatch failure before execution
+- Script capability dispatch through a resolved adapter
+- MCP capability dispatch through a resolved adapter
+- first-party and system lane behavior at the resolver/binding seam
 - event sink failures ignored on both success and failure paths
 - runtime failure details redacted to `RuntimeDispatchErrorKind`
 

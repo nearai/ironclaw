@@ -1111,6 +1111,8 @@ registerPack("ja", {
   "admin.users.member": "メンバー",
   "admin.users.admin": "管理者",
   "admin.users.suspend": "停止",
+  "admin.users.actionFailed": "操作に失敗しました: {message}",
+  "admin.users.lastAdminRequired": "少なくとも1人の有効な管理者が必要です。このユーザーを変更する前に、別の管理者を追加または有効化してください。",
   "admin.users.activate": "有効化",
   "admin.users.promote": "昇格",
   "admin.users.demote": "降格",
@@ -1253,6 +1255,13 @@ registerPack("ja", {
   "extensions.removeFailed": "削除に失敗しました",
   "extensions.openingAuth": "認証を開いています...",
   "extensions.configurationRequired": "設定が必要です",
+  "extensions.setupFailed": "設定に失敗しました",
+  "extensions.oauthSetupFailed": "OAuth の設定に失敗しました",
+  "extensions.oauthInvalidAuthorizationUrl": "認証 URL には HTTPS を使用する必要があります。",
+  "extensions.oauthFailed": "認証に失敗しました。もう一度接続してください。",
+  "extensions.oauthExpired": "認証の有効期限が切れました。もう一度接続してください。",
+  "extensions.oauthCanceled": "認証がキャンセルされました。もう一度接続してください。",
+  "extensions.oauthTimedOut": "認証がタイムアウトしました。もう一度接続してください。",
   "extensions.getCredentials": "認証情報を取得",
   "extensions.keepSecretPlaceholder": "•••••••（保持するには空欄のまま）",
   "extensions.runtime.wasm": "WASM ツール",
@@ -1361,6 +1370,10 @@ registerPack("ja", {
 
 registerPack("ja", {
   "app.checkingSession": "セッションを確認中...",
+  "app.sessionCheckFailedTitle": "セッションを確認できませんでした",
+  "app.sessionCheckFailedDescription":
+    "現在セッションを確認できません。サインイン情報は引き続き保持されています。しばらくしてからもう一度お試しください。",
+  "app.retrySession": "再試行",
   "common.close": "閉じる",
   "common.download": "ダウンロード",
   "common.copy": "コピー",

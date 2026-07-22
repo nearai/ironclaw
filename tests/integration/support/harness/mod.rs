@@ -53,8 +53,8 @@ use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
     GateRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInvocation, LoopCapabilityPort,
-        LoopHostMilestoneSink, LoopRunContext,
+        AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopHostMilestoneSink,
+        LoopRequest, LoopRunContext,
     },
 };
 
@@ -225,7 +225,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     provider_id: ExtensionId,
     additional_provider_trust: Vec<(ExtensionId, Vec<EffectKind>)>,
     user_id: UserId,
-    invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    invocations: Arc<Mutex<Vec<LoopRequest>>>,
     results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
     http_egress: Option<Arc<RecordingRuntimeHttpEgress>>,
     network_egress: Option<Arc<RecordingNetworkHttpEgress>>,
@@ -1003,7 +1003,7 @@ impl HostRuntimeCapabilityHarness {
         Ok(())
     }
 
-    fn invocations(&self) -> Vec<CapabilityInvocation> {
+    fn invocations(&self) -> Vec<LoopRequest> {
         self.invocations.lock().unwrap().clone()
     }
 
@@ -1077,6 +1077,20 @@ impl HostRuntimeCapabilityHarness {
             .as_ref()
             .ok_or("host runtime harness has no recording network egress to script")?
             .push_status(status);
+        Ok(())
+    }
+
+    /// Enqueue one exact status/body response on the recording network lane.
+    /// Used when a WASM guest's error classification depends on both fields.
+    pub(crate) fn install_network_response_script(
+        &self,
+        status: u16,
+        body: Vec<u8>,
+    ) -> HarnessResult<()> {
+        self.network_egress
+            .as_ref()
+            .ok_or("host runtime harness has no recording network egress to script")?
+            .push_response(status, body);
         Ok(())
     }
 

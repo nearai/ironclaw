@@ -60,7 +60,7 @@ use ironclaw_host_api::{
     NetworkPolicy, Principal, ProductKind, ResourceEstimate, ResourceScope, RuntimeKind,
     TrustClass,
 };
-use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeCapabilityRequest};
+use ironclaw_host_runtime::RuntimeCapabilityOutcome;
 use ironclaw_loop_host::{
     HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
     HostManagedModelResponse,
@@ -654,7 +654,7 @@ async fn configure_admin_group(
         .host_runtime
         .as_ref()
         .expect("host runtime")
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             capability_id,
             ResourceEstimate::default(),

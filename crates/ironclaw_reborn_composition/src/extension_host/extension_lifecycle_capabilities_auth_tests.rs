@@ -5,8 +5,8 @@ use ironclaw_auth::{
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, InvocationId, MountView, NetworkPolicy, NetworkTargetPattern,
-    Principal, ResourceScope, RuntimeCredentialAccountSetup, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId,
+    Principal, ResourceScope, RunId, RuntimeCredentialAccountSetup, RuntimeKind, TenantId,
+    ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{RuntimeCapabilityOutcome, RuntimeFailureKind};
 
@@ -305,7 +305,7 @@ fn execution_context_for_scope<'a>(
 ) -> ExecutionContext {
     let caller = ExtensionId::new("extension-tool-test-caller").expect("valid extension id"); // safety: static test extension id is valid.
     let context = ExecutionContext {
-        run_id: None,
+        run_id: Some(RunId::new()),
         origin: None,
         invocation_id: resource_scope.invocation_id,
         correlation_id: ironclaw_host_api::CorrelationId::new(),

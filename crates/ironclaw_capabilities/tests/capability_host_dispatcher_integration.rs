@@ -36,12 +36,7 @@ async fn capability_host_invokes_through_runtime_dispatcher_and_completes_run() 
     let input = json!({"message":"authorized"});
 
     let result = host
-        .invoke_json(CapabilityInvocationRequest {
-            context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(context, capability_id(), estimate.clone(), input.clone())
         .await
         .unwrap();
 
@@ -99,12 +94,12 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
     let input = json!({"message":"approved"});
 
     let err = block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
 
@@ -126,13 +121,13 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let result = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            context.clone(),
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap();
 
@@ -165,13 +160,13 @@ async fn capability_host_blocks_then_resumes_approved_dispatch_through_runtime_d
     );
 
     let second_err = resume_host
-        .resume_json(CapabilityResumeRequest {
+        .resume_json(
             context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default().set_output_bytes(1_024),
-            input: json!({"message":"approved"}),
-        })
+            approval_id,
+            capability_id(),
+            ResourceEstimate::default().set_output_bytes(1_024),
+            json!({"message":"approved"}),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -201,12 +196,12 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
     let input = json!({"message":"scoped"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -227,13 +222,13 @@ async fn capability_host_rejects_resume_from_wrong_user_scope_without_dispatch_o
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: wrong_context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
+        .resume_json(
+            wrong_context.clone(),
+            approval_id,
+            capability_id(),
             estimate,
             input,
-        })
+        )
         .await
         .unwrap_err();
 
@@ -285,12 +280,12 @@ async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
     let input = json!({"message":"expired lease"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -316,13 +311,7 @@ async fn capability_host_rejects_expired_approval_lease_before_dispatch() {
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate,
-            input,
-        })
+        .resume_json(context, approval_id, capability_id(), estimate, input)
         .await
         .unwrap_err();
 

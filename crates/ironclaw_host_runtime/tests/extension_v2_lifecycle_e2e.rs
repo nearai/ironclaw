@@ -15,10 +15,11 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::DiskFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, ExtensionId, HostPath, MountView, NetworkScheme,
-    NetworkTargetPattern, PermissionMode, ReservationStatus, ResourceEstimate,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialRequirementSource,
-    RuntimeCredentialTarget, RuntimeKind, SecretHandle, TenantId, UserId, VendorId, VirtualPath,
+    ActivityId, Actor, Authorized, CapabilityId, CorrelationId, EffectKind, ExtensionId, HostPath,
+    Invocation, InvocationOrigin, MountView, NetworkScheme, NetworkTargetPattern, PermissionMode,
+    ProcessId, ProductKind, ReservationStatus, ResourceEstimate, ResourceReservationId,
+    ResourceScope, ResourceUsage, RuntimeCredentialRequirementSource, RuntimeCredentialTarget,
+    RuntimeKind, RuntimeLane, SecretHandle, TenantId, Timestamp, UserId, VendorId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     default_host_api_contract_registry, default_host_port_catalog,
@@ -111,16 +112,24 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     assert_eq!(governor.reserved_for(&account).concurrency_slots, 1);
 
     let result = dispatch_port
-        .dispatch_json(ironclaw_host_api::CapabilityDispatchRequest {
-            run_id: None,
-            capability_id: CapabilityId::new("script.echo").unwrap(),
-            scope: scope.clone(),
-            authenticated_actor_user_id: None,
-            estimate: estimate.clone(),
-            mounts: None,
-            resource_reservation: Some(reservation),
-            input: json!({"message":"hello"}),
-        })
+        .dispatch_json(Authorized::seal_for_test(
+            Invocation {
+                activity_id: ActivityId::new(),
+                capability: CapabilityId::new("script.echo").unwrap(),
+                input: json!({"message":"hello"}),
+                scope: scope.clone(),
+                actor: Actor::System,
+                origin: InvocationOrigin::Product(ProductKind::new("test").unwrap()),
+                estimate: estimate.clone(),
+                correlation_id: CorrelationId::new(),
+                process_id: Some(ProcessId::new()),
+                parent_process_id: None,
+            },
+            RuntimeLane::Process,
+            MountView::default(),
+            Some(reservation),
+            Timestamp::MAX_UTC,
+        ))
         .await
         .unwrap();
 
@@ -140,7 +149,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     );
     assert_eq!(requests[0].scope, scope);
     assert_eq!(requests[0].estimate, estimate);
-    assert_eq!(requests[0].mounts, None);
+    assert_eq!(requests[0].mounts, Some(MountView::default()));
     assert_eq!(requests[0].resource_reservation_id, Some(reservation_id));
     assert_eq!(requests[0].input, json!({"message":"hello"}));
 }

@@ -428,9 +428,9 @@ mod tests {
             CapabilitySurfaceProfileResolver, SubagentPromptMaterialSource,
         };
         use ironclaw_turns::run_profile::{
-            AgentLoopHostError, CapabilityBatchInvocation, CapabilityDescriptorView,
-            CapabilityInputRef, CapabilityInvocation, CapabilitySurfaceVersion, ConcurrencyHint,
-            LoopCapabilityPort, LoopDriverId, ProviderToolDefinition, VisibleCapabilityRequest,
+            AgentLoopHostError, CapabilityDescriptorView, CapabilityInputRef,
+            CapabilitySurfaceVersion, ConcurrencyHint, LoopCapabilityPort, LoopDriverId,
+            LoopRequest, LoopRequestBatch, ProviderToolDefinition, VisibleCapabilityRequest,
             VisibleCapabilitySurface, resolution,
         };
         use ironclaw_turns::{LoopResultRef, RunProfileId, RunProfileVersion};
@@ -524,7 +524,7 @@ mod tests {
 
             async fn invoke_capability(
                 &self,
-                request: CapabilityInvocation,
+                request: LoopRequest,
             ) -> Result<Resolution, AgentLoopHostError> {
                 self.invoked
                     .lock()
@@ -543,7 +543,7 @@ mod tests {
 
             async fn invoke_capability_batch(
                 &self,
-                _request: CapabilityBatchInvocation,
+                _request: LoopRequestBatch,
             ) -> Result<ResolutionBatch, AgentLoopHostError> {
                 Ok(ResolutionBatch {
                     resolutions: Vec::new(),
@@ -606,8 +606,8 @@ mod tests {
             (filter, spy)
         }
 
-        fn invocation(capability: &str) -> CapabilityInvocation {
-            CapabilityInvocation {
+        fn invocation(capability: &str) -> LoopRequest {
+            LoopRequest {
                 activity_id: ironclaw_turns::CapabilityActivityId::new(),
                 surface_version: CapabilitySurfaceVersion::new("surface-v1")
                     .expect("valid surface version"),

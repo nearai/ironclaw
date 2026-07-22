@@ -15,9 +15,11 @@
 //! [`RateLimitPolicy`]: ironclaw_host_api::ingress::RateLimitPolicy
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ironclaw_host_api::{TenantId, UserId};
+use tokio::sync::watch;
 
 /// Default concurrent SSE streams per (tenant, user). Sized to cover a
 /// normal browser tab plus brief reconnect overlap; sustained abuse hits
@@ -39,15 +41,37 @@ struct CallerKey {
 
 #[derive(Debug)]
 pub(crate) struct SseCapacity {
-    state: Mutex<HashMap<CallerKey, usize>>,
+    state: Mutex<CapacityState>,
     max_per_caller: usize,
+    next_generation: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct CapacityState {
+    open_by_caller: HashMap<CallerKey, usize>,
+    named_slots: HashMap<(CallerKey, String), NamedSlot>,
+}
+
+#[derive(Debug)]
+struct NamedSlot {
+    generation: u64,
+    client_generation: Option<u64>,
+    cancel: watch::Sender<bool>,
+}
+
+#[derive(Debug)]
+pub(crate) enum SseAcquireResult {
+    Acquired(SseSlot),
+    AtCapacity,
+    StaleGeneration,
 }
 
 impl SseCapacity {
     pub(crate) fn new(max_per_caller: usize) -> Self {
         Self {
-            state: Mutex::new(HashMap::new()),
+            state: Mutex::new(CapacityState::default()),
             max_per_caller,
+            next_generation: AtomicU64::new(1),
         }
     }
 
@@ -58,37 +82,112 @@ impl SseCapacity {
         self: &Arc<Self>,
         tenant_id: &TenantId,
         user_id: &UserId,
+        connection_id: Option<&str>,
     ) -> Option<SseSlot> {
+        match self.try_acquire_ordered(tenant_id, user_id, connection_id, None) {
+            SseAcquireResult::Acquired(slot) => Some(slot),
+            SseAcquireResult::AtCapacity | SseAcquireResult::StaleGeneration => None,
+        }
+    }
+
+    /// Reserve a slot using the browser tab's monotonically increasing stream
+    /// generation. A delayed request from an older route must not cancel the
+    /// newer route merely because it reached the server later.
+    pub(crate) fn try_acquire_ordered(
+        self: &Arc<Self>,
+        tenant_id: &TenantId,
+        user_id: &UserId,
+        connection_id: Option<&str>,
+        client_generation: Option<u64>,
+    ) -> SseAcquireResult {
         // Reject before touching the HashMap so a configured cap of 0
         // (SSE disabled) does not leak a zero-count entry per rejected
         // open. With the insert-before-check order we used to use, every
         // 429 under a configured cap of 0 would
         // store the caller's `(tenant, user)` key indefinitely.
         if self.max_per_caller == 0 {
-            return None;
+            return SseAcquireResult::AtCapacity;
         }
         let key = CallerKey {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
         };
         let mut state = lock_state(&self.state);
-        let entry = state.entry(key.clone()).or_insert(0);
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        if let Some(connection_id) = connection_id {
+            let named_key = (key.clone(), connection_id.to_string());
+            if let Some(previous) = state.named_slots.get(&named_key) {
+                match (client_generation, previous.client_generation) {
+                    (Some(incoming), Some(current)) if incoming < current => {
+                        return SseAcquireResult::StaleGeneration;
+                    }
+                    (None, Some(_)) => return SseAcquireResult::StaleGeneration,
+                    _ => {}
+                }
+                let _ = previous.cancel.send(true);
+                let (cancel, cancellation) = watch::channel(false);
+                state.named_slots.insert(
+                    named_key,
+                    NamedSlot {
+                        generation,
+                        client_generation,
+                        cancel,
+                    },
+                );
+                return SseAcquireResult::Acquired(SseSlot {
+                    capacity: Arc::clone(self),
+                    key,
+                    connection_id: Some(connection_id.to_string()),
+                    generation,
+                    cancellation: Some(cancellation),
+                });
+            }
+        }
+        let entry = state.open_by_caller.entry(key.clone()).or_insert(0);
         if *entry >= self.max_per_caller {
-            return None;
+            return SseAcquireResult::AtCapacity;
         }
         *entry += 1;
-        Some(SseSlot {
+        let (connection_id, cancellation) = if let Some(connection_id) = connection_id {
+            let (cancel, cancellation) = watch::channel(false);
+            state.named_slots.insert(
+                (key.clone(), connection_id.to_string()),
+                NamedSlot {
+                    generation,
+                    client_generation,
+                    cancel,
+                },
+            );
+            (Some(connection_id.to_string()), Some(cancellation))
+        } else {
+            (None, None)
+        };
+        SseAcquireResult::Acquired(SseSlot {
             capacity: Arc::clone(self),
             key,
+            connection_id,
+            generation,
+            cancellation,
         })
     }
 
-    fn release(&self, key: &CallerKey) {
+    fn release(&self, key: &CallerKey, connection_id: Option<&str>, generation: u64) {
         let mut state = lock_state(&self.state);
-        if let Some(count) = state.get_mut(key) {
+        if let Some(connection_id) = connection_id {
+            let named_key = (key.clone(), connection_id.to_string());
+            let is_current = state
+                .named_slots
+                .get(&named_key)
+                .is_some_and(|slot| slot.generation == generation);
+            if !is_current {
+                return;
+            }
+            state.named_slots.remove(&named_key);
+        }
+        if let Some(count) = state.open_by_caller.get_mut(key) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                state.remove(key);
+                state.open_by_caller.remove(key);
             }
         }
     }
@@ -100,7 +199,7 @@ impl SseCapacity {
             user_id: user_id.clone(),
         };
         let state = lock_state(&self.state);
-        state.get(&key).copied().unwrap_or(0)
+        state.open_by_caller.get(&key).copied().unwrap_or(0)
     }
 }
 
@@ -121,9 +220,7 @@ impl SseCapacity {
 /// break. The worst case is a single caller's count being off by one,
 /// which `SSE_MAX_LIFETIME`-driven slot recycling self-heals within
 /// minutes.
-fn lock_state(
-    mutex: &Mutex<HashMap<CallerKey, usize>>,
-) -> std::sync::MutexGuard<'_, HashMap<CallerKey, usize>> {
+fn lock_state(mutex: &Mutex<CapacityState>) -> std::sync::MutexGuard<'_, CapacityState> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -138,11 +235,40 @@ fn lock_state(
 pub(crate) struct SseSlot {
     capacity: Arc<SseCapacity>,
     key: CallerKey,
+    connection_id: Option<String>,
+    generation: u64,
+    cancellation: Option<watch::Receiver<bool>>,
+}
+
+impl SseSlot {
+    pub(crate) async fn cancelled(&mut self) {
+        let Some(cancellation) = self.cancellation.as_mut() else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        if *cancellation.borrow() {
+            return;
+        }
+        while cancellation.changed().await.is_ok() {
+            if *cancellation.borrow() {
+                return;
+            }
+        }
+        std::future::pending::<()>().await;
+    }
+
+    #[cfg(test)]
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancellation| *cancellation.borrow())
+    }
 }
 
 impl Drop for SseSlot {
     fn drop(&mut self) {
-        self.capacity.release(&self.key);
+        self.capacity
+            .release(&self.key, self.connection_id.as_deref(), self.generation);
     }
 }
 
@@ -162,17 +288,21 @@ mod tests {
     fn acquires_up_to_cap_then_refuses() {
         let cap = Arc::new(SseCapacity::new(2));
         let alice = user("alice");
-        let s1 = cap.try_acquire(&tenant(), &alice).expect("first slot");
-        let s2 = cap.try_acquire(&tenant(), &alice).expect("second slot");
+        let s1 = cap
+            .try_acquire(&tenant(), &alice, None)
+            .expect("first slot");
+        let s2 = cap
+            .try_acquire(&tenant(), &alice, None)
+            .expect("second slot");
         assert!(
-            cap.try_acquire(&tenant(), &alice).is_none(),
+            cap.try_acquire(&tenant(), &alice, None).is_none(),
             "third slot must be refused"
         );
         assert_eq!(cap.open_count(&tenant(), &alice), 2);
         drop(s1);
         // After release, a new slot is available again.
         let s3 = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .expect("slot after release");
         drop(s2);
         drop(s3);
@@ -188,7 +318,7 @@ mod tests {
         // return the rejected open touches no state.
         let cap = Arc::new(SseCapacity::new(0));
         let alice = user("alice");
-        assert!(cap.try_acquire(&tenant(), &alice).is_none());
+        assert!(cap.try_acquire(&tenant(), &alice, None).is_none());
         assert_eq!(
             cap.open_count(&tenant(), &alice),
             0,
@@ -207,7 +337,9 @@ mod tests {
     fn poisoned_lock_does_not_double_panic_on_release_or_acquire() {
         let cap = Arc::new(SseCapacity::new(2));
         let alice = user("alice");
-        let slot = cap.try_acquire(&tenant(), &alice).expect("first slot");
+        let slot = cap
+            .try_acquire(&tenant(), &alice, None)
+            .expect("first slot");
 
         // Poison the mutex by panicking while holding the guard. We
         // catch the panic so the test process survives — the goal is
@@ -238,7 +370,7 @@ mod tests {
         // rather than panic; this is the call-site that runs on every
         // new SSE open.
         let recovered = cap
-            .try_acquire(&tenant(), &alice)
+            .try_acquire(&tenant(), &alice, None)
             .expect("try_acquire must recover from a poisoned lock");
         drop(recovered);
     }
@@ -248,9 +380,66 @@ mod tests {
         let cap = Arc::new(SseCapacity::new(1));
         let alice = user("alice");
         let bob = user("bob");
-        let _alice_slot = cap.try_acquire(&tenant(), &alice).expect("alice");
-        let _bob_slot = cap.try_acquire(&tenant(), &bob).expect("bob");
-        assert!(cap.try_acquire(&tenant(), &alice).is_none());
-        assert!(cap.try_acquire(&tenant(), &bob).is_none());
+        let _alice_slot = cap.try_acquire(&tenant(), &alice, None).expect("alice");
+        let _bob_slot = cap.try_acquire(&tenant(), &bob, None).expect("bob");
+        assert!(cap.try_acquire(&tenant(), &alice, None).is_none());
+        assert!(cap.try_acquire(&tenant(), &bob, None).is_none());
+    }
+
+    #[test]
+    fn named_slot_replaces_its_prior_generation_without_consuming_capacity() {
+        let cap = Arc::new(SseCapacity::new(1));
+        let alice = user("alice");
+        let first = cap
+            .try_acquire(&tenant(), &alice, Some("browser-tab"))
+            .expect("first named slot");
+        let replacement = cap
+            .try_acquire(&tenant(), &alice, Some("browser-tab"))
+            .expect("same browser tab replaces its stale stream");
+
+        assert!(first.is_cancelled(), "the prior stream must be cancelled");
+        assert!(!replacement.is_cancelled());
+        assert_eq!(cap.open_count(&tenant(), &alice), 1);
+        assert!(
+            cap.try_acquire(&tenant(), &alice, Some("different-tab"))
+                .is_none(),
+            "a different browser tab still respects the per-caller cap"
+        );
+
+        drop(first);
+        assert_eq!(
+            cap.open_count(&tenant(), &alice),
+            1,
+            "dropping the superseded generation must not release the replacement"
+        );
+        drop(replacement);
+        assert_eq!(cap.open_count(&tenant(), &alice), 0);
+    }
+
+    #[test]
+    fn ordered_named_slot_rejects_a_late_older_client_generation() {
+        let cap = Arc::new(SseCapacity::new(1));
+        let alice = user("alice");
+        let first = match cap.try_acquire_ordered(&tenant(), &alice, Some("browser-tab"), Some(1)) {
+            SseAcquireResult::Acquired(slot) => slot,
+            result => panic!("first generation must be admitted: {result:?}"),
+        };
+        let current = match cap.try_acquire_ordered(&tenant(), &alice, Some("browser-tab"), Some(2))
+        {
+            SseAcquireResult::Acquired(slot) => slot,
+            result => panic!("newer generation must be admitted: {result:?}"),
+        };
+
+        assert!(first.is_cancelled());
+        assert!(!current.is_cancelled());
+        assert!(matches!(
+            cap.try_acquire_ordered(&tenant(), &alice, Some("browser-tab"), Some(1)),
+            SseAcquireResult::StaleGeneration
+        ));
+        assert!(
+            !current.is_cancelled(),
+            "a late older request must not cancel the current route stream"
+        );
+        assert_eq!(cap.open_count(&tenant(), &alice), 1);
     }
 }

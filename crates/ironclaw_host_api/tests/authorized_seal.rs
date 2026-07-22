@@ -9,8 +9,8 @@
 use ironclaw_host_api::{
     ActivityId, Actor, AuthorizeResult, Authorized, Blocked, CapabilityAuthorizer, CapabilityId,
     CorrelationId, DenyRef, GateRef, GateWaypoint, Invocation, InvocationOrigin, MountView,
-    ProductKind, ResourceEstimate, ResourceReservation, ResourceReservationId, ResourceScope,
-    RuntimeLane, Timestamp, UserId,
+    ProcessAuthorizedContinuation, ProcessId, ProductKind, ResourceEstimate, ResourceReservation,
+    ResourceReservationId, ResourceScope, RuntimeLane, Timestamp, UserId,
 };
 
 /// A stand-in kernel authorizer. In production the sole impl lives in
@@ -68,6 +68,18 @@ fn seal_with_mounts_and_reservation(
     )
 }
 
+fn seal_invocation(invocation: Invocation) -> Authorized {
+    let grant = TestAuthorizer.authorization_grant();
+    Authorized::seal(
+        grant,
+        invocation,
+        RuntimeLane::Process,
+        Some(MountView::default()),
+        Some(reservation()),
+        ts(1000),
+    )
+}
+
 fn ts(secs: i64) -> Timestamp {
     chrono::DateTime::from_timestamp(secs, 0).unwrap()
 }
@@ -107,6 +119,26 @@ fn reservation_is_some_when_a_resource_obligation_produced_one() {
     let auth = seal_with_reservation(ts(1000), Some(expected.clone()));
     assert_eq!(auth.reservation(), Some(&expected));
     assert_eq!(auth.abort(), Some(expected));
+}
+
+#[test]
+fn process_authorized_continuation_preserves_direct_spawner_lineage() {
+    let spawner = ProcessId::new();
+    let grandparent = ProcessId::new();
+    let spawned = ProcessId::new();
+    let mut invocation = invocation();
+    invocation.process_id = Some(spawner);
+    invocation.parent_process_id = Some(grandparent);
+
+    let continuation = ProcessAuthorizedContinuation::from_authorized(
+        seal_invocation(invocation),
+        ts(999),
+        spawned,
+    )
+    .expect("unexpired process authorization converts");
+
+    assert_eq!(continuation.invocation.process_id, spawned);
+    assert_eq!(continuation.invocation.parent_process_id, Some(spawner));
 }
 
 #[test]

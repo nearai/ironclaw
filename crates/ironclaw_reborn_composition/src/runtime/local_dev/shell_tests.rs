@@ -10,8 +10,8 @@ use ironclaw_loop_host::{
 use ironclaw_turns::{
     RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
-        CapabilityInvocation, InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver,
-        LoopRunContext, ProviderToolCall, VisibleCapabilityRequest,
+        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopRequest, LoopRunContext,
+        ProviderToolCall, VisibleCapabilityRequest,
     },
 };
 
@@ -165,7 +165,7 @@ async fn local_dev_yolo_shell_translates_workspace_workdir_without_scoped_mounts
         .expect("input ref");
 
     let outcome = port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: CapabilityId::new(SHELL_CAPABILITY_ID).expect("shell capability id"),

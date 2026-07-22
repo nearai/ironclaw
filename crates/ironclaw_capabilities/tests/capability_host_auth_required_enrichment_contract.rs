@@ -104,12 +104,12 @@ async fn invoke_json_enriches_auth_required_credential_requirements_from_obligat
     });
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
+        )
         .await
         .unwrap_err();
 
@@ -155,7 +155,7 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
     };
     let dispatcher = TestDispatcher::responding(|request, _| {
         Err(DispatchError::AuthRequired {
-            capability: request.capability_id.clone(),
+            capability: request.invocation.capability.clone(),
             required_secrets: Vec::new(),
             credential_requirements: vec![RuntimeCredentialAuthRequirement {
                 provider: VendorId::new("mcp_provider").unwrap(),
@@ -173,12 +173,12 @@ async fn invoke_json_preserves_non_empty_credential_requirements_from_dispatcher
     });
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({}),
+        )
         .await
         .unwrap_err();
 
@@ -243,12 +243,12 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
 
     // Phase 1: invoke_json → blocked at auth.
     let invoke_err = host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
+        )
         .await
         .unwrap_err();
 
@@ -267,13 +267,13 @@ async fn auth_resume_json_enriches_auth_required_credential_requirements_from_ob
     // Phase 2: auth_resume_json → dispatcher returns AuthRequired again →
     // dispatch_resumed_capability enriches from obligations.
     let resume_err = host
-        .auth_resume_json(CapabilityAuthResumeRequest {
+        .auth_resume_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
-            approval_request_id: None,
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({"owner": "acme", "repo": "api", "issue_number": 1, "body": "hi"}),
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -353,12 +353,12 @@ async fn invoke_json_does_not_enrich_when_multiple_credential_obligations_declar
     });
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: serde_json::json!({}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            serde_json::json!({}),
+        )
         .await
         .unwrap_err();
 
@@ -409,7 +409,7 @@ async fn invoke_json_preserves_required_secrets_from_dispatcher() {
     };
     let dispatcher = TestDispatcher::responding(|request, _| {
         Err(DispatchError::AuthRequired {
-            capability: request.capability_id.clone(),
+            capability: request.invocation.capability.clone(),
             required_secrets: vec![SecretHandle::new("raw_secret_handle").unwrap()],
             credential_requirements: Vec::new(),
         })
@@ -422,12 +422,12 @@ async fn invoke_json_preserves_required_secrets_from_dispatcher() {
     });
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({}),
+        )
         .await
         .unwrap_err();
 
