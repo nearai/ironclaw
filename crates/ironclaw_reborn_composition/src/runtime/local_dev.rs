@@ -110,10 +110,8 @@ pub(super) fn capability_wiring(
     let workspace_mounts = services.workspace_mounts.clone();
     let memory_mounts = services.memory_mounts.clone();
     let system_extensions_lifecycle_mounts = services.system_extensions_lifecycle_mounts.clone();
-    let approval_requests: Arc<dyn ApprovalRequestStore> =
-        services.approval_requests.clone();
-    let capability_leases: Arc<dyn CapabilityLeaseStore> =
-        services.capability_leases.clone();
+    let approval_requests: Arc<dyn ApprovalRequestStore> = services.approval_requests.clone();
+    let capability_leases: Arc<dyn CapabilityLeaseStore> = services.capability_leases.clone();
     let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
         services.tool_permission_overrides.clone();
     let auto_approve_settings: Arc<dyn ironclaw_approvals::AutoApproveSettingStore> =
@@ -129,9 +127,8 @@ pub(super) fn capability_wiring(
         policy.as_ref(),
         &[EffectKind::ExternalWrite],
     );
-    let extension_surface_source = ExtensionCapabilitySurfaceSource::new(Some(
-        services.extension_management.clone(),
-    ));
+    let extension_surface_source =
+        ExtensionCapabilitySurfaceSource::new(Some(services.extension_management.clone()));
     // First-class project creation reuses the same access-controlled
     // `ProjectService` facade the WebUI v2 surface wires (composition owns the
     // service, never the raw repository), so an agent-created project is a real

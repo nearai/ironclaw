@@ -115,13 +115,13 @@ use crate::extension_host::{
     admin_configuration::ComposedAdminConfigurationService,
     available_extensions::AdminConfigurationCatalogUse,
 };
+#[cfg(any(test, feature = "test-support"))]
+use crate::factory::{ComposedApprovalRequestStore, ComposedCapabilityLeaseStore};
 use crate::factory::{
     ComposedAutoApproveSettingStore, ComposedPersistentApprovalPolicyStore,
     ComposedToolPermissionOverrideStore, builtin_extension_registry,
     filesystem_reborn_identity_store,
 };
-#[cfg(any(test, feature = "test-support"))]
-use crate::factory::{ComposedApprovalRequestStore, ComposedCapabilityLeaseStore};
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
@@ -1235,7 +1235,8 @@ impl RebornRuntime {
     pub fn local_dev_auto_approve_settings_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::AutoApproveSettingStore>> {
-        Some(self.auto_approve_settings.clone() as Arc<dyn ironclaw_approvals::AutoApproveSettingStore>)
+        Some(self.auto_approve_settings.clone()
+            as Arc<dyn ironclaw_approvals::AutoApproveSettingStore>)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1305,14 +1306,16 @@ impl RebornRuntime {
     pub fn local_dev_tool_permission_overrides_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>> {
-        Some(self.tool_permission_overrides.clone() as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>)
+        Some(self.tool_permission_overrides.clone()
+            as Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore>)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn local_dev_persistent_approval_policies_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>> {
-        Some(self.persistent_approval_policies.clone() as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>)
+        Some(self.persistent_approval_policies.clone()
+            as Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore>)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1371,7 +1374,8 @@ impl RebornRuntime {
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
     ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
         Some(
-            self.extension_management.publish_bundled_package_for_test(package, resolved)
+            self.extension_management
+                .publish_bundled_package_for_test(package, resolved)
                 .await,
         )
     }
@@ -3642,12 +3646,11 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         // filesystem so the model port can build multimodal image parts for
         // vision-capable models. Only available when a local runtime (and thus a
         // workspace filesystem) is composed.
-        attachment_read_port: Some(Arc::new(
-            crate::support::fs::ProjectScopedAttachmentReader::new(Arc::clone(
-                &services.workspace_filesystem,
-            )),
-        )
-            as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>),
+        attachment_read_port: Some(
+            Arc::new(crate::support::fs::ProjectScopedAttachmentReader::new(
+                Arc::clone(&services.workspace_filesystem),
+            )) as Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
+        ),
         // §5.2.9 render-from-record: a `FilesystemGateRecordStore` over the SAME
         // shared `extension_filesystem` + per-user mount view the local-dev
         // capability port persists `GateRecord::Auth` into (see
@@ -4242,7 +4245,9 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
     // slot before the runtime was built keeps its facade (same stores, same
     // durable state), so the discarded `set` result is deliberate.
     if let Some(channel_connection) = runtime.generic_channel_connection_facade() {
-        let _ = runtime.channel_connection_facade_slot.set(channel_connection);
+        let _ = runtime
+            .channel_connection_facade_slot
+            .set(channel_connection);
     }
     Ok(runtime)
 }
@@ -4444,9 +4449,7 @@ fn skill_injection_mode_from(value: &str) -> Result<SkillInjectionMode, RebornRu
     }
 }
 
-fn filesystem_skill_context_runtime(
-    runtime: &RebornRuntimeStores,
-) -> Option<&RebornRuntimeStores> {
+fn filesystem_skill_context_runtime(runtime: &RebornRuntimeStores) -> Option<&RebornRuntimeStores> {
     Some(runtime)
 }
 

@@ -30,10 +30,10 @@ pub use factory::ChannelHostAssemblyTestWiring;
 pub use factory::LOCAL_DEV_SECRETS_MASTER_KEY_PATH;
 #[cfg(feature = "test-support")]
 pub use factory::RebornApprovalTestParts;
+pub use factory::builtin_first_party_trust_policy;
 pub use factory::local_dev_db_path;
 pub use factory::open_local_dev_secret_store;
 pub use factory::{KeychainMasterKeyOutcome, provision_local_dev_keychain_master_key};
-pub use factory::{RebornServices, build_reborn_services, builtin_first_party_trust_policy};
 pub use google_oauth_secret_store::{GoogleOauthSecretStore, GoogleOauthSecretStoreError};
 pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornBuildInput, RebornRuntimeProcessBinding,
@@ -138,7 +138,7 @@ pub use runtime::RebornTurnDriveOutcome;
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, RebornSkillActivation,
     RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle, RebornSkillExecutionPlan,
-    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime,
+    RebornSkillExecutionResult, RebornSkillSourceKind, build_reborn_runtime, build_runtime,
 };
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL,

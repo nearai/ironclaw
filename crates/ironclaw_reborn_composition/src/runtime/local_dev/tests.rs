@@ -687,8 +687,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate");
-        let extension_management = runtime_surfaces.extension_management
-            .clone();
+        let extension_management = runtime_surfaces.extension_management.clone();
         // #5459 P1: install AS the runtime's tenant operator so the extensions
         // are tenant-shared (what these surface tests always meant) — a
         // non-operator context would now produce a private install invisible
@@ -5169,8 +5168,7 @@ mod tests {
             let runtime_surfaces = services
                 .local_runtime_for_test()
                 .expect("local runtime substrate");
-            let extension_management = runtime_surfaces.extension_management
-                .clone();
+            let extension_management = runtime_surfaces.extension_management.clone();
             let operator = extension_management
                 .tenant_operator_user_id_for_test()
                 .clone();
@@ -5272,8 +5270,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate");
-        let extension_management = runtime_surfaces.extension_management
-            .clone();
+        let extension_management = runtime_surfaces.extension_management.clone();
         let operator = extension_management
             .tenant_operator_user_id_for_test()
             .clone();
@@ -5483,8 +5480,7 @@ mod tests {
         let runtime_surfaces = services
             .local_runtime_for_test()
             .expect("local runtime substrate");
-        let extension_management = runtime_surfaces.extension_management
-            .clone();
+        let extension_management = runtime_surfaces.extension_management.clone();
         let operator = extension_management
             .tenant_operator_user_id_for_test()
             .clone();

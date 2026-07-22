@@ -215,9 +215,7 @@ pub(crate) fn build_webui_services_with_channel_connection(
     channel_connection: Option<Arc<dyn ChannelConnectionFacade>>,
     mut outbound_delivery_target_providers: Vec<Arc<dyn OutboundDeliveryTargetProvider>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
-    if true
-        && let Some(provider) = runtime.outbound_delivery_target_provider()
-    {
+    if true && let Some(provider) = runtime.outbound_delivery_target_provider() {
         outbound_delivery_target_providers.push(provider);
     }
 

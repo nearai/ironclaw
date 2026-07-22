@@ -163,7 +163,8 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         .expect("install Slack before OAuth callback");
 
     let slack_id = ironclaw_host_api::ExtensionId::new("slack").expect("Slack extension id");
-    runtime.channel_config
+    runtime
+        .channel_config
         .save(
             &slack_id,
             vec![
@@ -5928,8 +5929,7 @@ async fn multi_tool_call_response_survives_surface_change_mid_register() {
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
 
     // Seed the lifecycle facade before the model gateway runs.
-    let extension_management = runtime.extension_management
-        .clone();
+    let extension_management = runtime.extension_management.clone();
     let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
         &runtime.skill_management,
     ))

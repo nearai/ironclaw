@@ -7,9 +7,9 @@ use std::{
 };
 
 use crate::RebornProductAuthServicePorts;
-use crate::builtin_capability_policy::builtin_capability_policy;
 #[cfg(any(test, feature = "test-support"))]
 use crate::builtin_capability_policy::BuiltinCapabilityPolicy;
+use crate::builtin_capability_policy::builtin_capability_policy;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 use crate::extension_host::lifecycle::RebornLocalSkillManagementPort;
 use crate::extension_host::mcp::hosted_http_mcp_runtime;
@@ -85,11 +85,11 @@ use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
 };
+use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_api::{
     HostPath, InvocationId, MountPermissions, MountView, PackageId, ResourceScope,
     RuntimeHttpEgress, UserId, VendorId, VirtualPath, sha256_digest_token,
 };
-use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostProcessPort, HostRuntimeServices,
     PostEditCheckConfig, ProductAuthProviderRuntimePorts, TriggerCreateHook,
@@ -360,8 +360,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) delivered_gate_routes: Arc<dyn DeliveredGateRouteStore>,
     pub(crate) triggered_run_delivery: Arc<dyn TriggeredRunDeliveryStore>,
     pub(crate) extension_management: Arc<RebornLocalExtensionManagementPort>,
-    pub(crate) channel_config:
-        Arc<crate::extension_host::channel_config::ChannelConfigService>,
+    pub(crate) channel_config: Arc<crate::extension_host::channel_config::ChannelConfigService>,
     pub(crate) admin_configuration: Arc<ComposedAdminConfigurationService>,
     pub(crate) admin_configuration_uses: Arc<Vec<AdminConfigurationCatalogUse>>,
     pub(crate) channel_identity_store:
@@ -381,8 +380,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) local_dev_storage_root: Option<PathBuf>,
     pub(crate) default_system_prompt_path: Option<PathBuf>,
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) in_memory_budget_event_sink:
-        Arc<ironclaw_resources::InMemoryBudgetEventSink>,
+    pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
     pub(crate) extension_registry: Arc<ExtensionRegistry>,
     pub(crate) shared_extension_registry: Arc<SharedExtensionRegistry>,
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
@@ -1186,13 +1184,13 @@ fn open_postgres_pool_from_source(
 ) -> Result<deadpool_postgres::Pool, RebornBuildError> {
     match source {
         PostgresPoolSource::Prebuilt(pool) => Ok(pool),
-        PostgresPoolSource::Config(connection) => {
-            Ok(ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
+        PostgresPoolSource::Config(connection) => Ok(
+            ironclaw_reborn_event_store::open_postgres_pool_with_tls_options(
                 connection.url,
                 connection.pool_max_size,
                 connection.tls_options,
-            )?)
-        }
+            )?,
+        ),
     }
 }
 
@@ -2669,8 +2667,7 @@ async fn build_local_storage_production_shaped(
     )
     .await?;
     let secret_credentials = FilesystemSecretCredentialStores::new(scoped_filesystem, crypto);
-    let resource_governor =
-        filesystem_resource_governor(&filesystem);
+    let resource_governor = filesystem_resource_governor(&filesystem);
     if let Some(singleton) = postgres_resource_governor_singleton {
         ensure_postgres_resource_governor_authority_for_build(singleton)?;
     }
@@ -2843,8 +2840,7 @@ where
     ));
     ensure_postgres_event_store_config(&config.event_store)?;
     filesystem.run_migrations().await?;
-    let resource_governor =
-        filesystem_resource_governor(&filesystem);
+    let resource_governor = filesystem_resource_governor(&filesystem);
     let event_store = ironclaw_reborn_event_store::build_reborn_event_stores_from_root_filesystem(
         Arc::clone(&filesystem),
     )?;

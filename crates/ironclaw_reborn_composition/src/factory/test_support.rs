@@ -462,8 +462,7 @@ impl RebornRuntimeStores {
     pub(crate) fn local_dev_profile_filesystem_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_filesystem::RootFilesystem>> {
-        Some(Arc::clone(&self.extension_filesystem)
-            as Arc<dyn ironclaw_filesystem::RootFilesystem>)
+        Some(Arc::clone(&self.extension_filesystem) as Arc<dyn ironclaw_filesystem::RootFilesystem>)
     }
 
     /// Test-support access to the local-dev project service backing the synthetic
@@ -700,7 +699,6 @@ impl RebornRuntimeStores {
         Some(active_extension_authority_for_test(extension_management, grantee).await)
     }
 }
-
 
 #[cfg(feature = "test-support")]
 pub struct ActiveExtensionAuthorityForTest {

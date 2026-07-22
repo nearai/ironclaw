@@ -2650,8 +2650,7 @@ async fn local_dev_outbound_store_durable_shares_one_allocation_across_all_roles
     let pref_ptr = Arc::as_ptr(runtime_surfaces.outbound_preferences_for_test()) as *const ();
     let state_ptr = Arc::as_ptr(runtime_surfaces.outbound_state_for_test()) as *const ();
     let gate_ptr = Arc::as_ptr(runtime_surfaces.delivered_gate_routes_for_test()) as *const ();
-    let delivery_ptr =
-        Arc::as_ptr(runtime_surfaces.triggered_run_delivery_for_test()) as *const ();
+    let delivery_ptr = Arc::as_ptr(runtime_surfaces.triggered_run_delivery_for_test()) as *const ();
 
     assert!(
         std::ptr::addr_eq(pref_ptr, state_ptr),
