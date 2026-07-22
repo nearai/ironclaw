@@ -120,6 +120,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
             mounts: None,
             resource_reservation: Some(reservation),
             pinned_lane: None,
+            deadline: None,
             input: json!({"message":"hello"}),
         })
         .await

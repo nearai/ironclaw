@@ -356,6 +356,8 @@ async fn snapshot_resolver_serves_activated_tools_and_stops_after_deactivate() {
             estimate: ironclaw_host_api::ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
+            deadline: None,
             authenticated_actor_user_id: None,
             input: serde_json::json!({"message": "in flight"}),
         })
@@ -417,6 +419,8 @@ async fn snapshot_resolver_maps_tool_auth_required_to_the_generic_gate() {
             estimate: ironclaw_host_api::ResourceEstimate::default(),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
+            deadline: None,
             authenticated_actor_user_id: None,
             input: serde_json::json!({}),
         })

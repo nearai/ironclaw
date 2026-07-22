@@ -108,6 +108,8 @@ fn wasm_capability_request(input: Value) -> CapabilityDispatchRequest {
         },
         mounts: None,
         resource_reservation: None,
+        pinned_lane: None,
+        deadline: None,
         input,
     }
 }
@@ -201,6 +203,8 @@ async fn unconfigured_lane_fails_missing_backend_and_releases_prepared_reservati
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
+            pinned_lane: None,
+            deadline: None,
             input: json!({"message":"blocked"}),
         })
         .await
@@ -322,6 +326,8 @@ async fn resolved_binding_survives_registry_swap_mid_flight() {
             },
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
+            deadline: None,
             authenticated_actor_user_id: None,
             input: json!({"in":"flight"}),
         })

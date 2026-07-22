@@ -141,6 +141,7 @@ impl From<DispatchError> for CapabilityInvocationError {
             | DispatchError::MissingRuntimeBackend { .. }
             | DispatchError::UnsupportedRuntime { .. }
             | DispatchError::LaneMismatch { .. }
+            | DispatchError::AuthorizationExpired { .. }
             | DispatchError::Mcp { .. }
             | DispatchError::Script { .. }
             | DispatchError::Wasm { .. }
@@ -183,7 +184,8 @@ fn dispatch_error_model_visible_cause(error: &DispatchError) -> Option<String> {
         | DispatchError::RuntimeMismatch { .. }
         | DispatchError::MissingRuntimeBackend { .. }
         | DispatchError::UnsupportedRuntime { .. }
-        | DispatchError::LaneMismatch { .. } => Some(error.to_string()),
+        | DispatchError::LaneMismatch { .. }
+        | DispatchError::AuthorizationExpired { .. } => Some(error.to_string()),
         // Auth-required carries redacted secret handles; keep it summary-free.
         DispatchError::AuthRequired { .. } => None,
     }

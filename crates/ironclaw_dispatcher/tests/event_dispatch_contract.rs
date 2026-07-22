@@ -147,6 +147,8 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
             },
             mounts: None,
             resource_reservation: Some(reservation.clone()),
+            pinned_lane: None,
+            deadline: None,
             input: json!({"message": "unknown capability"}),
         })
         .instrument(tracing::info_span!(
@@ -230,6 +232,8 @@ async fn dispatcher_emits_failed_event_for_unknown_capability_without_reserving(
             },
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
+            deadline: None,
             input: json!({"message": "blocked"}),
         })
         .await
@@ -381,6 +385,8 @@ fn sample_request(capability_id: &str, input: Value) -> CapabilityDispatchReques
         },
         mounts: None,
         resource_reservation: None,
+        pinned_lane: None,
+        deadline: None,
         input,
     }
 }

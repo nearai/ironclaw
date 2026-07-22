@@ -354,7 +354,7 @@ where
         // S6 (§5.3.2/§9): dispatch routes through the always-present sealed
         // witness (consumed single-use, failing closed on expiry). See
         // [`Self::dispatch_inputs_from_witness`].
-        let (dispatch_mounts, dispatch_reservation, pinned_lane) = self
+        let (dispatch_mounts, dispatch_reservation, pinned_lane, deadline) = self
             .dispatch_inputs_from_witness(
                 CapabilityObligationPhase::Invoke,
                 witness,
@@ -378,6 +378,10 @@ where
                 mounts: dispatch_mounts,
                 resource_reservation: dispatch_reservation,
                 pinned_lane,
+                // Carry the witness deadline so the dispatcher revalidates it
+                // immediately before the executor, past its pre-execution event
+                // awaits (§5.3.2, finding #6436).
+                deadline,
                 input: request.input,
             })
             .await
@@ -2002,7 +2006,7 @@ where
             origin,
             frozen_deadline,
         );
-        let (witness_mounts, witness_reservation, _pinned_lane) = match self
+        let (witness_mounts, witness_reservation, _pinned_lane, deadline) = match self
             .dispatch_inputs_from_witness(
                 CapabilityObligationPhase::Spawn,
                 witness,
@@ -2038,6 +2042,45 @@ where
         let resource_reservation_id = witness_reservation
             .as_ref()
             .map(|reservation| reservation.id);
+
+        // Revalidate the authorization deadline IMMEDIATELY before process start
+        // (§5.3.2, IronLoop finding #6436), mirroring `spawn_json`. The claimed
+        // approval lease bounds this witness; `dispatch_inputs_from_witness` failed
+        // closed on expiry when it consumed the witness and there is no meaningful
+        // `await` before `ProcessManager::spawn` here, so this is defense-in-depth.
+        // On expiry, revoke the claimed lease too (mirror the witness-expiry arm
+        // above) so it is not stranded, and no process starts. `None` skips it.
+        if let Some(deadline) = deadline
+            && chrono::Utc::now() >= deadline
+        {
+            self.abort_obligations(
+                CapabilityObligationPhase::Spawn,
+                &authorized_context,
+                &capability_id,
+                &request.estimate,
+                obligations.as_slice(),
+                &obligation_outcome,
+            )
+            .await;
+            fail_run_if_configured(Some(run_state), &scope, invocation_id, "WitnessExpired").await;
+            if let Err(revoke_error) = capability_leases
+                .revoke(&scope, claimed_lease.grant.id)
+                .await
+            {
+                warn!(
+                    lease_id = %claimed_lease.grant.id,
+                    invocation_id = %invocation_id,
+                    capability_id = %capability_id,
+                    revoke_error_kind = capability_lease_error_kind(&revoke_error),
+                    "capability lease revoke failed after resume-spawn deadline re-check; lease may remain claimed",
+                );
+            }
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+                detail: None,
+            });
+        }
 
         let process = match process_manager
             .spawn(ProcessStart {
@@ -2156,7 +2199,7 @@ where
         // to carry a pinned lane — the witness's lane binding (finding C) is a
         // dispatcher-path concern, so the lane it yields is unused here. See
         // [`Self::dispatch_inputs_from_witness`].
-        let (witness_mounts, witness_reservation, _pinned_lane) = self
+        let (witness_mounts, witness_reservation, _pinned_lane, deadline) = self
             .dispatch_inputs_from_witness(
                 CapabilityObligationPhase::Spawn,
                 witness,
@@ -2201,6 +2244,34 @@ where
         let resource_reservation_id = witness_reservation
             .as_ref()
             .map(|reservation| reservation.id);
+
+        // Revalidate the authorization deadline IMMEDIATELY before process start
+        // (§5.3.2, IronLoop finding #6436). `dispatch_inputs_from_witness` already
+        // failed closed on expiry when it consumed the witness, and there is no
+        // meaningful `await` between that consumption and `ProcessManager::spawn`
+        // on this path — so this re-check is defense-in-depth (cheap): it makes the
+        // "no side effect after the authorization deadline" invariant local to the
+        // spawn site, matching the dispatcher's execution-boundary re-check. `None`
+        // (witness-free/legacy) skips it.
+        if let Some(deadline) = deadline
+            && chrono::Utc::now() >= deadline
+        {
+            self.abort_obligations(
+                CapabilityObligationPhase::Spawn,
+                &request.context,
+                &request.capability_id,
+                &request.estimate,
+                obligations.as_slice(),
+                &obligation_outcome,
+            )
+            .await;
+            fail_run_if_configured(self.run_state, &scope, invocation_id, "WitnessExpired").await;
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+                detail: None,
+            });
+        }
 
         let process = match process_manager
             .spawn(ProcessStart {
@@ -3048,7 +3119,7 @@ where
             obligation_outcome.mounts.clone(),
             obligation_outcome.resource_reservation.clone(),
         ));
-        let (dispatch_mounts, dispatch_reservation, pinned_lane) = match self
+        let (dispatch_mounts, dispatch_reservation, pinned_lane, deadline) = match self
             .dispatch_inputs_from_witness(
                 CapabilityObligationPhase::Resume,
                 witness,
@@ -3096,6 +3167,10 @@ where
                 mounts: dispatch_mounts,
                 resource_reservation: dispatch_reservation,
                 pinned_lane,
+                // Carry the witness deadline so the dispatcher revalidates it
+                // immediately before the executor, past its pre-execution event
+                // awaits (§5.3.2, finding #6436).
+                deadline,
                 input,
             })
             .await
@@ -3320,14 +3395,27 @@ where
             Option<ironclaw_host_api::MountView>,
             Option<ironclaw_host_api::ResourceReservation>,
             Option<RuntimeLane>,
+            Option<Timestamp>,
         ),
         CapabilityInvocationError,
     > {
+        // Capture the witness deadline BEFORE `into_parts` consumes it. The
+        // consumption fails closed on expiry (below), but the callers still need
+        // the deadline as expiry evidence carried through the final handoff: the
+        // dispatcher revalidates it immediately before the executor (past the
+        // pre-execution event-emission awaits), and the spawn paths revalidate it
+        // immediately before `ProcessManager::spawn` (§5.3.2, IronLoop finding
+        // #6436).
+        let deadline = witness.deadline();
         match witness.into_parts(chrono::Utc::now()) {
             // `lane` is the descriptor-resolved lane the authorization pinned:
             // threaded into the dispatch request so the dispatcher fails closed
             // if the hot registry re-resolves a different lane (§5.3.2, finding C).
-            Ok((_invocation, lane, mounts, reservation)) => Ok((mounts, reservation, lane)),
+            // `deadline` rides alongside as the expiry evidence the final
+            // execution-boundary re-check enforces (finding #6436).
+            Ok((_invocation, lane, mounts, reservation)) => {
+                Ok((mounts, reservation, lane, Some(deadline)))
+            }
             Err(expired) => {
                 self.abort_obligations(
                     phase,

@@ -49,6 +49,8 @@ async fn dispatcher_routes_capability_through_resolved_binding() {
             },
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
+            deadline: None,
             input: json!({"message": "hello dispatcher"}),
         })
         .await
@@ -126,6 +128,8 @@ async fn dispatcher_fails_unknown_capability_before_any_binding_work() {
             estimate: ResourceEstimate::default().set_concurrency_slots(1),
             mounts: None,
             resource_reservation: None,
+            pinned_lane: None,
+            deadline: None,
             input: json!({"message": "nope"}),
         })
         .await
@@ -157,6 +161,8 @@ async fn dispatcher_releases_prepared_reservation_when_resolution_fails() {
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
+            pinned_lane: None,
+            deadline: None,
             input: json!({"message": "release on resolution failure"}),
         })
         .await
@@ -194,6 +200,8 @@ async fn dispatcher_hands_prepared_reservation_to_the_binding() {
             estimate,
             mounts: None,
             resource_reservation: Some(reservation),
+            pinned_lane: None,
+            deadline: None,
             input: json!({}),
         })
         .await
@@ -410,6 +418,8 @@ fn sample_request(capability_id: &str, input: Value) -> CapabilityDispatchReques
         },
         mounts: None,
         resource_reservation: None,
+        pinned_lane: None,
+        deadline: None,
         input,
     }
 }

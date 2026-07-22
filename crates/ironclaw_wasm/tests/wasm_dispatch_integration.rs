@@ -958,6 +958,7 @@ fn dispatch_request(capability: &str, input: Value) -> CapabilityDispatchRequest
         mounts: None,
         resource_reservation: None,
         pinned_lane: None,
+        deadline: None,
         input,
     }
 }

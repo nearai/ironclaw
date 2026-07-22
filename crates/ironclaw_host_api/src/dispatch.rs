@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::{
     CapabilityId, ExtensionId, HostRemediation, MountView, ResourceEstimate, ResourceReceipt,
     ResourceReservation, ResourceScope, ResourceUsage, RunId, RuntimeCredentialAuthRequirement,
-    RuntimeKind, RuntimeLane, SecretHandle, UserId,
+    RuntimeKind, RuntimeLane, SecretHandle, Timestamp, UserId,
 };
 
 /// Request for one already-authorized declared capability dispatch.
@@ -38,11 +38,29 @@ pub struct CapabilityDispatchRequest {
     /// between authorize and dispatch must never execute a replacement runtime on
     /// authority prepared for the old one.
     ///
-    /// `None` means no lane was pinned (a witness-free/legacy dispatch or a
-    /// host-internal `System` descriptor that resolved to no lane); the dispatcher
-    /// skips the check and behaves exactly as before. Full descriptor-content
-    /// pinning (a same-lane descriptor swap) is tracked separately in #6434.
+    /// `None` means no lane was pinned (a witness-free/legacy dispatch); the
+    /// dispatcher skips the pin comparison and behaves exactly as before. This is
+    /// independent of the runtime→lane resolution: a resolved runtime that maps to
+    /// no lane (host-internal `System`) fails closed with `MissingRuntimeBackend`
+    /// regardless of this field. Full descriptor-content pinning (a same-lane
+    /// descriptor swap) is tracked separately in #6434.
     pub pinned_lane: Option<RuntimeLane>,
+    /// The `Authorized` witness's frozen expiry deadline (`authorized.deadline()`),
+    /// threaded through so the dispatcher can revalidate `now >= deadline`
+    /// IMMEDIATELY before it invokes the executor (§5.3.2, IronLoop finding
+    /// #6436). The witness deadline is checked once when the caller consumes the
+    /// witness (`Authorized::into_parts`), but the dispatcher then `await`s
+    /// `DispatchRequested`/`RuntimeSelected` event emissions before the executor
+    /// runs — a claimed approval lease can expire during those awaits, letting a
+    /// side effect execute AFTER its authorization deadline. The dispatcher fails
+    /// closed with [`DispatchError::AuthorizationExpired`] when this deadline is
+    /// `Some(d)` and `d` has passed by the time it reaches the executor.
+    ///
+    /// `None` means the dispatch carries no deadline (a witness-free/legacy
+    /// dispatch: the process executor forwarding an already-authorized long-running
+    /// process, or a test double); the dispatcher skips the re-check and the common
+    /// path is byte-identical.
+    pub deadline: Option<Timestamp>,
     pub input: Value,
 }
 
@@ -318,6 +336,7 @@ pub enum DispatchFailureKind {
     UnsupportedRuntime,
     AuthRequired,
     LaneMismatch,
+    AuthorizationExpired,
     Runtime(RuntimeDispatchErrorKind),
 }
 
@@ -331,6 +350,7 @@ impl DispatchFailureKind {
             Self::UnsupportedRuntime => "UnsupportedRuntime",
             Self::AuthRequired => "AuthRequired",
             Self::LaneMismatch => "LaneMismatch",
+            Self::AuthorizationExpired => "AuthorizationExpired",
             Self::Runtime(kind) => kind.as_str(),
         }
     }
@@ -348,6 +368,7 @@ impl DispatchFailureKind {
             Self::LaneMismatch => {
                 "the tool runtime changed and no longer matches its authorization"
             }
+            Self::AuthorizationExpired => "the tool's authorization expired before it could run",
             Self::Runtime(kind) => kind.human_summary(),
         }
     }
@@ -393,6 +414,15 @@ pub enum DispatchError {
         authorized: RuntimeLane,
         resolved: RuntimeLane,
     },
+    /// The authorization deadline the `Authorized` witness froze had already
+    /// passed by the time the dispatcher reached the executor. A claimed approval
+    /// lease can expire during the pre-execution `DispatchRequested`/
+    /// `RuntimeSelected` event-emission awaits, so the witness deadline is
+    /// revalidated immediately before execution and fails closed here — never
+    /// running the side effect AFTER its authorization deadline (§5.3.2, IronLoop
+    /// finding #6436).
+    #[error("capability {capability} authorization deadline expired before dispatch")]
+    AuthorizationExpired { capability: CapabilityId },
     #[error(
         "runtime {runtime:?} is recognized but not supported by this dispatcher yet for capability {capability}"
     )]
@@ -486,6 +516,10 @@ impl fmt::Debug for DispatchError {
                 .field("authorized", authorized)
                 .field("resolved", resolved)
                 .finish(),
+            Self::AuthorizationExpired { capability } => f
+                .debug_struct("AuthorizationExpired")
+                .field("capability", capability)
+                .finish(),
             Self::UnsupportedRuntime {
                 capability,
                 runtime,
@@ -548,6 +582,7 @@ impl DispatchError {
             Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
             Self::AuthRequired { .. } => DispatchFailureKind::AuthRequired,
             Self::LaneMismatch { .. } => DispatchFailureKind::LaneMismatch,
+            Self::AuthorizationExpired { .. } => DispatchFailureKind::AuthorizationExpired,
             Self::Mcp { kind, .. }
             | Self::Script { kind, .. }
             | Self::Wasm { kind, .. }
@@ -568,6 +603,7 @@ impl DispatchError {
             Self::UnsupportedRuntime { .. } => "unsupported_runtime",
             Self::AuthRequired { .. } => "auth_required",
             Self::LaneMismatch { .. } => "lane_mismatch",
+            Self::AuthorizationExpired { .. } => "authorization_expired",
             Self::Mcp { kind, .. }
             | Self::Script { kind, .. }
             | Self::Wasm { kind, .. }

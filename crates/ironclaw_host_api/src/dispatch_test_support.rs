@@ -155,6 +155,7 @@ mod tests {
             mounts: None,
             resource_reservation: None,
             pinned_lane: None,
+            deadline: None,
             input: json!({}),
         }
     }

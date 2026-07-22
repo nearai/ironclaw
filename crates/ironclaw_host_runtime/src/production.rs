@@ -1828,6 +1828,11 @@ impl From<DispatchFailureKind> for RuntimeFailureKind {
             // authorization failure — the run must not execute on unauthorized
             // authority (§5.3.2, finding C).
             DispatchFailureKind::LaneMismatch => RuntimeFailureKind::Authorization,
+            // The witness deadline passed during the dispatcher's pre-execution
+            // event-emission awaits (a claimed approval lease expired). Fail closed
+            // as an authorization failure — the side effect must not run after its
+            // authorization deadline (§5.3.2, IronLoop finding #6436).
+            DispatchFailureKind::AuthorizationExpired => RuntimeFailureKind::Authorization,
             DispatchFailureKind::RuntimeMismatch => RuntimeFailureKind::Backend,
             DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExtensionRuntimeMismatch) => {
                 RuntimeFailureKind::MissingRuntime

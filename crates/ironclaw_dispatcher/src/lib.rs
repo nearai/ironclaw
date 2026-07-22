@@ -20,7 +20,7 @@ pub use ironclaw_host_api::{
 };
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, ResourceReceipt, ResourceReservation, ResourceScope, ResourceUsage,
-    RuntimeKind,
+    RuntimeKind, RuntimeLane,
 };
 use ironclaw_resources::ResourceGovernor;
 use serde_json::Value;
@@ -200,28 +200,45 @@ where
         let provider = resolved.provider.clone();
         let runtime = resolved.runtime;
 
+        // Resolve the lane the capability's runtime executes on. A runtime that
+        // maps to no untrusted lane (host-internal `System`) is NOT dispatchable
+        // through a runtime adapter — fail closed with `MissingRuntimeBackend`,
+        // never default to a lane or reach the adapter (§4.2). This is
+        // UNCONDITIONAL: it does not depend on whether the caller pinned a lane, so
+        // a `System` dispatch carrying `pinned_lane: None` still fails closed here.
+        let Some(resolved_lane) = RuntimeLane::from_runtime_kind(runtime) else {
+            let error = DispatchError::MissingRuntimeBackend { runtime };
+            self.emit_dispatch_failure(
+                scope,
+                capability_id,
+                Some(provider.clone()),
+                Some(runtime),
+                &error,
+            )
+            .await?;
+            return Err(error);
+        };
+
         // Bind dispatch to the lane the authorization pinned into the witness
-        // (§5.3.2, mutable-registry TOCTOU). The descriptor + lane resolved above
-        // came from a FRESH `self.registry.snapshot()`, so an extension update
-        // between authorize and dispatch can move the descriptor onto a different
-        // runtime lane. If the authorization pinned a lane, fail closed on a
-        // mismatch — never execute a replacement runtime on mounts, a reservation,
-        // and trust prepared for the old lane. A `None` pin (witness-free/legacy
-        // dispatch, or a host-internal `System` descriptor with no lane) skips the
-        // check, so the common path is byte-identical. Same-lane descriptor-content
-        // swaps (which keep this lane equal) are the residual gap tracked in #6434.
+        // (§5.3.2, mutable-registry TOCTOU). `resolve()` above returns a fresh
+        // snapshot-shaped binding, so if the freshly-resolved lane no longer
+        // matches the lane the authorization pinned, fail closed — never execute a
+        // replacement runtime on mounts, a reservation, and trust prepared for the
+        // old lane. A `None` pin (witness-free/legacy dispatch) skips the
+        // comparison, so the common path is byte-identical. Same-lane content swaps
+        // (which keep this lane equal) are the residual gap tracked in #6434.
         if let Some(pinned) = request.pinned_lane
-            && pinned != lane
+            && pinned != resolved_lane
         {
             let error = DispatchError::LaneMismatch {
                 capability: capability_id.clone(),
                 authorized: pinned,
-                resolved: lane,
+                resolved: resolved_lane,
             };
             self.emit_dispatch_failure(
                 scope,
                 capability_id,
-                Some(descriptor.provider.clone()),
+                Some(provider.clone()),
                 Some(runtime),
                 &error,
             )
@@ -236,6 +253,31 @@ where
             runtime,
         ))
         .await?;
+
+        // Revalidate the authorization deadline IMMEDIATELY before execution
+        // (§5.3.2, IronLoop finding #6436). The caller checked the witness
+        // deadline once when it consumed the `Authorized` (`into_parts`), but the
+        // `DispatchRequested`/`RuntimeSelected` emissions above are `await`s — a
+        // claimed approval lease can expire during either, which would let the
+        // side effect run AFTER its authorization deadline. Fail closed here so
+        // the adapter is never invoked past the deadline. `None` (a witness-free/
+        // legacy dispatch) skips the check, so the common path is byte-identical.
+        if let Some(deadline) = request.deadline
+            && chrono::Utc::now() >= deadline
+        {
+            let error = DispatchError::AuthorizationExpired {
+                capability: capability_id.clone(),
+            };
+            self.emit_dispatch_failure(
+                scope,
+                capability_id,
+                Some(provider.clone()),
+                Some(runtime),
+                &error,
+            )
+            .await?;
+            return Err(error);
+        }
 
         let execution = match resolved
             .adapter

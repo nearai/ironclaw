@@ -237,6 +237,11 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
                 // extension update moved the capability onto a different lane
                 // between spawn authorization and this detached run.
                 pinned_lane: RuntimeLane::from_runtime_kind(request.runtime),
+                // Witness-free: this executor forwards an already-authorized,
+                // long-running process request and holds no `Authorized` witness,
+                // so it carries no deadline and the dispatcher skips the
+                // execution-boundary re-check (§5.3.2, finding #6436).
+                deadline: None,
                 input: request.input,
             })
             .await
