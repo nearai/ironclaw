@@ -62,32 +62,23 @@ const PRODUCT_SURFACE_TRAIT: &str = "ProductSurface";
 /// already listed below; never add another product operation here.
 const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     // --- turn lifecycle (the irreducible core, §5.2.3) ---
-    "create_thread",
-    "submit_turn",
     "delete_thread",
     "get_timeline",
     "global_auto_approve_enabled",
-    "read_attachment",
     "stream_events",
     "supports_stream_events_subscription",
     "subscribe_events",
-    "cancel_run",
-    "resolve_gate",
-    "retry_run",
     "get_run_state",
     "invoke",
     "query",
     // --- filesystem / project browsing (→ view descriptors, §5.2.2) ---
     "list_project_dir",
     "stat_project_path",
-    "read_project_file",
     "list_fs_mounts",
     "browse_fs_dir",
     "stat_fs_path",
-    "read_fs_file",
     // --- projects + membership (→ capability + view descriptors) ---
     "list_projects",
-    "create_project",
     "get_project",
     "update_project",
     "delete_project",
@@ -100,23 +91,11 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "resume_automation",
     "rename_automation",
     "delete_automation",
-    // --- trace / credits ---
-    "trace_account_login_link",
-    "authorize_trace_hold",
-    // --- LLM admin config ---
-    "test_llm_connection",
-    "list_llm_models",
-    "start_nearai_login",
-    "complete_nearai_wallet_login",
-    "start_codex_login",
     // --- operator setup / config / diagnostics ---
     "run_operator_setup",
-    "set_operator_config_key",
-    "run_operator_service_lifecycle",
     // --- admin users + per-user secrets ---
     "list_admin_users",
     "get_admin_user",
-    "create_admin_user",
     "update_admin_user",
     "set_admin_user_status",
     "set_admin_user_role",

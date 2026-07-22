@@ -47,22 +47,6 @@ struct RecordingServices {
 
 #[async_trait]
 impl RebornServicesApi for RecordingServices {
-    async fn create_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn submit_turn(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
     async fn delete_thread(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -84,30 +68,6 @@ impl RebornServicesApi for RecordingServices {
         _caller: WebUiAuthenticatedCaller,
         _request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn cancel_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn retry_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
         unreachable!("not exercised by this test")
     }
 
@@ -139,7 +99,9 @@ impl RebornServicesApi for RecordingServices {
             .push(OperatorConfigCall::Get { key });
         Err(service_unavailable_error())
     }
+}
 
+impl RecordingServices {
     async fn set_operator_config_key(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -154,6 +116,36 @@ impl RebornServicesApi for RecordingServices {
                 value: request.value,
             });
         Err(service_unavailable_error())
+    }
+}
+
+#[async_trait]
+impl ProductSurface for RecordingServices {
+    async fn execute_command(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCommandRequest,
+    ) -> Result<RebornCommandResponse, RebornServicesError> {
+        let command_id = RebornCommandId::parse(request.command_id.as_str())
+            .ok_or_else(service_unavailable_error)?;
+        match command_id {
+            RebornCommandId::OperatorConfigSetKey => {
+                let request: RebornOperatorConfigSetProductRequest =
+                    serde_json::from_value(request.input)
+                        .map_err(RebornServicesError::internal_from)?;
+                RebornCommandResponse::json(
+                    self.set_operator_config_key(
+                        caller,
+                        request.key,
+                        RebornOperatorConfigSetRequest {
+                            value: request.value,
+                        },
+                    )
+                    .await?,
+                )
+            }
+            _ => Err(service_unavailable_error()),
+        }
     }
 }
 

@@ -22,7 +22,9 @@ use ironclaw_host_api::{
     ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions, MountView,
     TenantId, UserId, VirtualPath,
 };
-use ironclaw_product_workflow::{RebornOperatorToolCatalog, RebornOperatorToolInfo};
+use ironclaw_product_workflow::{
+    OPERATOR_SERVICE_LIFECYCLE_COMMAND, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+};
 use std::time::Duration;
 
 use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
@@ -376,9 +378,9 @@ async fn build_webui_services_wires_lifecycle_owner_identity() {
         .expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui services build");
 
-    let error = bundle
-        .api
-        .run_operator_service_lifecycle(
+    let error = OPERATOR_SERVICE_LIFECYCLE_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller("bob"),
             ironclaw_product_workflow::RebornOperatorServiceLifecycleRequest {
                 action: ironclaw_product_workflow::RebornOperatorServiceLifecycleAction::Status,

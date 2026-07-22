@@ -32,7 +32,8 @@ use ironclaw_host_runtime::{
     TenantSandboxProcessPort,
 };
 use ironclaw_product_workflow::{
-    RebornCreateProjectRequest, RebornListProjectsRequest, WebUiAuthenticatedCaller,
+    PROJECT_CREATE_COMMAND, RebornCreateProjectRequest, RebornListProjectsRequest,
+    WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornCompositionProfile, RebornRuntimeIdentity, RebornRuntimeInput,
@@ -138,9 +139,12 @@ async fn production_runtime_wires_project_service_and_scopes_by_tenant() {
     // the `RebornServicesApi` default and this returned
     // `service_unavailable`. A successful create proves `with_project_service`
     // was wired from the production store graph.
-    let created = bundle
-        .api
-        .create_project(owner.clone(), create_request("Prod Project"))
+    let created = PROJECT_CREATE_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
+            owner.clone(),
+            create_request("Prod Project"),
+        )
         .await
         .expect("production project facade must be reachable (not service_unavailable)");
     assert_eq!(created.project.name, "Prod Project");

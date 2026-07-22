@@ -19,7 +19,8 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, NetworkMethod, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
+    ProductSurface, RebornCancelRunResponse, RebornCommandId, RebornCommandRequest,
+    RebornCommandResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
     RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
     RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
@@ -737,8 +738,7 @@ struct StubServices {
     resolve_gate_refs: Mutex<Vec<Option<String>>>,
 }
 
-#[async_trait]
-impl RebornServicesApi for StubServices {
+impl StubServices {
     async fn create_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -783,6 +783,56 @@ impl RebornServicesApi for StubServices {
         })
     }
 
+    async fn cancel_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiCancelRunRequest,
+    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        Ok(RebornCancelRunResponse {
+            run_id: TurnRunId::new(),
+            status: TurnStatus::Cancelled,
+            event_cursor: EventCursor(2),
+            already_terminal: false,
+        })
+    }
+
+    async fn retry_run(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: WebUiRetryRunRequest,
+    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
+        Err(RebornServicesError {
+            code: RebornServicesErrorCode::Internal,
+            kind: RebornServicesErrorKind::Internal,
+            status_code: 500,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        })
+    }
+
+    async fn resolve_gate(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        request: WebUiResolveGateRequest,
+    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+        self.resolve_gate_refs
+            .lock()
+            .expect("lock")
+            .push(request.gate_ref.clone());
+        Err(RebornServicesError {
+            code: RebornServicesErrorCode::Internal,
+            kind: RebornServicesErrorKind::Internal,
+            status_code: 500,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        })
+    }
+}
+
+#[async_trait]
+impl RebornServicesApi for StubServices {
     async fn delete_thread(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -845,52 +895,59 @@ impl RebornServicesApi for StubServices {
             validation_code: None,
         })
     }
+}
 
-    async fn cancel_run(
+#[async_trait]
+impl ProductSurface for StubServices {
+    async fn execute_command(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        Ok(RebornCancelRunResponse {
-            run_id: TurnRunId::new(),
-            status: TurnStatus::Cancelled,
-            event_cursor: EventCursor(2),
-            already_terminal: false,
-        })
-    }
-
-    async fn retry_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        })
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        self.resolve_gate_refs
-            .lock()
-            .expect("lock")
-            .push(request.gate_ref.clone());
-        Err(RebornServicesError {
-            code: RebornServicesErrorCode::Internal,
-            kind: RebornServicesErrorKind::Internal,
-            status_code: 500,
-            retryable: false,
-            field: None,
-            validation_code: None,
-        })
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCommandRequest,
+    ) -> Result<RebornCommandResponse, RebornServicesError> {
+        let command_id =
+            RebornCommandId::parse(request.command_id.as_str()).ok_or(RebornServicesError {
+                code: RebornServicesErrorCode::Internal,
+                kind: RebornServicesErrorKind::Internal,
+                status_code: 500,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            })?;
+        match command_id {
+            RebornCommandId::CreateThread => {
+                let request = serde_json::from_value(request.input)
+                    .map_err(RebornServicesError::internal_from)?;
+                RebornCommandResponse::json(self.create_thread(caller, request).await?)
+            }
+            RebornCommandId::SubmitTurn => {
+                let request = serde_json::from_value(request.input)
+                    .map_err(RebornServicesError::internal_from)?;
+                RebornCommandResponse::json(self.submit_turn(caller, request).await?)
+            }
+            RebornCommandId::CancelRun => {
+                let request = serde_json::from_value(request.input)
+                    .map_err(RebornServicesError::internal_from)?;
+                RebornCommandResponse::json(self.cancel_run(caller, request).await?)
+            }
+            RebornCommandId::RetryRun => {
+                let request = serde_json::from_value(request.input)
+                    .map_err(RebornServicesError::internal_from)?;
+                RebornCommandResponse::json(self.retry_run(caller, request).await?)
+            }
+            RebornCommandId::ResolveGate => {
+                let request = serde_json::from_value(request.input)
+                    .map_err(RebornServicesError::internal_from)?;
+                RebornCommandResponse::json(self.resolve_gate(caller, request).await?)
+            }
+            _ => Err(RebornServicesError {
+                code: RebornServicesErrorCode::Internal,
+                kind: RebornServicesErrorKind::Internal,
+                status_code: 500,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            }),
+        }
     }
 }
 

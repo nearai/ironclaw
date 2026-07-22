@@ -1322,28 +1322,6 @@ fn operator_config_capability_forbidden() -> RebornServicesError {
     RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
 }
 
-fn api_capability_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
-    match resolution {
-        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
-        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput) => Err(operator_config_invalid_value("value")),
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
-                Err(operator_config_capability_forbidden())
-            }
-            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(RebornServicesError::service_unavailable(true))
-            }
-            _ => Err(RebornServicesError::internal_from(
-                "API capability returned a non-success result",
-            )),
-        },
-        Resolution::Denied(_) => Err(operator_config_capability_forbidden()),
-        Resolution::Blocked(_) | Resolution::Suspended(_) => {
-            Err(RebornServicesError::service_unavailable(true))
-        }
-    }
-}
-
 fn product_view_forbidden() -> RebornServicesError {
     RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
 }
@@ -2077,18 +2055,6 @@ fn operator_diagnostics_surface_status(
 
 #[async_trait]
 pub trait RebornServicesApi: Send + Sync {
-    async fn create_thread(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError>;
-
-    async fn submit_turn(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError>;
-
     async fn delete_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2145,23 +2111,6 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// Read the raw bytes of one landed attachment so the browser can render an
-    /// image thumbnail (or download a file) for a persisted message. The default
-    /// reports the bytes are unavailable; compositions that wire a reader over
-    /// the project workspace filesystem override it. Implementations must derive
-    /// the scope from `caller`, never from the request path values.
-    async fn read_attachment(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornAttachmentRequest,
-    ) -> Result<RebornAttachmentBytes, RebornServicesError> {
-        Err(RebornServicesError::from_status(
-            RebornServicesErrorCode::NotFound,
-            404,
-            false,
-        ))
-    }
-
     async fn stream_events(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -2184,24 +2133,6 @@ pub trait RebornServicesApi: Send + Sync {
             true,
         ))
     }
-
-    async fn cancel_run(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError>;
-
-    async fn resolve_gate(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError>;
-
-    async fn retry_run(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError>;
 
     async fn get_run_state(
         &self,
@@ -2230,18 +2161,6 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: RebornProjectFsStatRequest,
     ) -> Result<RebornProjectFsStatResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Read (download) a file under the thread's project workspace. The returned
-    /// [`ProjectFsFile`] carries the bytes the HTTP layer streams as the body;
-    /// they are never embedded in a JSON envelope.
-    async fn read_project_file(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornProjectFsReadRequest,
-    ) -> Result<ProjectFsFile, RebornServicesError> {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
@@ -2290,27 +2209,6 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: RebornFsStatRequest,
     ) -> Result<RebornFsStatResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Create a project owned by the caller.
-    async fn create_project(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornCreateProjectRequest,
-    ) -> Result<RebornProjectResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Read (preview/download) a file on a browsable mount. The returned
-    /// [`ProjectFsFile`] carries the bytes the HTTP layer streams as the body.
-    async fn read_fs_file(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornFsReadRequest,
-    ) -> Result<ProjectFsFile, RebornServicesError> {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
@@ -2422,131 +2320,11 @@ pub trait RebornServicesApi: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// Mint a one-time Trace Commons browser login link for the
-    /// authenticated caller, so hosted users (no host-file access) can open
-    /// their contributor account from the WebUI.
-    ///
-    /// The scope is always derived from the authenticated caller's tenant +
-    /// user id — never from request input. An unenrolled caller gets the
-    /// zero-state (`minted: false, enrolled: false`), never an error.
-    ///
-    /// SECURITY: the returned URL is a one-time account-access credential. It
-    /// travels only over this authenticated response to the caller's own
-    /// browser; it must never be logged or exposed on a model-visible
-    /// surface. The default body is the production implementation (pinned
-    /// direct client, same lane as `trace_account_traces`).
-    async fn trace_account_login_link(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
-        let actor = caller.actor();
-        trace_credits::account_login_link_for_user(&caller.tenant_id, &actor.user_id)
-            .await
-            .map_err(RebornServicesError::internal_from)
-    }
-
-    /// Authorize the caller's held manual-review trace for submission
-    /// (promote-as-is). The scope is always the authenticated caller's user
-    /// id; the submission id from the request path is never authority to
-    /// cross scopes. A missing/already-resolved hold returns
-    /// `authorized: false`, not an error.
-    async fn authorize_trace_hold(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        submission_id: String,
-    ) -> Result<RebornTraceHoldAuthorizeResponse, RebornServicesError> {
-        let actor = caller.actor();
-        let submission = uuid::Uuid::parse_str(submission_id.trim()).map_err(|_| {
-            RebornServicesError::validation(WebUiInboundValidationError::new(
-                "submission_id",
-                WebUiInboundValidationCode::InvalidId,
-            ))
-        })?;
-        let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
-            caller.tenant_id.as_str(),
-            actor.user_id.as_str(),
-        );
-        let authorized =
-            trace_credits::authorize_trace_hold_for_user(&scope, submission).map_err(|error| {
-                tracing::debug!(%error, "failed to authorize Trace Commons held trace");
-                RebornServicesError::internal_invariant()
-            })?;
-        Ok(RebornTraceHoldAuthorizeResponse { authorized })
-    }
-
-    /// Probe an LLM provider's credentials/endpoint without persisting.
-    async fn test_llm_connection(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: LlmProbeRequest,
-    ) -> Result<LlmProbeResult, RebornServicesError> {
-        let _ = (caller, request);
-        Err(llm_config::llm_config_unavailable())
-    }
-
-    /// List the models an LLM provider exposes, without persisting.
-    async fn list_llm_models(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: LlmProbeRequest,
-    ) -> Result<LlmModelsResult, RebornServicesError> {
-        let _ = (caller, request);
-        Err(llm_config::llm_config_unavailable())
-    }
-
-    /// Begin a NEAR AI browser login; returns the authorization URL to open.
-    async fn start_nearai_login(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: NearAiLoginRequest,
-    ) -> Result<NearAiLoginStart, RebornServicesError> {
-        let _ = (caller, request);
-        Err(llm_config::llm_config_unavailable())
-    }
-
-    /// Complete a NEAR AI wallet (NEP-413) login from a browser-signed message.
-    async fn complete_nearai_wallet_login(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: NearAiWalletLoginRequest,
-    ) -> Result<NearAiWalletLoginResult, RebornServicesError> {
-        let _ = (caller, request);
-        Err(llm_config::llm_config_unavailable())
-    }
-
-    /// Begin an OpenAI Codex device-code login; returns the user code + URL.
-    async fn start_codex_login(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<CodexLoginStart, RebornServicesError> {
-        let _ = caller;
-        Err(llm_config::llm_config_unavailable())
-    }
-
     async fn run_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornOperatorSetupRequest,
     ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn set_operator_config_key(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        key: String,
-        request: RebornOperatorConfigSetRequest,
-    ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        let _ = (caller, key, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn run_operator_service_lifecycle(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornOperatorServiceLifecycleRequest,
-    ) -> Result<RebornOperatorCommandPlaneResponse, RebornServicesError> {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
@@ -2573,15 +2351,6 @@ pub trait RebornServicesApi: Send + Sync {
         user_id: UserId,
     ) -> Result<RebornAdminUserResponse, RebornServicesError> {
         let _ = (caller, user_id);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn create_admin_user(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornAdminCreateUserRequest,
-    ) -> Result<RebornAdminUserCreatedResponse, RebornServicesError> {
-        let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
 
@@ -2661,9 +2430,17 @@ pub trait RebornServicesApi: Send + Sync {
 /// ratchet shrinks per-feature methods into capability descriptors and view
 /// descriptors. Product adapters should depend on this trait name so the
 /// eventual method-set collapse is localized to the facade owner.
-pub trait ProductSurface: RebornServicesApi {}
-
-impl<T> ProductSurface for T where T: RebornServicesApi + ?Sized {}
+#[async_trait]
+pub trait ProductSurface: RebornServicesApi {
+    async fn execute_command(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCommandRequest,
+    ) -> Result<RebornCommandResponse, RebornServicesError> {
+        let _ = (caller, request);
+        Err(RebornServicesError::service_unavailable(false))
+    }
+}
 
 impl<Params, Output> ProductSurfaceCommand<Params, Output>
 where
@@ -2679,7 +2456,8 @@ where
     where
         S: ProductSurface + ?Sized,
     {
-        execute_product_surface_command(surface, caller, self.request(input)?)
+        surface
+            .execute_command(caller, self.request(input)?)
             .await?
             .into_json()
     }
@@ -2698,7 +2476,8 @@ where
     where
         S: ProductSurface + ?Sized,
     {
-        execute_product_surface_command(surface, caller, self.request(input)?)
+        surface
+            .execute_command(caller, self.request(input)?)
             .await?
             .into_project_file()
     }
@@ -2717,130 +2496,10 @@ where
     where
         S: ProductSurface + ?Sized,
     {
-        execute_product_surface_command(surface, caller, self.request(input)?)
+        surface
+            .execute_command(caller, self.request(input)?)
             .await?
             .into_attachment()
-    }
-}
-
-async fn execute_product_surface_command<S>(
-    surface: &S,
-    caller: WebUiAuthenticatedCaller,
-    request: RebornCommandRequest,
-) -> Result<RebornCommandResponse, RebornServicesError>
-where
-    S: ProductSurface + ?Sized,
-{
-    let command_id = RebornCommandId::parse(request.command_id.as_str())
-        .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
-    match command_id {
-        RebornCommandId::CreateThread => RebornCommandResponse::json(
-            surface
-                .create_thread(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::SubmitTurn => RebornCommandResponse::json(
-            surface
-                .submit_turn(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::CancelRun => RebornCommandResponse::json(
-            surface
-                .cancel_run(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::ResolveGate => RebornCommandResponse::json(
-            surface
-                .resolve_gate(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::RetryRun => RebornCommandResponse::json(
-            surface
-                .retry_run(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::ProjectCreate => RebornCommandResponse::json(
-            surface
-                .create_project(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::ProjectFsRead => Ok(RebornCommandResponse::project_file(
-            surface
-                .read_project_file(caller, product_command_input(request.input)?)
-                .await?,
-        )),
-        RebornCommandId::FsRead => Ok(RebornCommandResponse::project_file(
-            surface
-                .read_fs_file(caller, product_command_input(request.input)?)
-                .await?,
-        )),
-        RebornCommandId::AttachmentRead => Ok(RebornCommandResponse::attachment(
-            surface
-                .read_attachment(caller, product_command_input(request.input)?)
-                .await?,
-        )),
-        RebornCommandId::TraceAccountLoginLink => {
-            views::parse_empty_view_params(request.input)?;
-            RebornCommandResponse::json(surface.trace_account_login_link(caller).await?)
-        }
-        RebornCommandId::TraceHoldAuthorize => {
-            let request: RebornTraceHoldAuthorizeProductRequest =
-                product_command_input(request.input)?;
-            RebornCommandResponse::json(
-                surface
-                    .authorize_trace_hold(caller, request.submission_id)
-                    .await?,
-            )
-        }
-        RebornCommandId::OperatorConfigSetKey => {
-            let request: RebornOperatorConfigSetProductRequest =
-                product_command_input(request.input)?;
-            RebornCommandResponse::json(
-                surface
-                    .set_operator_config_key(
-                        caller,
-                        request.key,
-                        RebornOperatorConfigSetRequest {
-                            value: request.value,
-                        },
-                    )
-                    .await?,
-            )
-        }
-        RebornCommandId::OperatorServiceLifecycle => RebornCommandResponse::json(
-            surface
-                .run_operator_service_lifecycle(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::LlmTestConnection => RebornCommandResponse::json(
-            surface
-                .test_llm_connection(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::LlmListModels => RebornCommandResponse::json(
-            surface
-                .list_llm_models(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::LlmNearAiLogin => RebornCommandResponse::json(
-            surface
-                .start_nearai_login(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::LlmNearAiWalletLogin => RebornCommandResponse::json(
-            surface
-                .complete_nearai_wallet_login(caller, product_command_input(request.input)?)
-                .await?,
-        ),
-        RebornCommandId::LlmCodexLogin => {
-            views::parse_empty_view_params(request.input)?;
-            RebornCommandResponse::json(surface.start_codex_login(caller).await?)
-        }
-        RebornCommandId::AdminUserCreate => RebornCommandResponse::json(
-            surface
-                .create_admin_user(caller, product_command_input(request.input)?)
-                .await?,
-        ),
     }
 }
 
@@ -3313,38 +2972,30 @@ where
         match (request.provider_id, request.adapter) {
             (Some(provider_id), Some(adapter)) => {
                 let model = request.model;
-                let resolution = self
-                    .invoke(
-                        caller.clone(),
-                        LLM_PROVIDER_UPSERT_CAPABILITY.capability_id()?,
-                        ProductCapabilityInput::llm_provider_upsert(UpsertLlmProviderRequest {
-                            id: provider_id,
-                            name: None,
-                            adapter,
-                            base_url: request.base_url,
-                            default_model: model.clone(),
-                            api_key: request.api_key,
-                            set_active: true,
-                            model,
-                        }),
-                        ActivityId::new(),
-                    )
-                    .await?;
-                api_capability_mutation_succeeded(resolution)?;
+                self.invoke_llm_provider_upsert(
+                    caller.clone(),
+                    UpsertLlmProviderRequest {
+                        id: provider_id,
+                        name: None,
+                        adapter,
+                        base_url: request.base_url,
+                        default_model: model.clone(),
+                        api_key: request.api_key,
+                        set_active: true,
+                        model,
+                    },
+                )
+                .await?;
             }
             (Some(provider_id), None) => {
-                let resolution = self
-                    .invoke(
-                        caller,
-                        LLM_ACTIVE_SET_CAPABILITY.capability_id()?,
-                        ProductCapabilityInput::json(serde_json::json!({
-                            "provider_id": provider_id,
-                            "model": request.model,
-                        })),
-                        ActivityId::new(),
-                    )
-                    .await?;
-                api_capability_mutation_succeeded(resolution)?;
+                self.invoke_llm_active_set(
+                    caller,
+                    serde_json::json!({
+                        "provider_id": provider_id,
+                        "model": request.model,
+                    }),
+                )
+                .await?;
             }
             (None, _) => {}
         }
@@ -3637,12 +3288,150 @@ fn last_admin_error() -> RebornServicesError {
     }
 }
 
-#[async_trait]
-impl<I, V> RebornServicesApi for RebornServices<I, V>
+impl<I, V> RebornServices<I, V>
 where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
 {
+    async fn execute_product_surface_command(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCommandRequest,
+    ) -> Result<RebornCommandResponse, RebornServicesError> {
+        let command_id = RebornCommandId::parse(request.command_id.as_str())
+            .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+        match command_id {
+            RebornCommandId::CreateThread => RebornCommandResponse::json(
+                self.create_thread(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::SubmitTurn => RebornCommandResponse::json(
+                self.submit_turn(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::CancelRun => RebornCommandResponse::json(
+                self.cancel_run(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::ResolveGate => RebornCommandResponse::json(
+                self.resolve_gate(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::RetryRun => RebornCommandResponse::json(
+                self.retry_run(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::ProjectCreate => RebornCommandResponse::json(
+                self.create_project(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::ProjectFsRead => Ok(RebornCommandResponse::project_file(
+                self.read_project_file(caller, product_command_input(request.input)?)
+                    .await?,
+            )),
+            RebornCommandId::FsRead => Ok(RebornCommandResponse::project_file(
+                self.read_fs_file(caller, product_command_input(request.input)?)
+                    .await?,
+            )),
+            RebornCommandId::AttachmentRead => Ok(RebornCommandResponse::attachment(
+                self.read_attachment(caller, product_command_input(request.input)?)
+                    .await?,
+            )),
+            RebornCommandId::TraceAccountLoginLink => {
+                views::parse_empty_view_params(request.input)?;
+                RebornCommandResponse::json(self.trace_account_login_link(caller).await?)
+            }
+            RebornCommandId::TraceHoldAuthorize => {
+                let request: RebornTraceHoldAuthorizeProductRequest =
+                    product_command_input(request.input)?;
+                RebornCommandResponse::json(
+                    self.authorize_trace_hold(caller, request.submission_id)
+                        .await?,
+                )
+            }
+            RebornCommandId::OperatorConfigSetKey => {
+                let request: RebornOperatorConfigSetProductRequest =
+                    product_command_input(request.input)?;
+                RebornCommandResponse::json(
+                    self.set_operator_config_key(
+                        caller,
+                        request.key,
+                        RebornOperatorConfigSetRequest {
+                            value: request.value,
+                        },
+                    )
+                    .await?,
+                )
+            }
+            RebornCommandId::OperatorServiceLifecycle => RebornCommandResponse::json(
+                self.run_operator_service_lifecycle(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::LlmTestConnection => RebornCommandResponse::json(
+                self.test_llm_connection(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::LlmListModels => RebornCommandResponse::json(
+                self.list_llm_models(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::LlmNearAiLogin => RebornCommandResponse::json(
+                self.start_nearai_login(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::LlmNearAiWalletLogin => RebornCommandResponse::json(
+                self.complete_nearai_wallet_login(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+            RebornCommandId::LlmCodexLogin => {
+                views::parse_empty_view_params(request.input)?;
+                RebornCommandResponse::json(self.start_codex_login(caller).await?)
+            }
+            RebornCommandId::AdminUserCreate => RebornCommandResponse::json(
+                self.create_admin_user(caller, product_command_input(request.input)?)
+                    .await?,
+            ),
+        }
+    }
+
+    /// Mint a one-time Trace Commons browser login link for the authenticated
+    /// caller. The returned URL is a one-time account-access credential and must
+    /// never be logged or exposed on a model-visible surface.
+    async fn trace_account_login_link(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornAccountLoginLinkResponse, RebornServicesError> {
+        let actor = caller.actor();
+        trace_credits::account_login_link_for_user(&caller.tenant_id, &actor.user_id)
+            .await
+            .map_err(RebornServicesError::internal_from)
+    }
+
+    /// Authorize the caller's held manual-review trace for submission.
+    async fn authorize_trace_hold(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        submission_id: String,
+    ) -> Result<RebornTraceHoldAuthorizeResponse, RebornServicesError> {
+        let actor = caller.actor();
+        let submission = uuid::Uuid::parse_str(submission_id.trim()).map_err(|_| {
+            RebornServicesError::validation(WebUiInboundValidationError::new(
+                "submission_id",
+                WebUiInboundValidationCode::InvalidId,
+            ))
+        })?;
+        let scope = ironclaw_reborn_traces::contribution::trace_scope_key(
+            caller.tenant_id.as_str(),
+            actor.user_id.as_str(),
+        );
+        let authorized =
+            trace_credits::authorize_trace_hold_for_user(&scope, submission).map_err(|error| {
+                tracing::debug!(%error, "failed to authorize Trace Commons held trace");
+                RebornServicesError::internal_invariant()
+            })?;
+        Ok(RebornTraceHoldAuthorizeResponse { authorized })
+    }
+
     async fn invoke(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3883,7 +3672,7 @@ where
         Ok(RebornAdminUserResponse { user })
     }
 
-    async fn create_admin_user(
+    pub async fn create_admin_user(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornAdminCreateUserRequest,
@@ -4101,7 +3890,7 @@ where
         self.build_operator_setup_view(caller).await
     }
 
-    async fn set_operator_config_key(
+    pub async fn set_operator_config_key(
         &self,
         caller: WebUiAuthenticatedCaller,
         key: String,
@@ -4156,7 +3945,7 @@ where
     /// Otherwise the 400/409 distinction would be an existence oracle:
     /// callers sharing the same (tenant, agent, project) scope could probe
     /// for thread ids they did not create.
-    async fn create_thread(
+    pub async fn create_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: WebUiCreateThreadRequest,
@@ -4206,7 +3995,7 @@ where
         Ok(RebornCreateThreadResponse { thread })
     }
 
-    async fn submit_turn(
+    pub async fn submit_turn(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: WebUiSendMessageRequest,
@@ -4766,7 +4555,7 @@ where
         Ok(RebornProjectFsStatResponse { stat })
     }
 
-    async fn read_project_file(
+    pub async fn read_project_file(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornProjectFsReadRequest,
@@ -4844,7 +4633,7 @@ where
         Ok(RebornFsStatResponse { stat })
     }
 
-    async fn read_fs_file(
+    pub async fn read_fs_file(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornFsReadRequest,
@@ -4872,7 +4661,7 @@ where
             .map_err(map_project_service_error)
     }
 
-    async fn create_project(
+    pub async fn create_project(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornCreateProjectRequest,
@@ -4968,7 +4757,7 @@ where
             .map_err(map_project_service_error)
     }
 
-    async fn read_attachment(
+    pub async fn read_attachment(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornAttachmentRequest,
@@ -5175,7 +4964,7 @@ where
         Ok(RebornStreamEventsSubscription::new(receiver))
     }
 
-    async fn cancel_run(
+    pub async fn cancel_run(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: WebUiCancelRunRequest,
@@ -5206,7 +4995,7 @@ where
         Ok(response.into())
     }
 
-    async fn resolve_gate(
+    pub async fn resolve_gate(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
@@ -5278,7 +5067,7 @@ where
         }
     }
 
-    async fn retry_run(
+    pub async fn retry_run(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: WebUiRetryRunRequest,
@@ -5434,7 +5223,7 @@ where
             .await
     }
 
-    async fn run_operator_service_lifecycle(
+    pub async fn run_operator_service_lifecycle(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornOperatorServiceLifecycleRequest,
@@ -5475,7 +5264,7 @@ where
         })
     }
 
-    async fn test_llm_connection(
+    pub async fn test_llm_connection(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: LlmProbeRequest,
@@ -5491,7 +5280,7 @@ where
             .map_err(llm_config::map_llm_config_error)
     }
 
-    async fn list_llm_models(
+    pub async fn list_llm_models(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: LlmProbeRequest,
@@ -5507,7 +5296,7 @@ where
             .map_err(llm_config::map_llm_config_error)
     }
 
-    async fn start_nearai_login(
+    pub async fn start_nearai_login(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: NearAiLoginRequest,
@@ -5522,7 +5311,7 @@ where
             .map_err(llm_config::map_llm_config_error)
     }
 
-    async fn start_codex_login(
+    pub async fn start_codex_login(
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<CodexLoginStart, RebornServicesError> {
@@ -5536,7 +5325,7 @@ where
             .map_err(llm_config::map_llm_config_error)
     }
 
-    async fn complete_nearai_wallet_login(
+    pub async fn complete_nearai_wallet_login(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: NearAiWalletLoginRequest,
@@ -5549,6 +5338,319 @@ where
             .complete_nearai_wallet_login(caller, request)
             .await
             .map_err(llm_config::map_llm_config_error)
+    }
+}
+
+#[async_trait]
+impl<I, V> RebornServicesApi for RebornServices<I, V>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
+    async fn delete_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteThreadRequest,
+    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
+        RebornServices::delete_thread(self, caller, request).await
+    }
+
+    async fn get_timeline(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornTimelineRequest,
+    ) -> Result<RebornTimelineResponse, RebornServicesError> {
+        RebornServices::get_timeline(self, caller, request).await
+    }
+
+    async fn global_auto_approve_enabled(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<bool, RebornServicesError> {
+        RebornServices::global_auto_approve_enabled(self, caller).await
+    }
+
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: ProductCapabilityInput,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        RebornServices::invoke(self, caller, capability, input, activity_id).await
+    }
+
+    async fn query(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornViewQuery,
+    ) -> Result<RebornViewPage, RebornServicesError> {
+        RebornServices::query(self, caller, query).await
+    }
+
+    async fn stream_events(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        RebornServices::stream_events(self, caller, request).await
+    }
+
+    fn supports_stream_events_subscription(&self) -> bool {
+        RebornServices::supports_stream_events_subscription(self)
+    }
+
+    async fn subscribe_events(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsSubscription, RebornServicesError> {
+        RebornServices::subscribe_events(self, caller, request).await
+    }
+
+    async fn get_run_state(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetRunStateRequest,
+    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+        RebornServices::get_run_state(self, caller, request).await
+    }
+
+    async fn list_project_dir(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsListRequest,
+    ) -> Result<RebornProjectFsListResponse, RebornServicesError> {
+        RebornServices::list_project_dir(self, caller, request).await
+    }
+
+    async fn stat_project_path(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornProjectFsStatRequest,
+    ) -> Result<RebornProjectFsStatResponse, RebornServicesError> {
+        RebornServices::stat_project_path(self, caller, request).await
+    }
+
+    async fn list_fs_mounts(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
+        RebornServices::list_fs_mounts(self, caller).await
+    }
+
+    async fn browse_fs_dir(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsListRequest,
+    ) -> Result<RebornFsListResponse, RebornServicesError> {
+        RebornServices::browse_fs_dir(self, caller, request).await
+    }
+
+    async fn list_projects(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListProjectsRequest,
+    ) -> Result<RebornListProjectsResponse, RebornServicesError> {
+        RebornServices::list_projects(self, caller, request).await
+    }
+
+    async fn stat_fs_path(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornFsStatRequest,
+    ) -> Result<RebornFsStatResponse, RebornServicesError> {
+        RebornServices::stat_fs_path(self, caller, request).await
+    }
+
+    async fn get_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        RebornServices::get_project(self, caller, request).await
+    }
+
+    async fn update_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateProjectRequest,
+    ) -> Result<RebornProjectResponse, RebornServicesError> {
+        RebornServices::update_project(self, caller, request).await
+    }
+
+    async fn delete_project(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornDeleteProjectRequest,
+    ) -> Result<(), RebornServicesError> {
+        RebornServices::delete_project(self, caller, request).await
+    }
+
+    async fn list_project_members(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornListMembersRequest,
+    ) -> Result<RebornListMembersResponse, RebornServicesError> {
+        RebornServices::list_project_members(self, caller, request).await
+    }
+
+    async fn add_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornAddMemberRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        RebornServices::add_project_member(self, caller, request).await
+    }
+
+    async fn update_project_member_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornUpdateMemberRoleRequest,
+    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
+        RebornServices::update_project_member_role(self, caller, request).await
+    }
+
+    async fn remove_project_member(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornRemoveMemberRequest,
+    ) -> Result<(), RebornServicesError> {
+        RebornServices::remove_project_member(self, caller, request).await
+    }
+
+    async fn pause_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        RebornServices::pause_automation(self, caller, automation_id).await
+    }
+
+    async fn resume_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        RebornServices::resume_automation(self, caller, automation_id).await
+    }
+
+    async fn rename_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+        request: WebUiRenameAutomationRequest,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        RebornServices::rename_automation(self, caller, automation_id, request).await
+    }
+
+    async fn delete_automation(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        automation_id: String,
+    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+        RebornServices::delete_automation(self, caller, automation_id).await
+    }
+
+    async fn run_operator_setup(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornOperatorSetupRequest,
+    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
+        RebornServices::run_operator_setup(self, caller, request).await
+    }
+
+    async fn list_admin_users(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        query: RebornAdminUserListQuery,
+    ) -> Result<RebornAdminUserListResponse, RebornServicesError> {
+        RebornServices::list_admin_users(self, caller, query).await
+    }
+
+    async fn get_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        RebornServices::get_admin_user(self, caller, user_id).await
+    }
+
+    async fn update_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminUpdateUserRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        RebornServices::update_admin_user(self, caller, user_id, request).await
+    }
+
+    async fn set_admin_user_status(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminSetStatusRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        RebornServices::set_admin_user_status(self, caller, user_id, request).await
+    }
+
+    async fn set_admin_user_role(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        request: RebornAdminSetRoleRequest,
+    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
+        RebornServices::set_admin_user_role(self, caller, user_id, request).await
+    }
+
+    async fn delete_admin_user(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserDeletedResponse, RebornServicesError> {
+        RebornServices::delete_admin_user(self, caller, user_id).await
+    }
+
+    async fn list_admin_user_secrets(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+    ) -> Result<RebornAdminUserSecretsListResponse, RebornServicesError> {
+        RebornServices::list_admin_user_secrets(self, caller, user_id).await
+    }
+
+    async fn put_admin_user_secret(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        handle: SecretHandle,
+        request: RebornAdminPutSecretRequest,
+    ) -> Result<RebornAdminSecretResponse, RebornServicesError> {
+        RebornServices::put_admin_user_secret(self, caller, user_id, handle, request).await
+    }
+
+    async fn delete_admin_user_secret(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        user_id: UserId,
+        handle: SecretHandle,
+    ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
+        RebornServices::delete_admin_user_secret(self, caller, user_id, handle).await
+    }
+}
+
+#[async_trait]
+impl<I, V> ProductSurface for RebornServices<I, V>
+where
+    I: ProductCapabilityInvoker + Clone + 'static,
+    V: RebornViewProvider + Clone + 'static,
+{
+    async fn execute_command(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCommandRequest,
+    ) -> Result<RebornCommandResponse, RebornServicesError> {
+        self.execute_product_surface_command(caller, request).await
     }
 }
 

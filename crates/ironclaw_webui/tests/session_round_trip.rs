@@ -34,13 +34,11 @@ use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest,
+    ProductSurface, RebornCommandId, RebornCommandRequest, RebornCommandResponse,
+    RebornCreateThreadResponse, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornServicesApi, RebornServicesError,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
 };
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -71,8 +69,7 @@ struct StubServices {
     create_thread_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
 }
 
-#[async_trait]
-impl RebornServicesApi for StubServices {
+impl StubServices {
     async fn create_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -101,15 +98,10 @@ impl RebornServicesApi for StubServices {
             },
         })
     }
+}
 
-    async fn submit_turn(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        unreachable!("test does not drive submit_turn")
-    }
-
+#[async_trait]
+impl RebornServicesApi for StubServices {
     async fn get_timeline(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -133,37 +125,34 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
         unreachable!("test does not drive get_run_state")
     }
-
-    async fn cancel_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        unreachable!("test does not drive cancel_run")
-    }
-
-    async fn retry_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
-        unreachable!("test does not drive retry_run")
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        unreachable!("test does not drive resolve_gate")
-    }
-
     async fn delete_thread(
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: RebornDeleteThreadRequest,
     ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
         unreachable!("test does not drive delete_thread")
+    }
+}
+
+#[async_trait]
+impl ProductSurface for StubServices {
+    async fn execute_command(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornCommandRequest,
+    ) -> Result<RebornCommandResponse, RebornServicesError> {
+        let command_id = RebornCommandId::parse(request.command_id.as_str())
+            .ok_or_else(|| RebornServicesError::internal_from("unsupported product command"))?;
+        match command_id {
+            RebornCommandId::CreateThread => {
+                let request = serde_json::from_value(request.input)
+                    .map_err(RebornServicesError::internal_from)?;
+                RebornCommandResponse::json(self.create_thread(caller, request).await?)
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "unsupported product command",
+            )),
+        }
     }
 }
 

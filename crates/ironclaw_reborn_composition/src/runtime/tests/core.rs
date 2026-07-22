@@ -610,10 +610,11 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleReadinessBlocker,
-    ProductCapabilityInput, RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
-    RebornSkillListResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    CREATE_THREAD_COMMAND, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
+    LifecycleReadinessBlocker, ProductCapabilityInput, RESOLVE_GATE_COMMAND,
+    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillListResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, SUBMIT_TURN_COMMAND,
     WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
     approval_gate_ref,
@@ -5062,9 +5063,9 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
         Some(AgentId::new("runtime-webui-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-stream-thread".to_string()),
@@ -5074,9 +5075,9 @@ async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
         )
         .await
         .expect("create webui thread");
-    let submitted = bundle
-        .api
-        .submit_turn(
+    let submitted = SUBMIT_TURN_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiSendMessageRequest {
                 client_action_id: Some("send-webui-stream-message".to_string()),
@@ -5879,9 +5880,9 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
         Some(AgentId::new("runtime-webui-approval-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-approval-thread".to_string()),
@@ -5893,9 +5894,9 @@ async fn local_dev_webui_bundle_routes_approval_gates_into_interaction_service()
         .expect("create thread");
     let gate_ref = approval_gate_ref(ApprovalRequestId::new()).expect("approval gate");
 
-    let err = bundle
-        .api
-        .resolve_gate(
+    let err = RESOLVE_GATE_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiResolveGateRequest {
                 client_action_id: Some("resolve-webui-approval-gate".to_string()),
@@ -5947,9 +5948,9 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
         Some(AgentId::new("runtime-webui-auth-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-auth-thread".to_string()),
@@ -5960,9 +5961,9 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
         .await
         .expect("create thread");
 
-    let err = bundle
-        .api
-        .resolve_gate(
+    let err = RESOLVE_GATE_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiResolveGateRequest {
                 client_action_id: Some("resolve-webui-auth-gate".to_string()),
@@ -6015,9 +6016,9 @@ async fn local_dev_webui_spawn_approval_emits_redacted_audit_and_grants_process(
         Some(AgentId::new("runtime-webui-audit-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-audit-thread".to_string()),
@@ -6146,9 +6147,9 @@ async fn local_dev_webui_spawn_approval_emits_redacted_audit_and_grants_process(
         "blocked approval run should be visible as a gate prompt on the product event stream"
     );
 
-    bundle
-        .api
-        .resolve_gate(
+    RESOLVE_GATE_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiResolveGateRequest {
                 client_action_id: Some("resolve-webui-audit-gate".to_string()),
@@ -6242,9 +6243,9 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
         None,
     );
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-webui-skill-thread".to_string()),
@@ -6254,9 +6255,9 @@ async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
         )
         .await
         .expect("create thread");
-    let submitted = bundle
-        .api
-        .submit_turn(
+    let submitted = SUBMIT_TURN_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller,
             WebUiSendMessageRequest {
                 client_action_id: Some("send-webui-skill-message".to_string()),
@@ -6599,9 +6600,9 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     );
 
     // Create the thread via WebUI so the thread record exists.
-    let created = bundle
-        .api
-        .create_thread(
+    let created = CREATE_THREAD_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiCreateThreadRequest {
                 client_action_id: Some("create-rejected-busy-thread".to_string()),
@@ -6642,9 +6643,9 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     } = submitted_a;
 
     // Submit message B through the WebUI path — thread is busy, must get RejectedBusy.
-    let response_b = bundle
-        .api
-        .submit_turn(
+    let response_b = SUBMIT_TURN_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiSendMessageRequest {
                 client_action_id: Some("send-rejected-busy-b".to_string()),
@@ -6753,9 +6754,9 @@ async fn rejected_busy_message_not_auto_resubmitted_after_run_cancellation() {
     );
 
     // Submit message C — thread is free again, must be Submitted.
-    let response_c = bundle
-        .api
-        .submit_turn(
+    let response_c = SUBMIT_TURN_COMMAND
+        .execute_on(
+            bundle.api.as_ref(),
             caller.clone(),
             WebUiSendMessageRequest {
                 client_action_id: Some("send-rejected-busy-c".to_string()),
