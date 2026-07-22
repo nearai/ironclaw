@@ -142,11 +142,13 @@ def _recorded_sleeps(monkeypatch):
 
 
 async def test_create_response_retries_transient_then_succeeds(_recorded_sleeps):
-    client = _RecordingClient([503, 502, 429, 200])
+    # Every transient status (503/502/504/429) must be retried — a sequence that
+    # exercises all four fails if any is dropped from `_TRANSIENT_STATUSES`.
+    client = _RecordingClient([503, 502, 504, 429, 200])
     body = await _create_response(client, input="hi")
     assert body["object"] == "response"
-    assert len(client.posts) == 4  # three transient retries, then success
-    assert len(_recorded_sleeps) == 3  # one backoff between each retry, none after 200
+    assert len(client.posts) == 5  # four transient retries, then success
+    assert len(_recorded_sleeps) == 4  # one backoff between each retry, none after 200
     # A single idempotency key is reused on every attempt so an accepted-then-5xx
     # run is deduped rather than duplicated.
     keys = {post["headers"]["Idempotency-Key"] for post in client.posts}
