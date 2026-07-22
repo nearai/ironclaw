@@ -1764,7 +1764,7 @@ async def test_reborn_v2_sidebar_loads_older_thread_pages(reborn_v2_page):
     ).to_be_visible()
     await expect(sidebar.get_by_text('No chats match "Older searchable"')).to_have_count(0)
 
-    await load_more.click()
+    await load_more.evaluate("button => { button.click(); button.click(); }")
     await expect(
         sidebar.get_by_text("Older searchable topic", exact=True)
     ).to_be_visible(timeout=5000)
