@@ -414,10 +414,9 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
         .turn_coordinator
         .as_ref()
         .expect("turn coordinator");
-    let production_runtime = services
-        .production_runtime
-        .as_ref()
-        .expect("production runtime");
+    let graph = services
+        .runtime_store_graph()
+        .expect("production runtime store graph");
     let actor = TurnActor::new(UserId::new("alice").unwrap());
     let first_scope = turn_scope();
     let second_scope = TurnScope::new_with_owner(
@@ -429,7 +428,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     );
     let first_run = submit_and_block_provider_auth_run(
         turn_coordinator.as_ref(),
-        production_runtime.turn_state.as_ref(),
+        graph.turn_state.as_ref(),
         first_scope.clone(),
         actor.clone(),
         "first",
@@ -439,7 +438,7 @@ async fn production_libsql_oauth_callback_fans_out_to_all_owner_provider_blocked
     .await;
     let second_run = submit_and_block_provider_auth_run(
         turn_coordinator.as_ref(),
-        production_runtime.turn_state.as_ref(),
+        graph.turn_state.as_ref(),
         second_scope.clone(),
         actor.clone(),
         "second",

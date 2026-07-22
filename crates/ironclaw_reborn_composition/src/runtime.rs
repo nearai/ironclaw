@@ -245,9 +245,10 @@ where
     }
 }
 
-fn runtime_store_parts(
-    graph: crate::factory::RebornRuntimeStoreGraph<'_>,
-) -> RuntimeStoreParts<'_> {
+fn runtime_store_parts<'a>(
+    graph: &'a crate::factory::RebornRuntimeStoreGraph,
+    local_runtime: Option<&'a crate::factory::RebornRuntimeSubstrate>,
+) -> RuntimeStoreParts<'a> {
     let subagent_goal_store = Arc::new(FilesystemSubagentGoalStore::new(Arc::clone(
         &graph.scoped_filesystem,
     ))) as Arc<dyn RuntimeSubagentGoalStore>;
@@ -274,7 +275,7 @@ fn runtime_store_parts(
     };
 
     RuntimeStoreParts {
-        local_runtime: graph.local_runtime.map(Arc::as_ref),
+        local_runtime,
         turn_state_store: Arc::clone(&graph.turn_state) as Arc<dyn RuntimeTurnStateStore>,
         turn_state_flush: Arc::clone(&graph.turn_state) as Arc<dyn TurnStateFlush>,
         checkpoint_state_store: Arc::clone(&graph.checkpoint_state_store),
@@ -1411,23 +1412,17 @@ impl RebornRuntime {
             .map(|local_runtime| Arc::clone(&local_runtime.trigger_repository))
     }
 
-    /// Test-only accessor for the trigger repository backing a
-    /// production-shaped runtime (where `local_runtime` is `None`, so
-    /// [`Self::trigger_repository`] returns `None`). Mirrors the production
-    /// call site `RebornProductionRuntimeServices::trigger_repository`, which
-    /// the WebUI automations facade uses. Integration tests use this to seed
-    /// due `TriggerRecord` rows on a production runtime before driving the
-    /// poller. Returns `None` when no production store graph is present. Gated
-    /// behind `test-support` so the substrate handle never leaks into
-    /// production builds. For tests only.
+    /// Test-only accessor for the trigger repository backing a runtime without
+    /// the local auxiliary substrate. Integration tests use this to seed due
+    /// `TriggerRecord` rows before driving the poller. Gated behind
+    /// `test-support` so the store handle never leaks into production builds.
     #[cfg(any(test, feature = "test-support"))]
     pub fn production_trigger_repository_for_test(
         &self,
     ) -> Option<Arc<dyn ironclaw_triggers::TriggerRepository>> {
         self.services
-            .production_runtime
-            .as_ref()
-            .map(|production| Arc::clone(&production.trigger_repository))
+            .runtime_store_graph()
+            .map(|graph| Arc::clone(&graph.trigger_repository))
     }
 
     /// Test-only accessor for the SAME `ConversationActorPairingService`
@@ -3095,17 +3090,17 @@ pub async fn build_reborn_runtime(
         wiring
     };
 
-    let runtime_graph = crate::factory::RebornRuntimeStoreGraph::from_parts(
-        services.local_runtime.as_ref(),
-        services.production_runtime.as_ref(),
-    )
-    .ok_or_else(|| RebornRuntimeError::InvalidArgument {
-        reason: format!(
-            "profile={} must assemble exactly one runtime store graph",
-            deployment.profile()
-        ),
-    })?;
-    let runtime_parts = runtime_store_parts(runtime_graph);
+    let runtime_graph =
+        services
+            .runtime_store_graph()
+            .ok_or_else(|| RebornRuntimeError::InvalidArgument {
+                reason: format!(
+                    "profile={} must assemble exactly one runtime store graph",
+                    deployment.profile()
+                ),
+            })?;
+    let runtime_parts =
+        runtime_store_parts(runtime_graph.as_ref(), services.local_runtime.as_deref());
     let RuntimeStoreParts {
         local_runtime,
         turn_state_store,
@@ -3590,9 +3585,8 @@ pub async fn build_reborn_runtime(
 
     // Deferred bind (§ await-edge resolver ordering note above,
     // `RuntimeStoreParts`'s doc comment): the resolver was assembled inside
-    // `local_runtime_parts`/`production_runtime_parts` before
-    // `capability_result_writer` existed. Bind it now, exactly once, before
-    // the resolver's settler ever runs.
+    // `runtime_store_parts` before `capability_result_writer` existed. Bind it
+    // now, exactly once, before the resolver's settler ever runs.
     subagent_await_edge_settler
         .bind_result_writer(Arc::clone(&capability_result_writer))
         .map_err(|error| RebornRuntimeError::MalformedConfig {
@@ -3701,12 +3695,12 @@ pub async fn build_reborn_runtime(
         // `ScopedFilesystem` mount view, so the raw `RootFilesystem` is correct here.
         //
         // NOTE: this `Some(local_runtime) => real / None => Empty` guard intentionally
-        // mirrors `identity_context_source` directly above. The production-graph path
-        // (`production_runtime_parts`, `local_runtime: None`) currently wires NEITHER the
-        // identity source NOR this profile source — both degrade to Empty there today.
-        // Wiring the production-graph composition for these optional context sources is a
-        // single deferred follow-up (identity + profile together, to keep them paired);
-        // do not wire only one of them here, or they will diverge. See issue #5013.
+        // mirrors `identity_context_source` directly above. Runtime builds without the
+        // auxiliary local substrate currently wire NEITHER the identity source NOR this
+        // profile source — both degrade to Empty there today. Wiring configured
+        // production equivalents for these optional context sources is a single
+        // deferred follow-up (identity + profile together, to keep them paired); do not
+        // wire only one of them here, or they will diverge. See issue #5013.
         user_profile_source: match local_runtime {
             Some(local_runtime) => Arc::new(MemoryBackedUserProfileSourceAdapter(
                 MemoryBackedUserProfileSource::new(Arc::clone(&local_runtime.extension_filesystem)
@@ -3890,26 +3884,12 @@ pub async fn build_reborn_runtime(
             &trigger_poller,
             effective_trigger_fire_access_checker.as_ref(),
         )?;
-        // Resolve the trigger conversation services from whichever substrate
-        // backs this runtime — the local substrate's (lazily-built durable /
-        // in-memory) services, or the production store graph's eagerly-built
-        // filesystem services. The poller launch is otherwise identical for
-        // both, so there is a single substrate-agnostic path below.
-        let conversation_services = match local_runtime {
-            Some(local) => local
-                .durable_trigger_conversation_services()
-                .await
-                .map_err(|error| RebornRuntimeError::InvalidArgument {
-                    reason: format!("trigger conversation services unavailable: {error}"),
-                })?,
-            None => services
-                .production_runtime
-                .as_ref()
-                .map(|production| production.trigger_conversation_services.clone())
-                .ok_or_else(|| RebornRuntimeError::InvalidArgument {
-                    reason: "trigger poller enabled but no runtime substrate present".to_string(),
-                })?,
-        };
+        let conversation_services = runtime_graph
+            .durable_trigger_conversation_services()
+            .await
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("trigger conversation services unavailable: {error}"),
+            })?;
         let trigger_poller_services = build_trigger_poller_services(
             conversation_services,
             Arc::clone(&planned_turn_coordinator),

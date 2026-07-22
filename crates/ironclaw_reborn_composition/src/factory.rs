@@ -386,8 +386,7 @@ pub struct RebornServices {
     pub readiness: RebornReadiness,
     pub(crate) skill_management: Option<Arc<RebornLocalSkillManagementPort>>,
     pub(crate) local_runtime: Option<Arc<RebornRuntimeSubstrate>>,
-    // arch-exempt: optional_arc, local-dev vs production split pending RebornServices split, plan #4471
-    pub(crate) production_runtime: Option<RebornProductionRuntimeServices>,
+    pub(crate) runtime_store_graph: Option<Arc<RebornRuntimeStoreGraph>>,
     /// Pre-minted scheduler wake wiring for the production composition path.
     /// Minted in `build_production_shaped` so the notifier can satisfy
     /// `HostRuntimeServices.with_turn_run_wake_notifier_dyn` before
@@ -1008,39 +1007,12 @@ pub(crate) struct RebornRuntimeSubstrate {
     pub(crate) shared_extension_registry: Option<Arc<SharedExtensionRegistry>>,
 }
 
-pub(crate) struct RebornProductionRuntimeServices {
-    pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
-    pub(crate) turn_state: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
-    pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
-    pub(crate) thread_service: Arc<dyn SessionThreadService>,
-    pub(crate) trigger_repository: Arc<dyn TriggerRepository>,
-    pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
-    pub(crate) budget_gate_store: Arc<dyn BudgetGateStore>,
-    pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
-    pub(crate) event_log: Arc<dyn DurableEventLog>,
-    pub(crate) audit_log: Arc<dyn DurableAuditLog>,
-    pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
-    /// First-class projects + membership (ACL) facade over the production scoped
-    /// filesystem. Backs the WebUI project surface for production profiles where
-    /// `local_runtime` is None; mirrors the local substrate's `project_service`.
-    pub(crate) project_service: Arc<dyn ProjectService>,
-    /// Trigger conversation services over the production scoped filesystem.
-    /// Mirrors the local substrate's `trigger_conversation_services`: it backs
-    /// the production trigger poller's prompt materializer and trusted-ingress
-    /// submitter (binding + session-thread + actor-pairing roles). Built eagerly
-    /// in `build_backend_production` — production is always durable, so there is
-    /// no `OnceCell` lazy-init arm like the local substrate carries.
-    pub(crate) trigger_conversation_services:
-        ironclaw_conversations::RebornFilesystemConversationServices,
-}
-
 /// Runtime store graph selected by [`DeploymentConfig`](crate::deployment::DeploymentConfig).
 ///
-/// Local-dev and production-shaped deployments still have different auxiliary
-/// surfaces, but their runtime-facing store graph is one set of ports over the
-/// configured root filesystem.
-pub(crate) struct RebornRuntimeStoreGraph<'a> {
-    pub(crate) local_runtime: Option<&'a Arc<RebornRuntimeSubstrate>>,
+/// Runtime-facing stores are one set of ports over the configured root
+/// filesystem. Profile-specific composition can still add optional surfaces to
+/// `RebornServices`, but the runner/WebUI store path consumes this graph.
+pub(crate) struct RebornRuntimeStoreGraph {
     pub(crate) scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
     pub(crate) turn_state: Arc<FilesystemTurnStateRowStore<CompositeRootFilesystem>>,
     pub(crate) checkpoint_state_store: Arc<dyn CheckpointStateStore>,
@@ -1054,53 +1026,61 @@ pub(crate) struct RebornRuntimeStoreGraph<'a> {
     pub(crate) audit_log: Arc<dyn DurableAuditLog>,
     pub(crate) admin_secret_provisioner: Arc<dyn crate::admin_secrets::AdminSecretProvisioner>,
     pub(crate) project_service: Arc<dyn ProjectService>,
-    legacy_webui_identity_substrate_db: Option<&'a Arc<libsql::Database>>,
+    trigger_conversation_services: RebornRuntimeTriggerConversationServices,
+    legacy_webui_identity_substrate_db: Option<Arc<libsql::Database>>,
 }
 
-impl<'a> RebornRuntimeStoreGraph<'a> {
-    pub(crate) fn from_parts(
-        local_runtime: Option<&'a Arc<RebornRuntimeSubstrate>>,
-        production_runtime: Option<&'a RebornProductionRuntimeServices>,
-    ) -> Option<Self> {
-        match (local_runtime, production_runtime) {
-            (Some(local_runtime), None) => Some(Self {
-                local_runtime: Some(local_runtime),
-                scoped_filesystem: Arc::clone(&local_runtime.scoped_filesystem),
-                turn_state: Arc::clone(&local_runtime.turn_state),
-                checkpoint_state_store: Arc::clone(&local_runtime.checkpoint_state_store),
-                loop_checkpoint_store: Arc::clone(&local_runtime.loop_checkpoint_store),
-                thread_service: Arc::clone(&local_runtime.thread_service),
-                trigger_repository: Arc::clone(&local_runtime.trigger_repository),
-                resource_governor: Arc::clone(&local_runtime.resource_governor),
-                budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
-                broadcast_budget_event_sink: Arc::clone(&local_runtime.broadcast_budget_event_sink),
-                event_log: Arc::clone(&local_runtime.event_log),
-                audit_log: Arc::clone(&local_runtime.audit_log),
-                admin_secret_provisioner: Arc::clone(&local_runtime.admin_secret_provisioner),
-                project_service: Arc::clone(&local_runtime.project_service),
-                legacy_webui_identity_substrate_db: local_runtime.identity_substrate_db.as_ref(),
-            }),
-            (None, Some(production_runtime)) => Some(Self {
-                local_runtime: None,
-                scoped_filesystem: Arc::clone(&production_runtime.scoped_filesystem),
-                turn_state: Arc::clone(&production_runtime.turn_state),
-                checkpoint_state_store: Arc::clone(&production_runtime.checkpoint_state_store),
-                loop_checkpoint_store: Arc::clone(&production_runtime.turn_state)
-                    as Arc<dyn LoopCheckpointStore>,
-                thread_service: Arc::clone(&production_runtime.thread_service),
-                trigger_repository: Arc::clone(&production_runtime.trigger_repository),
-                resource_governor: Arc::clone(&production_runtime.resource_governor),
-                budget_gate_store: Arc::clone(&production_runtime.budget_gate_store),
-                broadcast_budget_event_sink: Arc::clone(
-                    &production_runtime.broadcast_budget_event_sink,
-                ),
-                event_log: Arc::clone(&production_runtime.event_log),
-                audit_log: Arc::clone(&production_runtime.audit_log),
-                admin_secret_provisioner: Arc::clone(&production_runtime.admin_secret_provisioner),
-                project_service: Arc::clone(&production_runtime.project_service),
-                legacy_webui_identity_substrate_db: None,
-            }),
-            (None, None) | (Some(_), Some(_)) => None,
+pub(crate) enum RebornRuntimeTriggerConversationServices {
+    LazyFilesystem {
+        scoped_filesystem: Arc<ScopedFilesystem<CompositeRootFilesystem>>,
+        cell: tokio::sync::OnceCell<RebornFilesystemConversationServices>,
+    },
+    Ready(RebornFilesystemConversationServices),
+}
+
+impl RebornRuntimeTriggerConversationServices {
+    pub(crate) async fn durable_trigger_conversation_services(
+        &self,
+    ) -> Result<RebornFilesystemConversationServices, InboundTurnError> {
+        match self {
+            Self::LazyFilesystem {
+                scoped_filesystem,
+                cell,
+            } => {
+                let filesystem = Arc::clone(scoped_filesystem);
+                cell.get_or_try_init(|| async move {
+                    RebornFilesystemConversationServices::new(filesystem).await
+                })
+                .await
+                .cloned()
+            }
+            Self::Ready(services) => Ok(services.clone()),
+        }
+    }
+}
+
+impl RebornRuntimeStoreGraph {
+    pub(crate) fn from_runtime_substrate(local_runtime: &Arc<RebornRuntimeSubstrate>) -> Self {
+        Self {
+            scoped_filesystem: Arc::clone(&local_runtime.scoped_filesystem),
+            turn_state: Arc::clone(&local_runtime.turn_state),
+            checkpoint_state_store: Arc::clone(&local_runtime.checkpoint_state_store),
+            loop_checkpoint_store: Arc::clone(&local_runtime.loop_checkpoint_store),
+            thread_service: Arc::clone(&local_runtime.thread_service),
+            trigger_repository: Arc::clone(&local_runtime.trigger_repository),
+            resource_governor: Arc::clone(&local_runtime.resource_governor),
+            budget_gate_store: Arc::clone(&local_runtime.budget_gate_store),
+            broadcast_budget_event_sink: Arc::clone(&local_runtime.broadcast_budget_event_sink),
+            event_log: Arc::clone(&local_runtime.event_log),
+            audit_log: Arc::clone(&local_runtime.audit_log),
+            admin_secret_provisioner: Arc::clone(&local_runtime.admin_secret_provisioner),
+            project_service: Arc::clone(&local_runtime.project_service),
+            trigger_conversation_services:
+                RebornRuntimeTriggerConversationServices::LazyFilesystem {
+                    scoped_filesystem: Arc::clone(&local_runtime.scoped_filesystem),
+                    cell: tokio::sync::OnceCell::new(),
+                },
+            legacy_webui_identity_substrate_db: local_runtime.identity_substrate_db.clone(),
         }
     }
 
@@ -1147,7 +1127,7 @@ impl<'a> RebornRuntimeStoreGraph<'a> {
     }
 
     pub(crate) fn legacy_webui_identity_substrate_db(&self) -> Option<&Arc<libsql::Database>> {
-        self.legacy_webui_identity_substrate_db
+        self.legacy_webui_identity_substrate_db.as_ref()
     }
 
     pub(crate) fn admin_secret_provisioner(
@@ -1158,6 +1138,14 @@ impl<'a> RebornRuntimeStoreGraph<'a> {
 
     pub(crate) fn project_service(&self) -> Arc<dyn ProjectService> {
         Arc::clone(&self.project_service)
+    }
+
+    pub(crate) async fn durable_trigger_conversation_services(
+        &self,
+    ) -> Result<RebornFilesystemConversationServices, InboundTurnError> {
+        self.trigger_conversation_services
+            .durable_trigger_conversation_services()
+            .await
     }
 }
 
@@ -1239,7 +1227,7 @@ impl std::fmt::Debug for RebornServices {
             .field("product_auth", &self.product_auth.is_some())
             .field("readiness", &self.readiness)
             .field("local_runtime", &self.local_runtime.is_some());
-        debug.field("production_runtime", &self.production_runtime.is_some());
+        debug.field("runtime_store_graph", &self.runtime_store_graph.is_some());
         debug.finish()
     }
 }
@@ -1247,11 +1235,8 @@ impl std::fmt::Debug for RebornServices {
 // arch-exempt: optional_arc, RebornServices fields are Optional because disabled()/local-dev paths don't wire all production services; proper factories always set them, plan #4469
 
 impl RebornServices {
-    pub(crate) fn runtime_store_graph(&self) -> Option<RebornRuntimeStoreGraph<'_>> {
-        RebornRuntimeStoreGraph::from_parts(
-            self.local_runtime.as_ref(),
-            self.production_runtime.as_ref(),
-        )
+    pub(crate) fn runtime_store_graph(&self) -> Option<Arc<RebornRuntimeStoreGraph>> {
+        self.runtime_store_graph.clone()
     }
 
     pub fn disabled() -> Self {
@@ -1262,7 +1247,7 @@ impl RebornServices {
             readiness: RebornReadiness::disabled(),
             skill_management: None,
             local_runtime: None,
-            production_runtime: None,
+            runtime_store_graph: None,
             production_scheduler_wake: None,
             // Disabled services still expose the standard encrypted secret-store
             // shape over an ephemeral backend.
@@ -2005,6 +1990,9 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         services.wasm_runtime_credential_provider_captured_for_test();
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
+    let runtime_store_graph = Arc::new(RebornRuntimeStoreGraph::from_runtime_substrate(
+        &store_graph.local_runtime,
+    ));
 
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
@@ -2015,7 +2003,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         readiness: readiness_for(profile, true, true, true),
         skill_management: Some(Arc::clone(&store_graph.local_runtime.skill_management)),
         local_runtime: Some(store_graph.local_runtime),
-        production_runtime: None,
+        runtime_store_graph: Some(runtime_store_graph),
         production_scheduler_wake: None,
         secret_store,
         #[cfg(any(test, feature = "test-support"))]
@@ -4909,10 +4897,11 @@ async fn build_backend_production(
             .map_err(|error| RebornBuildError::InvalidConfig {
                 reason: format!("trigger conversation services unavailable: {error}"),
             })?;
-    let production_runtime = RebornProductionRuntimeServices {
+    let runtime_store_graph = Arc::new(RebornRuntimeStoreGraph {
         scoped_filesystem: Arc::clone(&stores.scoped_filesystem),
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store: Arc::clone(&checkpoint_state_store),
+        loop_checkpoint_store: Arc::clone(&turn_state) as Arc<dyn LoopCheckpointStore>,
         thread_service,
         trigger_repository: Arc::clone(&trigger_repository),
         resource_governor: production_resource_governor,
@@ -4922,13 +4911,16 @@ async fn build_backend_production(
         audit_log,
         admin_secret_provisioner,
         project_service,
-        trigger_conversation_services,
-    };
+        trigger_conversation_services: RebornRuntimeTriggerConversationServices::Ready(
+            trigger_conversation_services,
+        ),
+        legacy_webui_identity_substrate_db: None,
+    });
     // Same store-backed lookup the WebUI automations panel builds via
-    // `RebornProductionRuntimeServices::turn_run_snapshot_source` (#5886).
+    // the runtime store graph's turn-state snapshot source (#5886).
     let trigger_active_run_lookup: Arc<dyn TriggerActiveRunLookup> = Arc::new(
         crate::automation::trigger_poller::SnapshotActiveRunLookup::new(Arc::clone(
-            &production_runtime.turn_state,
+            &runtime_store_graph.turn_state,
         )
             as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>),
     );
@@ -5084,7 +5076,7 @@ async fn build_backend_production(
         product_auth: Some(product_auth_services),
         skill_management: Some(skill_management),
         local_runtime: None,
-        production_runtime: Some(production_runtime),
+        runtime_store_graph: Some(runtime_store_graph),
         production_scheduler_wake: Some(scheduler_wake_wiring),
         secret_store,
         #[cfg(any(test, feature = "test-support"))]

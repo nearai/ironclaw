@@ -511,10 +511,8 @@ async fn local_dev_services_include_repl_runtime_substrate() {
     assert!(services.turn_coordinator.is_some());
     assert!(services.product_auth.is_some());
     assert!(services.local_runtime.is_some());
-    let graph = services
-        .runtime_store_graph()
-        .expect("local-dev runtime store graph");
-    assert!(graph.local_runtime.is_some());
+    assert!(services.runtime_store_graph().is_some());
+    assert!(services.local_runtime.is_some());
     assert!(
         services
             .local_runtime
@@ -1521,14 +1519,10 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
     .await
     .expect("production libsql services build");
 
-    let production_runtime = services
-        .production_runtime
-        .as_ref()
-        .expect("production runtime");
     let graph = services
         .runtime_store_graph()
         .expect("production runtime store graph");
-    assert!(graph.local_runtime.is_none());
+    assert!(services.local_runtime.is_none());
     let scope = ironclaw_turns::TurnScope::new_with_owner(
         tenant,
         Some(agent),
@@ -1559,7 +1553,7 @@ async fn production_libsql_turn_state_uses_configured_runtime_identity() {
         product_context: None,
     };
     ironclaw_turns::TurnStateStore::submit_turn(
-        production_runtime.turn_state.as_ref(),
+        graph.turn_state.as_ref(),
         submit,
         &ironclaw_turns::AllowAllTurnAdmissionPolicy,
         &InMemoryRunProfileResolver::default(),
@@ -1631,10 +1625,9 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
     .await
     .expect("production libsql services build");
 
-    let production_runtime = services
-        .production_runtime
-        .as_ref()
-        .expect("production runtime");
+    let graph = services
+        .runtime_store_graph()
+        .expect("production runtime store graph");
     let default_path =
         VirtualPath::new("/tenants/reborn-cli/users/default-owner/turns/rows/v1/deltas/log")
             .expect("default turn-state row delta log path");
@@ -1673,7 +1666,7 @@ async fn production_libsql_turn_state_uses_default_runtime_identity_when_unconfi
         product_context: None,
     };
     ironclaw_turns::TurnStateStore::submit_turn(
-        production_runtime.turn_state.as_ref(),
+        graph.turn_state.as_ref(),
         submit,
         &ironclaw_turns::AllowAllTurnAdmissionPolicy,
         &InMemoryRunProfileResolver::default(),
