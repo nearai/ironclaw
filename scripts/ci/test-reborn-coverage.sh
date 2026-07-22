@@ -828,33 +828,46 @@ fi
 #
 # The script derives its repo root from its own path and `cd`s there, so
 # each case copies it into a fresh temp tree's scripts/ci/ and builds a
-# tests/integration/ subtree alongside it, then invokes the copy. It also
-# filters candidates against a `[[test]] name = "..."` entry in Cargo.toml
-# (see that script's header comment), so every case seeds a fake Cargo.toml
-# with one `[[test]]` block per fixture suite the case constructs — mirrors
-# the real repo root always having a `[[test]]` entry per suite.
+# tests/integration/ subtree alongside it, then invokes the copy. Each fixture
+# is a minimal Cargo package whose `[[test]]` targets exercise Cargo metadata as
+# the discovery authority.
 
 setup_int_tier_case() {
   local case_dir="$1"
-  shift
-  mkdir -p "${case_dir}/scripts/ci" "${case_dir}/tests/integration"
+  mkdir -p "${case_dir}/scripts/ci" "${case_dir}/src" "${case_dir}/tests/integration"
   cp "${int_tier_sh}" "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
   chmod +x "${case_dir}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-  : > "${case_dir}/Cargo.toml"
-  local candidate
-  for candidate in "$@"; do
-    cat >>"${case_dir}/Cargo.toml" <<EOF
-[[test]]
-name = "${candidate}"
-path = "tests/integration/${candidate}.rs"
+  : > "${case_dir}/src/lib.rs"
+  cat >"${case_dir}/Cargo.toml" <<'TOML'
+[package]
+name = "int-tier-discovery-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+autotests = false
 
-EOF
-  done
+[lib]
+path = "src/lib.rs"
+TOML
 }
 
-# D1: empty tests/integration/ -> non-zero exit + discovery error.
+add_int_tier_target() {
+  local case_dir="$1" name="$2" path="$3"
+  mkdir -p "$(dirname "${case_dir}/${path}")"
+  : > "${case_dir}/${path}"
+  cat >>"${case_dir}/Cargo.toml" <<EOF
+
+[[test]]
+name = "${name}"
+path = "${path}"
+EOF
+}
+
+# D1: no tests/integration/ targets -> non-zero exit + discovery error, even
+# when the root package declares a test target elsewhere.
 d1="${tmp_root}/d1"
 setup_int_tier_case "${d1}"
+add_int_tier_target "${d1}" root_helper tests/root_helper.rs
 capture "${d1}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D1: empty tests/integration/ exits non-zero" 1 "${CAP_RC}"
 assert_contains "D1: empty tests/integration/ prints the discovery error" "${CAP_ERR}" \
@@ -862,8 +875,8 @@ assert_contains "D1: empty tests/integration/ prints the discovery error" "${CAP
 
 # D2: one tests/integration/foo.rs -> --test / reborn_integration_foo.
 d2="${tmp_root}/d2"
-setup_int_tier_case "${d2}" reborn_integration_foo
-: > "${d2}/tests/integration/foo.rs"
+setup_int_tier_case "${d2}"
+add_int_tier_target "${d2}" reborn_integration_foo tests/integration/foo.rs
 capture "${d2}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D2: single flat integration file exits 0" 0 "${CAP_RC}"
 assert_eq "D2: single flat integration file emits its --test pair" \
@@ -871,51 +884,66 @@ assert_eq "D2: single flat integration file emits its --test pair" \
 
 # D3: one tests/integration/group_bar/main.rs -> --test / reborn_group_bar.
 d3="${tmp_root}/d3"
-setup_int_tier_case "${d3}" reborn_group_bar
-mkdir -p "${d3}/tests/integration/group_bar"
-: > "${d3}/tests/integration/group_bar/main.rs"
+setup_int_tier_case "${d3}"
+add_int_tier_target "${d3}" reborn_group_bar tests/integration/group_bar/main.rs
 capture "${d3}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D3: single group dir exits 0" 0 "${CAP_RC}"
-assert_eq "D3: single group dir emits its --test pair, dir->name rewrite applied" \
+assert_eq "D3: single group target emits its manifest-declared --test pair" \
   "$(printf -- '--test\nreborn_group_bar')" "${CAP_OUT}"
 
-# D3b: a half-scaffolded group dir (no main.rs yet) is skipped, not errored.
+# D3b: a half-scaffolded group dir with no manifest target is ignored.
 d3b="${tmp_root}/d3b"
-setup_int_tier_case "${d3b}" reborn_group_bar
-mkdir -p "${d3b}/tests/integration/group_bar" "${d3b}/tests/integration/group_incomplete"
-: > "${d3b}/tests/integration/group_bar/main.rs"
+setup_int_tier_case "${d3b}"
+add_int_tier_target "${d3b}" reborn_group_bar tests/integration/group_bar/main.rs
+mkdir -p "${d3b}/tests/integration/group_incomplete"
 capture "${d3b}/scripts/ci/reborn-coverage-int-tier-tests.sh"
-assert_exit_code "D3b: half-scaffolded group dir does not error the whole discovery" 0 "${CAP_RC}"
-assert_eq "D3b: half-scaffolded group dir (no main.rs) is skipped" \
+assert_exit_code "D3b: unmanifested group dir does not error the whole discovery" 0 "${CAP_RC}"
+assert_eq "D3b: unmanifested group dir is skipped" \
   "$(printf -- '--test\nreborn_group_bar')" "${CAP_OUT}"
 
-# D4: multiple files + dirs, created out of alphabetical order -> sorted,
-# deduped output. Group dirs ('g') sort before integration files ('i').
+# D4: multiple targets declared out of alphabetical order produce sorted output.
+# Group names ('g') sort before integration names ('i').
 d4="${tmp_root}/d4"
-setup_int_tier_case "${d4}" reborn_group_beta reborn_group_omega reborn_integration_alpha reborn_integration_zeta
-: > "${d4}/tests/integration/zeta.rs"
-: > "${d4}/tests/integration/alpha.rs"
-mkdir -p "${d4}/tests/integration/group_omega" "${d4}/tests/integration/group_beta"
-: > "${d4}/tests/integration/group_omega/main.rs"
-: > "${d4}/tests/integration/group_beta/main.rs"
+setup_int_tier_case "${d4}"
+add_int_tier_target "${d4}" reborn_integration_zeta tests/integration/zeta.rs
+add_int_tier_target "${d4}" reborn_group_omega tests/integration/group_omega/main.rs
+add_int_tier_target "${d4}" reborn_integration_alpha tests/integration/alpha.rs
+add_int_tier_target "${d4}" reborn_group_beta tests/integration/group_beta/main.rs
 capture "${d4}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D4: multiple suites exits 0" 0 "${CAP_RC}"
-assert_eq "D4: multiple suites sorted+deduped in expected order" \
+assert_eq "D4: multiple suites sorted in expected order" \
   "$(printf -- '--test\nreborn_group_beta\n--test\nreborn_group_omega\n--test\nreborn_integration_alpha\n--test\nreborn_integration_zeta')" \
   "${CAP_OUT}"
 
-# D5: a `support/` subdirectory alongside the flat files must not be
-# mistaken for a suite (no main.rs, and doesn't match the `group_*` name
-# pattern either) — mirrors the real tests/integration/support/ harness tree.
+# D5: a shared file with no manifest target must not be mistaken for a suite;
+# this mirrors the real tests/integration/support/ harness tree.
 d5="${tmp_root}/d5"
-setup_int_tier_case "${d5}" reborn_integration_only
-: > "${d5}/tests/integration/only.rs"
+setup_int_tier_case "${d5}"
+add_int_tier_target "${d5}" reborn_integration_only tests/integration/only.rs
 mkdir -p "${d5}/tests/integration/support"
 : > "${d5}/tests/integration/support/mod.rs"
 capture "${d5}/scripts/ci/reborn-coverage-int-tier-tests.sh"
 assert_exit_code "D5: support/ dir alongside flat suites exits 0" 0 "${CAP_RC}"
 assert_eq "D5: support/ dir is not discovered as a suite" \
   "$(printf -- '--test\nreborn_integration_only')" "${CAP_OUT}"
+
+# D6: nested manifest targets are selected by their declared target names;
+# an adjacent shared fixture with no [[test]] entry is excluded. These mirror
+# the six auth binaries that directory-based discovery missed in the real repo.
+d6="${tmp_root}/d6"
+setup_int_tier_case "${d6}"
+add_int_tier_target "${d6}" reborn_integration_oauth_refresh tests/integration/auth/oauth_refresh.rs
+add_int_tier_target "${d6}" reborn_integration_auth_failure tests/integration/auth/auth_failure.rs
+add_int_tier_target "${d6}" reborn_integration_auth_gate tests/integration/auth/auth_gate.rs
+add_int_tier_target "${d6}" reborn_integration_oauth_connect tests/integration/auth/oauth_connect.rs
+add_int_tier_target "${d6}" reborn_integration_oauth_popup_journeys tests/integration/auth/oauth_popup_journeys.rs
+add_int_tier_target "${d6}" reborn_integration_reopen_resume_through_gate tests/integration/auth/reopen_resume_through_gate.rs
+: > "${d6}/tests/integration/auth/common.rs"
+capture "${d6}/scripts/ci/reborn-coverage-int-tier-tests.sh"
+assert_exit_code "D6: nested auth targets exit 0" 0 "${CAP_RC}"
+assert_eq "D6: all nested auth targets are emitted exactly once and shared fixtures are excluded" \
+  "$(printf -- '--test\nreborn_integration_auth_failure\n--test\nreborn_integration_auth_gate\n--test\nreborn_integration_oauth_connect\n--test\nreborn_integration_oauth_popup_journeys\n--test\nreborn_integration_oauth_refresh\n--test\nreborn_integration_reopen_resume_through_gate')" \
+  "${CAP_OUT}"
 
 # ---------------------------------------------------------------------------
 # R. reborn-coverage-ratchet.sh (coverage-floor ratchet gate)

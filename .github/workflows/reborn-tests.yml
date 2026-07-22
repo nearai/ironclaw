@@ -529,15 +529,15 @@ jobs:
     needs: changes
     if: needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.has_reborn_tests == 'true'
     runs-on: ubuntu-latest
-    # This is the ONLY execution of the 27 flat reborn_integration_* suites
+    # This is the ONLY execution of the flat reborn_integration_* suites
     # (there is no separate uninstrumented pass/fail run of them — `cargo
     # llvm-cov ... test` has the same pass/fail semantics as `cargo test`, just
-    # instrumented) plus one more, instrumented, run of the 7 reborn_group_*
+    # instrumented) plus one more, instrumented, run of the reborn_group_*
     # suites already covered uninstrumented by reborn-group-tests above.
     # Generous backstop: a cold-cache instrumented build of the Reborn closure
     # is heavier than a plain build (see the retired reborn-coverage.yml's
     # 180m budget for the same closure, run as a single job); each of these 5
-    # lanes only carries a slice of the 34 int-tier suites, so 120m is ample.
+    # lanes only carries a slice of the discovered int-tier suites, so 120m is ample.
     timeout-minutes: 120
     env:
       ANTHROPIC_API_KEY: ""
@@ -865,7 +865,7 @@ jobs:
             exit 1
           fi
 
-          # This is the ONLY execution of the 27 flat reborn_integration_*
+          # This is the ONLY execution of the flat reborn_integration_*
           # suites (see the reborn-integration-coverage job), so it gates like
           # every other test job above — real pass/fail, not the coverage
           # percentage (that's coverage-report below).
