@@ -1434,7 +1434,7 @@ carries **~108K LOC of product/transport code** — the core of #6168:
 | **Slack** | `ironclaw_slack_v2_adapter` (protocol, ~3K) + `composition/src/slack/` (**~40.6K** host: serve / delivery / egress / setup / identity) | one `SlackProductAdapter` |
 | **Telegram** | `ironclaw_telegram_v2_adapter` (~2.7K) + ~69 refs in composition | one `TelegramProductAdapter` (closest to clean today — the reference shape) |
 | **OpenAI-compat API** | `ironclaw_reborn_openai_compat` (~7.5K) + ~441 refs in composition | one `OpenAiCompatProductAdapter` |
-| **CLI** | `ironclaw_reborn_cli` over the `RebornRuntime` facade | CLI adapter over `ProductSurface` (`RebornRuntime` is today's proto-`ProductSurface`) |
+| **CLI** | canonical `ironclaw` package over the `RebornRuntime` facade | CLI adapter over `ProductSurface` (`RebornRuntime` is today's proto-`ProductSurface`) |
 
 Plus cross-cutting product concerns currently inside composition that belong to the
 adapters (their deliver / auth side) or the kernel, not the assembler:

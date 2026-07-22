@@ -413,9 +413,7 @@ pub enum WebUiGateResolution {
         always: bool,
     },
     /// Unified decline variant — covers both user-initiated approval denial
-    /// ("denied") and auth-gate cancellation ("cancelled"). Both legacy wire
-    /// strings deserialize to this variant; new serializations use "declined".
-    #[serde(alias = "denied", alias = "cancelled")]
+    /// and auth-gate cancellation; the wire value is "declined".
     Declined,
     /// A host-stored credential reference, not a raw secret/token.
     CredentialProvided { credential_ref: String },
@@ -670,7 +668,7 @@ fn parse_gate_resolution(
         "approved" => Ok(WebUiGateResolution::Approved {
             always: always.unwrap_or(false),
         }),
-        "denied" | "cancelled" => Ok(WebUiGateResolution::Declined),
+        "declined" => Ok(WebUiGateResolution::Declined),
         "credential_provided" => Ok(WebUiGateResolution::CredentialProvided {
             credential_ref: required_text(
                 "credential_ref",

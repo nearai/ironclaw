@@ -346,7 +346,7 @@ fn failure_summary_covers_agent_loop_safe_summary_categories() {
         // The granular `compaction_*` categories are deliberately absent: the
         // agent loop no longer mints them since non-cancellation compaction
         // failures became a deferred-continue path instead of a terminal exit
-        // (#5838). `crate::failure_summary` keeps display support so
+        // (#5838). `ironclaw_runner::failure_summary` keeps display support so
         // historical records still render.
     ];
 

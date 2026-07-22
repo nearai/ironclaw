@@ -14,6 +14,7 @@ use ironclaw_host_api::{
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use crate::resolved::ResolvedExtensionManifest;
 use crate::{ExtensionManifestV2, HostApiContractRegistry, ManifestSource, ManifestV2Error};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -145,34 +146,33 @@ impl ExtensionRemovalCleanupRequirement {
 
 /// Product-agnostic extension manifest record.
 ///
-/// Domain crates can project their own host-api sections from `raw_toml` and
-/// `manifest`; installation state itself stays in `ironclaw_extensions`.
+/// Compiled once per install/upgrade: the raw source is kept for diagnostics
+/// and recompilation only; production projection reads the
+/// [`ResolvedExtensionManifest`] (checklist REC-1). v2 records may still be
+/// reprojected from `raw_toml` by domain crates until their cutover phases
+/// land.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionManifestRecord {
     raw_toml: String,
     manifest: ExtensionManifestV2,
+    resolved: ResolvedExtensionManifest,
     manifest_hash: Option<ManifestHash>,
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
 
-impl ExtensionManifestRecord {
-    pub fn from_toml(
-        raw_toml: impl Into<String>,
-        source: ManifestSource,
-        host_port_catalog: &HostPortCatalog,
-        manifest_hash: Option<ManifestHash>,
-    ) -> Result<Self, ExtensionInstallationError> {
-        let contracts = HostApiContractRegistry::new();
-        Self::from_toml_with_contracts(
-            raw_toml,
-            source,
-            host_port_catalog,
-            manifest_hash,
-            &contracts,
-        )
-    }
+/// Minimal probe used to dispatch the single parse entry point on the
+/// declared schema version (checklist MAN-2).
+#[derive(Deserialize)]
+struct SchemaVersionProbe {
+    #[serde(default)]
+    schema_version: String,
+}
 
-    pub fn from_toml_with_contracts(
+impl ExtensionManifestRecord {
+    /// The single manifest parse entry point: dispatches on the declared
+    /// `schema_version` (v2 or v3) and normalizes both into the same
+    /// resolved model.
+    pub fn from_toml(
         raw_toml: impl Into<String>,
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
@@ -180,15 +180,47 @@ impl ExtensionManifestRecord {
         contracts: &HostApiContractRegistry,
     ) -> Result<Self, ExtensionInstallationError> {
         let raw_toml = raw_toml.into();
-        let manifest = ExtensionManifestV2::parse_with_optional_host_api_contracts(
-            &raw_toml,
-            source,
-            host_port_catalog,
-            contracts,
-        )?;
+        let probe: SchemaVersionProbe = toml::from_str(&raw_toml).map_err(|error| {
+            ExtensionInstallationError::InvalidManifest {
+                reason: format!("failed to parse extension manifest: {error}"),
+            }
+        })?;
+        let (manifest, resolved) = if probe.schema_version == crate::v3::MANIFEST_SCHEMA_VERSION_V3
+        {
+            crate::v3::parse_v3(&raw_toml, source, host_port_catalog).map_err(|error| {
+                ExtensionInstallationError::InvalidManifest {
+                    reason: error.to_string(),
+                }
+            })?
+        } else {
+            let manifest =
+                ExtensionManifestV2::parse(&raw_toml, source, host_port_catalog, contracts)?;
+            let resolved = ResolvedExtensionManifest::from_v2(&manifest);
+            (manifest, resolved)
+        };
         Ok(Self {
             raw_toml,
             manifest,
+            resolved,
+            manifest_hash,
+            removal_cleanup_requirements: Vec::new(),
+        })
+    }
+
+    /// Rebuild a record from its persisted resolved contract — no TOML
+    /// reparse; the raw source is carried for diagnostics only (checklist
+    /// REC-2).
+    pub fn from_resolved(
+        raw_toml: impl Into<String>,
+        source: ManifestSource,
+        resolved: ResolvedExtensionManifest,
+        manifest_hash: Option<ManifestHash>,
+    ) -> Result<Self, ExtensionInstallationError> {
+        let manifest = resolved.to_internal(source)?;
+        Ok(Self {
+            raw_toml: raw_toml.into(),
+            manifest,
+            resolved,
             manifest_hash,
             removal_cleanup_requirements: Vec::new(),
         })
@@ -207,6 +239,11 @@ impl ExtensionManifestRecord {
 
     pub fn manifest(&self) -> &ExtensionManifestV2 {
         &self.manifest
+    }
+
+    /// The persisted resolved contract this record was compiled into.
+    pub fn resolved(&self) -> &ResolvedExtensionManifest {
+        &self.resolved
     }
 
     pub fn raw_toml(&self) -> &str {
@@ -799,6 +836,29 @@ pub trait ExtensionInstallationStore: Send + Sync {
         installation_id: &ExtensionInstallationId,
         health: ExtensionHealthSnapshot,
     ) -> Result<(), ExtensionInstallationError>;
+
+    /// Non-secret `[channel.config]` values for the extension's installation,
+    /// keyed by field handle. Stores without durable channel-config support
+    /// report empty (config completeness then derives as "nothing provided").
+    async fn channel_config(
+        &self,
+        _extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        Ok(Vec::new())
+    }
+
+    /// Replace the stored non-secret `[channel.config]` values for the
+    /// extension's installation. Fails closed on stores without durable
+    /// channel-config support so a save can never silently vanish.
+    async fn set_channel_config(
+        &self,
+        _extension_id: &ExtensionId,
+        _values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        Err(ExtensionInstallationError::InvalidInstallation {
+            reason: "channel config persistence is not supported by this store".to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -891,11 +951,27 @@ where
     ) -> Result<(), ExtensionInstallationError> {
         (**self).update_health(installation_id, health).await
     }
+
+    async fn channel_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        (**self).channel_config(extension_id).await
+    }
+
+    async fn set_channel_config(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        (**self).set_channel_config(extension_id, values).await
+    }
 }
 
 const DEFAULT_INSTALLATION_STATE_PATH: &str = "/system/extensions/.installations";
 const MANIFEST_RECORD_KIND: &str = "extension_manifest_record";
 const INSTALLATION_RECORD_KIND: &str = "extension_installation_record";
+const CHANNEL_CONFIG_RECORD_KIND: &str = "extension_channel_config_record";
 const FILESYSTEM_CAS_RETRIES: usize = 5;
 
 /// Filesystem-backed extension installation state store.
@@ -936,6 +1012,7 @@ impl FilesystemExtensionInstallationStore {
             cas_retries: FILESYSTEM_CAS_RETRIES,
         };
         store.ensure_indexes().await?;
+        store.migrate_legacy_manifest_rows().await?;
         Ok(store)
     }
 
@@ -992,12 +1069,82 @@ impl FilesystemExtensionInstallationStore {
             ))
     }
 
+    /// One-time compatibility compiler for rows written by the filesystem
+    /// store before resolved manifests became authoritative. The migrated row
+    /// is rewritten under CAS before `load_at` returns, so normal projection
+    /// paths never reparse raw TOML.
+    async fn migrate_legacy_manifest_rows(&self) -> Result<(), ExtensionInstallationError> {
+        let rows = query_all(&self.filesystem, &self.manifests_root()?, &Filter::All).await?;
+        for row in rows {
+            let mut complete = false;
+            for _ in 0..=self.cas_retries {
+                let Some(current) = self
+                    .filesystem
+                    .get(&row.path)
+                    .await
+                    .map_err(store_unavailable("load legacy extension manifest row"))?
+                else {
+                    complete = true;
+                    break;
+                };
+                ensure_entry_kind(&current.entry, MANIFEST_RECORD_KIND, &row.path)?;
+                let wire: WireManifestRecord = current.entry.parse_json().map_err(|error| {
+                    corrupt_row(
+                        "deserialize legacy extension manifest row",
+                        &row.path,
+                        error,
+                    )
+                })?;
+                if wire.resolved.is_some() {
+                    complete = true;
+                    break;
+                }
+                let record = ExtensionManifestRecord::from_toml(
+                    wire.raw_toml,
+                    wire.source.into_manifest_source(),
+                    &self.host_ports,
+                    wire.manifest_hash,
+                    &self.contracts,
+                )?
+                .with_removal_cleanup_requirements(wire.removal_cleanup_requirements);
+                match self
+                    .filesystem
+                    .put(
+                        &row.path,
+                        entry_for_manifest(&record)?,
+                        CasExpectation::Version(current.version),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        complete = true;
+                        break;
+                    }
+                    Err(FilesystemError::VersionMismatch { .. }) => continue,
+                    Err(error) => {
+                        return Err(store_unavailable("migrate extension manifest row")(error));
+                    }
+                }
+            }
+            if !complete {
+                return Err(store_unavailable_error(
+                    "legacy extension manifest row changed repeatedly while migrating",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn manifests_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
         child_path(&self.root, "manifests")
     }
 
     fn installations_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
         child_path(&self.root, "installations")
+    }
+
+    fn channel_configs_root(&self) -> Result<VirtualPath, ExtensionInstallationError> {
+        child_path(&self.root, "channel-configs")
     }
 
     fn manifest_path(
@@ -1018,6 +1165,81 @@ impl FilesystemExtensionInstallationStore {
             &self.installations_root()?,
             &format!("{}.json", row_token(installation_id.as_str())),
         )
+    }
+
+    fn channel_config_path(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<VirtualPath, ExtensionInstallationError> {
+        child_path(
+            &self.channel_configs_root()?,
+            &format!("{}.json", row_token(extension_id.as_str())),
+        )
+    }
+
+    async fn load_channel_config_entry(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Option<(WireChannelConfig, RecordVersion)>, ExtensionInstallationError> {
+        let path = self.channel_config_path(extension_id)?;
+        let Some(entry) = self
+            .filesystem
+            .get(&path)
+            .await
+            .map_err(store_unavailable("load extension channel config row"))?
+        else {
+            return Ok(None);
+        };
+        ensure_entry_kind(&entry.entry, CHANNEL_CONFIG_RECORD_KIND, &path)?;
+        let config: WireChannelConfig = entry.entry.parse_json().map_err(|error| {
+            corrupt_row("deserialize extension channel config row", &path, error)
+        })?;
+        if &config.extension_id != extension_id {
+            return Err(invalid_installation_error(format!(
+                "extension channel config row key {extension_id} contained config for {}",
+                config.extension_id
+            )));
+        }
+        Ok(Some((config, entry.version)))
+    }
+
+    async fn put_channel_config(
+        &self,
+        config: &WireChannelConfig,
+    ) -> Result<(), ExtensionInstallationError> {
+        let path = self.channel_config_path(&config.extension_id)?;
+        let payload = serde_json::to_value(config).map_err(invalid_installation_error)?;
+        let entry = Entry::record(record_kind(CHANNEL_CONFIG_RECORD_KIND)?, &payload)
+            .map_err(invalid_installation_error)?;
+        self.filesystem
+            .put(&path, entry, CasExpectation::Any)
+            .await
+            .map(|_| ())
+            .map_err(store_unavailable("save extension channel config row"))
+    }
+
+    async fn delete_channel_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<(), ExtensionInstallationError> {
+        for _ in 0..=self.cas_retries {
+            let Some((_, version)) = self.load_channel_config_entry(extension_id).await? else {
+                return Ok(());
+            };
+            let path = self.channel_config_path(extension_id)?;
+            match self.filesystem.delete_if_version(&path, version).await {
+                Ok(()) | Err(FilesystemError::NotFound { .. }) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => {
+                    return Err(store_unavailable("delete extension channel config row")(
+                        error,
+                    ));
+                }
+            }
+        }
+        Err(store_unavailable_error(
+            "extension channel config row changed repeatedly while deleting",
+        ))
     }
 
     async fn load_manifest_entry(
@@ -1106,7 +1328,7 @@ impl FilesystemExtensionInstallationStore {
         let wire: WireManifestRecord = entry
             .parse_json()
             .map_err(|error| corrupt_row("deserialize extension manifest row", path, error))?;
-        wire.into_manifest_record(&self.host_ports, &self.contracts)
+        wire.into_manifest_record()
     }
 
     async fn put_manifest(
@@ -1337,13 +1559,19 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
         installation_id: &ExtensionInstallationId,
     ) -> Result<(), ExtensionInstallationError> {
         for _ in 0..=self.cas_retries {
-            let Some((_, version)) = self.load_installation_entry(installation_id).await? else {
+            let Some((installation, version)) =
+                self.load_installation_entry(installation_id).await?
+            else {
                 return Err(ExtensionInstallationError::InstallationNotFound {
                     installation_id: installation_id.clone(),
                 });
             };
             match self.delete_installation_row(installation_id, version).await {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.delete_channel_config(installation.extension_id())
+                        .await?;
+                    return Ok(());
+                }
                 Err(SaveRowError::CasConflict) => continue,
                 Err(SaveRowError::NotFound) => {
                     return Err(ExtensionInstallationError::InstallationNotFound {
@@ -1420,6 +1648,48 @@ impl ExtensionInstallationStore for FilesystemExtensionInstallationStore {
             "extension installation row changed repeatedly while updating health",
         ))
     }
+
+    async fn channel_config(
+        &self,
+        extension_id: &ExtensionId,
+    ) -> Result<Vec<(String, String)>, ExtensionInstallationError> {
+        if self
+            .query_installations_by_extension(extension_id)
+            .await?
+            .is_empty()
+        {
+            return Ok(Vec::new());
+        }
+        Ok(self
+            .load_channel_config_entry(extension_id)
+            .await?
+            .map(|(config, _)| config.values)
+            .unwrap_or_default())
+    }
+
+    async fn set_channel_config(
+        &self,
+        extension_id: &ExtensionId,
+        values: Vec<(String, String)>,
+    ) -> Result<(), ExtensionInstallationError> {
+        if self
+            .query_installations_by_extension(extension_id)
+            .await?
+            .is_empty()
+        {
+            return Err(ExtensionInstallationError::InvalidInstallation {
+                reason: format!("extension {extension_id} has no installation for channel config"),
+            });
+        }
+        if values.is_empty() {
+            return self.delete_channel_config(extension_id).await;
+        }
+        self.put_channel_config(&WireChannelConfig {
+            extension_id: extension_id.clone(),
+            values,
+        })
+        .await
+    }
 }
 
 #[derive(Debug)]
@@ -1450,23 +1720,29 @@ struct WireManifestRecord {
     raw_toml: String,
     source: WireManifestSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved: Option<ResolvedExtensionManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     manifest_hash: Option<ManifestHash>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     removal_cleanup_requirements: Vec<ExtensionRemovalCleanupRequirement>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WireChannelConfig {
+    extension_id: ExtensionId,
+    values: Vec<(String, String)>,
+}
+
 impl WireManifestRecord {
-    fn into_manifest_record(
-        self,
-        host_ports: &HostPortCatalog,
-        contracts: &HostApiContractRegistry,
-    ) -> Result<ExtensionManifestRecord, ExtensionInstallationError> {
-        ExtensionManifestRecord::from_toml_with_contracts(
+    fn into_manifest_record(self) -> Result<ExtensionManifestRecord, ExtensionInstallationError> {
+        let resolved = self.resolved.ok_or_else(|| {
+            invalid_installation_error("extension manifest row was not resolved during store load")
+        })?;
+        ExtensionManifestRecord::from_resolved(
             self.raw_toml,
             self.source.into_manifest_source(),
-            host_ports,
+            resolved,
             self.manifest_hash,
-            contracts,
         )
         .map(|record| record.with_removal_cleanup_requirements(self.removal_cleanup_requirements))
     }
@@ -1477,6 +1753,7 @@ impl From<&ExtensionManifestRecord> for WireManifestRecord {
         Self {
             raw_toml: record.raw_toml().to_string(),
             source: WireManifestSource::from_manifest_source(record.manifest().source),
+            resolved: Some(record.resolved().clone()),
             manifest_hash: record.manifest_hash().cloned(),
             removal_cleanup_requirements: record.removal_cleanup_requirements().to_vec(),
         }
@@ -1713,6 +1990,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn channel_config_round_trips_and_is_deleted_with_the_installation() {
+        let store = filesystem_store().await;
+        let manifest = manifest_record("fixture", Some("hash-1"));
+        let extension_id = manifest.extension_id().clone();
+        store
+            .upsert_manifest(manifest)
+            .await
+            .expect("upsert manifest");
+        let installed = installation("fixture", Some("hash-1"));
+        let installation_id = installed.installation_id().clone();
+        store
+            .upsert_installation(installed)
+            .await
+            .expect("upsert installation");
+
+        assert!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read empty config")
+                .is_empty(),
+            "no config is provided until a save"
+        );
+        store
+            .set_channel_config(
+                &extension_id,
+                vec![(
+                    "public_endpoint_url".to_string(),
+                    "https://x.example".to_string(),
+                )],
+            )
+            .await
+            .expect("save config");
+        assert_eq!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read config"),
+            vec![(
+                "public_endpoint_url".to_string(),
+                "https://x.example".to_string()
+            )]
+        );
+        // Channel config is installation-owned state: deleting the
+        // installation deletes it (removal order §6.2 step 5).
+        store
+            .delete_installation(&installation_id)
+            .await
+            .expect("delete installation");
+        assert!(
+            store
+                .channel_config(&extension_id)
+                .await
+                .expect("read after delete")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn load_migrates_pre_resolved_manifest_rows_before_projection() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let root = VirtualPath::new("/system/extensions/.installations/migration-test")
+            .expect("valid root");
+        let store = FilesystemExtensionInstallationStore::load_at(
+            backend.clone(),
+            root.clone(),
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("initial store");
+        let record = manifest_record("legacy-fixture", Some("hash-legacy"));
+        let path = store
+            .manifest_path(record.extension_id())
+            .expect("manifest path");
+        let wire = WireManifestRecord {
+            raw_toml: record.raw_toml().to_string(),
+            source: WireManifestSource::from_manifest_source(record.manifest().source),
+            resolved: None,
+            manifest_hash: record.manifest_hash().cloned(),
+            removal_cleanup_requirements: Vec::new(),
+        };
+        let payload = serde_json::to_value(wire).expect("legacy wire payload");
+        let entry = Entry::record(
+            record_kind(MANIFEST_RECORD_KIND).expect("record kind"),
+            &payload,
+        )
+        .expect("legacy manifest entry")
+        .with_indexed(
+            index_key("extension_id").expect("index key"),
+            IndexValue::Text(record.extension_id().as_str().to_string()),
+        )
+        .with_indexed(
+            index_key("manifest_source").expect("index key"),
+            IndexValue::Text("host_bundled".to_string()),
+        );
+        backend
+            .put(&path, entry, CasExpectation::Any)
+            .await
+            .expect("seed legacy row");
+        drop(store);
+
+        let reopened = FilesystemExtensionInstallationStore::load_at(
+            backend,
+            root,
+            HostPortCatalog::empty(),
+            capability_provider_contracts(),
+        )
+        .await
+        .expect("migration succeeds");
+        let loaded = reopened
+            .get_manifest(record.extension_id())
+            .await
+            .expect("load migrated row")
+            .expect("migrated row exists");
+        assert_eq!(loaded.resolved(), record.resolved());
+    }
+
+    #[tokio::test]
     async fn delete_manifest_rejects_active_installations() {
         let store = filesystem_store().await;
         let manifest = manifest_record("fixture", Some("hash-1"));
@@ -1743,10 +2139,20 @@ mod tests {
             Arc::new(InMemoryBackend::new()),
             VirtualPath::new("/system/extensions/.installations/test").expect("valid root"),
             HostPortCatalog::empty(),
-            HostApiContractRegistry::new(),
+            capability_provider_contracts(),
         )
         .await
         .expect("filesystem store")
+    }
+
+    fn capability_provider_contracts() -> crate::HostApiContractRegistry {
+        let mut contracts = crate::HostApiContractRegistry::new();
+        contracts
+            .register(std::sync::Arc::new(
+                crate::CapabilityProviderHostApiContract::new().expect("contract"),
+            ))
+            .expect("register capability provider contract");
+        contracts
     }
 
     fn manifest_record(extension_id: &str, hash: Option<&str>) -> ExtensionManifestRecord {
@@ -1755,6 +2161,7 @@ mod tests {
             ManifestSource::HostBundled,
             &HostPortCatalog::empty(),
             hash.map(|value| ManifestHash::new(value).expect("hash")),
+            &capability_provider_contracts(),
         )
         .expect("manifest record")
     }
@@ -1860,7 +2267,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/{extension_id}.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "{extension_id}.read"
 description = "read"
 effects = ["network"]
@@ -1877,6 +2290,8 @@ output_schema_ref = "schemas/read.output.json"
 pub enum ExtensionInstallationError {
     #[error(transparent)]
     Manifest(#[from] ManifestV2Error),
+    #[error("invalid extension manifest: {reason}")]
+    InvalidManifest { reason: String },
     #[error("invalid {field}: {reason}")]
     InvalidValue { field: &'static str, reason: String },
     #[error("installation owner member set must not be empty")]

@@ -78,7 +78,13 @@ trust = "third_party"
 kind = "wasm"
 module = "builtin.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "builtin.shell"
 description = "Runs a shell command."
 effects = ["dispatch_capability", "spawn_process", "execute_code", "network"]
@@ -91,6 +97,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
         manifest_toml,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     let package = ExtensionPackage::from_manifest(
@@ -2343,4 +2350,15 @@ impl CapabilityLeaseStore for ConsumeFailingLeaseStore {
     async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
         self.inner.active_leases_for_context(context).await
     }
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

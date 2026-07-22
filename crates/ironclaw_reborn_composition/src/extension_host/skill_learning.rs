@@ -1527,3 +1527,4 @@ mod learning {
         }
     }
 }
+// arch-exempt: large_file, skill learning service remains centralized during composition cleanup, plan #6175

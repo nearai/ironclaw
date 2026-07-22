@@ -1688,8 +1688,7 @@ mod tests {
         let credential = RuntimeCredentialRequirement {
             handle: SecretHandle::new("google-drive-access").unwrap(),
             source: RuntimeCredentialRequirementSource::ProductAuthAccount {
-                provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google")
-                    .unwrap(),
+                provider: ironclaw_host_api::VendorId::new("google").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                     scopes: scopes.clone(),
                 },
@@ -1713,8 +1712,7 @@ mod tests {
         assert_eq!(
             context.credential_requirements,
             vec![RuntimeCredentialAuthRequirement {
-                provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google")
-                    .unwrap(),
+                provider: ironclaw_host_api::VendorId::new("google").unwrap(),
                 setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth { scopes },
                 requester_extension: ExtensionId::new("google-drive").unwrap(),
                 provider_scopes: vec!["https://www.googleapis.com/auth/drive.readonly".to_string()],

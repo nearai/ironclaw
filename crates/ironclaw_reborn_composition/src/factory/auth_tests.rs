@@ -8,7 +8,6 @@ use ironclaw_auth::{
     OAuthRedirectUri, OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderScope,
     TurnRunRef,
 };
-use ironclaw_capabilities::{CapabilityObligationHandler, CapabilityObligationRequest};
 use ironclaw_events::{InMemorySecurityAuditSink, SecurityBoundary, SecurityDecision};
 use ironclaw_host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError,
@@ -30,8 +29,6 @@ use std::sync::Mutex;
 use crate::product_auth::api::auth::AUTH_CONTINUATION_DISPATCH_FAILED_CODE;
 
 use super::*;
-use crate::product_auth::oauth::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
-use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient;
 
 #[derive(Clone)]
 struct ErrorTurnCoordinator {
@@ -111,17 +108,10 @@ impl RebornAuthContinuationDispatcher for NoopContinuationDispatcher {
     ) -> Result<(), ironclaw_auth::AuthProductError> {
         Ok(())
     }
-}
-
-#[derive(Debug, Default)]
-struct NoopObligationHandler;
-
-#[async_trait::async_trait]
-impl CapabilityObligationHandler for NoopObligationHandler {
-    async fn satisfy(
+    async fn dispatch_canceled_auth_continuation(
         &self,
-        _request: CapabilityObligationRequest<'_>,
-    ) -> Result<(), ironclaw_capabilities::CapabilityObligationError> {
+        _event: ironclaw_auth::AuthContinuationEvent,
+    ) -> Result<(), ironclaw_auth::AuthProductError> {
         Ok(())
     }
 }
@@ -306,13 +296,18 @@ async fn local_dev_google_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-google-oauth-owner", dir.path().join("local-dev"))
-            .with_google_oauth_backend(OAuthClientConfig {
-                client_id: OAuthClientId::new("google-client-123").expect("client id"),
-                client_secret: None,
-                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
+            .with_vendor_oauth_client(
+                "google",
+                OAuthClientConfig {
+                    client_id: OAuthClientId::new("google-client-123").expect("client id"),
+                    client_secret: None,
+                    redirect_uri: OAuthRedirectUri::new(
+                        "https://app.example/oauth/google/callback",
+                    )
                     .expect("redirect uri"),
-                hosted_domain_hint: None,
-            }),
+                    hosted_domain_hint: None,
+                },
+            ),
     )
     .await
     .expect("local-dev services build");
@@ -341,13 +336,16 @@ async fn production_libsql_google_oauth_backend_captures_wasm_credential_provide
             None,
             ironclaw_secrets::SecretMaterial::from("01234567890123456789012345678901"),
         )
-        .with_google_oauth_backend(OAuthClientConfig {
-            client_id: OAuthClientId::new("google-client-123").expect("client id"),
-            client_secret: None,
-            redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
-                .expect("redirect uri"),
-            hosted_domain_hint: None,
-        })
+        .with_vendor_oauth_client(
+            "google",
+            OAuthClientConfig {
+                client_id: OAuthClientId::new("google-client-123").expect("client id"),
+                client_secret: None,
+                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
+                    .expect("redirect uri"),
+                hosted_domain_hint: None,
+            },
+        )
         .with_production_trust_policy(Arc::new(
             builtin_first_party_trust_policy().expect("builtin trust policy"),
         ))
@@ -482,20 +480,30 @@ async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-notion-oauth-owner", dir.path().join("local-dev"))
-            .with_google_oauth_backend(OAuthClientConfig {
-                client_id: OAuthClientId::new("google-client-123").expect("client id"),
-                client_secret: None,
-                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
+            .with_vendor_oauth_client(
+                "google",
+                OAuthClientConfig {
+                    client_id: OAuthClientId::new("google-client-123").expect("client id"),
+                    client_secret: None,
+                    redirect_uri: OAuthRedirectUri::new(
+                        "https://app.example/oauth/google/callback",
+                    )
                     .expect("redirect uri"),
-                hosted_domain_hint: None,
-            })
-            .with_notion_oauth_backend(OAuthClientConfig {
-                client_id: OAuthClientId::new("notion-client-123").expect("client id"),
-                client_secret: None,
-                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/notion/callback")
+                    hosted_domain_hint: None,
+                },
+            )
+            .with_vendor_oauth_client(
+                "notion",
+                OAuthClientConfig {
+                    client_id: OAuthClientId::new("notion-client-123").expect("client id"),
+                    client_secret: None,
+                    redirect_uri: OAuthRedirectUri::new(
+                        "https://app.example/oauth/notion/callback",
+                    )
                     .expect("redirect uri"),
-                hosted_domain_hint: None,
-            }),
+                    hosted_domain_hint: None,
+                },
+            ),
     )
     .await
     .expect("local-dev services build");
@@ -503,15 +511,15 @@ async fn local_dev_notion_oauth_backend_builds_with_host_provider_config() {
 }
 
 #[tokio::test]
-async fn local_dev_notion_dcr_oauth_backend_builds_and_wires_registry() {
+async fn local_dev_dcr_oauth_callback_builds_and_wires_challenge_provider() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
         RebornBuildInput::local_dev(
             "local-dev-notion-dcr-oauth-owner",
             dir.path().join("local-dev"),
         )
-        .with_notion_dcr_oauth_backend("http://127.0.0.1:3000", "Ironclaw")
-        .expect("notion dcr config"),
+        .with_dcr_oauth_callback("http://127.0.0.1:3000")
+        .expect("dcr callback config"),
     )
     .await
     .expect("local-dev services build");
@@ -523,34 +531,81 @@ async fn local_dev_notion_dcr_oauth_backend_builds_and_wires_registry() {
             .as_ref()
             .and_then(|product_auth| product_auth.as_auth_challenge_provider())
             .is_some(),
-        "DCR-backed product auth must expose the challenge provider projection path"
+        "engine-backed product auth must expose the challenge provider projection path"
     );
 }
 
 #[tokio::test]
-async fn oauth_callback_exchanges_notion_through_reborn_product_auth_boundary() {
+async fn oauth_callback_exchanges_vendor_recipe_through_reborn_product_auth_boundary() {
+    // The engine executes recipe DATA: the exchange body carries the RFC 8707
+    // resource indicator from the manifest's [mcp].server, and the grant
+    // persists through the same product-auth boundary as every vendor.
     let egress = Arc::new(RecordingOAuthEgress::ok(
-        br#"{"access_token":"notion-access","refresh_token":"notion-refresh","expires_in":3600,"token_type":"Bearer"}"#.to_vec(),
+        br#"{"access_token":"vendor-access","refresh_token":"vendor-refresh","expires_in":3600,"token_type":"Bearer"}"#.to_vec(),
     ));
-    let provider_client = HostOAuthProviderClient::new(
-        notion_provider_spec(),
-        egress.clone(),
-        Arc::new(FilesystemSecretStore::ephemeral()),
-        Arc::new(NoopObligationHandler),
-        OAuthClientId::new("notion-client-123").expect("client id"),
-        OAuthRedirectUri::new("https://app.example/oauth/notion/callback").expect("redirect uri"),
-    )
-    .expect("notion provider client");
+    let recipe: ironclaw_host_api::VendorAuthRecipe = serde_json::from_value(serde_json::json!({
+        "method": "oauth2_code",
+        "display_name": "Vendor account",
+        "authorization_endpoint": "https://mcp.vendorco.example/authorize",
+        "token_endpoint": "https://mcp.vendorco.example/token",
+        "scopes": ["workspace"],
+        "client_credentials": { "client_id_handle": "vendorco_oauth_client_id" },
+        "token_response": {
+            "access_token": "/access_token",
+            "refresh_token": "/refresh_token",
+            "expires_in": "/expires_in",
+            "scope": { "path": "/scope", "missing": "fallback_to_requested" }
+        },
+    }))
+    .expect("vendor recipe parses");
+
+    #[derive(Debug)]
+    struct StaticTestCredentials;
+
+    #[async_trait::async_trait]
+    impl ironclaw_auth::EngineClientCredentialsSource for StaticTestCredentials {
+        async fn resolve(
+            &self,
+            _vendor: &str,
+            _credentials: &ironclaw_host_api::RecipeClientCredentials,
+        ) -> Result<ironclaw_auth::EngineOAuthClientMaterial, ironclaw_auth::AuthProductError>
+        {
+            Ok(ironclaw_auth::EngineOAuthClientMaterial {
+                client_id: OAuthClientId::new("vendorco-client-123")?,
+                client_secret: None,
+            })
+        }
+    }
+
+    let engine = Arc::new(ironclaw_auth::AuthEngine::new(
+        ironclaw_auth::AuthEngineDeps {
+            recipes: Arc::new(ironclaw_auth::StaticAuthRecipeResolver::new(vec![
+                ironclaw_auth::ResolvedVendorAuthRecipe {
+                    vendor: "vendorco".to_string(),
+                    recipe,
+                    token_exchange_resource: Some("https://mcp.vendorco.example/mcp".to_string()),
+                },
+            ])),
+            client_credentials: Arc::new(StaticTestCredentials),
+            egress: egress.clone(),
+            secret_store: Arc::new(FilesystemSecretStore::ephemeral()),
+            callback_base: ironclaw_auth::EngineCallbackBase::new(
+                "https://app.example/api/reborn/product-auth/oauth",
+            )
+            .expect("callback base"),
+            dcr_client_name: "Ironclaw".to_string(),
+        },
+    ));
     let services = RebornProductAuthServices::from_shared(
         Arc::new(InMemoryAuthProductServices::new()),
         Arc::new(NoopContinuationDispatcher),
     )
-    .with_provider_client(Arc::new(provider_client));
+    .with_provider_client(engine);
     let auth_scope = auth_scope_for_turn(
         &turn_scope(),
         &TurnActor::new(UserId::new("alice").unwrap()),
     );
-    let flow_id = create_notion_flow(
+    let flow_id = create_vendor_flow(
         &services,
         auth_scope.clone(),
         AuthContinuationRef::SetupOnly,
@@ -558,14 +613,14 @@ async fn oauth_callback_exchanges_notion_through_reborn_product_auth_boundary() 
     .await;
 
     let response = services
-        .handle_oauth_callback(notion_authorized_request(auth_scope, flow_id))
+        .handle_oauth_callback(vendor_authorized_request(auth_scope, flow_id))
         .await
-        .expect("notion callback succeeds through product auth");
+        .expect("vendor callback succeeds through product auth");
 
     assert_eq!(response.flow_id, flow_id);
     assert!(response.credential_account_id.is_some());
     let request = egress.single_request();
-    assert_eq!(request.url, "https://mcp.notion.com/token");
+    assert_eq!(request.url, "https://mcp.vendorco.example/token");
     let body = form_params(&request.body);
     assert_eq!(
         body.get("grant_type").map(String::as_str),
@@ -573,7 +628,7 @@ async fn oauth_callback_exchanges_notion_through_reborn_product_auth_boundary() 
     );
     assert_eq!(
         body.get("resource").map(String::as_str),
-        Some("https://mcp.notion.com/mcp")
+        Some("https://mcp.vendorco.example/mcp")
     );
 }
 
@@ -585,13 +640,16 @@ async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() 
             "local-dev-google-oauth-secret-owner",
             dir.path().join("local-dev"),
         )
-        .with_google_oauth_backend(OAuthClientConfig {
-            client_id: OAuthClientId::new("google-client-123").expect("client id"),
-            client_secret: Some(SecretString::from("raw-client-secret".to_string())),
-            redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
-                .expect("redirect uri"),
-            hosted_domain_hint: None,
-        }),
+        .with_vendor_oauth_client(
+            "google",
+            OAuthClientConfig {
+                client_id: OAuthClientId::new("google-client-123").expect("client id"),
+                client_secret: Some(SecretString::from("raw-client-secret".to_string())),
+                redirect_uri: OAuthRedirectUri::new("https://app.example/oauth/google/callback")
+                    .expect("redirect uri"),
+                hosted_domain_hint: None,
+            },
+        ),
     )
     .await
     .expect("local-dev services build");
@@ -599,7 +657,7 @@ async fn local_dev_google_oauth_backend_accepts_optional_client_secret_config() 
 }
 
 #[tokio::test]
-async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
+async fn oauth_callback_with_stale_gate_converges_without_resuming() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
         RebornBuildInput::local_dev("local-dev-auth-stale-owner", dir.path().join("local-dev"))
@@ -634,17 +692,38 @@ async fn oauth_callback_with_stale_gate_maps_to_terminal_invalid_request() {
     )
     .await;
 
-    let error = product_auth
-        .handle_oauth_callback(authorized_request(auth_scope, flow_id))
+    // A continuation for a superseded gate converges as a settled no-op: the
+    // credential is minted (that part is real work the user completed) and
+    // the continuation is acknowledged, but the run's CURRENT gate must not
+    // be resumed by a stale reference. Erroring here instead used to leave
+    // the completed flow permanently unacknowledged and the reconcile loop
+    // hammering a non-retryable failure.
+    product_auth
+        .handle_oauth_callback(authorized_request(auth_scope.clone(), flow_id))
         .await
-        .expect_err("stale auth gate should not resume");
+        .expect("a stale-gate continuation converges without resuming");
 
-    assert_eq!(error.code, AuthErrorCode::InvalidRequest);
-    assert!(!error.retryable);
+    let state = turn_coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope.clone(),
+            run_id,
+        })
+        .await
+        .expect("run state");
+    assert_eq!(
+        state.status,
+        TurnStatus::BlockedAuth,
+        "the run stays parked on its CURRENT gate"
+    );
+    assert_eq!(
+        state.gate_ref.as_ref().map(|gate| gate.as_str()),
+        Some("gate:current-auth"),
+        "the stale continuation never touched the current gate"
+    );
 }
 
 #[tokio::test]
-async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extension() {
+async fn oauth_callback_with_lifecycle_activation_returns_ok_without_resume() {
     let dir = tempfile::tempdir().expect("tempdir");
     let services = build_reborn_services(
         RebornBuildInput::local_dev(
@@ -656,224 +735,22 @@ async fn oauth_callback_with_lifecycle_activation_activates_and_publishes_extens
     .await
     .expect("local-dev services build");
     let product_auth = services.product_auth.as_ref().expect("product auth");
-    let extension_management = services
-        .local_runtime
-        .as_ref()
-        .and_then(|runtime| runtime.extension_management.as_ref())
-        .expect("extension management");
-    let package_ref = ironclaw_product_workflow::LifecyclePackageRef::new(
-        ironclaw_product_workflow::LifecyclePackageKind::Extension,
-        "github",
-    )
-    .expect("github package ref");
-    let lifecycle_owner = UserId::new("alice").expect("valid lifecycle owner"); // safety: fixed test user id literal is valid.
-    extension_management
-        .install(package_ref.clone(), &lifecycle_owner)
-        .await
-        .expect("install github before OAuth");
     let auth_scope = auth_scope_for_turn(
         &turn_scope(),
         &TurnActor::new(UserId::new("alice").unwrap()),
     );
     let continuation = AuthContinuationRef::LifecycleActivation {
-        package_ref: LifecyclePackageRef::new("github").unwrap(),
+        package_ref: LifecyclePackageRef::new("github-extension").unwrap(),
     };
     let flow_id = create_flow(product_auth, auth_scope.clone(), continuation.clone()).await;
 
     let response = product_auth
         .handle_oauth_callback(authorized_request(auth_scope, flow_id))
         .await
-        .expect("OAuth callback activates extension");
+        .expect("lifecycle continuation is deferred");
 
     assert_eq!(response.flow_id, flow_id);
     assert_eq!(response.continuation, continuation);
-    let projection = extension_management
-        .project(package_ref, &lifecycle_owner)
-        .await
-        .expect("project github after OAuth callback");
-    assert_eq!(
-        projection.phase,
-        ironclaw_product_workflow::LifecyclePhase::Active
-    );
-    assert!(
-        extension_management
-            .active_model_visible_capabilities()
-            .await
-            .expect("active extension capabilities")
-            .iter()
-            .any(|capability| capability.id.as_str() == "github.search_issues"),
-        "OAuth callback must publish GitHub tools before reporting success"
-    );
-}
-
-#[tokio::test]
-async fn slack_oauth_callback_activates_and_publishes_all_personal_tools() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev(
-            "local-dev-slack-auth-lifecycle-owner",
-            dir.path().join("local-dev"),
-        )
-        .with_product_auth_ports(in_memory_product_auth_ports())
-        // This test exercises the Slack personal OAuth callback's activation
-        // path (per-account credential completion), not the provider-instance
-        // readiness map — without these, the callback's internal
-        // `extension_activate` fails closed with
-        // `ProviderInstanceNotConfigured` before it ever reaches OAuth
-        // completion. Slack readiness has TWO axes and this fixture must
-        // satisfy both.
-        //
-        // The redirect-URI axis is declared as a FACT here, not wired through
-        // `with_slack_personal_oauth_lazy`: the slot would additionally switch
-        // the provider client to lazy setup-service credentials that nothing
-        // fills in this test, failing the callback with `BackendUnavailable`.
-        .with_slack_host_beta_enabled(true)
-        .with_slack_personal_oauth_redirect_uri_configured(true),
-    )
-    .await
-    .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let turn_coordinator = services
-        .turn_coordinator
-        .as_ref()
-        .expect("turn coordinator");
-    let local_runtime = services.local_runtime.as_ref().expect("local runtime");
-    let extension_management = services
-        .local_runtime
-        .as_ref()
-        .and_then(|runtime| runtime.extension_management.as_ref())
-        .expect("extension management");
-    let package_ref = ironclaw_product_workflow::LifecyclePackageRef::new(
-        ironclaw_product_workflow::LifecyclePackageKind::Extension,
-        "slack",
-    )
-    .expect("Slack package ref");
-    let lifecycle_owner = UserId::new("alice").expect("valid lifecycle owner"); // safety: fixed test user id literal is valid.
-    extension_management
-        .install(package_ref.clone(), &lifecycle_owner)
-        .await
-        .expect("install Slack before OAuth");
-    let auth_scope = auth_scope_for_turn(
-        &turn_scope(),
-        &TurnActor::new(UserId::new("alice").unwrap()),
-    );
-    let blocked_scope = turn_scope();
-    let blocked_run = submit_and_block_provider_auth_run(
-        turn_coordinator.as_ref(),
-        local_runtime.turn_state.as_ref(),
-        blocked_scope.clone(),
-        TurnActor::new(UserId::new("alice").unwrap()),
-        "slack-lifecycle",
-        ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID,
-        "slack",
-    )
-    .await;
-    let slack_provider = AuthProviderId::new(ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID)
-        .expect("Slack personal provider");
-    let flow_id = create_provider_flow(
-        product_auth,
-        auth_scope.clone(),
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: LifecyclePackageRef::new("slack").unwrap(),
-        },
-        slack_provider.clone(),
-    )
-    .await;
-    let scopes = crate::extension_host::available_extensions::slack_personal_oauth_setup_scopes()
-        .iter()
-        .map(|scope| ProviderScope::new(*scope).expect("Slack OAuth scope"))
-        .collect();
-
-    product_auth
-        .handle_oauth_callback(authorized_provider_request(
-            auth_scope,
-            flow_id,
-            slack_provider,
-            scopes,
-        ))
-        .await
-        .expect("Slack OAuth callback activates extension");
-
-    assert_eq!(
-        extension_management
-            .project(package_ref, &lifecycle_owner)
-            .await
-            .expect("project Slack after OAuth")
-            .phase,
-        ironclaw_product_workflow::LifecyclePhase::Active
-    );
-    let mut slack_capabilities = extension_management
-        .active_model_visible_capabilities()
-        .await
-        .expect("active Slack capabilities")
-        .into_iter()
-        .map(|capability| capability.id.as_str().to_string())
-        .filter(|capability_id| capability_id.starts_with("slack."))
-        .collect::<Vec<_>>();
-    slack_capabilities.sort();
-    assert_eq!(
-        slack_capabilities,
-        vec![
-            "slack.get_conversation_history",
-            "slack.get_conversation_info",
-            "slack.get_thread_replies",
-            "slack.get_user_info",
-            "slack.list_conversations",
-            "slack.search_messages",
-            "slack.send_message",
-            "slack.whoami",
-        ]
-    );
-    let blocked_state = turn_coordinator
-        .get_run_state(GetRunStateRequest {
-            scope: blocked_scope,
-            run_id: blocked_run,
-        })
-        .await
-        .expect("blocked Slack run after OAuth");
-    assert_eq!(blocked_state.status, TurnStatus::Queued);
-    assert_eq!(blocked_state.gate_ref, None);
-}
-
-#[tokio::test]
-async fn failed_lifecycle_activation_is_not_projected_as_completed_oauth() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let services = build_reborn_services(
-        RebornBuildInput::local_dev(
-            "local-dev-auth-lifecycle-failure-owner",
-            dir.path().join("local-dev"),
-        )
-        .with_product_auth_ports(in_memory_product_auth_ports()),
-    )
-    .await
-    .expect("local-dev services build");
-    let product_auth = services.product_auth.as_ref().expect("product auth");
-    let auth_scope = auth_scope_for_turn(
-        &turn_scope(),
-        &TurnActor::new(UserId::new("alice").unwrap()),
-    );
-    let flow_id = create_flow(
-        product_auth,
-        auth_scope.clone(),
-        AuthContinuationRef::LifecycleActivation {
-            package_ref: LifecyclePackageRef::new("github").unwrap(),
-        },
-    )
-    .await;
-
-    product_auth
-        .handle_oauth_callback(authorized_request(auth_scope.clone(), flow_id))
-        .await
-        .expect_err("uninstalled extension cannot activate after OAuth");
-
-    assert_eq!(
-        product_auth
-            .reconcile_oauth_flow(&auth_scope, flow_id)
-            .await
-            .expect("sanitized flow status"),
-        ironclaw_auth::AuthFlowStatus::Failed,
-        "the popup poll must terminate after lifecycle activation fails"
-    );
 }
 
 #[tokio::test]
@@ -1007,10 +884,7 @@ async fn submit_and_block_provider_auth_run(
                 gate_ref: GateRef::new(format!("gate:fanout-{suffix}")).unwrap(),
                 credential_requirements: vec![
                     ironclaw_host_api::RuntimeCredentialAuthRequirement {
-                        provider: ironclaw_host_api::RuntimeCredentialAccountProviderId::new(
-                            provider,
-                        )
-                        .unwrap(),
+                        provider: ironclaw_host_api::VendorId::new(provider).unwrap(),
                         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
                             scopes: Vec::new(),
                         },
@@ -1051,8 +925,8 @@ fn provider() -> AuthProviderId {
 }
 
 #[cfg(test)]
-fn notion_provider() -> AuthProviderId {
-    AuthProviderId::new(NOTION_PROVIDER_ID).unwrap()
+fn vendor_provider() -> AuthProviderId {
+    AuthProviderId::new("vendorco").unwrap()
 }
 
 #[cfg(test)]
@@ -1061,8 +935,8 @@ fn label() -> CredentialAccountLabel {
 }
 
 #[cfg(test)]
-fn notion_label() -> CredentialAccountLabel {
-    CredentialAccountLabel::new("work notion").unwrap()
+fn vendor_label() -> CredentialAccountLabel {
+    CredentialAccountLabel::new("work account").unwrap()
 }
 
 #[cfg(test)]
@@ -1170,7 +1044,7 @@ async fn create_provider_flow(
         .id
 }
 
-async fn create_notion_flow(
+async fn create_vendor_flow(
     product_auth: &RebornProductAuthServices,
     scope: AuthProductScope,
     continuation: AuthContinuationRef,
@@ -1181,9 +1055,9 @@ async fn create_notion_flow(
             id: None,
             scope,
             kind: AuthFlowKind::IntegrationCredential,
-            provider: notion_provider(),
+            provider: vendor_provider(),
             challenge: AuthChallenge::OAuthUrl {
-                authorization_url: authorization_url("https://mcp.notion.com/oauth/authorize"),
+                authorization_url: authorization_url("https://mcp.vendorco.example/authorize"),
                 expires_at: Utc::now() + Duration::minutes(5),
             },
             continuation,
@@ -1195,7 +1069,7 @@ async fn create_notion_flow(
         .await
     {
         Ok(flow) => flow.id,
-        Err(error) => panic!("notion auth flow failed: {error:?}"),
+        Err(error) => panic!("vendor auth flow failed: {error:?}"),
     }
 }
 
@@ -1237,7 +1111,7 @@ fn authorized_provider_request(
     }
 }
 
-fn notion_authorized_request(
+fn vendor_authorized_request(
     scope: AuthProductScope,
     flow_id: AuthFlowId,
 ) -> crate::RebornOAuthCallbackRequest {
@@ -1247,15 +1121,15 @@ fn notion_authorized_request(
         opaque_state_hash: state_hash(),
         outcome: crate::RebornOAuthCallbackOutcome::Authorized {
             provider_request: OAuthProviderCallbackRequest {
-                provider: notion_provider(),
-                account_label: notion_label(),
+                provider: vendor_provider(),
+                account_label: vendor_label(),
                 authorization_code: OAuthAuthorizationCode::new(SecretString::from(
-                    "raw-notion-auth-code".to_string(),
+                    "raw-vendor-auth-code".to_string(),
                 ))
                 .unwrap(), // safety: test-only fixture literal is valid by construction.
                 authorization_code_hash: code_hash(),
                 pkce_verifier: PkceVerifierSecret::new(SecretString::from(
-                    "raw-notion-pkce-verifier".to_string(),
+                    "raw-vendor-pkce-verifier".to_string(),
                 ))
                 .unwrap(), // safety: test-only fixture literal is valid by construction.
                 pkce_verifier_hash: pkce_hash(),

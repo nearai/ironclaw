@@ -62,7 +62,7 @@ effects = ["dispatch_capability", "use_secret"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "google_oauth_token"
 source = { type = "product_auth_account", provider = "google", setup = { kind = "oauth", scopes = ["https://www.googleapis.com/auth/gmail.readonly"] } }
 audience = { scheme = "https", host_pattern = "gmail.googleapis.com" }
@@ -93,7 +93,7 @@ effects = ["dispatch_capability", "use_secret"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 
-[[capabilities.runtime_credentials]]
+[[capability_provider.tools.capabilities.runtime_credentials]]
 handle = "script_api_token"
 source = { type = "secret_handle" }
 audience = { scheme = "https", host_pattern = "api.example.com" }
@@ -109,6 +109,7 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .expect("manifest must parse");
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
@@ -479,4 +480,15 @@ async fn spawn_capability_forged_scope_fails_before_preflight() {
             panic!("expected Err(InvalidRequest) for forged-scope spawn; got Err({other:?})")
         }
     }
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

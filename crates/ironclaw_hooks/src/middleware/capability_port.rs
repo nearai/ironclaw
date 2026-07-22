@@ -1,4 +1,5 @@
 //! Capability-port middleware that runs `dispatch_before_capability` ahead of
+// arch-exempt: large_file, capability middleware remains centralized during Resolution migration, plan #6175
 //! every invocation and translates hook decisions into the existing
 //! `CapabilityOutcome` vocabulary.
 //!

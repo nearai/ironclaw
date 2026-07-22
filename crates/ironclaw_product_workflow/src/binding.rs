@@ -21,6 +21,11 @@ use crate::error::ProductWorkflowError;
 pub struct ResolvedBinding {
     pub tenant_id: TenantId,
     /// Real paired human actor who sent or authorized the external action.
+    ///
+    /// The `user_id` alias is a sanctioned one-time wire-fold for persisted
+    /// binding rows written before the actor/subject split — a durable-data
+    /// migration concern, not a runtime compatibility path (new
+    /// serializations emit `actor_user_id` only).
     #[serde(alias = "user_id")]
     pub actor_user_id: UserId,
     /// User scope whose agent/context/tools/memory execute the turn.

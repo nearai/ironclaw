@@ -2161,3 +2161,4 @@ mod tests {
         assert_eq!(ids, vec!["demo.a", "demo.c"]);
     }
 }
+// arch-exempt: large_file, capability surface migration remains centralized, plan #6175

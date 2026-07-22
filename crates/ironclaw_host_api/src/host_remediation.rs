@@ -11,9 +11,9 @@
 //! [`SafeSummary::placeholder`](crate::SafeSummary::placeholder).
 //!
 //! That rule is correct for untrusted output and *wrong* for host-authored
-//! operator remediation. "Run `ironclaw config set google.client_id
-//! <id>.apps.googleusercontent.com`, then confirm the client at
-//! <https://console.cloud.google.com/apis/credentials>" is a multi-line
+//! operator remediation. "Run `ironclaw config set provider.client_id
+//! <id>`, then confirm the client at
+//! <https://console.provider.example/oauth/credentials>" is a multi-line
 //! instruction containing a URL, backticks, and the word `client_secret` — it
 //! fails `SafeSummary` four separate ways and degrades to "capability summary
 //! unavailable", which is exactly the dead end the remediation exists to
@@ -156,7 +156,7 @@ const HIGH_ENTROPY_RUN_MIN_LEN: usize = 32;
 ///
 /// `_` and `-` deliberately keep BREAKING runs: they are the separators of the
 /// long host-authored identifiers this guard must not false-positive on
-/// (`IRONCLAW_REBORN_SLACK_PERSONAL_OAUTH_REDIRECT_URI`, kebab-case project
+/// (`IRONCLAW_REBORN_PROVIDER_OAUTH_REDIRECT_URI`, kebab-case project
 /// slugs). Credential values that use them (`ghp_…`, `xoxb-…`, `sk_live_…`) are
 /// caught by the prefix detector in `credential_redaction`, not by this rule.
 fn is_run_character(c: char) -> bool {
@@ -169,8 +169,8 @@ fn is_run_character(c: char) -> bool {
 /// instruction produces.
 ///
 /// The letters-AND-digits requirement is what keeps the widened run charset
-/// safe: URLs long enough to clear the bound (`https://console.cloud.google.com
-/// /apis/credentials`) are pure letters, and pure-digit runs are version or id
+/// safe: URLs long enough to clear the bound (`https://console.provider.example
+/// /oauth/credentials`) are pure letters, and pure-digit runs are version or id
 /// numbers. Both are deliberately exempt — see
 /// `pure_alphabetic_and_pure_numeric_runs_are_exempt`.
 fn contains_high_entropy_run(value: &str) -> bool {

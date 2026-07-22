@@ -63,9 +63,9 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
       opt?.capabilities?.final_replies &&
       opt?.target?.status === "unavailable",
   );
-  // The Slack approval footnote only makes sense when an external target exists
-  // at all. Web-only deployments shouldn't see a
-  // "reply in Slack" hint.
+  // The external-channel approval footnote only makes sense when an external
+  // target exists at all. Web-only deployments shouldn't see a
+  // "reply in the channel" hint.
   const hasExternalTargets = hasTargets || hasUnavailableTargets;
 
   // Flash the "Saved" confirmation; the mutation's rejection is reflected
@@ -340,7 +340,7 @@ export function AutomationDeliveryDefaultsPanel({ deliveryState }) {
           )}
         </div>
 
-        {/* ── Footnote (only when an external Slack-style target exists) ── */}
+        {/* ── Footnote (only when an external channel target exists) ── */}
         {hasExternalTargets &&
         (
           <div

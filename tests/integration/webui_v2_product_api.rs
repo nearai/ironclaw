@@ -33,12 +33,15 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::ProductOutboundPayload;
 use ironclaw_product_workflow::{
     RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices, RebornServicesApi,
-    RebornStreamEventsRequest,
+    RebornStreamEventsRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
-    RebornBuildInput, RebornRuntimeIdentity, RebornRuntimeInput, build_reborn_runtime,
-    build_webui_services, local_dev_runtime_policy,
+    ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
+    RebornBuildInput, RebornChannelConnectStrategy, RebornRuntime, RebornRuntimeIdentity,
+    RebornRuntimeInput, RebornWebuiBundle, RuntimeCredentialAccountSetup,
+    RuntimeCredentialAuthRequirement, VendorId, build_reborn_runtime, build_webui_services,
+    local_dev_runtime_policy,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnEventProjectionSource, TurnStatus};
 use ironclaw_webui::webui_v2::{
@@ -50,7 +53,7 @@ use reborn_support::reply::RebornScriptedReply;
 use reborn_support::session_thread::RebornThreadHarness;
 use reborn_support::webui_mount::{get_json, mount_webui_v2_router, post_json, webui_caller_for};
 use serde_json::Value;
-use tempfile::tempdir;
+use tempfile::{TempDir, tempdir};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -66,11 +69,11 @@ async fn thread_history_cold_get_and_libsql_reopen() {
     // Cold-GET mechanics mirror `assert_reply_persists_after_reopen`'s LibSql
     // branch: a genuinely fresh `libsql::Database` connection to the on-disk
     // file, independent of the live composite `Arc`.
-    let db_path = h
-        ._shared
-        .libsql_db_path
-        .clone()
-        .expect("LibSql storage mode has a db path");
+    let reborn_support::builder::StorageReopen::LibSql { db_path } = &h._shared.storage_reopen
+    else {
+        panic!("LibSql storage mode has a db path");
+    };
+    let db_path = db_path.clone();
     let db = Arc::new(
         libsql::Builder::new_local(&db_path)
             .build()
@@ -731,7 +734,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
             CapabilityProviderHostApiContract::new().expect("capability provider contract"),
         ))
         .expect("register capability provider contract");
-    let orphan_manifest = ExtensionManifestRecord::from_toml_with_contracts(
+    let orphan_manifest = ExtensionManifestRecord::from_toml(
         orphan_raw_toml,
         catalog_manifest.manifest().source,
         &ironclaw_host_api::HostPortCatalog::empty(),
@@ -1057,6 +1060,606 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
 
     drop(webui);
     runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// Deployment configuration is discovered from the manifest catalog, not from
+/// per-user installation state. An operator must therefore see first-party
+/// channel configuration on a fresh runtime before any user installs either
+/// extension, and secret fields must remain value-free in the response.
+#[tokio::test]
+async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_redacted() {
+    let root = tempdir().expect("runtime storage tempdir");
+    let tenant_id = TenantId::new("webui-admin-config-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-admin-config-agent").expect("agent id");
+    let user_id = UserId::new("webui-admin-config-operator").expect("user id");
+    let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-admin-config-source".to_string(),
+                reply_target_binding_id: "webui-admin-config-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id,
+        user_id,
+        Some(agent_id),
+        None,
+    );
+    let operator_router = webui_v2_router(WebUiV2State::new(
+        Arc::clone(&webui.api),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    ))
+    .layer(axum::Extension(caller.with_operator_webui_config(true)))
+    .layer(axum::Extension(WebUiV2Capabilities {
+        operator_webui_config: true,
+    }));
+
+    let (status, body) = get_json(
+        operator_router,
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "operator response: {body}");
+    let groups = body["groups"].as_array().expect("configuration groups");
+    for group_id in ["extension.slack", "extension.telegram"] {
+        assert!(
+            groups.iter().any(|group| group["group_id"] == group_id),
+            "manifest-declared group {group_id} must be listed before installation: {body}"
+        );
+    }
+    for secret_field in groups
+        .iter()
+        .flat_map(|group| group["fields"].as_array().into_iter().flatten())
+        .filter(|field| field["secret"] == true)
+    {
+        assert!(
+            secret_field.get("value").is_none_or(Value::is_null),
+            "secret fields must never expose a value: {secret_field}"
+        );
+    }
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// The public save path must cross the production generic invoke conduit and
+/// then return the authoritative redacted query state. A successful first
+/// replacement advances revision zero to one; the subsequent GET must observe
+/// the same revision without exposing any submitted secret material.
+#[tokio::test]
+async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision() {
+    let root = tempdir().expect("runtime storage tempdir");
+    let tenant_id = TenantId::new("webui-admin-save-tenant").expect("tenant id");
+    let agent_id = AgentId::new("webui-admin-save-agent").expect("agent id");
+    let user_id = UserId::new("webui-admin-save-operator").expect("user id");
+    let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
+        .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+        .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+        .with_network_http_egress_for_test(Arc::new(
+            reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+        ));
+    let runtime = build_reborn_runtime(
+        RebornRuntimeInput::from_services(input)
+            .with_identity(RebornRuntimeIdentity {
+                tenant_id: tenant_id.as_str().to_string(),
+                agent_id: agent_id.as_str().to_string(),
+                source_binding_id: "webui-admin-save-source".to_string(),
+                reply_target_binding_id: "webui-admin-save-reply".to_string(),
+            })
+            .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                "unused", 0, 0,
+            ))),
+    )
+    .await
+    .expect("production Reborn runtime builds");
+    let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        tenant_id,
+        user_id,
+        Some(agent_id),
+        None,
+    )
+    .with_operator_webui_config(true);
+    let operator_router = || {
+        webui_v2_router(WebUiV2State::new(
+            Arc::clone(&webui.api),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(caller.clone()))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: true,
+        }))
+    };
+    let submitted_secret = "xoxb-redaction-sentinel-never-return";
+
+    let (save_status, saved) = put_json(
+        operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.slack",
+        serde_json::json!({
+            "values": slack_admin_configuration_values(submitted_secret, "T-SAVED"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-save-1",
+        }),
+    )
+    .await;
+    let (read_status, read_body) = get_json(
+        operator_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+
+    assert_eq!(save_status, StatusCode::OK, "save response: {saved}");
+    assert_eq!(
+        saved["group_id"], "extension.slack",
+        "save response: {saved}"
+    );
+    assert_eq!(saved["revision"], 1, "save response: {saved}");
+    assert_eq!(read_status, StatusCode::OK, "read response: {read_body}");
+    let slack = read_body["groups"]
+        .as_array()
+        .and_then(|groups| {
+            groups
+                .iter()
+                .find(|group| group["group_id"] == "extension.slack")
+        })
+        .unwrap_or_else(|| panic!("Slack configuration missing after save: {read_body}"));
+    assert_eq!(slack["revision"], 1, "read response: {read_body}");
+    assert_eq!(slack["complete"], true, "read response: {read_body}");
+    assert!(
+        !saved.to_string().contains(submitted_secret)
+            && !read_body.to_string().contains(submitted_secret),
+        "secret material must be redacted from save and read responses"
+    );
+    let bot_token = slack["fields"]
+        .as_array()
+        .and_then(|fields| {
+            fields
+                .iter()
+                .find(|field| field["handle"] == "slack_bot_token")
+        })
+        .unwrap_or_else(|| panic!("Slack bot-token field missing: {read_body}"));
+    assert_eq!(bot_token["provided"], true, "read response: {read_body}");
+    assert!(
+        bot_token.get("value").is_none_or(Value::is_null),
+        "stored secret value must not be returned: {bot_token}"
+    );
+
+    drop(webui);
+    runtime.shutdown().await.expect("runtime shuts down");
+}
+
+/// Operator capability is a transport authorization boundary. An ordinary
+/// authenticated user may neither discover tenant deployment configuration nor
+/// submit a replacement, even when the request body is otherwise valid.
+#[tokio::test]
+async fn non_operator_cannot_read_or_replace_admin_configuration() {
+    let fixture = AdminConfigurationFixture::new("non-operator").await;
+    let (get_status, get_body) = get_json(
+        fixture.member_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+    let (put_status, put_body) = put_json(
+        fixture.member_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.slack",
+        serde_json::json!({
+            "values": slack_admin_configuration_values("forbidden-secret", "T-FORBIDDEN"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-forbidden-1",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        (get_status, put_status),
+        (StatusCode::FORBIDDEN, StatusCode::FORBIDDEN),
+        "non-operator GET body: {get_body}; PUT body: {put_body}"
+    );
+    fixture.shutdown().await;
+}
+
+/// Optimistic concurrency belongs to the generic manifest configuration
+/// service. Two distinct requests cannot both replace revision zero: after the
+/// first commit, a second request carrying the stale revision is a conflict.
+#[tokio::test]
+async fn stale_admin_configuration_revision_is_rejected() {
+    let fixture = AdminConfigurationFixture::new("stale-revision").await;
+    let route = "/api/webchat/v2/operator/extension-configuration/extension.slack";
+    let (first_status, first_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("first-secret", "T-FIRST"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-first-1",
+        }),
+    )
+    .await;
+    let (stale_status, stale_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("stale-secret", "T-STALE"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-stale-2",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        (first_status, stale_status),
+        (StatusCode::OK, StatusCode::CONFLICT),
+        "first response: {first_body}; stale response: {stale_body}"
+    );
+    fixture.shutdown().await;
+}
+
+/// Empty secret inputs are the UI's explicit "keep the existing secret"
+/// sentinel. A later replacement may update inline values while preserving the
+/// prior secret reference and advancing the group revision.
+#[tokio::test]
+async fn blank_admin_secret_preserves_stored_value() {
+    let fixture = AdminConfigurationFixture::new("blank-secret").await;
+    let route = "/api/webchat/v2/operator/extension-configuration/extension.slack";
+    let (first_status, first_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("retained-secret", "T-ORIGINAL"),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-secret-first",
+        }),
+    )
+    .await;
+    let (second_status, second_body) = put_json(
+        fixture.operator_router(),
+        route,
+        serde_json::json!({
+            "values": slack_admin_configuration_values("", "T-UPDATED"),
+            "expected_revision": 1,
+            "idempotency_key": "webui-admin-secret-second",
+        }),
+    )
+    .await;
+    let (read_status, read_body) = get_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+
+    assert_eq!(
+        (first_status, second_status, read_status),
+        (StatusCode::OK, StatusCode::OK, StatusCode::OK),
+        "first response: {first_body}; second response: {second_body}; read response: {read_body}"
+    );
+    let slack = configuration_group(&read_body, "extension.slack");
+    assert_eq!(slack["revision"], 2, "read response: {read_body}");
+    let bot_token = configuration_field(slack, "slack_bot_token");
+    assert_eq!(bot_token["provided"], true, "read response: {read_body}");
+    assert!(
+        bot_token.get("value").is_none_or(Value::is_null),
+        "retained secret remains redacted: {bot_token}"
+    );
+    let team_id = configuration_field(slack, "slack_team_id");
+    assert_eq!(team_id["value"], "T-UPDATED", "read response: {read_body}");
+    fixture.shutdown().await;
+}
+
+/// Installation membership and tenant deployment configuration are distinct
+/// lifecycles. Removing a user's extension installation cannot delete the
+/// operator's manifest-group revision or configured values.
+#[tokio::test]
+async fn user_extension_removal_does_not_erase_admin_configuration() {
+    let fixture = AdminConfigurationFixture::new("remove-preserves-config").await;
+    let (save_status, save_body) = put_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.telegram",
+        serde_json::json!({
+            "values": telegram_admin_configuration_values(),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-before-user-remove",
+        }),
+    )
+    .await;
+    let (install_status, install_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/install",
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "telegram"}
+        }),
+    )
+    .await;
+    let (remove_status, remove_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/telegram/remove",
+        serde_json::json!({}),
+    )
+    .await;
+    let (read_status, read_body) = get_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration",
+    )
+    .await;
+
+    assert_eq!(
+        (save_status, install_status, remove_status, read_status),
+        (
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+        ),
+        "save: {save_body}; install: {install_body}; remove: {remove_body}; read: {read_body}"
+    );
+    let telegram = configuration_group(&read_body, "extension.telegram");
+    assert_eq!(telegram["revision"], 1, "read response: {read_body}");
+    assert_eq!(telegram["complete"], true, "read response: {read_body}");
+    assert_eq!(
+        configuration_field(telegram, "telegram_bot_token")["provided"],
+        true,
+        "read response: {read_body}"
+    );
+    fixture.shutdown().await;
+}
+
+/// A manifest-declared channel consumer must resolve the tenant's saved admin
+/// values through the generic configuration path. This drives the ordinary
+/// extension setup and pairing projections rather than reading the admin store
+/// directly: pairing is available after install, before activation, with no
+/// Telegram-specific adapter branch in this journey.
+#[tokio::test]
+async fn extension_setup_consumer_sees_manifest_admin_configuration() {
+    let fixture = AdminConfigurationFixture::new("effective-consumer").await;
+    let (save_status, save_body) = put_json(
+        fixture.operator_router(),
+        "/api/webchat/v2/operator/extension-configuration/extension.telegram",
+        serde_json::json!({
+            "values": telegram_admin_configuration_values(),
+            "expected_revision": 0,
+            "idempotency_key": "webui-admin-effective-consumer",
+        }),
+    )
+    .await;
+    let (install_status, install_body) = post_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/install",
+        serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "telegram"}
+        }),
+    )
+    .await;
+    let (setup_status, setup_body) = get_json(
+        fixture.member_router(),
+        "/api/webchat/v2/extensions/telegram/setup",
+    )
+    .await;
+    let (pairing_status, pairing_body) = post_json(
+        fixture.pairing_member_router(),
+        "/api/webchat/v2/extensions/telegram/pairing/mint",
+        serde_json::json!({}),
+    )
+    .await;
+
+    assert_eq!(
+        (save_status, install_status, setup_status, pairing_status),
+        (
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+            StatusCode::OK,
+        ),
+        "save: {save_body}; install: {install_body}; setup: {setup_body}; pairing: {pairing_body}"
+    );
+    for handle in ["telegram_bot_token", "telegram_webhook_secret"] {
+        let secret = setup_body["secrets"]
+            .as_array()
+            .and_then(|secrets| secrets.iter().find(|secret| secret["name"] == handle))
+            .unwrap_or_else(|| panic!("setup consumer omitted {handle}: {setup_body}"));
+        assert_eq!(
+            secret["provided"], true,
+            "setup consumer did not resolve saved {handle}: {setup_body}"
+        );
+        assert!(
+            secret.get("value").is_none(),
+            "setup projection must remain presence-only: {secret}"
+        );
+    }
+    assert!(
+        pairing_body["code"]
+            .as_str()
+            .is_some_and(|code| !code.is_empty()),
+        "pairing mint omitted its code: {pairing_body}"
+    );
+    assert!(
+        pairing_body["deep_link"]
+            .as_str()
+            .is_some_and(|link| link.starts_with("https://t.me/ironclaw_test_bot?start=")),
+        "pairing mint did not consume the manifest-configured deep-link value: {pairing_body}"
+    );
+    fixture.shutdown().await;
+}
+
+struct AdminConfigurationFixture {
+    _root: TempDir,
+    runtime: RebornRuntime,
+    webui: RebornWebuiBundle,
+    caller: WebUiAuthenticatedCaller,
+}
+
+impl AdminConfigurationFixture {
+    async fn new(name: &str) -> Self {
+        let root = tempdir().expect("runtime storage tempdir");
+        let tenant_id = TenantId::new(format!("webui-admin-{name}-tenant")).expect("tenant id");
+        let agent_id = AgentId::new(format!("webui-admin-{name}-agent")).expect("agent id");
+        let user_id = UserId::new(format!("webui-admin-{name}-user")).expect("user id");
+        let input = RebornBuildInput::local_dev(user_id.as_str(), root.path().join("local-dev"))
+            .with_local_runtime_identity(tenant_id.clone(), agent_id.clone())
+            .with_runtime_policy(local_dev_runtime_policy().expect("local-dev policy"))
+            .with_account_setup_descriptors(vec![telegram_pairing_descriptor()])
+            .with_network_http_egress_for_test(Arc::new(
+                reborn_support::harness::RecordingNetworkHttpEgress::with_body(Vec::new()),
+            ));
+        let runtime = build_reborn_runtime(
+            RebornRuntimeInput::from_services(input)
+                .with_identity(RebornRuntimeIdentity {
+                    tenant_id: tenant_id.as_str().to_string(),
+                    agent_id: agent_id.as_str().to_string(),
+                    source_binding_id: format!("webui-admin-{name}-source"),
+                    reply_target_binding_id: format!("webui-admin-{name}-reply"),
+                })
+                .with_model_gateway_override(Arc::new(BudgetTestGateway::with_constant(
+                    "unused", 0, 0,
+                ))),
+        )
+        .await
+        .expect("production Reborn runtime builds");
+        let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
+        let caller = WebUiAuthenticatedCaller::new(tenant_id, user_id, Some(agent_id), None);
+        Self {
+            _root: root,
+            runtime,
+            webui,
+            caller,
+        }
+    }
+
+    fn member_router(&self) -> Router {
+        mount_webui_v2_router(Arc::clone(&self.webui.api), self.caller.clone())
+    }
+
+    fn operator_router(&self) -> Router {
+        webui_v2_router(WebUiV2State::new(
+            Arc::clone(&self.webui.api),
+            DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+        ))
+        .layer(axum::Extension(
+            self.caller.clone().with_operator_webui_config(true),
+        ))
+        .layer(axum::Extension(WebUiV2Capabilities {
+            operator_webui_config: true,
+        }))
+    }
+
+    fn pairing_member_router(&self) -> Router {
+        let pairing = self
+            .runtime
+            .channel_pairing_route_mount()
+            .expect("Telegram pairing route mount");
+        pairing
+            .router
+            .layer(axum::Extension(self.caller.clone()))
+            .layer(axum::Extension(WebUiV2Capabilities::default()))
+    }
+
+    async fn shutdown(self) {
+        let Self { runtime, webui, .. } = self;
+        drop(webui);
+        runtime.shutdown().await.expect("runtime shuts down");
+    }
+}
+
+fn telegram_pairing_descriptor() -> ExtensionAccountSetupDescriptor {
+    let extension_id = ExtensionId::new("telegram").expect("extension id");
+    ExtensionAccountSetupDescriptor {
+        extension_id: extension_id.clone(),
+        auth_requirement: RuntimeCredentialAuthRequirement {
+            provider: VendorId::new("telegram").expect("vendor id"),
+            setup: RuntimeCredentialAccountSetup::Pairing,
+            requester_extension: extension_id,
+            provider_scopes: Vec::new(),
+        },
+        connection_requirement: ChannelConnectionRequirement {
+            channel: "telegram".to_string(),
+            display_name: "Telegram".to_string(),
+            strategy: RebornChannelConnectStrategy::WebGeneratedCode,
+            instructions: "Pair Telegram".to_string(),
+            input_placeholder: String::new(),
+            submit_label: "Open pairing".to_string(),
+            error_message: "Pairing failed".to_string(),
+        },
+        connection_notices: ChannelConnectionNoticePolicy::generic("Telegram"),
+        activation_success_message: "Telegram paired".to_string(),
+        pairing_deep_link_template: Some("https://t.me/{bot_username}?start={code}".to_string()),
+    }
+}
+
+async fn put_json(router: Router, path: &str, body: Value) -> (StatusCode, Value) {
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let body = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "response body is not valid JSON ({error}): {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        })
+    };
+    (status, body)
+}
+
+fn slack_admin_configuration_values(bot_token: &str, team_id: &str) -> Value {
+    serde_json::json!([
+        {"handle": "slack_bot_token", "value": bot_token},
+        {"handle": "slack_signing_secret", "value": "signing-secret"},
+        {"handle": "slack_team_id", "value": team_id},
+        {"handle": "slack_api_app_id", "value": "A-APP"},
+        {"handle": "slack_installation_id", "value": "I-INSTALL"},
+        {"handle": "slack_bot_user_id", "value": "U-BOT"},
+        {"handle": "slack_oauth_client_id", "value": "oauth-client"},
+        {"handle": "slack_oauth_client_secret", "value": "oauth-secret"}
+    ])
+}
+
+fn telegram_admin_configuration_values() -> Value {
+    serde_json::json!([
+        {"handle": "telegram_bot_token", "value": "telegram-bot-secret"},
+        {"handle": "telegram_webhook_secret", "value": "telegram-webhook-secret"},
+        {"handle": "telegram_webhook_url", "value": "https://example.test/telegram/updates"},
+        {"handle": "bot_username", "value": "ironclaw_test_bot"}
+    ])
+}
+
+fn configuration_group<'a>(body: &'a Value, group_id: &str) -> &'a Value {
+    body["groups"]
+        .as_array()
+        .and_then(|groups| groups.iter().find(|group| group["group_id"] == group_id))
+        .unwrap_or_else(|| panic!("configuration group {group_id} missing: {body}"))
+}
+
+fn configuration_field<'a>(group: &'a Value, handle: &str) -> &'a Value {
+    group["fields"]
+        .as_array()
+        .and_then(|fields| fields.iter().find(|field| field["handle"] == handle))
+        .unwrap_or_else(|| panic!("configuration field {handle} missing: {group}"))
 }
 
 async fn post_raw(router: Router, path: &str, body: Vec<u8>) -> (StatusCode, Value) {

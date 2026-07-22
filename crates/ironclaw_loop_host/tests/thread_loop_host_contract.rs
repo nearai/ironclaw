@@ -4994,3 +4994,4 @@ impl LoopCapabilityPort for StaticToolDefinitionPort {
         })
     }
 }
+// arch-exempt: large_file, thread loop host contract remains one integration suite, plan #6175

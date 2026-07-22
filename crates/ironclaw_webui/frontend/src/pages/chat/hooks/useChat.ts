@@ -1004,8 +1004,7 @@ export function useChat(threadId) {
     async (_requestId, action, _kind) => {
       let resolution = "approved";
       let always = false;
-      if (action === "deny") resolution = "denied";
-      else if (action === "cancel") resolution = "cancelled";
+      if (action === "deny" || action === "cancel") resolution = "declined";
       else if (action === "always") {
         resolution = "approved";
         always = true;
@@ -1107,7 +1106,7 @@ export function useChat(threadId) {
 }
 
 function isDeclinedGateResolution(resolution) {
-  return resolution === "denied" || resolution === "cancelled";
+  return resolution === "declined";
 }
 
 function retryAfterMs(err) {

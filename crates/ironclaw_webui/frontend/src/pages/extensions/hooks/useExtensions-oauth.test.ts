@@ -63,8 +63,6 @@ test("useOauthSetup exposes the popup-watcher phase as authorizing", () => {
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -140,8 +138,6 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -156,8 +152,8 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -204,7 +200,7 @@ test("useOauthSetup waits for the matching Slack OAuth callback when reconnectin
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -255,7 +251,7 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     active: true,
     authenticated: false,
     needs_setup: true,
-    activation_status: "active",
+    installation_state: "active",
     onboarding_state: "setup_required",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
@@ -285,8 +281,6 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -301,8 +295,8 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -352,7 +346,7 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -366,7 +360,7 @@ test("useOauthSetup completes reconnect when polling sees Slack become configure
     active: true,
     authenticated: true,
     needs_setup: false,
-    activation_status: "active",
+    installation_state: "active",
     onboarding_state: null,
   };
   intervals[0]();
@@ -390,7 +384,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     active: true,
     authenticated: false,
     needs_setup: true,
-    activation_status: "active",
+    installation_state: "active",
     onboarding_state: "setup_required",
   };
   const popup = { closed: false, location: { href: "about:blank" } };
@@ -420,8 +414,6 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -436,8 +428,8 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -487,7 +479,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -502,7 +494,7 @@ test("useOauthSetup keeps polling reconnect after Slack closes the OAuth popup",
     active: true,
     authenticated: true,
     needs_setup: false,
-    activation_status: "active",
+    installation_state: "active",
     onboarding_state: null,
   };
   intervals[0]();
@@ -548,8 +540,6 @@ test("useOauthSetup surfaces a flow-matched failure signal as a retryable error 
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -678,7 +668,7 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
     active: true,
     authenticated: true,
     needs_setup: false,
-    activation_status: "active",
+    installation_state: "active",
     onboarding_state: null,
   };
   const popup = { closed: false, location: { href: "about:blank" } };
@@ -708,8 +698,6 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -724,8 +712,8 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -775,7 +763,7 @@ test("useOauthSetup reconnect ignores the pre-flow configured snapshot and waits
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -838,8 +826,6 @@ test("useOauthSetup ignores a stale OAuth callback when the flow response carrie
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -966,8 +952,6 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -986,8 +970,8 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -1035,7 +1019,7 @@ test("useOauthSetup completes reconnect from the origin-independent flow-status 
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -1094,8 +1078,6 @@ test("useOauthSetup surfaces an expired flow-status poll as a retryable error wh
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},
@@ -1110,8 +1092,8 @@ test("useOauthSetup surfaces an expired flow-status poll as a retryable error wh
           return {
             secrets: [
               {
-                name: "slack_personal_oauth",
-                provider: "slack_personal",
+                name: "slack_oauth",
+                provider: "slack",
                 provided: true,
               },
             ],
@@ -1159,7 +1141,7 @@ test("useOauthSetup surfaces an expired flow-status poll as a retryable error wh
     },
     {
       secret: {
-        provider: "slack_personal",
+        provider: "slack",
         provided: true,
       },
     },
@@ -1238,8 +1220,6 @@ test("useOauthSetup ignores flow A status after flow B becomes current", async (
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () =>
       new Promise((resolve) => {
@@ -1349,8 +1329,6 @@ test("useOauthSetup still times out when a matched failure signal cannot reach d
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
-    isChannelExtensionKind: () => false,
-    listConnectableChannels: () => {},
     removeExtension: () => {},
     startExtensionOauth: () => {},
     submitExtensionSetup: () => {},

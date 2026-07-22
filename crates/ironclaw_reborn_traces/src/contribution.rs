@@ -102,6 +102,11 @@ pub struct IronclawTraceMetadata {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub feature_flags: BTreeMap<String, String>,
     pub channel: TraceChannel,
+    /// The originating extension/surface id when `channel` is
+    /// [`TraceChannel::Extension`] (generic origin data replacing the retired
+    /// concrete variants).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_origin: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_name: Option<String>,
 }
@@ -111,10 +116,15 @@ pub struct IronclawTraceMetadata {
 pub enum TraceChannel {
     Web,
     Cli,
-    Telegram,
-    Slack,
     Routine,
     Other,
+    /// An extension-served channel. The concrete identity lives in
+    /// `IronclawTraceMetadata::channel_origin` (data, never an enum variant).
+    /// `#[serde(other)]` also absorbs historical concrete tags and any
+    /// future unknown tag — persisted envelopes always deserialize (LLM data
+    /// is never dropped to a parse quarantine over a channel name).
+    #[serde(other)]
+    Extension,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1598,6 +1608,9 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
+                // Options carry no origin id today; the wire field stays
+                // (compat-pinned) for envelope producers that stamp one.
+                channel_origin: None,
                 model_name: Some(trace.model_name.clone()),
             },
             consent: ConsentMetadata {
@@ -1726,6 +1739,9 @@ impl RawTraceContribution {
                 engine_version: options.engine_version,
                 feature_flags: options.feature_flags,
                 channel: options.channel,
+                // Options carry no origin id today; the wire field stays
+                // (compat-pinned) for envelope producers that stamp one.
+                channel_origin: None,
                 model_name: None,
             },
             consent: ConsentMetadata {
@@ -2907,10 +2923,9 @@ fn channel_label(channel: TraceChannel) -> &'static str {
     match channel {
         TraceChannel::Web => "web",
         TraceChannel::Cli => "cli",
-        TraceChannel::Telegram => "telegram",
-        TraceChannel::Slack => "slack",
         TraceChannel::Routine => "routine",
         TraceChannel::Other => "other",
+        TraceChannel::Extension => "extension",
     }
 }
 
@@ -2927,7 +2942,9 @@ fn tool_category_for(tool_name: &str) -> String {
         "workspace".to_string()
     } else if lower.contains("memory") || lower.contains("search") {
         "retrieval".to_string()
-    } else if lower.contains("calendar") || lower.contains("email") || lower.contains("slack") {
+    } else if lower.contains("calendar") || lower.contains("email") || lower.contains('.') {
+        // Namespaced capability ids (`<extension>.<tool>`) are external-app
+        // tools by construction.
         "external_app".to_string()
     } else {
         "other".to_string()
@@ -10319,6 +10336,84 @@ mod tests {
                 TraceContributionAcceptance::ManualSubmit
             ),
             Ok(())
+        );
+    }
+
+    /// Lane-2 safety pin (extension-runtime DEL-8). The trace redaction
+    /// classifier keys the payload-redaction profile (and the external-write
+    /// side-effect level) off tool-name keywords; the vendor keywords are a
+    /// genuine safety DENYLIST, not extension routing. It is deliberately a
+    /// SUPERSET of the bundled package inventory — it must also cover
+    /// non-package messaging/issue-tracker tools such as signal, discord, and
+    /// gitlab — so it cannot be sourced from the inventory without weakening
+    /// redaction. This locks the mapping so a future "de-hardcode the vendor
+    /// names" cleanup cannot silently drop a keyword and stop redacting a
+    /// tool's sensitive payload. The `contribution.rs` PATH_TERM_COLLISIONS
+    /// carve-out in
+    /// `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`
+    /// documents why the names stay here.
+    #[test]
+    fn tool_payload_redaction_profile_is_a_safety_denylist_not_inventory_routing() {
+        // Package-vendor keywords select the profile whose rules redact that
+        // payload shape.
+        assert!(matches!(
+            tool_payload_profile("slack.send_message"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("gmail.send_email"),
+            Some(ToolPayloadProfile::Email)
+        ));
+        assert!(matches!(
+            tool_payload_profile("github.create_issue"),
+            Some(ToolPayloadProfile::IssueTracker)
+        ));
+        // Non-inventory keywords must ALSO classify — dropping them (as
+        // sourcing the set from the package inventory would) silently stops
+        // redacting those tools' payloads.
+        assert!(matches!(
+            tool_payload_profile("signal.send"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("discord.post_message"),
+            Some(ToolPayloadProfile::Messaging)
+        ));
+        assert!(matches!(
+            tool_payload_profile("gitlab.open_merge_request"),
+            Some(ToolPayloadProfile::IssueTracker)
+        ));
+
+        // A `slack`-named send is an external write (the safety signal),
+        // distinct from a local write.
+        assert!(matches!(
+            classify_tool_side_effect("slack.send_message"),
+            SideEffectLevel::ExternalWrite
+        ));
+        assert!(matches!(
+            classify_tool_side_effect("file.write"),
+            SideEffectLevel::LocalWrite
+        ));
+
+        // Drive the production caller: a messaging tool's content field is
+        // redacted; a tool the classifier does not recognize passes through
+        // untouched (the control proving the keyword gates the redaction).
+        let payload = serde_json::json!({ "message": "meet me at 5", "channel": "C42" });
+        let mut report = RedactionReport::default();
+        let redacted =
+            redact_tool_specific_payload(Some("slack.send_message"), &payload, &mut report);
+        assert_ne!(
+            redacted.get("message"),
+            payload.get("message"),
+            "a messaging tool's message content must be redacted"
+        );
+
+        let mut report = RedactionReport::default();
+        let untouched =
+            redact_tool_specific_payload(Some("weather.forecast"), &payload, &mut report);
+        assert_eq!(
+            untouched, payload,
+            "a tool with no payload profile must pass through unredacted"
         );
     }
 

@@ -3,13 +3,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    ExtensionId, RuntimeCredentialAccountProviderId, RuntimeCredentialAccountSetup,
-    RuntimeCredentialAuthRequirement, UserId,
+    ExtensionId, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement, UserId, VendorId,
 };
 use ironclaw_product_workflow::{
-    AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionRequirement,
-    ExtensionAccountSetupDescriptor, ExtensionAccountSetupError, ExtensionAccountSetupRegistry,
-    RebornChannelConnectStrategy,
+    AccountConnectionStatusError, AccountConnectionStatusSource, ChannelConnectionNoticePolicy,
+    ChannelConnectionRequirement, ExtensionAccountSetupDescriptor, ExtensionAccountSetupError,
+    ExtensionAccountSetupRegistry, RebornChannelConnectStrategy,
 };
 
 fn extension_id(value: &str) -> ExtensionId {
@@ -21,26 +20,64 @@ fn user_id(value: &str) -> UserId {
 }
 
 fn descriptor(extension: &str) -> ExtensionAccountSetupDescriptor {
+    descriptor_with_display_name(extension, extension)
+}
+
+fn descriptor_with_display_name(
+    extension: &str,
+    display_name: &str,
+) -> ExtensionAccountSetupDescriptor {
     let extension_id = extension_id(extension);
+    let connection_requirement = ChannelConnectionRequirement {
+        channel: extension.to_string(),
+        display_name: display_name.to_string(),
+        strategy: RebornChannelConnectStrategy::WebGeneratedCode,
+        instructions: "Connect the account.".to_string(),
+        input_placeholder: String::new(),
+        submit_label: "Connect".to_string(),
+        error_message: "Connection failed.".to_string(),
+    };
+    let connection_notices =
+        ChannelConnectionNoticePolicy::generic(&connection_requirement.display_name);
     ExtensionAccountSetupDescriptor {
         extension_id: extension_id.clone(),
         auth_requirement: RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new(extension)
-                .expect("valid provider id"),
+            provider: VendorId::new(extension).expect("valid provider id"),
             setup: RuntimeCredentialAccountSetup::Pairing,
             requester_extension: extension_id,
             provider_scopes: Vec::new(),
         },
-        connection_requirement: ChannelConnectionRequirement {
-            channel: extension.to_string(),
-            strategy: RebornChannelConnectStrategy::WebGeneratedCode,
-            instructions: "Connect the account.".to_string(),
-            input_placeholder: String::new(),
-            submit_label: "Connect".to_string(),
-            error_message: "Connection failed.".to_string(),
-        },
+        connection_requirement,
+        connection_notices,
         activation_success_message: "Account setup is ready.".to_string(),
+        pairing_deep_link_template: None,
     }
+}
+
+#[test]
+fn generic_connection_notices_are_complete_and_display_name_driven() {
+    let notices = ChannelConnectionNoticePolicy::generic("Acme Chat");
+    for text in [
+        &notices.connect_required,
+        &notices.paired,
+        &notices.already_paired_same_user,
+        &notices.already_bound_to_other_user,
+        &notices.expired_or_unknown,
+    ] {
+        assert!(!text.trim().is_empty());
+        assert!(text.contains("Acme Chat"));
+        assert!(!text.contains("Telegram"));
+    }
+}
+
+#[test]
+fn descriptor_uses_display_name_driven_connection_notices() {
+    let descriptor = descriptor_with_display_name("paired-channel", "Acme Chat");
+
+    assert_eq!(
+        descriptor.connection_notices,
+        ChannelConnectionNoticePolicy::generic("Acme Chat")
+    );
 }
 
 #[derive(Debug)]

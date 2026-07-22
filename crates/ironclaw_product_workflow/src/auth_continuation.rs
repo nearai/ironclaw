@@ -93,7 +93,14 @@ impl ProductAuthTurnGateResumeDispatcher {
         &self,
         event: AuthContinuationEvent,
     ) -> Result<TurnRunId, ProductWorkflowError> {
-        self.dispatch_turn_gate(event, None, false).await
+        // Tolerate an already-settled gate exactly like the deny path does:
+        // a completed continuation is re-dispatched whenever the durable
+        // `continuation_emitted_at` fence was not stamped (e.g. the fan-out
+        // sweep was incomplete and the whole dispatch stays retryable). On
+        // replay the primary run has typically already resumed — its gate is
+        // no longer the blocked gate — and that is the settled outcome this
+        // continuation wanted, not an error to retry forever.
+        self.dispatch_turn_gate(event, None, true).await
     }
 
     async fn dispatch_turn_gate(
@@ -683,6 +690,46 @@ mod tests {
         assert!(coordinator.resumes().is_empty());
     }
 
+    /// A replayed RESUME continuation whose gate already settled converges as
+    /// a no-op instead of erroring forever. Completed continuations replay
+    /// whenever the durable `continuation_emitted_at` fence was not stamped —
+    /// e.g. the blocked-run fan-out sweep was incomplete and the whole
+    /// dispatch stayed retryable; by then the primary run has typically
+    /// resumed (or re-blocked on a NEW gate), which is the settled outcome the
+    /// continuation wanted.
+    #[tokio::test]
+    async fn resume_continuation_leaves_settled_gate_untouched() {
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
+        let run_id = TurnRunId::new();
+        // Re-blocked on a NEW gate: the replayed resume for the old gate must
+        // not touch it.
+        coordinator.set_state(run_state(
+            run_id,
+            TurnStatus::BlockedAuth,
+            Some("gate:new-auth"),
+        ));
+        dispatcher
+            .dispatch_auth_continuation(scoped_event(AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+                gate_ref: AuthGateRef::new("gate:stale-auth").unwrap(),
+            }))
+            .await
+            .expect("a replayed resume for a superseded gate converges");
+
+        // Already resumed (no longer blocked at all): same convergence.
+        coordinator.set_state(run_state(run_id, TurnStatus::Queued, None));
+        dispatcher
+            .dispatch_auth_continuation(scoped_event(AuthContinuationRef::TurnGateResume {
+                turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+                gate_ref: AuthGateRef::new("gate:stale-auth").unwrap(),
+            }))
+            .await
+            .expect("a replayed resume for an already-resumed run converges");
+
+        assert!(coordinator.resumes().is_empty());
+    }
+
     #[tokio::test]
     async fn turn_gate_continuation_uses_subject_scope_and_original_actor() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
@@ -738,17 +785,15 @@ mod tests {
             gate_ref: AuthGateRef::new("gate:auth").unwrap(),
         });
 
-        let err = dispatcher
+        // The safety property is side-effect freedom: an auth continuation
+        // must never resolve a non-auth gate. It converges as a settled no-op
+        // (replay-tolerant) instead of erroring forever — the run left
+        // BlockedAuth, so this continuation's business is done.
+        dispatcher
             .dispatch_turn_gate_resume(event)
             .await
-            .expect_err("non-auth gates must not resume through auth continuation");
+            .expect("a non-auth-blocked run converges without a resume");
 
-        assert!(matches!(
-            err,
-            ProductWorkflowError::AuthContinuationRejected {
-                kind: AuthContinuationRejectionKind::UnauthorizedBlockedGate
-            }
-        ));
         assert!(coordinator.resumes().is_empty());
     }
 
@@ -767,17 +812,15 @@ mod tests {
             gate_ref: AuthGateRef::new("gate:auth").unwrap(),
         });
 
-        let err = dispatcher
+        // The safety property is side-effect freedom: a stale continuation
+        // must never resolve a DIFFERENT gate. It converges as a settled
+        // no-op (replay-tolerant) instead of erroring forever — the gate it
+        // was minted for is gone.
+        dispatcher
             .dispatch_turn_gate_resume(event)
             .await
-            .expect_err("stale auth gate callbacks must not resume a different gate");
+            .expect("a superseded gate converges without a resume");
 
-        assert!(matches!(
-            err,
-            ProductWorkflowError::AuthContinuationRejected {
-                kind: AuthContinuationRejectionKind::UnauthorizedBlockedGate
-            }
-        ));
         assert!(coordinator.resumes().is_empty());
     }
 
@@ -795,8 +838,8 @@ mod tests {
         let actor = TurnActor::new(UserId::new("alice").unwrap());
         let submit = coordinator
             .submit_turn(SubmitTurnRequest {
-                requested_model: None,
                 scope: scope.clone(),
+                requested_model: None,
                 actor: actor.clone(),
                 accepted_message_ref: AcceptedMessageRef::new("message-auth-real").unwrap(),
                 source_binding_ref: SourceBindingRef::new("source-auth-real").unwrap(),

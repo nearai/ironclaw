@@ -3163,3 +3163,4 @@ mod tests {
         CapabilityInputRef::new(value.into()).expect("valid input ref")
     }
 }
+// arch-exempt: large_file, tool disclosure migration remains centralized, plan #6175

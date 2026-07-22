@@ -30,4 +30,5 @@ tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_v1_lists_co
 tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_api_v1_alias_matches_v1_models
 tests/e2e/scenarios/test_reborn_responses_api.py::test_reborn_models_requires_auth
 tests/e2e/scenarios/test_admin_api.py
+tests/e2e/scenarios/test_reborn_slack_channel_e2e.py
 tests/e2e/scenarios/test_reborn_private_tool_installs.py

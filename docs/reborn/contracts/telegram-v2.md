@@ -1,8 +1,21 @@
 # Telegram Channel (Reborn host)
 
-**Status:** Shipped host wiring, compiled into every build. The CLI requires
-runtime Telegram enablement — `[telegram].enabled = true` /
-`IRONCLAW_REBORN_TELEGRAM_ENABLED=true` — before the routes are mounted.
+> **SUPERSEDED (unified extension runtime, NEA-25).** The host architecture this
+> document describes — the `ironclaw_channel_host` / `ironclaw_channel_delivery`
+> vendor-neutral host crates, the `ironclaw_wasm_product_adapters` adapter
+> runtime, and composition-owned Telegram mounting — was deleted with the V3
+> manifest-driven extension runtime. Telegram now ships as an ordinary
+> extension package (`crates/ironclaw_first_party_extensions/assets/telegram/`
+> plus its `ChannelAdapter` in `crates/ironclaw_telegram_extension`), installed,
+> activated, and dispatched by the generic runtime; see
+> `docs/reborn/extension-runtime/overview.md`. This document is retained as the
+> historical design record of the pre-runtime Telegram host; read it for the
+> shape of the flows, not for current crate or type names.
+
+**Status:** Superseded — see banner above. Historical text below describes the
+retired host wiring: the CLI required runtime Telegram enablement —
+`[telegram].enabled = true` /
+`IRONCLAW_REBORN_TELEGRAM_ENABLED=true` — before the routes were mounted.
 Supersedes the issue #3285 webhook-only
 tracer bullet this document previously described (see "What changed from the
 tracer-bullet contract" below).

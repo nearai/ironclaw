@@ -60,11 +60,13 @@ fn contains_marker_at_word_boundary(haystack: &str, marker: &str) -> bool {
     for (start, _) in haystack.match_indices(marker) {
         let end = start + marker.len();
         let before_ok = !starts_alnum
-            || start == 0
-            || !haystack[..start].ends_with(|c: char| c.is_ascii_alphanumeric());
+            || haystack
+                .get(..start)
+                .is_none_or(|prefix| !prefix.ends_with(|c: char| c.is_ascii_alphanumeric()));
         let after_ok = !ends_alnum
-            || end >= haystack.len()
-            || !haystack[end..].starts_with(|c: char| c.is_ascii_alphanumeric());
+            || haystack
+                .get(end..)
+                .is_none_or(|suffix| !suffix.starts_with(|c: char| c.is_ascii_alphanumeric()));
         if before_ok && after_ok {
             return true;
         }
@@ -101,7 +103,7 @@ fn has_secret_like_prefix(token: &str) -> bool {
 }
 
 fn is_secret_like_token(token: &str) -> bool {
-    [
+    const SECRET_PREFIXES: [&str; 25] = [
         "sk-",
         "sk-ant-",
         // Stripe's underscore forms. The hyphenated `sk-` above does not
@@ -124,11 +126,11 @@ fn is_secret_like_token(token: &str) -> bool {
         "gcp-",
         "ya29.",
         "aiza",
-        // Google OAuth client secrets and Slack bot/user/app tokens. Added
-        // with `HostRemediation` (the host-authored remediation channel):
-        // remediation text NAMES `google.client_secret` and Slack app
-        // credentials, so the VALUE shapes for exactly those credentials must
-        // be detectable. Strengthening this shared detector also tightens
+        // OAuth client secrets and workspace bot/user/app tokens. Added with
+        // `HostRemediation` (the host-authored remediation channel):
+        // remediation text names the corresponding configuration keys, so the
+        // VALUE shapes for those credentials must be detectable. Strengthening
+        // this shared detector also tightens
         // `SafeSummary`/`ModelResultPreview`, which is the correct direction —
         // the single definition never forks.
         "gocspx-",
@@ -138,9 +140,17 @@ fn is_secret_like_token(token: &str) -> bool {
         "xoxr-",
         "xoxs-",
         "xoxe-",
-    ]
-    .iter()
-    .any(|prefix| token.starts_with(prefix))
+    ];
+
+    // A bare prefix is documentation, not credential material. Extension
+    // catalog descriptions legitimately name token families such as `xoxp-`;
+    // treating the prefix alone as a leaked value drops the entire structured
+    // tool result before the model can see it. Any non-empty suffix still fails
+    // closed, including short sentinel values used by tests.
+    (!SECRET_PREFIXES.contains(&token)
+        && SECRET_PREFIXES
+            .iter()
+            .any(|prefix| token.starts_with(prefix)))
         || (token.len() >= 16 && (token.starts_with("akia") || token.starts_with("asia")))
 }
 
@@ -178,6 +188,10 @@ mod tests {
         assert!(contains_secret_like_token("secret gocspx-abc123def456"));
         assert!(contains_secret_like_token("xoxb-1234-5678-abcdefghij"));
         assert!(contains_secret_like_token("xoxp-1234-5678-abcdefghij"));
+        assert!(
+            !contains_secret_like_token("supports xoxp- tokens"),
+            "a documented token-family prefix without a value is not a credential"
+        );
         // Stripe's underscore forms — the hyphenated `sk-` prefix never
         // matched these, so they used to pass the guard untouched.
         assert!(contains_secret_like_token("sk_live_0123456789abcdef"));
