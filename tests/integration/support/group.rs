@@ -123,8 +123,9 @@ use super::product_workflow::RebornProductWorkflowHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
-    ErrLlm, ErrLlmKind, ParkingModelGate, SCRIPTED_MODEL_NAME, content_filter_once_trace_llm,
-    parking_trace_llm, scripted_trace_llm,
+    ErrLlm, ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailure,
+    RecoverableModelFailureScript, SCRIPTED_MODEL_NAME, parking_trace_llm,
+    recoverable_failure_trace_llm, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -1125,9 +1126,9 @@ enum ThreadModelMode {
     /// This thread's model call parks until the gate is released (E-GATEWAY
     /// seam), enabling a mid-turn cancel test.
     Parked(ParkingModelGate),
-    /// The first completion reports `FinishReason::ContentFilter`; subsequent
-    /// calls resume normal scripted playback.
-    ContentFilterOnce,
+    /// Reports a recoverable provider failure a bounded number of times, then
+    /// resumes normal scripted playback.
+    Recoverable(RecoverableModelFailureScript),
     /// This thread's model call always fails with a fixed non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS) instead of playing back
     /// `replies`. See [`super::scripted_provider::ErrLlm`].
@@ -1153,17 +1154,24 @@ impl<'g> RebornThreadBuilder<'g> {
     /// playback. This exercises model-error recovery through the real gateway.
     pub fn content_filter_model_once(mut self) -> Self {
         if matches!(self.model_mode, ThreadModelMode::Normal) {
-            self.model_mode = ThreadModelMode::ContentFilterOnce;
+            self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
+                RecoverableModelFailure::ContentFiltered,
+                1,
+            ));
         }
         self
     }
 
-    pub(crate) fn content_filter_model_once_opt(self, enabled: bool) -> Self {
-        if enabled {
-            self.content_filter_model_once()
-        } else {
-            self
+    pub(crate) fn recoverable_model_failure_opt(
+        mut self,
+        script: Option<RecoverableModelFailureScript>,
+    ) -> Self {
+        if let Some(script) = script
+            && matches!(self.model_mode, ThreadModelMode::Normal)
+        {
+            self.model_mode = ThreadModelMode::Recoverable(script);
         }
+        self
     }
 
     /// Internal: set the optional park gate (used by the flat builder to thread
@@ -1279,18 +1287,28 @@ impl<'g> RebornThreadBuilder<'g> {
         // way.
         let scripted_llm: Arc<TraceLlm> = Arc::new(scripted_trace_llm(self.replies));
         // C-ERRORS: `Failing` swaps in `ErrLlm` at the same vendor-SDK seam;
-        // `Parked` swaps in the parking wrapper. `ThreadModelMode` makes the
-        // three modes mutually exclusive by construction — no priority rule
-        // needed here.
-        let raw: Arc<dyn LlmProvider> = match self.model_mode {
-            ThreadModelMode::Parked(gate) => {
-                Arc::new(parking_trace_llm(gate, scripted_llm.clone()))
+        // `Parked` swaps in the parking wrapper. `ThreadModelMode` keeps all
+        // provider modes mutually exclusive by construction — no priority
+        // rule is needed here.
+        let (raw, model_provider_call_probe): (
+            Arc<dyn LlmProvider>,
+            Option<ModelProviderCallProbe>,
+        ) = match self.model_mode {
+            ThreadModelMode::Parked(gate) => (
+                Arc::new(parking_trace_llm(gate, scripted_llm.clone())),
+                None,
+            ),
+            ThreadModelMode::Recoverable(script) => {
+                let (provider, probe) = recoverable_failure_trace_llm(
+                    script.failure,
+                    script.successful_calls_before_failures,
+                    script.failures,
+                    scripted_llm.clone(),
+                );
+                (Arc::new(provider), Some(probe))
             }
-            ThreadModelMode::ContentFilterOnce => {
-                Arc::new(content_filter_once_trace_llm(scripted_llm.clone()))
-            }
-            ThreadModelMode::Failing(kind) => Arc::new(ErrLlm::new(kind)),
-            ThreadModelMode::Normal => scripted_llm.clone(),
+            ThreadModelMode::Failing(kind) => (Arc::new(ErrLlm::new(kind)), None),
+            ThreadModelMode::Normal => (scripted_llm.clone(), None),
         };
         let session = create_session_manager(SessionConfig {
             session_path: shared
@@ -1414,6 +1432,7 @@ impl<'g> RebornThreadBuilder<'g> {
             event_seq: AtomicU64::new(1),
             capability_recorder,
             scripted_llm,
+            model_provider_call_probe,
             _shared: Arc::clone(&shared),
             baseline_invocation_count,
             baseline_egress_count,

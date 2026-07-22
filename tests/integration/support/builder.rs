@@ -62,7 +62,10 @@ use super::http_matcher::ScriptedHttpResponse;
 use super::planned_runtime_parts_shape::DefaultPlannedRuntimePartsShape;
 use super::process::ScriptedProcessResult;
 use super::reply::RebornScriptedReply;
-use super::scripted_provider::{ErrLlmKind, ParkingModelGate};
+use super::scripted_provider::{
+    ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailure,
+    RecoverableModelFailureScript,
+};
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
 use crate::support::trace_llm::TraceLlm;
@@ -149,9 +152,9 @@ pub struct RebornIntegrationHarnessBuilder {
     /// selected fixed non-retryable `LlmError`. Threaded into the degenerate
     /// one-thread group. See [`RebornThreadBuilder::fail_model`].
     fail_model: Option<ErrLlmKind>,
-    /// E-GATEWAY recovery seam: report one provider content-filter finish
-    /// reason, then resume normal scripted playback.
-    content_filter_model_once: bool,
+    /// E-GATEWAY recovery seam: report a bounded recoverable provider failure,
+    /// then resume normal scripted playback.
+    recoverable_model_failure: Option<RecoverableModelFailureScript>,
     /// C-TRACECAP seam: install an in-memory `TurnEventSink` when `true`.
     turn_event_sink: bool,
     /// Force `ToolDisclosureMode::Bridged` into the underlying group's ONE
@@ -273,7 +276,35 @@ impl RebornIntegrationHarnessBuilder {
     /// Report one provider content-filter finish reason, then resume scripted
     /// playback through the real model gateway and recovery path.
     pub fn content_filter_model_once(mut self) -> Self {
-        self.content_filter_model_once = true;
+        self.recoverable_model_failure = Some(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::ContentFiltered,
+            1,
+        ));
+        self
+    }
+
+    /// Allow `successful_calls` interactive requests before reporting context
+    /// overflow `failures` times. This lets a test establish compactable thread
+    /// history before exercising recovery.
+    pub fn context_overflow_model_after(
+        mut self,
+        successful_calls: usize,
+        failures: usize,
+    ) -> Self {
+        self.recoverable_model_failure = Some(
+            RecoverableModelFailureScript::new(RecoverableModelFailure::ContextOverflow, failures)
+                .after_successful_calls(successful_calls),
+        );
+        self
+    }
+
+    /// Return structurally invalid output `failures` times, then resume
+    /// scripted playback through the real model gateway and recovery path.
+    pub fn invalid_output_model_times(mut self, failures: usize) -> Self {
+        self.recoverable_model_failure = Some(RecoverableModelFailureScript::new(
+            RecoverableModelFailure::InvalidOutput,
+            failures,
+        ));
         self
     }
 
@@ -579,7 +610,7 @@ impl RebornIntegrationHarnessBuilder {
         group
             .thread(self.conversation_id)
             .script(self.replies)
-            .content_filter_model_once_opt(self.content_filter_model_once)
+            .recoverable_model_failure_opt(self.recoverable_model_failure)
             .park_model_opt(self.park_gate)
             .fail_model_opt(self.fail_model)
             .build()
@@ -623,6 +654,9 @@ pub struct RebornIntegrationHarness {
     /// Retained even when parked (`park_model`, E-GATEWAY): `ParkingLlm` only
     /// wraps this SAME `TraceLlm`.
     pub(crate) scripted_llm: Arc<TraceLlm>,
+    /// Requests captured by the recoverable-failure provider wrapper before it
+    /// either injects a failure or delegates to `scripted_llm`.
+    pub(crate) model_provider_call_probe: Option<ModelProviderCallProbe>,
     /// Shared storage bundle keeping the composite, TempDir, product harness, and
     /// capability alive for this harness's lifetime. For a single-shot harness the
     /// Arc is the sole owner; for a group thread it is shared with the group and
@@ -678,7 +712,7 @@ impl RebornIntegrationHarness {
             shell_mode: ShellMode::default(),
             park_gate: None,
             fail_model: None,
-            content_filter_model_once: false,
+            recoverable_model_failure: None,
             turn_event_sink: false,
             tool_disclosure: None,
             budget_accounting: false,
