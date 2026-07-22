@@ -1853,6 +1853,33 @@ async fn product_auth_google_oauth_callback_provider_denial_is_sanitized() {
 }
 
 #[tokio::test]
+async fn product_auth_google_oauth_callback_provider_error_terminalizes_as_failed() {
+    let (app, dispatcher) = build_app_with_google_oauth();
+    let (_, state) = start_google_oauth_flow(&app).await;
+
+    let response = app
+        .oneshot(callback_request(format!(
+            "/api/reborn/product-auth/oauth/google/callback?state={state}&error=server_error"
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains(&state));
+    assert!(!body.contains("server_error"));
+    let events = dispatcher.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].outcome,
+        AuthFlowOutcome::Failed {
+            error: AuthErrorCode::MalformedCallback
+        }
+    );
+}
+
+#[tokio::test]
 async fn product_auth_google_oauth_callback_unknown_state_is_sanitized() {
     let (app, dispatcher) = build_app_with_google_oauth();
 
@@ -1937,6 +1964,43 @@ async fn product_auth_callback_provider_denial_is_sanitized() {
     let events = dispatcher.events();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].outcome, AuthFlowOutcome::ProviderDenied);
+}
+
+#[tokio::test]
+async fn product_auth_callback_provider_error_terminalizes_as_failed() {
+    let (app, dispatcher) = build_app_with_product_auth();
+    let started = start_oauth_flow(
+        &app,
+        "provider-error-state",
+        "provider-error-pkce",
+        json!({}),
+    )
+    .await;
+
+    let response = app
+        .oneshot(callback_request(callback_uri(
+            &started.flow_id,
+            &started.invocation_id,
+            USER,
+            "provider-error-state",
+            "&error=temporarily_unavailable",
+        )))
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_body_string(response).await;
+    assert!(body.contains("\"code\":\"malformed_callback\""));
+    assert!(!body.contains("provider-error-state"));
+    assert!(!body.contains("temporarily_unavailable"));
+    let events = dispatcher.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].outcome,
+        AuthFlowOutcome::Failed {
+            error: AuthErrorCode::MalformedCallback
+        }
+    );
 }
 
 #[tokio::test]

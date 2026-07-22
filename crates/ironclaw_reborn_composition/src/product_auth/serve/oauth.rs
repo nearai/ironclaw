@@ -393,17 +393,13 @@ async fn vendor_oauth_callback_attempt(
         ));
     }
 
-    if query
-        .error
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-    {
+    if let Some(outcome) = callback_error_outcome(query.error.as_deref()) {
         let response = run_with_backend_timeout(state.product_auth.handle_oauth_callback(
             RebornOAuthCallbackRequest {
                 scope: callback_scope.clone(),
                 flow_id,
                 opaque_state_hash: state_hash.clone(),
-                outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+                outcome,
             },
         ))
         .await;
@@ -719,12 +715,8 @@ pub(super) async fn callback_outcome_from_query(
     flow_provider: Option<&AuthProviderId>,
     query: &OAuthCallbackQuery,
 ) -> Result<RebornOAuthCallbackOutcome, ProductAuthRouteFailure> {
-    if query
-        .error
-        .as_deref()
-        .is_some_and(|value| !value.is_empty())
-    {
-        return Ok(RebornOAuthCallbackOutcome::ProviderDenied);
+    if let Some(outcome) = callback_error_outcome(query.error.as_deref()) {
+        return Ok(outcome);
     }
 
     let provider = match query.provider.as_deref() {
@@ -767,6 +759,16 @@ pub(super) async fn callback_outcome_from_query(
             pkce_verifier_hash,
             scopes,
         },
+    })
+}
+
+fn callback_error_outcome(error: Option<&str>) -> Option<RebornOAuthCallbackOutcome> {
+    error.filter(|value| !value.is_empty()).map(|value| {
+        if value == "access_denied" {
+            RebornOAuthCallbackOutcome::ProviderDenied
+        } else {
+            RebornOAuthCallbackOutcome::Malformed
+        }
     })
 }
 
