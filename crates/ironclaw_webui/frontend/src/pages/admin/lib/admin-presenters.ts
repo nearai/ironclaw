@@ -121,6 +121,15 @@ export function formatUserStatus(status, t) {
   return tx(t, USER_STATUS_KEYS[value], {}, fallback);
 }
 
+export function adminUserActionErrorMessage(error, t) {
+  if (error?.payload?.field === "last_admin") {
+    return t("admin.users.lastAdminRequired");
+  }
+  return t("admin.users.actionFailed", {
+    message: error?.message || t("common.unknown"),
+  });
+}
+
 export function summarizeUsers(users) {
   const total = users.length;
   const active = users.filter((u) => u.status === USER_STATUS.ACTIVE).length;
