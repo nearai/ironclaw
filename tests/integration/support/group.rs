@@ -123,9 +123,8 @@ use super::product_workflow::RebornProductWorkflowHarness;
 use super::reply::RebornScriptedReply;
 use super::scope_gateway::ScopeRegistryGateway;
 use super::scripted_provider::{
-    ErrLlm, ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailure,
-    RecoverableModelFailureScript, SCRIPTED_MODEL_NAME, parking_trace_llm,
-    recoverable_failure_trace_llm, scripted_trace_llm,
+    ErrLlm, ErrLlmKind, ModelProviderCallProbe, ParkingModelGate, RecoverableModelFailureScript,
+    SCRIPTED_MODEL_NAME, parking_trace_llm, recoverable_failure_trace_llm, scripted_trace_llm,
 };
 use super::session_thread::RebornThreadHarness;
 use super::test_adapter::RebornTestIngress;
@@ -1113,13 +1112,13 @@ pub struct RebornThreadBuilder<'g> {
 }
 
 /// A thread's model-call behavior: exactly one of normal scripted playback,
-/// parked-until-released, recoverable content filtering, or unconditional
+/// parked-until-released, bounded recoverable failure, or unconditional
 /// failure. One enum instead of an `Option<ParkingModelGate>` + `bool` pair
 /// (mirrors `ShellMode` in `builder.rs`) so the four modes are mutually exclusive BY CONSTRUCTION —
 /// no tuple-priority rule needed at the dispatch site, and no state can
 /// silently ask for "parked AND failing" at once.
 #[derive(Default)]
-enum ThreadModelMode {
+pub(crate) enum ThreadModelMode {
     /// Normal scripted playback (the default).
     #[default]
     Normal,
@@ -1143,45 +1142,16 @@ impl<'g> RebornThreadBuilder<'g> {
         self
     }
 
+    pub(crate) fn model_mode(mut self, mode: ThreadModelMode) -> Self {
+        self.model_mode = mode;
+        self
+    }
+
     /// Park this thread's model call until `gate` is released (E-GATEWAY seam).
     /// The parking provider sits at the same vendor-SDK seam as the scripted
     /// provider, so the real decorator chain still runs on top.
-    pub fn park_model(self, gate: ParkingModelGate) -> Self {
-        self.park_model_opt(Some(gate))
-    }
-
-    /// Report one provider content-filter finish reason, then resume scripted
-    /// playback. This exercises model-error recovery through the real gateway.
-    pub fn content_filter_model_once(mut self) -> Self {
-        if matches!(self.model_mode, ThreadModelMode::Normal) {
-            self.model_mode = ThreadModelMode::Recoverable(RecoverableModelFailureScript::new(
-                RecoverableModelFailure::ContentFiltered,
-                1,
-            ));
-        }
-        self
-    }
-
-    pub(crate) fn recoverable_model_failure_opt(
-        mut self,
-        script: Option<RecoverableModelFailureScript>,
-    ) -> Self {
-        if let Some(script) = script
-            && matches!(self.model_mode, ThreadModelMode::Normal)
-        {
-            self.model_mode = ThreadModelMode::Recoverable(script);
-        }
-        self
-    }
-
-    /// Internal: set the optional park gate (used by the flat builder to thread
-    /// its own park gate through the degenerate one-thread group). A `Some`
-    /// gate always wins, matching the old tuple-priority contract, even if
-    /// `fail_model_opt` is called first.
-    pub(crate) fn park_model_opt(mut self, gate: Option<ParkingModelGate>) -> Self {
-        if let Some(gate) = gate {
-            self.model_mode = ThreadModelMode::Parked(gate);
-        }
+    pub fn park_model(mut self, gate: ParkingModelGate) -> Self {
+        self.model_mode = ThreadModelMode::Parked(gate);
         self
     }
 
@@ -1198,28 +1168,17 @@ impl<'g> RebornThreadBuilder<'g> {
     /// Fail this thread's model call unconditionally with a fixed, non-retryable
     /// `LlmError` (E-GATEWAY seam, C-ERRORS — provider-`Err` failure category).
     /// Sits at the same vendor-SDK seam as `park_model`/scripted playback.
-    pub fn fail_model(self) -> Self {
-        self.fail_model_opt(Some(ErrLlmKind::ContextLength))
+    pub fn fail_model(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::ContextLength);
+        self
     }
 
     /// Credentials arm of [`Self::fail_model`]: the model call always fails
     /// with non-retryable `LlmError::AuthFailed`, driving the pinned
     /// `model_credentials_unavailable` failure category through the real
     /// provider-error mapping.
-    pub fn fail_model_auth(self) -> Self {
-        self.fail_model_opt(Some(ErrLlmKind::AuthFailed))
-    }
-
-    /// Internal: set the fail-model kind (used by the flat builder to thread
-    /// its own knob through the degenerate one-thread group). Never downgrades
-    /// an already-`Parked` mode, matching the old tuple-priority contract
-    /// (`park_model` always wins over `fail_model`).
-    pub(crate) fn fail_model_opt(mut self, fail: Option<ErrLlmKind>) -> Self {
-        if let Some(kind) = fail
-            && !matches!(self.model_mode, ThreadModelMode::Parked(_))
-        {
-            self.model_mode = ThreadModelMode::Failing(kind);
-        }
+    pub fn fail_model_auth(mut self) -> Self {
+        self.model_mode = ThreadModelMode::Failing(ErrLlmKind::AuthFailed);
         self
     }
 

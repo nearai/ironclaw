@@ -2,12 +2,14 @@
 //!
 
 mod bounded_ring;
+mod model_recovery;
 mod signature;
 mod slots;
 
 pub use bounded_ring::BoundedRing;
 pub use ironclaw_turns::LoopFailureKind;
 pub use ironclaw_turns::run_profile::AuthResumeApprovalIdentity;
+pub use model_recovery::{ModelErrorRecoveryObservation, PendingModelRetryDirective};
 pub use signature::{
     ArgsHash, CapabilityCallSignature, CapabilityCallSignatureError, CapabilityOutputObservation,
 };
@@ -103,11 +105,16 @@ pub struct LoopExecutionState {
     pub completion_nudge_pending: bool,
 
     /// One-shot, typed host-authored repair context for the next model call
-    /// after a model-error retry budget is exhausted. Prompt construction
-    /// consumes it only after successfully building the request.
+    /// after a model-error retry budget is exhausted. It remains checkpointed
+    /// until the executor has issued the request, so restart cannot lose it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_model_error_observation:
-        Option<ironclaw_turns::run_profile::ModelVisibleModelErrorObservation>,
+    pub pending_model_error_observation: Option<ModelErrorRecoveryObservation>,
+
+    /// Prompt-shape repair directive for the next model call. Kept separately
+    /// from backoff/compaction retry mechanics because it must be reconstructed
+    /// from the retry-transition checkpoint after worker restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_model_retry_directive: Option<PendingModelRetryDirective>,
 
     /// Whether the most recent admitted assistant reply "trailed off" without a
     /// real closing answer (empty after trim, or ends with a colon — a narrated
@@ -323,6 +330,7 @@ impl LoopExecutionState {
             completion_nudges_used: 0,
             completion_nudge_pending: false,
             pending_model_error_observation: None,
+            pending_model_retry_directive: None,
             last_reply_trailed_off: false,
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),

@@ -9,7 +9,7 @@ use ironclaw_turns::{
 use tracing::debug;
 
 use crate::{
-    state::{CheckpointKind, LoopExecutionState},
+    state::{CheckpointKind, LoopExecutionState, PendingModelRetryDirective},
     strategies::{
         GateKind, ModelErrorSummary, RecoveryOutcome, RetryAlteration, RetryScope,
         model_error_to_failure_kind,
@@ -103,7 +103,15 @@ impl ExecutorStage<ModelInput> for ModelStage {
         let mut last_error_summary: Option<ModelErrorSummary> = None;
         let mut last_error_detail: Option<String> = None;
         for _ in 0..max_model_attempts {
-            match ctx.host.stream_model(request.clone()).await {
+            let model_result = ctx.host.stream_model(request.clone()).await;
+            // Pending controls have now crossed the model gateway boundary.
+            // Keep them through prompt construction and the BeforeModel
+            // checkpoint, then consume them only after issuing the request.
+            // A crash before this in-memory clear may replay the same control
+            // once, which is safer than losing a consumed recovery budget.
+            state.pending_model_error_observation = None;
+            state.pending_model_retry_directive = None;
+            match model_result {
                 Ok(response) => {
                     match &response.output {
                         ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(reply) => {
@@ -124,7 +132,6 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         }
                     }
                     state.recovery_state = state.recovery_state.cleared_attempts();
-                    state.pending_model_error_observation = None;
                     return Ok(ModelStep::Response(Box::new(state), response));
                 }
                 Err(error) => {
@@ -284,11 +291,9 @@ impl ExecutorStage<ModelInput> for ModelStage {
                         &state,
                         surface_version.clone(),
                         capability_view.clone(),
-                        alter.as_ref(),
                     )
                     .await?;
                     request.inline_messages = bundle.inline_messages();
-                    state.pending_model_error_observation = None;
                     match CheckpointStage.cancel_if_requested(ctx, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(ModelStep::Exit(exit)),
@@ -368,6 +373,7 @@ fn prepare_model_retry_alteration(
     alteration: Option<&RetryAlteration>,
 ) -> Result<ModelRetryAction, AgentLoopExecutorError> {
     honor_retry_alteration(alteration)?;
+    state.pending_model_retry_directive = None;
     match alteration {
         Some(RetryAlteration::Backoff { .. }) => {}
         Some(RetryAlteration::ShrinkContext) => {
@@ -385,6 +391,8 @@ fn prepare_model_retry_alteration(
                     detail: "invalid model output repair retry requires call scope",
                 });
             }
+            state.pending_model_retry_directive =
+                Some(PendingModelRetryDirective::RepairInvalidOutput);
         }
         Some(RetryAlteration::AdvanceFallback) | None => {}
     }

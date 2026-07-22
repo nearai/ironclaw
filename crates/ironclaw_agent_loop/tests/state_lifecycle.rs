@@ -4,18 +4,15 @@ use ironclaw_agent_loop::{
     state::{
         CapabilityCallSignature, CheckpointKind, CheckpointPayloadError,
         DeferredCompactionWatermark, LoopExecutionState, ModelErrorObservationClass,
-        RecoveryAttemptClass, RecoveryStrategyState, RepeatedCallWarningPhase,
-        RepeatedCallWarningState,
+        ModelErrorRecoveryObservation, PendingModelRetryDirective, RecoveryAttemptClass,
+        RecoveryStrategyState, RepeatedCallWarningPhase, RepeatedCallWarningState,
     },
     test_support::{
         LoopExecutionStateBuilder, MockAgentLoopDriverHost, ScenarioScript, capability_id,
         test_run_context,
     },
 };
-use ironclaw_turns::{
-    LoopExit, LoopFailureKind,
-    run_profile::{LoopRunInfoPort, ModelVisibleModelErrorObservation},
-};
+use ironclaw_turns::{LoopExit, LoopFailureKind, run_profile::LoopRunInfoPort};
 use serde_json::json;
 
 #[test]
@@ -67,8 +64,8 @@ fn model_error_recovery_budget_and_observation_survive_checkpoint_reload() {
     state.recovery_state =
         RecoveryStrategyState::with_attempts_for(RecoveryAttemptClass::ModelInvalidOutput, 2)
             .with_observation_attempted_for(ModelErrorObservationClass::InvalidOutput);
-    state.pending_model_error_observation =
-        Some(ModelVisibleModelErrorObservation::content_filtered());
+    state.pending_model_error_observation = Some(ModelErrorRecoveryObservation::content_filtered());
+    state.pending_model_retry_directive = Some(PendingModelRetryDirective::RepairInvalidOutput);
 
     let payload = serde_json::to_vec(&state).expect("state should serialize");
     let restored =
@@ -79,6 +76,10 @@ fn model_error_recovery_budget_and_observation_survive_checkpoint_reload() {
     assert_eq!(
         restored.pending_model_error_observation,
         state.pending_model_error_observation
+    );
+    assert_eq!(
+        restored.pending_model_retry_directive,
+        state.pending_model_retry_directive
     );
     assert_eq!(
         restored
@@ -100,11 +101,12 @@ fn legacy_checkpoint_without_model_error_observation_fields_decodes_to_defaults(
     state.recovery_state = state
         .recovery_state
         .with_observation_attempted_for(ModelErrorObservationClass::InvalidOutput);
-    state.pending_model_error_observation =
-        Some(ModelVisibleModelErrorObservation::content_filtered());
+    state.pending_model_error_observation = Some(ModelErrorRecoveryObservation::content_filtered());
+    state.pending_model_retry_directive = Some(PendingModelRetryDirective::RepairInvalidOutput);
     let mut value = serde_json::to_value(&state).expect("state should serialize");
     let state_object = value.as_object_mut().expect("state serializes as object");
     state_object.remove("pending_model_error_observation");
+    state_object.remove("pending_model_retry_directive");
     state_object
         .get_mut("recovery_state")
         .and_then(serde_json::Value::as_object_mut)
@@ -114,6 +116,7 @@ fn legacy_checkpoint_without_model_error_observation_fields_decodes_to_defaults(
     let restored: LoopExecutionState =
         serde_json::from_value(value).expect("legacy checkpoint should deserialize");
     assert!(restored.pending_model_error_observation.is_none());
+    assert!(restored.pending_model_retry_directive.is_none());
     assert!(
         !restored
             .recovery_state

@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use ironclaw_turns::run_profile::{
     LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole, LoopPromptBundleRequest,
-    ModelVisibleModelErrorObservation, PromptMode,
+    PromptMode,
 };
 
-use crate::state::{LoopExecutionState, RepeatedCallWarningPhase};
+use crate::state::{LoopExecutionState, ModelErrorRecoveryObservation, RepeatedCallWarningPhase};
 use crate::strategies::reply_admission::reply_admission_control_message;
 
 pub(crate) const REPEATED_CALL_WARNING_CONTROL_TEXT: &str = "loop control repeated capability call detected change strategy explain new evidence or answer from current evidence";
@@ -134,7 +134,7 @@ pub(crate) fn invalid_model_output_repair_control_message() -> LoopInlineMessage
 }
 
 pub(crate) fn model_error_observation_control_message(
-    observation: &ModelVisibleModelErrorObservation,
+    observation: &ModelErrorRecoveryObservation,
 ) -> Result<LoopInlineMessage, String> {
     observation.validate()?;
     Ok(LoopInlineMessage {

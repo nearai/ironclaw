@@ -16,17 +16,18 @@ use ironclaw_turns::{
         LoopContextCompactionKind, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
         LoopInterruptKind, LoopModelCapabilityView, LoopProcessRef, LoopProgressEvent,
         LoopRunInfoPort, LoopSafeSummary, LoopSummaryArtifactId,
-        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleModelErrorObservation,
-        ModelVisibleToolObservation, ObservationTrust, ParentLoopOutput, PromptMode,
-        ProviderToolCallReplay, SameCallRetryConstraint, ToolObservationDetail,
-        ToolObservationStatus, VisibleCapabilityRequest, resolution,
+        MODEL_VISIBLE_TOOL_OBSERVATION_SCHEMA_VERSION, ModelVisibleToolObservation,
+        ObservationTrust, ParentLoopOutput, PromptMode, ProviderToolCallReplay,
+        SameCallRetryConstraint, ToolObservationDetail, ToolObservationStatus,
+        VisibleCapabilityRequest, resolution,
     },
 };
 
 use crate::state::{
     CapabilityCallSignature, CheckpointKind, DeferredCompactionWatermark, IndexedMessageKind,
-    LoopExecutionState, MessageIndexEntry, ModelErrorObservationClass, PendingApprovalResume,
-    PendingAuthResume, RepeatedCallWarningPhase, RepeatedCallWarningState,
+    LoopExecutionState, MessageIndexEntry, ModelErrorObservationClass,
+    ModelErrorRecoveryObservation, PendingApprovalResume, PendingAuthResume,
+    PendingModelRetryDirective, RepeatedCallWarningPhase, RepeatedCallWarningState,
 };
 use crate::strategies::{
     CapabilityBatchTurnSummary, CapabilityFilter, DefaultCompactionStrategy, GateKind, GateOutcome,
@@ -1358,7 +1359,7 @@ async fn model_context_overflow_exhaustion_gives_model_one_observation_assisted_
         message
             .safe_body
             .as_str()
-            .contains("context overflowed; transcript compacted; continue")
+            .contains("context overflowed; use the available context and continue")
     }));
 }
 
@@ -3824,7 +3825,7 @@ async fn model_retry_transition_survives_checkpoint_reload_before_retry() {
     );
     assert_eq!(
         restored.pending_model_error_observation,
-        Some(ModelVisibleModelErrorObservation::content_filtered())
+        Some(ModelErrorRecoveryObservation::content_filtered())
     );
 
     // Simulate a new worker loading the last committed BeforeModel payload.
@@ -3846,8 +3847,118 @@ async fn model_retry_transition_survives_checkpoint_reload_before_retry() {
         message
             .safe_body
             .as_str()
-            .contains("completion refused by content filter; rephrase")
+            .contains("provide a policy compliant alternative")
     }));
+}
+
+#[tokio::test]
+async fn invalid_output_repair_directive_survives_checkpoint_reload_before_retry() {
+    let host = Arc::new(
+        MockHost::new(vec![reply_response()])
+            .with_model_errors(vec![AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidOutput,
+                "model returned an empty assistant response",
+            )])
+            .crash_after_checkpoint_progress(LoopCheckpointKind::BeforeModel),
+    );
+    let crashed_host = Arc::clone(&host);
+    let crash = match tokio::spawn(async move {
+        let family = crate::families::default();
+        ModelStage
+            .process(
+                StageContext {
+                    planner: family.planner(),
+                    host: crashed_host.as_ref(),
+                },
+                ModelInput {
+                    state: LoopExecutionState::initial_for_run(crashed_host.run_context()),
+                    messages: Vec::new(),
+                    inline_messages: Vec::new(),
+                    surface_version: surface_version(),
+                    capability_view: LoopModelCapabilityView {
+                        visible_capability_ids: Vec::new(),
+                    },
+                },
+            )
+            .await
+    })
+    .await
+    {
+        Err(join_error) => join_error,
+        Ok(_) => panic!("scripted worker crash must stop before the retry"),
+    };
+    assert!(crash.is_panic());
+
+    let restored = final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeModel);
+    assert_eq!(
+        restored.pending_model_retry_directive,
+        Some(PendingModelRetryDirective::RepairInvalidOutput)
+    );
+
+    let exit = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), host.as_ref(), restored)
+        .await
+        .expect("reloaded repair directive should reach the retry request");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
+    let requests = host.model_requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].inline_messages.iter().any(|message| {
+        message
+            .safe_body
+            .as_str()
+            .contains("previous model response was empty or structurally invalid")
+    }));
+}
+
+#[tokio::test]
+async fn retry_transition_checkpoint_failure_stops_before_second_model_call() {
+    let host = MockHost::new(vec![reply_response()])
+        .with_model_errors(vec![AgentLoopHostError::new(
+            AgentLoopHostErrorKind::ContentFiltered,
+            "model completion was filtered",
+        )])
+        .fail_checkpoint_on_occurrence(LoopCheckpointKind::BeforeModel, 2);
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("retry-transition checkpoint failure must stop the run");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::CheckpointFailed {
+            stage: CheckpointKind::BeforeModel
+        }
+    ));
+    assert_eq!(host.model_requests().len(), 1);
+}
+
+#[tokio::test]
+async fn unsupported_checkpointed_model_observation_stops_before_model_call() {
+    let host = MockHost::new(vec![reply_response()]);
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    let mut observation = ModelErrorRecoveryObservation::content_filtered();
+    observation.schema_version += 1;
+    state.pending_model_error_observation = Some(observation);
+    let payload = serde_json::to_vec(&state).expect("checkpoint state serializes");
+    let restored =
+        LoopExecutionState::from_checkpoint_payload(&payload, CheckpointKind::BeforeModel)
+            .expect("checkpoint state reloads before semantic validation");
+
+    let error = CanonicalAgentLoopExecutor
+        .execute_family(&crate::families::default(), &host, restored)
+        .await
+        .expect_err("unsupported observation must fail prompt construction");
+
+    assert!(matches!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "model-error observation control text was invalid"
+        }
+    ));
+    assert!(host.model_requests().is_empty());
 }
 
 #[tokio::test]
@@ -3872,8 +3983,30 @@ async fn model_content_filter_gives_model_one_rephrase_attempt() {
         message
             .safe_body
             .as_str()
-            .contains("completion refused by content filter; rephrase")
+            .contains("provide a policy compliant alternative")
     }));
+
+    let before_model_states = host
+        .staged_payloads()
+        .into_iter()
+        .filter(|request| request.kind == LoopCheckpointKind::BeforeModel)
+        .map(|request| {
+            LoopExecutionState::from_checkpoint_payload(
+                &request.payload,
+                CheckpointKind::BeforeModel,
+            )
+            .expect("checkpoint payload")
+        })
+        .collect::<Vec<_>>();
+    assert!(before_model_states.iter().any(|state| {
+        state.pending_model_error_observation
+            == Some(ModelErrorRecoveryObservation::content_filtered())
+    }));
+    assert!(
+        final_staged_state(&host)
+            .pending_model_error_observation
+            .is_none()
+    );
 }
 
 #[tokio::test]

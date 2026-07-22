@@ -311,7 +311,7 @@ pub fn recoverable_failure_trace_llm(
 }
 
 impl RecoverableFailureLlm {
-    fn should_fail(&self) -> bool {
+    fn consume_scheduled_failure(&self) -> bool {
         if self
             .successful_calls_remaining
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
@@ -349,7 +349,7 @@ impl LlmProvider for RecoverableFailureLlm {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.calls.record(&request.messages, true);
-        if self.should_fail() {
+        if self.consume_scheduled_failure() {
             return match self.failure {
                 RecoverableModelFailure::ContextOverflow => Err(LlmError::ContextLengthExceeded {
                     used: CONTEXT_OVERFLOW_USED_TOKENS,

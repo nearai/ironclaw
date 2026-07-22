@@ -383,7 +383,9 @@ pub struct GoalRefreshStrategyState {
 ///
 /// Retry counters and one-shot observation attempts are serialized into
 /// checkpoints so resume/rebase cannot silently grant an unbounded fresh
-/// recovery budget. Successful or terminal decisions clear the slot.
+/// recovery budget. Successful and ordinary non-retry decisions clear the
+/// slot; retry-exhaustion terminal checkpoints retain it as evidence of
+/// consumed attempts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecoveryStrategyState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

@@ -13,11 +13,12 @@
 use async_trait::async_trait;
 use ironclaw_turns::{
     LoopDiagnosticRef, LoopFailureKind, ModelInvalidOutputDetailReason,
-    run_profile::{LoopSafeSummary, ModelVisibleModelErrorObservation},
+    run_profile::LoopSafeSummary,
 };
 
 use crate::state::{
-    LoopExecutionState, ModelErrorObservationClass, RecoveryAttemptClass, RecoveryStrategyState,
+    LoopExecutionState, ModelErrorObservationClass, ModelErrorRecoveryObservation,
+    RecoveryAttemptClass, RecoveryStrategyState,
 };
 
 /// Decides what to do when a capability call OR a model call fails with a
@@ -200,7 +201,7 @@ pub(crate) enum RecoveryOutcome {
         recovery: RecoveryStrategyState,
         scope: RetryScope,
         alter: Option<RetryAlteration>,
-        observation: ModelVisibleModelErrorObservation,
+        observation: ModelErrorRecoveryObservation,
     },
     Abort {
         recovery: RecoveryStrategyState,
@@ -332,10 +333,8 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
             },
             ModelErrorClass::ContentFiltered => observe_once_or_abort(
                 state,
-                ModelErrorObservationClass::ContentFiltered,
-                kind,
                 RetryScope::Call,
-                ModelVisibleModelErrorObservation::content_filtered(),
+                ModelErrorRecoveryObservation::content_filtered(),
             ),
             ModelErrorClass::StaleRequest => {
                 let Some(attempt_class) = model_retry_attempt_class(err.class) else {
@@ -358,22 +357,20 @@ impl RecoveryStrategy for DefaultRecoveryStrategy {
             }
             ModelErrorClass::ContextOverflow => retry_observe_or_abort(
                 state,
-                ModelErrorObservationClass::ContextOverflow,
                 self.max_attempts_per_class,
                 RetryScope::Iteration,
                 |_| Some(RetryAlteration::ShrinkContext),
-                ModelVisibleModelErrorObservation::context_overflow(),
+                ModelErrorRecoveryObservation::context_overflow(),
             ),
             ModelErrorClass::InvalidOutput => {
                 let reason =
                     ModelInvalidOutputDetailReason::from_safe_summary(err.safe_summary.as_str());
                 retry_observe_or_abort(
                     state,
-                    ModelErrorObservationClass::InvalidOutput,
                     self.max_attempts_per_class,
                     RetryScope::Call,
                     |_| Some(RetryAlteration::RepairInvalidModelOutput),
-                    ModelVisibleModelErrorObservation::invalid_output(reason),
+                    ModelErrorRecoveryObservation::invalid_output(reason),
                 )
             }
             ModelErrorClass::Transient
@@ -455,17 +452,13 @@ fn retry_or_abort(
 
 fn retry_observe_or_abort(
     state: &LoopExecutionState,
-    observation_class: ModelErrorObservationClass,
     max_attempts_per_class: u32,
     scope: RetryScope,
     alteration: impl FnOnce(u32) -> Option<RetryAlteration>,
-    observation: ModelVisibleModelErrorObservation,
+    observation: ModelErrorRecoveryObservation,
 ) -> RecoveryOutcome {
-    let model_error_class = match observation_class {
-        ModelErrorObservationClass::ContextOverflow => ModelErrorClass::ContextOverflow,
-        ModelErrorObservationClass::InvalidOutput => ModelErrorClass::InvalidOutput,
-        ModelErrorObservationClass::ContentFiltered => ModelErrorClass::ContentFiltered,
-    };
+    let observation_class = observation.class();
+    let model_error_class = model_error_class_for_observation(observation_class);
     let Some(attempt_class) = model_retry_attempt_class(model_error_class) else {
         return RecoveryOutcome::Abort {
             recovery: state.recovery_state.cleared_attempts(),
@@ -503,11 +496,12 @@ fn retry_observe_or_abort(
 
 fn observe_once_or_abort(
     state: &LoopExecutionState,
-    observation_class: ModelErrorObservationClass,
-    failure_kind: LoopFailureKind,
     scope: RetryScope,
-    observation: ModelVisibleModelErrorObservation,
+    observation: ModelErrorRecoveryObservation,
 ) -> RecoveryOutcome {
+    let observation_class = observation.class();
+    let model_error_class = model_error_class_for_observation(observation_class);
+    let failure_kind = model_error_to_failure_kind(model_error_class);
     if state
         .recovery_state
         .observation_attempted_for(observation_class)
@@ -524,6 +518,14 @@ fn observe_once_or_abort(
         scope,
         alter: None,
         observation,
+    }
+}
+
+fn model_error_class_for_observation(class: ModelErrorObservationClass) -> ModelErrorClass {
+    match class {
+        ModelErrorObservationClass::ContextOverflow => ModelErrorClass::ContextOverflow,
+        ModelErrorObservationClass::InvalidOutput => ModelErrorClass::InvalidOutput,
+        ModelErrorObservationClass::ContentFiltered => ModelErrorClass::ContentFiltered,
     }
 }
 
@@ -958,10 +960,9 @@ mod tests {
             run_profile::{
                 CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
                 CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
-                LoopRunContext, ModelProfileId, ModelVisibleModelErrorObservation,
-                RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-                ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-                SchedulingClass, SteeringPolicy,
+                LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
+                ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+                RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
             },
         };
 
@@ -971,7 +972,10 @@ mod tests {
             RetryScope, SanitizedStrategySummary, availability_backoff_for, backoff_for,
             capability_error_to_failure_kind,
         };
-        use crate::state::{LoopExecutionState, RecoveryAttemptClass, RecoveryStrategyState};
+        use crate::state::{
+            LoopExecutionState, ModelErrorRecoveryObservation, RecoveryAttemptClass,
+            RecoveryStrategyState,
+        };
         use ironclaw_turns::LoopFailureKind;
 
         fn test_run_context() -> LoopRunContext {
@@ -1256,7 +1260,7 @@ mod tests {
                     assert_eq!(alter, Some(RetryAlteration::ShrinkContext));
                     assert_eq!(
                         observation,
-                        ModelVisibleModelErrorObservation::context_overflow()
+                        ModelErrorRecoveryObservation::context_overflow()
                     );
                     recovery
                 }
@@ -1470,7 +1474,7 @@ mod tests {
                     assert!(recovery.attempts_by_class.is_empty());
                     assert_eq!(
                         observation,
-                        ModelVisibleModelErrorObservation::content_filtered()
+                        ModelErrorRecoveryObservation::content_filtered()
                     );
                     recovery
                 }

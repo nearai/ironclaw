@@ -80,6 +80,7 @@ pub(super) struct MockHost {
     cancel_after_model_response: Arc<Mutex<bool>>,
     cancel_after_batch_invocation: Arc<Mutex<bool>>,
     fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
+    fail_checkpoint_on_occurrence: Arc<Mutex<Option<(LoopCheckpointKind, usize)>>>,
     fail_checkpoint_payload: Arc<Mutex<Option<(LoopCheckpointKind, AgentLoopHostError)>>>,
     fail_visible_capabilities: bool,
     fail_prompt_bundle: bool,
@@ -127,6 +128,7 @@ impl MockHost {
             cancel_after_model_response: Arc::new(Mutex::new(false)),
             cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
             fail_checkpoint: Arc::new(Mutex::new(None)),
+            fail_checkpoint_on_occurrence: Arc::new(Mutex::new(None)),
             fail_checkpoint_payload: Arc::new(Mutex::new(None)),
             fail_visible_capabilities: false,
             fail_prompt_bundle: false,
@@ -347,6 +349,15 @@ impl MockHost {
 
     pub(super) fn fail_checkpoint(self, kind: LoopCheckpointKind) -> Self {
         *self.fail_checkpoint.lock().expect("lock") = Some(kind);
+        self
+    }
+
+    pub(super) fn fail_checkpoint_on_occurrence(
+        self,
+        kind: LoopCheckpointKind,
+        occurrence: usize,
+    ) -> Self {
+        *self.fail_checkpoint_on_occurrence.lock().expect("lock") = Some((kind, occurrence));
         self
     }
 
@@ -869,12 +880,24 @@ impl ironclaw_turns::run_profile::LoopCheckpointPort for MockHost {
             .lock()
             .expect("lock")
             .push(format!("checkpoint:{}", request.kind.as_str()));
-        self.checkpoints.lock().expect("lock").push(request.kind);
+        let occurrence = {
+            let mut checkpoints = self.checkpoints.lock().expect("lock");
+            checkpoints.push(request.kind);
+            checkpoints
+                .iter()
+                .filter(|kind| **kind == request.kind)
+                .count()
+        };
         if self
             .fail_checkpoint
             .lock()
             .expect("lock")
             .is_some_and(|kind| kind == request.kind)
+            || self
+                .fail_checkpoint_on_occurrence
+                .lock()
+                .expect("lock")
+                .is_some_and(|(kind, target)| kind == request.kind && target == occurrence)
         {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::CheckpointRejected,
