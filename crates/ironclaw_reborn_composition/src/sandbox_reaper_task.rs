@@ -18,8 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironclaw_host_runtime::{SandboxReaper, SandboxReaperConfig};
-use ironclaw_run_state::RunStateStore;
+use ironclaw_host_runtime::{SandboxActivityRegistry, SandboxReaper, SandboxReaperConfig};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -73,7 +72,7 @@ impl SandboxReaperRuntimeHandle {
 /// unavailability at its own (earlier) connect, so a reaper-spawn failure
 /// here must not additionally fail boot.
 pub(crate) async fn maybe_spawn_sandbox_reaper(
-    run_state: Arc<dyn RunStateStore>,
+    activity: Arc<SandboxActivityRegistry>,
 ) -> Option<SandboxReaperRuntimeHandle> {
     let docker = match ironclaw_host_runtime::connect_docker_with_retry().await {
         Ok(docker) => docker,
@@ -88,7 +87,7 @@ pub(crate) async fn maybe_spawn_sandbox_reaper(
 
     let reaper = Arc::new(SandboxReaper::new(
         docker,
-        run_state,
+        activity,
         SandboxReaperConfig::default(),
     ));
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -105,73 +104,6 @@ pub(crate) async fn maybe_spawn_sandbox_reaper(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{ApprovalRequest, InvocationId, ResourceScope};
-    use ironclaw_run_state::{RunRecord, RunStart, RunStateError};
-
-    /// Minimal stand-in for a `RunStateStore` backend: the reaper-task tests
-    /// here never exercise real run-state persistence (that is
-    /// `ironclaw_run_state`'s own coverage), they only need *some*
-    /// `Arc<dyn RunStateStore>` to construct `maybe_spawn_sandbox_reaper`'s
-    /// argument. `ironclaw_run_state::test_support` is private to that crate,
-    /// so this local fake mirrors
-    /// `sandbox_reaper_docker.rs`'s `AlwaysAbsentRunStateStore`: `get`
-    /// reports "no record", and the writer methods are never called by
-    /// either test, so they're `unreachable!()`. Written inline (not via a
-    /// declarative macro) because `#[async_trait]` sees a macro
-    /// *invocation*, not the expanded `async fn`s, and cannot rewrite them —
-    /// which produces E0195.
-    struct AlwaysAbsentRunStateStore;
-
-    #[async_trait::async_trait]
-    impl RunStateStore for AlwaysAbsentRunStateStore {
-        async fn start(&self, _start: RunStart) -> Result<RunRecord, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls start()")
-        }
-        async fn block_approval(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-            _approval: ApprovalRequest,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls block_approval()")
-        }
-        async fn block_auth(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-            _error_kind: String,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls block_auth()")
-        }
-        async fn complete(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls complete()")
-        }
-        async fn fail(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-            _error_kind: String,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls fail()")
-        }
-        async fn records_for_scope(
-            &self,
-            _scope: &ResourceScope,
-        ) -> Result<Vec<RunRecord>, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls records_for_scope()")
-        }
-        async fn get(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-        ) -> Result<Option<RunRecord>, RunStateError> {
-            Ok(None)
-        }
-    }
 
     /// The guard the module doc promises: no Docker daemon means `None`, not
     /// a panic/error. This machine's dev/CI default has no Docker daemon, so
@@ -182,9 +114,9 @@ mod tests {
     /// it up rather than asserting the environment.
     #[tokio::test]
     async fn no_docker_daemon_yields_no_handle() {
-        let run_state: Arc<dyn RunStateStore> = Arc::new(AlwaysAbsentRunStateStore);
+        let activity = Arc::new(SandboxActivityRegistry::new());
 
-        match maybe_spawn_sandbox_reaper(run_state).await {
+        match maybe_spawn_sandbox_reaper(activity).await {
             None => {}
             Some(handle) => {
                 // A real Docker daemon happens to be reachable on this

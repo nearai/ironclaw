@@ -15,7 +15,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ironclaw_host_runtime::{RebornSandboxConfig, RebornScopedSandboxCommandTransport};
+use ironclaw_host_runtime::{
+    RebornSandboxConfig, RebornScopedSandboxCommandTransport, SandboxActivityRegistry,
+};
 
 use crate::RebornBuildError;
 use crate::input::RebornRuntimeProcessBinding;
@@ -65,17 +67,33 @@ const SANDBOX_HTTP_PROXY_PORT_ENV: &str = "IRONCLAW_SANDBOX_HTTP_PROXY_PORT";
 /// egress.
 pub async fn tenant_sandbox_process_binding(
     sandbox_workspaces_root: PathBuf,
-) -> Result<RebornRuntimeProcessBinding, RebornBuildError> {
+) -> Result<TenantSandboxBinding, RebornBuildError> {
     let config = with_sandbox_network_broker(RebornSandboxConfig::new(sandbox_workspaces_root))?;
+    let activity = Arc::new(SandboxActivityRegistry::new());
     let transport = RebornScopedSandboxCommandTransport::connect(config)
         .await
         .map_err(|error| RebornBuildError::InvalidConfig {
             reason: format!(
                 "tenant-sandbox process backend requires a reachable Docker daemon: {error}"
             ),
-        })?;
+        })?
+        .with_activity_registry(Arc::clone(&activity));
     let process_port = Arc::new(transport.into_process_port());
-    Ok(RebornRuntimeProcessBinding::tenant_sandbox(process_port))
+    Ok(TenantSandboxBinding {
+        binding: RebornRuntimeProcessBinding::tenant_sandbox(process_port),
+        activity,
+    })
+}
+
+/// Return value of [`tenant_sandbox_process_binding`]: the process-port
+/// binding plus the SAME [`SandboxActivityRegistry`] instance the exec
+/// transport now writes activity into, so a caller that also spawns
+/// `SandboxReaper` (via `sandbox_composition`/`factory.rs`) reads the exact
+/// timestamps the transport is recording — never a second, independently
+/// constructed registry.
+pub struct TenantSandboxBinding {
+    pub binding: RebornRuntimeProcessBinding,
+    pub activity: Arc<SandboxActivityRegistry>,
 }
 
 /// Applies the configured proxy broker (if any) to `config`. Missing or

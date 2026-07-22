@@ -1,26 +1,36 @@
-//! Orphaned sandbox container reaper.
+//! Persistent per-user sandbox container reaper.
 //!
-//! Sandbox containers are launched per command invocation
-//! (`RebornScopedSandboxCommandTransport::execute_in_container`) and normally
-//! removed inline once the command finishes. A container can survive that
-//! best-effort removal — host crash mid-command, killed process, a lost
-//! connection to the daemon — and become an orphan: a running container whose
-//! owning invocation is gone. [`SandboxReaper`] periodically lists containers
-//! this transport created (via the `ironclaw.*` labels set in
-//! `container_launch_config`) and removes the ones that are definitively
-//! orphaned.
+//! The sandboxed profile now runs one long-lived container per `{tenant,
+//! user}` pair (see `super::exec_transport`), reused across every shell
+//! invocation rather than recreated per command. A container therefore
+//! belongs to a *user*, not an invocation, and its lifecycle is a two-stage
+//! idle/retention policy instead of invocation-liveness:
 //!
-//! **Deliberate fix over the legacy `src/orchestrator/reaper.rs`:** that
-//! implementation treated "the run-state lookup failed" the same as "the run
-//! is gone" and reaped in both cases. A transient backend/filesystem error is
-//! not evidence of anything — reaping on it can kill a container whose
-//! invocation is still very much alive. [`liveness_for`] treats a query error
-//! as [`Liveness::Alive`]: the scan skips the container this tick and
-//! re-evaluates it next tick, so only a *definitive* not-found or terminal
-//! run status is ever grounds for removal.
+//! 1. **Idle-stop**: a *running* container with no recorded activity for
+//!    `idle_stop_after` is stopped (not removed) — the user's workspace and
+//!    container state are preserved for the next command.
+//! 2. **Retention-remove**: a *stopped* container whose `finished_at` is
+//!    older than `remove_stopped_after` is removed outright.
 //!
-//! This module is NOT wired into composition yet — spawning [`SandboxReaper::run`]
-//! as an owned background task is a later slice (composition/factory.rs).
+//! A **forced recycle** age (`forced_recycle_after`, measured from the
+//! container's `created_at` label) overrides both stages as a janitor
+//! backstop: past that age a running container is stopped and a stopped one
+//! is removed immediately, regardless of idle/retention windows.
+//!
+//! [`decide_reap_action`] is the pure decision function driving all of this
+//! — deliberately free of I/O so it can be exhaustively unit tested on a
+//! fake clock. **Never reap on uncertainty**: an unknown idle duration (no
+//! activity record — e.g. after a process restart lost the in-memory map)
+//! or an unknown `finished_at` (can't attribute a stop time) always yields
+//! [`ReapAction::None`]. Containers whose `ironclaw.tenant`/`ironclaw.user`
+//! labels are missing or fail to parse are skipped entirely by
+//! [`SandboxReaper::scan_and_reap`] — never reaped — since they cannot be
+//! attributed to a user record at all.
+//!
+//! "Orphan sweep" (a user has no live record at all) is deliberately not
+//! this module's job: in the fixed-owner single-tenant profile users never
+//! disappear, so that sweep has no trigger yet — it is a named follow-up
+//! for a future multi-user profile.
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -30,134 +40,61 @@ use bollard::{
     models::ContainerSummary,
 };
 use chrono::{DateTime, Utc};
-use ironclaw_host_api::{InvocationId, ResourceScope};
-use ironclaw_run_state::{RunStateStore, RunStatus};
+use ironclaw_host_api::{TenantId, UserId};
 
 use crate::RuntimeProcessError;
 
 use super::LABEL_PREFIX;
+use super::registry::{self, SandboxActivityRegistry, UserContainerCandidate};
+use super::user_key::RebornSandboxUserKey;
 
-/// Docker label carrying the invocation ID that created the container.
-pub(crate) fn label_invocation_id(prefix: &str) -> String {
-    format!("{prefix}.invocation_id")
+/// Overrides [`SandboxReaperConfig::idle_stop_after`]. Unset, empty,
+/// non-numeric, or zero falls back to the default.
+const IDLE_STOP_AFTER_ENV: &str = "IRONCLAW_SANDBOX_IDLE_STOP_SECS";
+/// Overrides [`SandboxReaperConfig::remove_stopped_after`].
+const REMOVE_STOPPED_AFTER_ENV: &str = "IRONCLAW_SANDBOX_REMOVE_STOPPED_SECS";
+/// Overrides [`SandboxReaperConfig::forced_recycle_after`].
+const FORCED_RECYCLE_AFTER_ENV: &str = "IRONCLAW_SANDBOX_FORCED_RECYCLE_SECS";
+
+const DEFAULT_IDLE_STOP_AFTER_SECS: u64 = 15 * 60;
+const DEFAULT_REMOVE_STOPPED_AFTER_SECS: u64 = 7 * 24 * 3600;
+const DEFAULT_FORCED_RECYCLE_AFTER_SECS: u64 = 7 * 24 * 3600;
+
+/// Pure resolution of a duration-in-seconds config knob from an
+/// already-read raw env value, falling back to `default_secs` when the
+/// value is absent, empty, non-numeric, or zero. Kept separate from the env
+/// read itself (mirrors `sandbox_quota::resolve_sandbox_max_concurrent_from_raw`)
+/// so tests can drive every branch with an explicit `Some`/`None` input
+/// instead of mutating process-global env — this crate is used from a
+/// `#![forbid(unsafe_code)]` composition crate that bans `std::env::set_var`,
+/// and raw env mutation is flaky under parallel test execution regardless.
+pub(crate) fn resolve_duration_secs_from_raw(raw: Option<String>, default_secs: u64) -> Duration {
+    let secs = raw
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default_secs);
+    Duration::from_secs(secs)
 }
 
-/// Docker label carrying the JSON-serialized [`ResourceScope`] the container
-/// was launched under.
-pub(crate) fn label_resource_scope(prefix: &str) -> String {
-    format!("{prefix}.resource_scope")
+fn idle_stop_after_from_env() -> Duration {
+    resolve_duration_secs_from_raw(
+        std::env::var(IDLE_STOP_AFTER_ENV).ok(),
+        DEFAULT_IDLE_STOP_AFTER_SECS,
+    )
 }
 
-/// Docker label carrying the container's RFC3339 creation timestamp, as
-/// recorded by the transport (not Docker's own `Created` field), so orphan
-/// age is always attributable to our own labeling scheme.
-pub(crate) fn label_created_at(prefix: &str) -> String {
-    format!("{prefix}.created_at")
+fn remove_stopped_after_from_env() -> Duration {
+    resolve_duration_secs_from_raw(
+        std::env::var(REMOVE_STOPPED_AFTER_ENV).ok(),
+        DEFAULT_REMOVE_STOPPED_AFTER_SECS,
+    )
 }
 
-/// Builds the `ironclaw.*` Docker labels for a container launched under
-/// `scope`. Used by `container_launch_config` in the parent module.
-///
-/// The `resource_scope` label is the scope's existing `Serialize` impl
-/// (`ResourceScope` derives `Serialize`/`Deserialize`) — never reconstructed
-/// from ad-hoc string fields, so the reaper's parse side always matches
-/// whatever shape `ResourceScope` actually has.
-pub(crate) fn build_container_labels(
-    scope: &ResourceScope,
-) -> Result<HashMap<String, String>, RuntimeProcessError> {
-    let resource_scope_json = serde_json::to_string(scope).map_err(|error| {
-        RuntimeProcessError::ExecutionFailed(format!(
-            "sandbox container labels could not serialize resource scope: {error}"
-        ))
-    })?;
-    let mut labels = HashMap::with_capacity(3);
-    labels.insert(
-        label_invocation_id(LABEL_PREFIX),
-        scope.invocation_id.to_string(),
-    );
-    labels.insert(label_resource_scope(LABEL_PREFIX), resource_scope_json);
-    labels.insert(label_created_at(LABEL_PREFIX), Utc::now().to_rfc3339());
-    Ok(labels)
-}
-
-/// A parsed, attributable sandbox container: the pieces of the `ironclaw.*`
-/// labels the reaper needs to decide liveness and age.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ReapCandidate {
-    container_id: String,
-    invocation_id: InvocationId,
-    scope: ResourceScope,
-    created_at: DateTime<Utc>,
-}
-
-impl ReapCandidate {
-    /// Parses a [`ContainerSummary`] into a candidate. Returns `None` when
-    /// the container has no ID or its labels are missing/unparseable — such
-    /// a container cannot be attributed to an invocation, so the reaper must
-    /// leave it alone rather than guess.
-    fn from_summary(container: &ContainerSummary, label_prefix: &str) -> Option<Self> {
-        let container_id = container.id.clone()?;
-        let labels = container.labels.as_ref()?;
-
-        let invocation_id = labels
-            .get(&label_invocation_id(label_prefix))
-            .and_then(|value| InvocationId::parse(value).ok())?;
-        let scope = labels
-            .get(&label_resource_scope(label_prefix))
-            .and_then(|value| serde_json::from_str::<ResourceScope>(value).ok())?;
-        let created_at = labels
-            .get(&label_created_at(label_prefix))
-            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-            .map(|value| value.with_timezone(&Utc))?;
-
-        Some(Self {
-            container_id,
-            invocation_id,
-            scope,
-            created_at,
-        })
-    }
-
-    fn age(&self, now: DateTime<Utc>) -> Duration {
-        (now - self.created_at).to_std().unwrap_or(Duration::ZERO)
-    }
-}
-
-/// Whether a sandbox container's owning invocation is still alive, as far as
-/// the reaper can tell.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Liveness {
-    /// The run is still running/blocked, OR the liveness query itself failed
-    /// (backend/filesystem error) — never conflate "I don't know" with
-    /// "it's gone".
-    Alive,
-    /// The run-state store definitively has no record for this invocation,
-    /// or the record is in a terminal status (`Completed`/`Failed`).
-    Orphaned,
-}
-
-/// Determines liveness for one invocation by querying `run_state`.
-///
-/// This is a free function (not a `SandboxReaper` method) so it can be unit
-/// tested against a fake [`RunStateStore`] without a Docker connection.
-pub(crate) async fn liveness_for(
-    run_state: &dyn RunStateStore,
-    scope: &ResourceScope,
-    invocation_id: InvocationId,
-) -> Liveness {
-    match run_state.get(scope, invocation_id).await {
-        Ok(Some(record)) => match record.status {
-            RunStatus::Running | RunStatus::BlockedApproval | RunStatus::BlockedAuth => {
-                Liveness::Alive
-            }
-            RunStatus::Completed | RunStatus::Failed => Liveness::Orphaned,
-        },
-        // Definitively no record for this invocation: orphan.
-        Ok(None) => Liveness::Orphaned,
-        // Transient query error: never reap on uncertainty. Skip this scan;
-        // the next tick re-evaluates from scratch.
-        Err(_) => Liveness::Alive,
-    }
+fn forced_recycle_after_from_env() -> Duration {
+    resolve_duration_secs_from_raw(
+        std::env::var(FORCED_RECYCLE_AFTER_ENV).ok(),
+        DEFAULT_FORCED_RECYCLE_AFTER_SECS,
+    )
 }
 
 /// Configuration for [`SandboxReaper`].
@@ -165,10 +102,18 @@ pub(crate) async fn liveness_for(
 pub struct SandboxReaperConfig {
     /// How often the reaper lists containers and evaluates them.
     pub scan_interval: Duration,
-    /// Minimum container age (by the `ironclaw.created_at` label) before it
-    /// is eligible for reaping, even if definitively orphaned. Guards
-    /// against racing a container that is mid-create.
-    pub orphan_threshold: Duration,
+    /// How long a *running* container may go with no recorded activity
+    /// before it is stopped (not removed). Default 15 minutes, overridable
+    /// via [`IDLE_STOP_AFTER_ENV`].
+    pub idle_stop_after: Duration,
+    /// How long a *stopped* container is retained before it is removed.
+    /// Default 7 days, overridable via [`REMOVE_STOPPED_AFTER_ENV`].
+    pub remove_stopped_after: Duration,
+    /// Forced-recycle age (from the container's `created_at` label) past
+    /// which a running container is stopped and a stopped one is removed
+    /// immediately, regardless of the idle/retention windows above.
+    /// Default 7 days, overridable via [`FORCED_RECYCLE_AFTER_ENV`].
+    pub forced_recycle_after: Duration,
     /// Prefix for the `ironclaw.*` Docker labels this reaper looks for.
     pub label_prefix: String,
 }
@@ -177,9 +122,76 @@ impl Default for SandboxReaperConfig {
     fn default() -> Self {
         Self {
             scan_interval: Duration::from_secs(300),
-            orphan_threshold: Duration::from_secs(600),
+            idle_stop_after: idle_stop_after_from_env(),
+            remove_stopped_after: remove_stopped_after_from_env(),
+            forced_recycle_after: forced_recycle_after_from_env(),
             label_prefix: LABEL_PREFIX.to_string(),
         }
+    }
+}
+
+/// What [`decide_reap_action`] concluded a container should have done to
+/// it. Pure decision output — [`SandboxReaper::scan_and_reap`] is the only
+/// caller that turns this into a Docker call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReapAction {
+    None,
+    Stop,
+    Remove,
+}
+
+/// Pure two-stage idle/retention decision, with a forced-recycle backstop.
+/// No I/O — every input is a value the caller already read from Docker/the
+/// activity registry, so this is exhaustively unit-testable on a fake
+/// clock (see `decision_tests` below).
+///
+/// **Never reap on uncertainty**: `idle: None` (no activity record for a
+/// running container) and `finished_at: None` (no attributable stop time
+/// for a stopped container) both yield [`ReapAction::None`] rather than
+/// treating "unknown" as "eligible" — this holds even when the container's
+/// age has crossed `forced_recycle_after`: a stopped container with an
+/// unparseable/absent `finished_at` is left alone, not force-removed,
+/// because "unknown" must never be reinterpreted as "eligible" just because
+/// another signal (age) happens to be known.
+pub(crate) fn decide_reap_action(
+    now: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    running: bool,
+    finished_at: Option<DateTime<Utc>>,
+    idle: Option<Duration>,
+    config: &SandboxReaperConfig,
+) -> ReapAction {
+    let age = (now - created_at).to_std().unwrap_or(Duration::ZERO);
+    let past_forced_recycle_age = age >= config.forced_recycle_after;
+
+    if running {
+        // Forced recycle overrides the idle window outright: a running
+        // container's age is always known (it is the container's own
+        // `created_at` label), so there is no uncertainty to defer to here.
+        if past_forced_recycle_age {
+            return ReapAction::Stop;
+        }
+        return match idle {
+            Some(idle) if idle >= config.idle_stop_after => ReapAction::Stop,
+            _ => ReapAction::None, // no activity record: never reap on uncertainty
+        };
+    }
+
+    match finished_at {
+        Some(finished_at) => {
+            if past_forced_recycle_age {
+                return ReapAction::Remove;
+            }
+            let stopped_for = (now - finished_at).to_std().unwrap_or(Duration::ZERO);
+            if stopped_for >= config.remove_stopped_after {
+                ReapAction::Remove
+            } else {
+                ReapAction::None
+            }
+        }
+        // Can't attribute a stop time: never reap on uncertainty, even if
+        // the container's age alone would otherwise justify forced recycle.
+        None => ReapAction::None,
     }
 }
 
@@ -190,25 +202,23 @@ pub struct ReapSummary {
     pub reaped: usize,
 }
 
-/// Periodically removes orphaned sandbox containers.
-///
-/// Not wired into composition yet: constructing and spawning `run()` as an
-/// owned background task is a later slice.
+/// Periodically stops idle and removes retention-expired persistent
+/// per-user sandbox containers.
 pub struct SandboxReaper {
     docker: Docker,
-    run_state: Arc<dyn RunStateStore>,
+    activity: Arc<SandboxActivityRegistry>,
     config: SandboxReaperConfig,
 }
 
 impl SandboxReaper {
     pub fn new(
         docker: Docker,
-        run_state: Arc<dyn RunStateStore>,
+        activity: Arc<SandboxActivityRegistry>,
         config: SandboxReaperConfig,
     ) -> Self {
         Self {
             docker,
-            run_state,
+            activity,
             config,
         }
     }
@@ -235,39 +245,64 @@ impl SandboxReaper {
         }
     }
 
-    /// Lists `ironclaw`-labeled containers, evaluates each against
-    /// `orphan_threshold` and [`liveness_for`], and reaps the definitively
-    /// orphaned ones. Errors listing containers are propagated (a Docker
-    /// connectivity failure means the scan learned nothing, not that
-    /// everything is fine); errors reaping an individual container are
-    /// best-effort and logged.
+    /// Lists every persistent sandbox container (any container carrying the
+    /// `ironclaw.created_at` label), evaluates each against
+    /// [`decide_reap_action`], and acts on the result. Errors listing
+    /// containers are propagated (a Docker connectivity failure means the
+    /// scan learned nothing, not that everything is fine); errors reaping
+    /// an individual container are best-effort and logged.
     pub async fn scan_and_reap(&self) -> Result<ReapSummary, RuntimeProcessError> {
-        let containers = self.list_ironclaw_containers().await?;
+        let containers = self.list_persistent_containers().await?;
         let now = Utc::now();
         let mut summary = ReapSummary::default();
 
         for container in &containers {
-            let Some(candidate) = ReapCandidate::from_summary(container, &self.config.label_prefix)
+            let Some(candidate) =
+                UserContainerCandidate::from_summary(container, &self.config.label_prefix)
             else {
-                // Unattributable container (missing/unparseable labels): not
-                // ours to manage, leave it alone.
+                // Unattributable container (missing/unparseable created_at
+                // label): not ours to manage, leave it alone.
+                continue;
+            };
+            let Some((tenant_id, user_id)) =
+                parse_tenant_user_labels(container, &self.config.label_prefix)
+            else {
+                // Missing/unparseable tenant or user label: never reap on
+                // uncertainty — this is the "unparseable/foreign labels"
+                // half of dropping orphan-sweep duty.
                 continue;
             };
             summary.considered += 1;
 
-            if candidate.age(now) < self.config.orphan_threshold {
-                continue;
-            }
+            let key = RebornSandboxUserKey::from_tenant_user(&tenant_id, &user_id);
+            let running = container.state.as_deref() == Some("running");
+            let idle = self.activity.idle_for(&key, std::time::Instant::now());
+            let finished_at = if running {
+                None
+            } else {
+                self.finished_at(&candidate.container_id).await
+            };
 
-            let liveness = liveness_for(
-                self.run_state.as_ref(),
-                &candidate.scope,
-                candidate.invocation_id,
-            )
-            .await;
-            if liveness == Liveness::Orphaned {
-                self.reap_container(&candidate.container_id).await;
-                summary.reaped += 1;
+            let action = decide_reap_action(
+                now,
+                candidate.created_at,
+                running,
+                finished_at,
+                idle,
+                &self.config,
+            );
+
+            match action {
+                ReapAction::None => {}
+                ReapAction::Stop => {
+                    self.stop_container(&candidate.container_id).await;
+                    summary.reaped += 1;
+                }
+                ReapAction::Remove => {
+                    self.remove_container(&candidate.container_id).await;
+                    self.activity.forget(&key);
+                    summary.reaped += 1;
+                }
             }
         }
 
@@ -279,11 +314,13 @@ impl SandboxReaper {
         Ok(summary)
     }
 
-    async fn list_ironclaw_containers(&self) -> Result<Vec<ContainerSummary>, RuntimeProcessError> {
+    async fn list_persistent_containers(
+        &self,
+    ) -> Result<Vec<ContainerSummary>, RuntimeProcessError> {
         let mut filters: HashMap<String, Vec<String>> = HashMap::new();
         filters.insert(
             "label".to_string(),
-            vec![label_invocation_id(&self.config.label_prefix)],
+            vec![registry::label_created_at(&self.config.label_prefix)],
         );
         self.docker
             .list_containers(Some(ListContainersOptions {
@@ -299,11 +336,33 @@ impl SandboxReaper {
             })
     }
 
-    /// Best-effort stop-then-remove, mirroring the removal style already
-    /// used inline in `execute_in_container`: never fail the scan over a
-    /// single container's teardown error, just log at `debug!` (never
-    /// `info!` — background tasks must not write to the REPL surface).
-    async fn reap_container(&self, container_id: &str) {
+    /// Inspects `container_id` for its `State.FinishedAt` timestamp.
+    /// Returns `None` on any inspect failure or unparseable/absent value —
+    /// callers treat that the same as "can't attribute a stop time", which
+    /// [`decide_reap_action`] already leaves alone rather than reaping.
+    async fn finished_at(&self, container_id: &str) -> Option<DateTime<Utc>> {
+        let inspected = self
+            .docker
+            .inspect_container(
+                container_id,
+                None::<bollard::container::InspectContainerOptions>,
+            )
+            .await
+            .ok()?;
+        let raw = inspected.state?.finished_at?;
+        // Docker reports the zero value ("0001-01-01T00:00:00Z") for a
+        // container that has never exited; that is not a real stop time.
+        let parsed = DateTime::parse_from_rfc3339(&raw).ok()?;
+        if parsed.timestamp() <= 0 {
+            return None;
+        }
+        Some(parsed.with_timezone(&Utc))
+    }
+
+    /// Best-effort stop: never fail the scan over a single container's
+    /// teardown error, just log at `debug!` (never `info!` — background
+    /// tasks must not write to the REPL surface).
+    async fn stop_container(&self, container_id: &str) {
         if let Err(error) = self
             .docker
             .stop_container(container_id, Some(StopContainerOptions { t: 0 }))
@@ -315,6 +374,11 @@ impl SandboxReaper {
                 "sandbox reaper best-effort stop failed"
             );
         }
+    }
+
+    /// Best-effort forced removal, mirroring [`Self::stop_container`]'s
+    /// error handling.
+    async fn remove_container(&self, container_id: &str) {
         if let Err(error) = self
             .docker
             .remove_container(
@@ -335,213 +399,194 @@ impl SandboxReaper {
     }
 }
 
+/// Parses the `ironclaw.tenant`/`ironclaw.user` labels off a
+/// [`ContainerSummary`] into a `{TenantId, UserId}` pair. `None` when
+/// either label is missing or fails to parse into a valid id — the
+/// container cannot be attributed to a user record, so the caller must
+/// leave it alone rather than guess.
+fn parse_tenant_user_labels(
+    container: &ContainerSummary,
+    label_prefix: &str,
+) -> Option<(TenantId, UserId)> {
+    let labels = container.labels.as_ref()?;
+    let tenant_id = labels
+        .get(&registry::label_tenant(label_prefix))
+        .and_then(|value| TenantId::new(value).ok())?;
+    let user_id = labels
+        .get(&registry::label_user(label_prefix))
+        .and_then(|value| UserId::new(value).ok())?;
+    Some((tenant_id, user_id))
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+    use chrono::Duration as ChronoDuration;
+
+    fn config() -> SandboxReaperConfig {
+        SandboxReaperConfig {
+            scan_interval: Duration::from_secs(300),
+            idle_stop_after: Duration::from_secs(900),
+            remove_stopped_after: Duration::from_secs(7 * 24 * 3600),
+            forced_recycle_after: Duration::from_secs(7 * 24 * 3600),
+            label_prefix: LABEL_PREFIX.to_string(),
+        }
+    }
+
+    #[test]
+    fn running_container_under_idle_threshold_is_left_alone() {
+        let now = Utc::now();
+        let action = decide_reap_action(
+            now,
+            now,
+            true,
+            None,
+            Some(Duration::from_secs(60)),
+            &config(),
+        );
+        assert_eq!(action, ReapAction::None);
+    }
+
+    #[test]
+    fn running_container_past_idle_threshold_is_stopped() {
+        let now = Utc::now();
+        let action = decide_reap_action(
+            now,
+            now,
+            true,
+            None,
+            Some(Duration::from_secs(1_000)),
+            &config(),
+        );
+        assert_eq!(action, ReapAction::Stop);
+    }
+
+    #[test]
+    fn running_container_with_no_activity_record_is_left_alone_not_stopped() {
+        // A process restart loses the in-memory activity map; treating
+        // "unknown" as "reap" would mass-stop every warm container on
+        // every composition restart. Mirrors the old reaper's "never
+        // reap on uncertainty" rule.
+        let now = Utc::now();
+        let action = decide_reap_action(now, now, true, None, None, &config());
+        assert_eq!(action, ReapAction::None);
+    }
+
+    #[test]
+    fn stopped_container_under_retention_is_left_alone() {
+        let now = Utc::now();
+        let finished_at = now - ChronoDuration::hours(1);
+        let action = decide_reap_action(
+            now,
+            now - ChronoDuration::days(1),
+            false,
+            Some(finished_at),
+            None,
+            &config(),
+        );
+        assert_eq!(action, ReapAction::None);
+    }
+
+    #[test]
+    fn stopped_container_past_retention_is_removed() {
+        let now = Utc::now();
+        let finished_at = now - ChronoDuration::days(8);
+        let action = decide_reap_action(
+            now,
+            now - ChronoDuration::days(8),
+            false,
+            Some(finished_at),
+            None,
+            &config(),
+        );
+        assert_eq!(action, ReapAction::Remove);
+    }
+
+    #[test]
+    fn stopped_container_with_unknown_finished_at_is_left_alone() {
+        let now = Utc::now();
+        let action = decide_reap_action(
+            now,
+            now - ChronoDuration::days(8),
+            false,
+            None,
+            None,
+            &config(),
+        );
+        assert_eq!(action, ReapAction::None);
+    }
+
+    #[test]
+    fn running_container_past_forced_recycle_age_is_stopped_first() {
+        let now = Utc::now();
+        let action = decide_reap_action(
+            now,
+            now - ChronoDuration::days(8),
+            true,
+            None,
+            Some(Duration::ZERO),
+            &config(),
+        );
+        assert_eq!(action, ReapAction::Stop);
+    }
+
+    #[test]
+    fn already_stopped_container_past_forced_recycle_age_is_removed_even_within_retention() {
+        let now = Utc::now();
+        let finished_at = now - ChronoDuration::minutes(5);
+        let action = decide_reap_action(
+            now,
+            now - ChronoDuration::days(8),
+            false,
+            Some(finished_at),
+            None,
+            &config(),
+        );
+        assert_eq!(action, ReapAction::Remove);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use ironclaw_host_api::{CapabilityId, InvocationId, UserId};
-    use ironclaw_run_state::{RunRecord, RunStart, RunStateError};
-
-    /// A fake [`RunStateStore`] whose `get` returns one of three canned
-    /// answers, so `liveness_for` can be tested without a real filesystem or
-    /// Docker daemon. Every other trait method is unreachable from these
-    /// tests — the reaper only ever calls `get`.
-    enum FixedResponse {
-        Found(RunStatus),
-        NotFound,
-        Error,
-    }
-
-    struct FixedRunStateStore(FixedResponse);
-
-    #[async_trait]
-    impl RunStateStore for FixedRunStateStore {
-        async fn start(&self, _start: RunStart) -> Result<RunRecord, RunStateError> {
-            unreachable!("reaper liveness tests never call start()")
-        }
-
-        async fn block_approval(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-            _approval: ironclaw_host_api::ApprovalRequest,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("reaper liveness tests never call block_approval()")
-        }
-
-        async fn block_auth(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-            _error_kind: String,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("reaper liveness tests never call block_auth()")
-        }
-
-        async fn complete(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("reaper liveness tests never call complete()")
-        }
-
-        async fn fail(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-            _error_kind: String,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("reaper liveness tests never call fail()")
-        }
-
-        async fn get(
-            &self,
-            scope: &ResourceScope,
-            invocation_id: InvocationId,
-        ) -> Result<Option<RunRecord>, RunStateError> {
-            match &self.0 {
-                FixedResponse::Found(status) => Ok(Some(RunRecord {
-                    invocation_id,
-                    capability_id: CapabilityId::new("builtin.shell").unwrap(),
-                    scope: scope.clone(),
-                    authenticated_actor_user_id: None,
-                    status: *status,
-                    approval_request_id: None,
-                    error_kind: None,
-                })),
-                FixedResponse::NotFound => Ok(None),
-                FixedResponse::Error => Err(RunStateError::Backend(
-                    "transient backend failure".to_string(),
-                )),
-            }
-        }
-
-        async fn records_for_scope(
-            &self,
-            _scope: &ResourceScope,
-        ) -> Result<Vec<RunRecord>, RunStateError> {
-            unreachable!("reaper liveness tests never call records_for_scope()")
-        }
-    }
-
-    fn test_scope() -> ResourceScope {
-        ResourceScope::local_default(
-            UserId::new("reaper-test-user").unwrap(),
-            InvocationId::new(),
-        )
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn is_container_live_treats_transient_query_error_as_alive() {
-        // HEADLINE regression: a backend/filesystem error from the run-state
-        // store must never be treated as "the run is gone". Reaping here
-        // would kill a container whose invocation is still alive but whose
-        // liveness query merely failed this tick.
-        let store = FixedRunStateStore(FixedResponse::Error);
-        let scope = test_scope();
-
-        let liveness = liveness_for(&store, &scope, scope.invocation_id).await;
-
-        assert_eq!(liveness, Liveness::Alive);
-    }
-
-    #[tokio::test]
-    async fn is_container_live_reaps_when_run_definitively_absent() {
-        let store = FixedRunStateStore(FixedResponse::NotFound);
-        let scope = test_scope();
-
-        let liveness = liveness_for(&store, &scope, scope.invocation_id).await;
-
-        assert_eq!(liveness, Liveness::Orphaned);
-    }
-
-    #[tokio::test]
-    async fn is_container_live_reaps_when_run_is_terminal() {
-        for status in [RunStatus::Completed, RunStatus::Failed] {
-            let store = FixedRunStateStore(FixedResponse::Found(status));
-            let scope = test_scope();
-
-            let liveness = liveness_for(&store, &scope, scope.invocation_id).await;
-
-            assert_eq!(liveness, Liveness::Orphaned, "status: {status:?}");
-        }
-    }
-
-    #[tokio::test]
-    async fn is_container_live_stays_alive_while_running_or_blocked() {
-        for status in [
-            RunStatus::Running,
-            RunStatus::BlockedApproval,
-            RunStatus::BlockedAuth,
-        ] {
-            let store = FixedRunStateStore(FixedResponse::Found(status));
-            let scope = test_scope();
-
-            let liveness = liveness_for(&store, &scope, scope.invocation_id).await;
-
-            assert_eq!(liveness, Liveness::Alive, "status: {status:?}");
-        }
-    }
-
-    #[test]
-    fn list_ironclaw_containers_parses_scope_and_invocation_labels() {
-        let scope = test_scope();
-        let labels = build_container_labels(&scope).unwrap();
-        let container = ContainerSummary {
-            id: Some("abc123".to_string()),
-            labels: Some(labels),
-            ..Default::default()
-        };
-
-        let candidate = ReapCandidate::from_summary(&container, LABEL_PREFIX)
-            .expect("round-tripped labels must parse back into a candidate");
-
-        assert_eq!(candidate.container_id, "abc123");
-        assert_eq!(candidate.invocation_id, scope.invocation_id);
-        assert_eq!(candidate.scope, scope);
-    }
-
-    #[test]
-    fn missing_labels_do_not_parse_into_a_candidate() {
-        let container = ContainerSummary {
-            id: Some("no-labels".to_string()),
-            labels: None,
-            ..Default::default()
-        };
-
-        assert!(ReapCandidate::from_summary(&container, LABEL_PREFIX).is_none());
-    }
-
-    #[test]
-    fn unparseable_resource_scope_label_does_not_parse_into_a_candidate() {
-        let scope = test_scope();
-        let container = ContainerSummary {
-            id: Some("bad-scope".to_string()),
-            labels: Some(HashMap::from([
-                (
-                    label_invocation_id(LABEL_PREFIX),
-                    scope.invocation_id.to_string(),
-                ),
-                (
-                    label_resource_scope(LABEL_PREFIX),
-                    "not valid json".to_string(),
-                ),
-                (label_created_at(LABEL_PREFIX), Utc::now().to_rfc3339()),
-            ])),
-            ..Default::default()
-        };
-
-        assert!(ReapCandidate::from_summary(&container, LABEL_PREFIX).is_none());
-    }
 
     #[test]
     fn default_config_matches_plan_thresholds() {
         let config = SandboxReaperConfig::default();
 
         assert_eq!(config.scan_interval, Duration::from_secs(300));
-        assert_eq!(config.orphan_threshold, Duration::from_secs(600));
+        assert_eq!(config.idle_stop_after, Duration::from_secs(900));
+        assert_eq!(
+            config.remove_stopped_after,
+            Duration::from_secs(7 * 24 * 3600)
+        );
+        assert_eq!(
+            config.forced_recycle_after,
+            Duration::from_secs(7 * 24 * 3600)
+        );
         assert_eq!(config.label_prefix, "ironclaw");
+    }
+
+    #[test]
+    fn env_override_resolution_falls_back_on_absent_empty_or_invalid_values() {
+        for raw in [
+            None,
+            Some(String::new()),
+            Some("not-a-number".to_string()),
+            Some("0".to_string()),
+        ] {
+            assert_eq!(
+                resolve_duration_secs_from_raw(raw, 42),
+                Duration::from_secs(42)
+            );
+        }
+    }
+
+    #[test]
+    fn env_override_resolution_uses_a_valid_positive_value() {
+        assert_eq!(
+            resolve_duration_secs_from_raw(Some("120".to_string()), 42),
+            Duration::from_secs(120)
+        );
     }
 }

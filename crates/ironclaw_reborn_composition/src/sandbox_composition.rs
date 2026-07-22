@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use ironclaw_host_runtime::SandboxActivityRegistry;
 use ironclaw_resources::ResourceGovernor;
-use ironclaw_run_state::RunStateStore;
 
 use crate::RebornBuildError;
 use crate::input::RebornLocalRuntimeIdentity;
@@ -53,7 +52,12 @@ pub(crate) struct SandboxProfileBindingInputs<'a> {
     pub(crate) is_sandboxed_profile: bool,
     pub(crate) local_runtime_identity: Option<&'a RebornLocalRuntimeIdentity>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
-    pub(crate) run_state: Arc<dyn RunStateStore>,
+    /// The activity registry the transport (`sandbox_boot::tenant_sandbox_process_binding`)
+    /// already constructed and injected into the exec transport — the reaper
+    /// must observe the SAME instance, never a second independently
+    /// constructed registry, or its idle/activity reads would never match
+    /// what the transport records.
+    pub(crate) activity: Arc<SandboxActivityRegistry>,
 }
 
 pub(crate) struct SandboxRuntimeBindings {
@@ -105,12 +109,14 @@ impl SandboxRuntimeBindings {
         // D4-1: spawn the orphan-container reaper. Guarded internally —
         // returns `None` rather than failing this build if Docker is not
         // reachable at this (independent, best-effort) connect attempt.
+        // Shares `inputs.activity` with the exec transport (Task A5) so
+        // both observe the same per-user last-activity timestamps.
         let reaper =
-            crate::sandbox_reaper_task::maybe_spawn_sandbox_reaper(Arc::clone(&inputs.run_state))
+            crate::sandbox_reaper_task::maybe_spawn_sandbox_reaper(Arc::clone(&inputs.activity))
                 .await;
 
         Ok(Self {
-            activity: Arc::new(SandboxActivityRegistry::new()),
+            activity: inputs.activity,
             reaper,
             egress_proxy: None,
             secret_lease: None,
@@ -134,67 +140,8 @@ impl SandboxRuntimeBindings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_host_api::{
-        ApprovalRequest, InvocationId, ResourceEstimate, ResourceScope, UserId,
-    };
+    use ironclaw_host_api::{InvocationId, ResourceEstimate, ResourceScope, UserId};
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_run_state::{RunRecord, RunStart, RunStateError, RunStateStore};
-
-    /// Mirrors `sandbox_reaper_task::tests::AlwaysAbsentRunStateStore`:
-    /// these tests never exercise real run-state persistence, they only
-    /// need some `Arc<dyn RunStateStore>` to construct `build`'s argument.
-    struct AlwaysAbsentRunStateStore;
-
-    #[async_trait::async_trait]
-    impl RunStateStore for AlwaysAbsentRunStateStore {
-        async fn start(&self, _start: RunStart) -> Result<RunRecord, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls start()")
-        }
-        async fn block_approval(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-            _approval: ApprovalRequest,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls block_approval()")
-        }
-        async fn block_auth(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-            _error_kind: String,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls block_auth()")
-        }
-        async fn complete(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls complete()")
-        }
-        async fn fail(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-            _error_kind: String,
-        ) -> Result<RunRecord, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls fail()")
-        }
-        async fn records_for_scope(
-            &self,
-            _scope: &ResourceScope,
-        ) -> Result<Vec<RunRecord>, RunStateError> {
-            unreachable!("AlwaysAbsentRunStateStore never calls records_for_scope()")
-        }
-        async fn get(
-            &self,
-            _scope: &ResourceScope,
-            _invocation_id: InvocationId,
-        ) -> Result<Option<RunRecord>, RunStateError> {
-            Ok(None)
-        }
-    }
 
     fn governor() -> Arc<dyn ironclaw_resources::ResourceGovernor> {
         Arc::new(InMemoryResourceGovernor::new())
@@ -206,7 +153,7 @@ mod tests {
             is_sandboxed_profile: false,
             local_runtime_identity: None,
             resource_governor: governor(),
-            run_state: Arc::new(AlwaysAbsentRunStateStore),
+            activity: Arc::new(SandboxActivityRegistry::new()),
         })
         .await
         .expect("non-sandboxed profile never fails to build inert bindings");
@@ -224,7 +171,7 @@ mod tests {
             is_sandboxed_profile: true,
             local_runtime_identity: None,
             resource_governor: Arc::clone(&governor),
-            run_state: Arc::new(AlwaysAbsentRunStateStore),
+            activity: Arc::new(SandboxActivityRegistry::new()),
         })
         .await
         .expect("sandboxed profile build succeeds even with no reachable Docker daemon");

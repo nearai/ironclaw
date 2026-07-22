@@ -1751,6 +1751,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         storage,
         runtime_policy,
         runtime_process_binding,
+        sandbox_activity,
         product_auth_ports,
         oauth_provider_configs,
         oauth_dcr_callback,
@@ -1984,8 +1985,16 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             local_runtime_identity: local_runtime_identity_for_nearai_mcp.as_ref(),
             resource_governor: Arc::clone(&store_graph.resource_governor)
                 as Arc<dyn ironclaw_resources::ResourceGovernor>,
-            run_state: Arc::clone(&store_graph.run_state)
-                as Arc<dyn ironclaw_run_state::RunStateStore>,
+            // Reuse the SAME registry `tenant_sandbox_process_binding`
+            // injected into the exec transport (threaded here via
+            // `RebornBuildInput::sandbox_activity`), so the reaper's idle
+            // reads observe the transport's writes. Non-sandboxed profiles
+            // (and any caller that never wired one) fall back to a fresh,
+            // never-touched registry — `is_sandboxed_profile` gates whether
+            // `build` does anything with it at all.
+            activity: sandbox_activity
+                .clone()
+                .unwrap_or_else(|| Arc::new(ironclaw_host_runtime::SandboxActivityRegistry::new())),
         },
     )
     .await?;
@@ -4657,6 +4666,7 @@ async fn build_production_shaped(
         // generic ingress lane lands.
         account_setup_descriptors: _,
         runtime_process_binding,
+        sandbox_activity: _,
         required_runtime_backends,
         require_runtime_http_egress,
         require_wasm_credentials,

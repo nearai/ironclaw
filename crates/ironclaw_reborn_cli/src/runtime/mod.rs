@@ -755,16 +755,18 @@ fn build_sandboxed_local_runtime_services_input(
 ) -> anyhow::Result<RebornBuildInput> {
     let sandbox_workspaces_root =
         local_runtime_storage_root(config, profile).join(SANDBOX_WORKSPACES_SUBDIR);
-    let connect = ironclaw_reborn_composition::tenant_sandbox_process_binding(
-        sandbox_workspaces_root,
-    );
-    let binding = block_on_cli(connect).map_err(|error| SandboxProcessBootError::DockerUnreachable {
-        profile,
-        reason: error.to_string(),
-    })?;
+    let connect =
+        ironclaw_reborn_composition::tenant_sandbox_process_binding(sandbox_workspaces_root);
+    let tenant_sandbox =
+        block_on_cli(connect).map_err(|error| SandboxProcessBootError::DockerUnreachable {
+            profile,
+            reason: error.to_string(),
+        })?;
     let services_input =
         build_standalone_local_runtime_services_input(profile, owner_id, config, options)?;
-    Ok(services_input.with_runtime_process_binding(binding))
+    Ok(services_input
+        .with_runtime_process_binding(tenant_sandbox.binding)
+        .with_sandbox_activity_registry(tenant_sandbox.activity))
 }
 
 fn build_hosted_single_tenant_services_input(

@@ -9,7 +9,7 @@ use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, SecretMode,
 };
 use ironclaw_host_api::{AgentId, TenantId};
-use ironclaw_host_runtime::TenantSandboxProcessPort;
+use ironclaw_host_runtime::{SandboxActivityRegistry, TenantSandboxProcessPort};
 #[cfg(any(test, feature = "test-support"))]
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_trust::HostTrustPolicy;
@@ -183,6 +183,14 @@ pub struct RebornBuildInput {
     pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     pub(crate) turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     pub(crate) runtime_process_binding: RebornRuntimeProcessBinding,
+    /// The `SandboxActivityRegistry` `tenant_sandbox_process_binding`
+    /// constructed and injected into the exec transport, when
+    /// `runtime_process_binding` is a `TenantSandbox` binding. `factory.rs`
+    /// forwards this same instance into `SandboxRuntimeBindings::build` so
+    /// the reaper reads the exact registry the transport writes into,
+    /// rather than a second independently constructed one. `None` for every
+    /// non-sandboxed profile.
+    pub(crate) sandbox_activity: Option<Arc<SandboxActivityRegistry>>,
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
@@ -711,6 +719,20 @@ impl RebornBuildInput {
         self
     }
 
+    /// Supply the `SandboxActivityRegistry` a `tenant_sandbox_process_binding`
+    /// caller received alongside its `TenantSandboxBinding.binding` (see
+    /// `sandbox_boot::TenantSandboxBinding`), so `build_local_runtime` can
+    /// forward the SAME instance into `SandboxRuntimeBindings::build` rather
+    /// than the reaper reading a second, empty registry the transport never
+    /// writes into.
+    pub fn with_sandbox_activity_registry(
+        mut self,
+        activity: Arc<SandboxActivityRegistry>,
+    ) -> Self {
+        self.sandbox_activity = Some(activity);
+        self
+    }
+
     pub fn require_runtime_http_egress(mut self) -> Self {
         self.require_runtime_http_egress = true;
         self
@@ -863,6 +885,7 @@ impl RebornBuildInput {
             runtime_policy: None,
             turn_run_wake_notifier: None,
             runtime_process_binding: RebornRuntimeProcessBinding::default(),
+            sandbox_activity: None,
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,

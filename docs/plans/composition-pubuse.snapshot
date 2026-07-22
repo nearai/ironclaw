@@ -53,7 +53,7 @@ pub use ironclaw_product_workflow::{
 };
 pub use ironclaw_runner::failure_lane::{ALL_RUN_FAILURE_CATEGORIES, FailureLane, failure_lane};
 pub use ironclaw_runner::runtime::DEFAULT_TURN_RUNNER_WORKER_COUNT;
-pub use sandbox_boot::tenant_sandbox_process_binding;
+pub use sandbox_boot::{TenantSandboxBinding, tenant_sandbox_process_binding};
 pub use ironclaw_runner::failure_summary::reborn_failure_summary_for_category;
 pub use ironclaw_runtime_policy::{
     ResolveRequest as RuntimePolicyResolveRequest, resolve as resolve_runtime_policy,
