@@ -37,6 +37,7 @@ mod network_allowlist;
 mod reaper;
 mod scope_key;
 pub mod shell_limits;
+mod user_key;
 
 use mounts::RebornSandboxMountSources;
 
@@ -44,15 +45,16 @@ pub use broker::{RebornSandboxNetworkBroker, RebornSandboxSecretBroker};
 pub use connect::{SandboxDockerReadiness, connect_docker_with_retry, sandbox_docker_readiness};
 pub use container_identity::{RebornSandboxContainerIdentity, RebornSandboxWorkspaceMode};
 pub use network_allowlist::{
-    DEFAULT_SANDBOX_ALLOWED_DOMAINS, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV,
-    sandbox_allowed_domains, sandbox_extra_allowed_domains, sandbox_network_policy,
+    DEFAULT_SANDBOX_ALLOWED_DOMAINS, SANDBOX_EXTRA_ALLOWED_DOMAINS_ENV, sandbox_allowed_domains,
+    sandbox_extra_allowed_domains, sandbox_network_policy,
 };
 pub use reaper::{ReapSummary, SandboxReaper, SandboxReaperConfig};
+pub use scope_key::RebornSandboxScopeKey;
 pub use shell_limits::{
     SHELL_OUTPUT_LIMIT_DEFAULT_BYTES, SHELL_OUTPUT_LIMIT_MAX_BYTES, SHELL_TIMEOUT_DEFAULT_SECS,
     SHELL_TIMEOUT_MAX_SECS, clamp_shell_output_limit_bytes, clamp_shell_timeout_secs,
 };
-pub use scope_key::RebornSandboxScopeKey;
+pub use user_key::RebornSandboxUserKey;
 
 /// Docker label prefix for container metadata attached by
 /// [`RebornScopedSandboxCommandTransport`] — shared with [`reaper`] so the
