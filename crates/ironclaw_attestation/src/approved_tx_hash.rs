@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::canonical_signing_bytes;
 use crate::decoded_tx::{DecodedTransaction, RenderingSchemaVersion};
+use crate::error::AttestationError;
 use crate::rendered::{RenderedTx, render};
 
 /// Domain separator for the approved-tx hash pre-image. Distinct from the
@@ -79,17 +80,17 @@ pub fn approved_tx_hash_for(
     tx: &DecodedTransaction,
     signer_account: &str,
     schema_version: RenderingSchemaVersion,
-) -> ApprovedTxHash {
-    let rendered = render(tx, schema_version);
-    let canonical = canonical_signing_bytes(tx, schema_version);
-    compute_approved_tx_hash_inner(
+) -> Result<ApprovedTxHash, AttestationError> {
+    let rendered = render(tx, schema_version)?;
+    let canonical = canonical_signing_bytes(tx, schema_version)?;
+    Ok(compute_approved_tx_hash_inner(
         &rendered,
         &canonical,
         signer_account,
         &tx.chain_network(),
         &tx.tx_type_label(),
         schema_version,
-    )
+    ))
 }
 
 /// Compute the binding [`ApprovedTxHash`] from already-derived components.

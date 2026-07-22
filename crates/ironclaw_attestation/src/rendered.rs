@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::decoded_tx::{DecodedTransaction, RenderingSchemaVersion};
+use crate::error::AttestationError;
 use crate::fields::project;
 
 /// One displayed label/value pair.
@@ -54,19 +55,22 @@ impl RenderedTx {
 /// The renderer surfaces EVERY signing-relevant field that
 /// [`crate::canonical::canonical_signing_bytes`] consumes — there are no silent
 /// fields, because both walk [`crate::fields::project`].
-pub fn render(tx: &DecodedTransaction, schema_version: RenderingSchemaVersion) -> RenderedTx {
-    let fields = project(tx)
+pub fn render(
+    tx: &DecodedTransaction,
+    schema_version: RenderingSchemaVersion,
+) -> Result<RenderedTx, AttestationError> {
+    let fields = project(tx)?
         .into_iter()
         .map(|f| RenderedField {
             label: f.label.to_string(),
             value: f.value,
         })
         .collect();
-    RenderedTx {
+    Ok(RenderedTx {
         schema_version,
         chain: tx.chain_tag().to_string(),
         chain_network: tx.chain_network(),
         tx_type: tx.tx_type_label(),
         fields,
-    }
+    })
 }
