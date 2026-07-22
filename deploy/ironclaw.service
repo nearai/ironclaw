@@ -6,21 +6,26 @@ Requires=cloud-sql-proxy.service
 [Service]
 Type=simple
 EnvironmentFile=/opt/ironclaw/.env
-# Pin to a specific version tag or digest instead of :latest to prevent
-# uncontrolled deployments. Update IRONCLAW_VERSION in /opt/ironclaw/.env
-# or replace the tag below when deploying a new release.
-ExecStartPre=/bin/bash -c 'docker pull us-central1-docker.pkg.dev/ironclaw-prod/ironclaw/agent:${IRONCLAW_VERSION:-latest}'
+# Pin to a specific release tag instead of :latest to prevent uncontrolled
+# deployments. Update IRONCLAW_VERSION in /opt/ironclaw/.env when deploying a
+# new release. Empty, placeholder, and latest values fail before Docker runs.
+ExecStartPre=/bin/bash -c ': "${IRONCLAW_VERSION:?IRONCLAW_VERSION must be set in /opt/ironclaw/.env}"; case "${IRONCLAW_VERSION}" in latest|CHANGE_ME) echo "IRONCLAW_VERSION must be a pinned release tag" >&2; exit 1 ;; esac; exec docker pull "us-central1-docker.pkg.dev/ironclaw-prod/ironclaw/agent:${IRONCLAW_VERSION}"'
 # The Reborn image entrypoint (docker/reborn/entrypoint.sh) defaults to
 # `serve --host $IRONCLAW_REBORN_SERVE_HOST --port $PORT` when invoked with no
 # arguments. Set IRONCLAW_REBORN_SERVE_HOST=0.0.0.0 in /opt/ironclaw/.env so
 # the published port is reachable, and IRONCLAW_REBORN_PROFILE=production to
 # select Postgres-backed hosted storage. Do NOT pass legacy v1 flags such as
 # `--no-onboard` here — they are not accepted by the Reborn `ironclaw` binary.
+# Before enabling or restarting this unit, follow
+# docs/reborn/deployment-profile-operator-checklist.md without recording secrets.
 ExecStart=/bin/bash -c 'docker run --rm \
   --name ironclaw \
   --env-file /opt/ironclaw/.env \
+  --mount type=bind,src=/opt/ironclaw/data,dst=/data/ironclaw-reborn \
+  --mount type=bind,src=/run/cloud-sql-proxy,dst=/cloudsql \
+  --group-add "$(stat -c %g /run/cloud-sql-proxy)" \
   -p 3000:3000 \
-  us-central1-docker.pkg.dev/ironclaw-prod/ironclaw/agent:${IRONCLAW_VERSION:-latest}'
+  "us-central1-docker.pkg.dev/ironclaw-prod/ironclaw/agent:${IRONCLAW_VERSION:?IRONCLAW_VERSION must be set in /opt/ironclaw/.env}"'
 ExecStop=/usr/bin/docker stop ironclaw
 Restart=always
 RestartSec=10

@@ -48,11 +48,11 @@ echo "==> Configuring Docker registry auth"
 # The VM service account provides Artifact Registry access
 gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-echo "==> Creating config directory"
-# Owned by root, readable only by root. Docker reads --env-file as root
-# before dropping to uid 1000 (ironclaw) inside the container.
-mkdir -p /opt/ironclaw
-chmod 700 /opt/ironclaw
+echo "==> Creating config and persistent data directories"
+# The config remains root-only. The data directory is bind-mounted into the
+# image and therefore uses the image's fixed ironclaw uid/gid (1000:1000).
+install -d -m 0700 -o root -g root /opt/ironclaw
+install -d -m 0700 -o 1000 -g 1000 /opt/ironclaw/data
 
 if [ ! -f /opt/ironclaw/.env ]; then
   echo "WARNING: /opt/ironclaw/.env does not exist."
@@ -61,6 +61,7 @@ if [ ! -f /opt/ironclaw/.env ]; then
   echo ""
   echo "Then run: systemctl enable ironclaw && systemctl start ironclaw"
 else
+  chown root:root /opt/ironclaw/.env
   chmod 600 /opt/ironclaw/.env
   echo "==> Starting IronClaw"
   systemctl enable ironclaw

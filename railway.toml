@@ -2,6 +2,12 @@
 builder = "dockerfile"
 dockerfilePath = "Dockerfile"
 
+# Railway service variables are managed outside this repository.
+# IRONCLAW_REBORN_PROFILE must be set explicitly to the profile matching the
+# service's storage and tenancy topology. Do not rely on the image's local-dev
+# seed for a public deployment. Follow the pre-deploy and verification checklist:
+# docs/reborn/deployment-profile-operator-checklist.md
+
 [deploy]
 healthcheckPath = "/api/health"
 healthcheckTimeout = 300

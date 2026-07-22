@@ -12,6 +12,8 @@ This repo exposes Reborn structure primarily through implementation crates, crat
 | --- | --- |
 | Standalone Reborn binary | `docs/reborn-binary.md` |
 | Standalone Reborn onboarding | `docs/reborn/onboarding.md` |
+| Docker/Railway/GCP deployment | `docs/reborn/deploy-reborn-cli-docker.md` |
+| Deployment profile operator checklist | `docs/reborn/deployment-profile-operator-checklist.md` |
 | Production cutover readiness closeout | `docs/reborn/production-cutover-readiness-closeout.md` |
 | Standalone Reborn Slack setup | `docs/reborn/setup-slack-for-reborn-binary.md` |
 | Porting v1 channels to Reborn surfaces/ProductAdapters | `docs/reborn/how-to-port-channel-to-reborn.md` |
