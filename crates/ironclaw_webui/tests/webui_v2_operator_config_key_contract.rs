@@ -156,21 +156,6 @@ impl RebornServicesApi for RecordingServices {
         Err(service_unavailable_error())
     }
 
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        unreachable!("not exercised by this test")
-    }
-
     async fn install_skill(
         &self,
         _caller: WebUiAuthenticatedCaller,

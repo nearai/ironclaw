@@ -39,13 +39,12 @@ use ironclaw_product_workflow::{
     RebornGetRunStateRequest, RebornGetRunStateResponse, RebornListAutomationsResponse,
     RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
     RebornServicesApi, RebornServicesError, RebornSetupExtensionResponse,
-    RebornSkillActionResponse, RebornSkillContentResponse, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
+    RebornSkillActionResponse, RebornSkillContentResponse, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -191,21 +190,6 @@ impl RebornServicesApi for StubServices {
         _caller: WebUiAuthenticatedCaller,
         _request: WebUiListAutomationsRequest,
     ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 

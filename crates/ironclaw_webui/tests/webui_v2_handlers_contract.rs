@@ -67,12 +67,12 @@ use ironclaw_product_workflow::{
     RebornStreamEventsResponse, RebornStreamEventsSubscription, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
     RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    RunArtifactLogs, RunArtifactRedaction, SetActiveLlmRequest, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, UpsertLlmProviderRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    rejecting_reborn_services_error,
+    RunArtifactLogs, RunArtifactRedaction, SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, rejecting_reborn_services_error,
 };
 use ironclaw_threads::SessionThreadRecord;
 use ironclaw_turns::{
@@ -877,6 +877,25 @@ impl RebornServicesApi for StubServices {
                 .expect("extension registry payload"),
                 next_cursor: None,
             }),
+            id if id == SKILLS_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornSkillListResponse {
+                    skills: Vec::new(),
+                    count: 0,
+                    auto_activate_learned: true,
+                })
+                .expect("skills payload"),
+                next_cursor: None,
+            }),
+            id if id == SKILL_SEARCH_VIEW.id => Ok(RebornViewPage {
+                payload: serde_json::to_value(RebornSkillSearchResponse {
+                    catalog: Vec::new(),
+                    installed: Vec::new(),
+                    registry_url: String::new(),
+                    catalog_error: None,
+                })
+                .expect("skill search payload"),
+                next_cursor: None,
+            }),
             _ => Err(rejecting_reborn_services_error()),
         }
     }
@@ -1206,21 +1225,6 @@ impl RebornServicesApi for StubServices {
             updated: true,
             automation: None,
         })
-    }
-
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
     }
 
     async fn install_skill(
@@ -4416,6 +4420,48 @@ async fn extension_list_and_registry_use_product_views() {
 }
 
 #[tokio::test]
+async fn skill_list_and_search_use_product_views() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let list_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/skills")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(list_response.status(), StatusCode::OK);
+
+    let search_response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/skills/search")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"registry"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(search_response.status(), StatusCode::OK);
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 2);
+    assert_eq!(queries[0].view_id, SKILLS_VIEW.id);
+    assert_eq!(queries[0].params, serde_json::json!({}));
+    assert_eq!(queries[1].view_id, SKILL_SEARCH_VIEW.id);
+    assert_eq!(
+        queries[1].params,
+        serde_json::json!({ "query": "registry" })
+    );
+}
+
+#[tokio::test]
 async fn install_extension_decodes_body_package_ref_to_facade_call() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
@@ -5272,19 +5318,6 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
             _caller: WebUiAuthenticatedCaller,
             _request: WebUiListAutomationsRequest,
         ) -> Result<RebornListAutomationsResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn list_skills(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-        ) -> Result<RebornSkillListResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn search_skills(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _query: String,
-        ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
             unreachable!("not exercised by this test")
         }
         async fn install_skill(

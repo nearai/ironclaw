@@ -209,6 +209,14 @@ const TOOL_CONFIG_PREFIX: &str = "tool.";
 pub const OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID: &str =
     "builtin.operator_config_set_auto_approve";
 pub const OUTBOUND_PREFERENCES_SET_CAPABILITY_ID: &str = "builtin.outbound_preferences_set";
+pub const SKILLS_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "skills",
+    paginated: false,
+};
+pub const SKILL_SEARCH_VIEW: RebornViewDescriptor = RebornViewDescriptor {
+    id: "skill_search",
+    paginated: false,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornOperatorToolInfo {
@@ -2256,17 +2264,6 @@ pub trait RebornServicesApi: Send + Sync {
         Ok(RebornTraceHoldAuthorizeResponse { authorized })
     }
 
-    async fn list_skills(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError>;
-
-    async fn search_skills(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError>;
-
     async fn install_skill(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -3993,6 +3990,19 @@ where
                         .await?;
                 views::view_page(response)
             }
+            id if id == SKILLS_VIEW.id => {
+                views::parse_empty_view_params(query.params)?;
+                let response = self.skills_facade.list_skills(caller).await?;
+                views::view_page(response)
+            }
+            id if id == SKILL_SEARCH_VIEW.id => {
+                let search_query = views::required_string_view_param(query.params, "query")?;
+                let response = self
+                    .skills_facade
+                    .search_skills(caller, search_query)
+                    .await?;
+                views::view_page(response)
+            }
             id if id == OPERATOR_DIAGNOSTICS_VIEW.id => {
                 views::parse_empty_view_params(query.params)?;
                 let response = self.build_operator_diagnostics_view(caller).await?;
@@ -4769,21 +4779,6 @@ where
         self.automation_facade
             .delete_automation(caller, automation_id)
             .await
-    }
-
-    async fn list_skills(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        self.skills_facade.list_skills(caller).await
-    }
-
-    async fn search_skills(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        self.skills_facade.search_skills(caller, query).await
     }
 
     async fn install_skill(

@@ -89,12 +89,14 @@ use ironclaw_product_workflow::{
     RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
     RebornServiceLifecycleState, RebornServices, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornViewQuery, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SetActiveLlmRequest,
-    StaticOperatorStatusService, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
-    TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewQuery, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest,
+    SkillsProductFacade, StaticOperatorStatusService, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
@@ -9610,6 +9612,105 @@ async fn query_extensions<S: RebornServicesApi + ?Sized>(
         )
         .await?;
     serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
+}
+
+#[tokio::test]
+async fn skill_reads_are_available_as_product_views() {
+    let skills = Arc::new(RecordingSkillsFacade::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_skills_product_facade(skills.clone());
+
+    let list_page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: SKILLS_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("skills view");
+    let listed: RebornSkillListResponse =
+        serde_json::from_value(list_page.payload).expect("skills payload");
+    assert_eq!(listed.count, 1);
+    assert_eq!(listed.skills[0].name, "local-skill");
+
+    let search_page = services
+        .query(
+            caller(),
+            RebornViewQuery {
+                view_id: SKILL_SEARCH_VIEW.id.to_string(),
+                params: json!({ "query": "registry" }),
+                cursor: None,
+            },
+        )
+        .await
+        .expect("skill search view");
+    let searched: RebornSkillSearchResponse =
+        serde_json::from_value(search_page.payload).expect("skill search payload");
+    assert_eq!(searched.registry_url, "https://skills.example.test");
+    assert_eq!(
+        skills.search_queries.lock().expect("lock").as_slice(),
+        ["registry"]
+    );
+}
+
+fn skill_info(name: &str) -> RebornSkillInfo {
+    RebornSkillInfo {
+        name: name.to_string(),
+        description: format!("{name} skill"),
+        version: "1.0.0".to_string(),
+        trust: RebornSkillTrustLevel::Installed,
+        source: RebornSkillSourceKind::User,
+        source_kind: RebornSkillSourceKind::User,
+        keywords: Vec::new(),
+        usage_hint: None,
+        setup_hint: None,
+        bundle_path: None,
+        install_source_url: None,
+        has_requirements: false,
+        has_scripts: false,
+        can_edit: true,
+        can_delete: true,
+        auto_activate: true,
+    }
+}
+
+#[derive(Default)]
+struct RecordingSkillsFacade {
+    search_queries: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl SkillsProductFacade for RecordingSkillsFacade {
+    async fn list_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+    ) -> Result<RebornSkillListResponse, RebornServicesError> {
+        Ok(RebornSkillListResponse {
+            skills: vec![skill_info("local-skill")],
+            count: 1,
+            auto_activate_learned: true,
+        })
+    }
+
+    async fn search_skills(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        query: String,
+    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
+        self.search_queries.lock().expect("lock").push(query);
+        Ok(RebornSkillSearchResponse {
+            catalog: vec![json!({ "name": "registry-skill" })],
+            installed: vec![skill_info("local-skill")],
+            registry_url: "https://skills.example.test".to_string(),
+            catalog_error: None,
+        })
+    }
 }
 
 fn operator_policy_scope_for_test(tenant_id: &str, user_id: &str) -> ResourceScope {

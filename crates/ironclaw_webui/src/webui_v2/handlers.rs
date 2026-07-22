@@ -63,8 +63,8 @@ use ironclaw_product_workflow::{
     RebornSkillContentResponse, RebornSkillListResponse, RebornSkillSearchResponse,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewQuery,
-    SetActiveLlmRequest, SettingsToolPermissionState, TRACE_ACCOUNT_TRACES_VIEW,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewQuery, SKILL_SEARCH_VIEW,
+    SKILLS_VIEW, SetActiveLlmRequest, SettingsToolPermissionState, TRACE_ACCOUNT_TRACES_VIEW,
     TRACE_CREDITS_VIEW, UpsertLlmProviderRequest, WebUiAttachmentCapabilities,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
@@ -1631,7 +1631,19 @@ pub async fn list_skills(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornSkillListResponse>, WebUiV2HttpError> {
-    let response = state.services().list_skills(caller).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: SKILLS_VIEW.id.to_string(),
+                params: serde_json::json!({}),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 
@@ -1641,7 +1653,19 @@ pub async fn search_skills(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<SearchSkillsBody>,
 ) -> Result<Json<RebornSkillSearchResponse>, WebUiV2HttpError> {
-    let response = state.services().search_skills(caller, body.query).await?;
+    let page = state
+        .services()
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: SKILL_SEARCH_VIEW.id.to_string(),
+                params: serde_json::json!({ "query": body.query }),
+                cursor: None,
+            },
+        )
+        .await?;
+    let response =
+        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
     Ok(Json(response))
 }
 

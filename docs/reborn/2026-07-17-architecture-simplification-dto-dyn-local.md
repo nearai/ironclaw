@@ -2353,8 +2353,8 @@ loop-facing capability result and every result mirror is deleted.
   landed (§10 ratchet, above), so the surface can only shrink. Initial reads now
   flow through view descriptors (`query`) rather than per-feature methods:
   LLM config, operator status/diagnostics/setup/config validation, extension
-  inventory/registry, outbound preferences/targets, trace credits/account
-  traces, and run artifacts. The
+  inventory/registry, skill list/search, outbound preferences/targets, trace
+  credits/account traces, and run artifacts. The
   outbound preference write now flows through
   `builtin.outbound_preferences_set`, an API-only first-party capability invoked
   directly by the WebUI product adapter and verified by reading back

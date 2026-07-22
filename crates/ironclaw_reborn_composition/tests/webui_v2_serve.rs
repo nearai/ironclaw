@@ -27,9 +27,8 @@ use ironclaw_product_workflow::{
     RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
     RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetupExtensionResponse, RebornSkillActionResponse, RebornSkillContentResponse,
-    RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest,
@@ -919,21 +918,6 @@ impl RebornServicesApi for StubServices {
             automations: Vec::new(),
             scheduler_enabled: true,
         })
-    }
-
-    async fn list_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornSkillListResponse, RebornServicesError> {
-        Err(unused_services_error())
-    }
-
-    async fn search_skills(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _query: String,
-    ) -> Result<RebornSkillSearchResponse, RebornServicesError> {
-        Err(unused_services_error())
     }
 
     async fn install_skill(

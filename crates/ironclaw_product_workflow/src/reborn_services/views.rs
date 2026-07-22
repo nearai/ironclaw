@@ -41,6 +41,25 @@ pub(super) fn parse_empty_view_params(
         .map_err(RebornServicesError::internal_from)
 }
 
+pub(super) fn required_string_view_param(
+    params: serde_json::Value,
+    field: &str,
+) -> Result<String, RebornServicesError> {
+    let object = params
+        .as_object()
+        .ok_or_else(|| RebornServicesError::internal_from("view params must be a JSON object"))?;
+    if object.len() != 1 {
+        return Err(RebornServicesError::internal_from(
+            "view params contain unexpected fields",
+        ));
+    }
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| RebornServicesError::internal_from("view params missing string field"))
+}
+
 pub(super) fn view_page<T: Serialize>(payload: T) -> Result<RebornViewPage, RebornServicesError> {
     view_page_with_cursor(payload, None)
 }
