@@ -76,9 +76,9 @@ exempt_capabilities = [
     # operator's explicit save gesture. Its handler repeats operator identity
     # enforcement and uses revision CAS plus idempotent replay.
     "builtin.admin_configuration_replace",
-    # This API-only capability is reachable only from an authenticated
-    # operator's explicit settings toggle. Its handler repeats actor/scope
-    # matching and writes only the tenant/user approval settings scope.
+    # This API-only capability is reachable only from an authenticated user's
+    # explicit settings toggle. Its handler repeats actor/scope matching and
+    # writes only that tenant/user's approval settings scope.
     "builtin.operator_config_set_auto_approve",
     # This API-only capability is reachable only from an authenticated
     # operator's explicit per-tool permission save. Its handler repeats

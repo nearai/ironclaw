@@ -130,7 +130,7 @@ impl FirstPartyCapabilityHandler for SetAutoApproveHandler {
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         let started = Instant::now();
         ensure_declared(&request, started)?;
-        let actor = authenticated_operator(&request, started)?;
+        let actor = authenticated_actor(&request, started)?;
         let enabled = parse_enabled(request.input, started)?;
         let scope = request.scope.tenant_user_settings_scope();
         let record = self
@@ -171,7 +171,7 @@ impl FirstPartyCapabilityHandler for SetToolPermissionHandler {
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         let started = Instant::now();
         ensure_tool_permission_declared(&request, started)?;
-        let actor = authenticated_operator(&request, started)?;
+        let actor = authenticated_actor(&request, started)?;
         let input = parse_tool_permission_input(request.input, started)?;
         let tool = find_operator_tool(
             self.tool_catalog.as_ref(),
@@ -237,7 +237,7 @@ fn ensure_tool_permission_declared(
     }
 }
 
-fn authenticated_operator(
+fn authenticated_actor(
     request: &FirstPartyCapabilityRequest,
     started: Instant,
 ) -> Result<UserId, FirstPartyCapabilityError> {
@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn authenticated_operator_must_match_resource_user() {
+    fn authenticated_actor_must_match_resource_user() {
         let operator = UserId::new("operator").expect("operator");
         let member = UserId::new("member").expect("member");
         let scope = ResourceScope {
@@ -543,10 +543,10 @@ mod tests {
             None,
         );
         request.authenticated_actor_user_id = Some(member);
-        assert!(authenticated_operator(&request, Instant::now()).is_err());
+        assert!(authenticated_actor(&request, Instant::now()).is_err());
         request.authenticated_actor_user_id = Some(operator.clone());
         assert_eq!(
-            authenticated_operator(&request, Instant::now()).expect("operator"),
+            authenticated_actor(&request, Instant::now()).expect("actor"),
             operator
         );
     }

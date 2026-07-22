@@ -24,10 +24,10 @@ use ironclaw_auth::{
 };
 use ironclaw_common::{AutomationName, AutomationNameError};
 use ironclaw_host_api::{
-    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, FailureKind, InvocationId, Outcome,
-    OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution, ResourceScope,
-    ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId,
-    TerminateHint, ThreadId, ToolVerdict, UserId,
+    ActivityId, AgentId, CapabilityId, EffectKind, ExtensionId, FailureKind, GrantConstraints,
+    InvocationId, Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution,
+    ResourceScope, ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle,
+    TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -125,8 +125,9 @@ pub use fs_browse::{
 };
 use ironclaw_approvals::{
     AUTO_APPROVE_DEFAULT_ENABLED, AutoApproveSettingKey, AutoApproveSettingStore,
-    PersistentApprovalAction, PersistentApprovalPolicyKey, PersistentApprovalPolicyStore,
-    ToolPermissionOverride, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
+    PersistentApprovalAction, PersistentApprovalPolicyError, PersistentApprovalPolicyInput,
+    PersistentApprovalPolicyKey, PersistentApprovalPolicyStore, ToolPermissionOverride,
+    ToolPermissionOverrideInput, ToolPermissionOverrideKey, ToolPermissionOverrideStore,
     ToolPermissionState, permission_mode_allows_persistent_approval,
 };
 pub use lifecycle_setup::EXTENSION_SETUP_VIEW;
@@ -1343,6 +1344,77 @@ fn api_capability_mutation_succeeded(resolution: Resolution) -> Result<(), Rebor
     }
 }
 
+fn product_view_forbidden() -> RebornServicesError {
+    RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
+}
+
+fn product_view_requires_operator_webui_config(view_id: &str) -> bool {
+    matches!(
+        view_id,
+        id if id == ADMIN_CONFIGURATION_VIEW.id
+            || id == OPERATOR_LOGS_VIEW.id
+            || id == LLM_CONFIG_VIEW.id
+            || id == OPERATOR_SETUP_VIEW.id
+            || id == OPERATOR_DIAGNOSTICS_VIEW.id
+            || id == OPERATOR_STATUS_VIEW.id
+    )
+}
+
+fn authorize_product_view(
+    caller: &WebUiAuthenticatedCaller,
+    view_id: &str,
+) -> Result<(), RebornServicesError> {
+    if product_view_requires_operator_webui_config(view_id) && !caller.operator_webui_config {
+        return Err(product_view_forbidden());
+    }
+    Ok(())
+}
+
+fn operator_config_auto_approve_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    enabled: bool,
+) -> ActivityId {
+    let mut seed = Vec::new();
+    for segment in [
+        "product-surface-operator-config-auto-approve",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        if enabled { "enabled" } else { "disabled" },
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    ActivityId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_OID, &seed))
+}
+
+fn operator_config_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
+        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
+            Some(FailureKind::InvalidInput) => Err(operator_config_invalid_value("value")),
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
+                Err(operator_config_capability_forbidden())
+            }
+            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
+                Err(RebornServicesError::service_unavailable(true))
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "operator config capability returned a non-success result",
+            )),
+        },
+        Resolution::Denied(_) => Err(operator_config_capability_forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => {
+            Err(RebornServicesError::service_unavailable(true))
+        }
+    }
+}
+
 async fn auto_approve_config_entry(
     config: &RebornOperatorApprovalConfig,
     scope: &ResourceScope,
@@ -1583,13 +1655,6 @@ fn tool_permission_state_wire(state: ToolPermissionState) -> &'static str {
     }
 }
 
-fn tool_permission_update_wire(update: ToolPermissionUpdate) -> &'static str {
-    match update {
-        ToolPermissionUpdate::Default => "default",
-        ToolPermissionUpdate::State(state) => tool_permission_state_wire(state),
-    }
-}
-
 /// Wire enum for the WebUI settings/tools permission request body.
 ///
 /// Request-side vocabulary on the RebornServicesApi contract surface: the
@@ -1633,6 +1698,96 @@ fn parse_tool_permission_state(
         "disabled" => Ok(ToolPermissionUpdate::State(ToolPermissionState::Disabled)),
         _ => Err(operator_config_invalid_value("state")),
     }
+}
+
+async fn apply_tool_permission_state(
+    config: &RebornOperatorApprovalConfig,
+    scope: &ResourceScope,
+    actor: &TurnActor,
+    tool: &RebornOperatorToolInfo,
+    update: ToolPermissionUpdate,
+) -> Result<(), RebornServicesError> {
+    match update {
+        ToolPermissionUpdate::Default => {
+            let operator_scope = operator_tool_permission_scope(scope);
+            match config
+                .persistent_policies
+                .revoke(&persistent_user_policy_key(&operator_scope, tool))
+                .await
+            {
+                Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => {}
+                Err(error) => return Err(operator_config_store_error(error)),
+            }
+            config
+                .overrides
+                .clear(&ToolPermissionOverrideKey::new(
+                    &operator_scope,
+                    tool.capability_id.clone(),
+                ))
+                .await
+                .map_err(operator_config_store_error)?;
+        }
+        ToolPermissionUpdate::State(ToolPermissionState::AlwaysAllow) => {
+            let operator_scope = operator_tool_permission_scope(scope);
+            config
+                .persistent_policies
+                .allow(PersistentApprovalPolicyInput {
+                    scope: operator_scope.clone(),
+                    action: PersistentApprovalAction::Dispatch,
+                    capability_id: tool.capability_id.clone(),
+                    grantee: Principal::Extension(tool.provider.clone()),
+                    approved_by: Principal::User(actor.user_id.clone()),
+                    constraints: GrantConstraints {
+                        allowed_effects: tool.effects.as_ref().to_vec(),
+                        mounts: Default::default(),
+                        network: Default::default(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                    source_approval_request_id: None,
+                })
+                .await
+                .map_err(operator_config_store_error)?;
+            config
+                .overrides
+                .clear(&ToolPermissionOverrideKey::new(
+                    &operator_scope,
+                    tool.capability_id.clone(),
+                ))
+                .await
+                .map_err(operator_config_store_error)?;
+        }
+        ToolPermissionUpdate::State(state @ ToolPermissionState::AskEachTime)
+        | ToolPermissionUpdate::State(state @ ToolPermissionState::Disabled) => {
+            let operator_scope = operator_tool_permission_scope(scope);
+            let override_state = match state {
+                ToolPermissionState::AskEachTime => ToolPermissionOverride::AskEachTime,
+                ToolPermissionState::Disabled => ToolPermissionOverride::Disabled,
+                ToolPermissionState::AlwaysAllow => unreachable!(),
+            };
+            match config
+                .persistent_policies
+                .revoke(&persistent_user_policy_key(&operator_scope, tool))
+                .await
+            {
+                Ok(_) | Err(PersistentApprovalPolicyError::UnknownPolicy) => {}
+                Err(error) => return Err(operator_config_store_error(error)),
+            }
+            config
+                .overrides
+                .set(ToolPermissionOverrideInput {
+                    scope: operator_scope.clone(),
+                    capability_id: tool.capability_id.clone(),
+                    state: override_state,
+                    updated_by: Principal::User(actor.user_id.clone()),
+                })
+                .await
+                .map_err(operator_config_store_error)?;
+        }
+    }
+    Ok(())
 }
 
 const LLM_BASE_URL_MAX_BYTES: usize = 2048;
@@ -1964,13 +2119,14 @@ pub trait RebornServicesApi: Send + Sync {
     /// `caller` is trusted ingress input. `capability` and `input` are
     /// designators only; a wired implementation must resolve and authorize
     /// them rather than treating either as authority. `activity_id` is the
-    /// client-minted idempotency identity and must be preserved across retries.
+    /// stable idempotency identity for this mutation and must be preserved
+    /// across retries.
     /// The unwired default fails closed without performing any side effect.
     async fn invoke(
         &self,
         caller: WebUiAuthenticatedCaller,
         capability: CapabilityId,
-        input: serde_json::Value,
+        input: ProductCapabilityInput,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
         let _ = (caller, capability, input, activity_id);
@@ -1987,108 +2143,6 @@ pub trait RebornServicesApi: Send + Sync {
     ) -> Result<RebornViewPage, RebornServicesError> {
         let _ = (caller, query);
         Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Execute one descriptor-declared, result-bearing product command.
-    ///
-    /// This is the result-bearing sibling of [`Self::invoke`]: commands keep
-    /// legacy HTTP response bodies intact while the WebUI stops naming concrete
-    /// facade methods directly.
-    async fn command(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
-        let command_id = RebornCommandId::parse(request.command_id.as_str())
-            .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
-        match command_id {
-            RebornCommandId::CreateThread => RebornCommandResponse::json(
-                self.create_thread(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::SubmitTurn => RebornCommandResponse::json(
-                self.submit_turn(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::CancelRun => RebornCommandResponse::json(
-                self.cancel_run(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::ResolveGate => RebornCommandResponse::json(
-                self.resolve_gate(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::RetryRun => RebornCommandResponse::json(
-                self.retry_run(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::ProjectCreate => RebornCommandResponse::json(
-                self.create_project(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::ProjectFsRead => Ok(RebornCommandResponse::project_file(
-                self.read_project_file(caller, product_command_input(request.input)?)
-                    .await?,
-            )),
-            RebornCommandId::FsRead => Ok(RebornCommandResponse::project_file(
-                self.read_fs_file(caller, product_command_input(request.input)?)
-                    .await?,
-            )),
-            RebornCommandId::AttachmentRead => Ok(RebornCommandResponse::attachment(
-                self.read_attachment(caller, product_command_input(request.input)?)
-                    .await?,
-            )),
-            RebornCommandId::TraceAccountLoginLink => {
-                RebornCommandResponse::json(self.trace_account_login_link(caller).await?)
-            }
-            RebornCommandId::TraceHoldAuthorize => {
-                let input: RebornTraceHoldAuthorizeProductRequest =
-                    product_command_input(request.input)?;
-                RebornCommandResponse::json(
-                    self.authorize_trace_hold(caller, input.submission_id)
-                        .await?,
-                )
-            }
-            RebornCommandId::OperatorConfigSetKey => {
-                let input: RebornOperatorConfigSetProductRequest =
-                    product_command_input(request.input)?;
-                RebornCommandResponse::json(
-                    self.set_operator_config_key(
-                        caller,
-                        input.key,
-                        RebornOperatorConfigSetRequest { value: input.value },
-                    )
-                    .await?,
-                )
-            }
-            RebornCommandId::OperatorServiceLifecycle => RebornCommandResponse::json(
-                self.run_operator_service_lifecycle(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::LlmTestConnection => RebornCommandResponse::json(
-                self.test_llm_connection(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::LlmListModels => RebornCommandResponse::json(
-                self.list_llm_models(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::LlmNearAiLogin => RebornCommandResponse::json(
-                self.start_nearai_login(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::LlmNearAiWalletLogin => RebornCommandResponse::json(
-                self.complete_nearai_wallet_login(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-            RebornCommandId::LlmCodexLogin => {
-                RebornCommandResponse::json(self.start_codex_login(caller).await?)
-            }
-            RebornCommandId::AdminUserCreate => RebornCommandResponse::json(
-                self.create_admin_user(caller, product_command_input(request.input)?)
-                    .await?,
-            ),
-        }
     }
 
     /// Read the raw bytes of one landed attachment so the browser can render an
@@ -2611,6 +2665,214 @@ pub trait ProductSurface: RebornServicesApi {}
 
 impl<T> ProductSurface for T where T: RebornServicesApi + ?Sized {}
 
+impl<Params, Output> ProductSurfaceCommand<Params, Output>
+where
+    Params: Serialize,
+    Output: DeserializeOwned,
+{
+    pub async fn execute_on<S>(
+        &self,
+        surface: &S,
+        caller: WebUiAuthenticatedCaller,
+        input: Params,
+    ) -> Result<Output, RebornServicesError>
+    where
+        S: ProductSurface + ?Sized,
+    {
+        execute_product_surface_command(surface, caller, self.request(input)?)
+            .await?
+            .into_json()
+    }
+}
+
+impl<Params> ProductSurfaceCommand<Params, ProjectFsFile>
+where
+    Params: Serialize,
+{
+    pub async fn execute_file_on<S>(
+        &self,
+        surface: &S,
+        caller: WebUiAuthenticatedCaller,
+        input: Params,
+    ) -> Result<ProjectFsFile, RebornServicesError>
+    where
+        S: ProductSurface + ?Sized,
+    {
+        execute_product_surface_command(surface, caller, self.request(input)?)
+            .await?
+            .into_project_file()
+    }
+}
+
+impl<Params> ProductSurfaceCommand<Params, RebornAttachmentBytes>
+where
+    Params: Serialize,
+{
+    pub async fn execute_attachment_on<S>(
+        &self,
+        surface: &S,
+        caller: WebUiAuthenticatedCaller,
+        input: Params,
+    ) -> Result<RebornAttachmentBytes, RebornServicesError>
+    where
+        S: ProductSurface + ?Sized,
+    {
+        execute_product_surface_command(surface, caller, self.request(input)?)
+            .await?
+            .into_attachment()
+    }
+}
+
+async fn execute_product_surface_command<S>(
+    surface: &S,
+    caller: WebUiAuthenticatedCaller,
+    request: RebornCommandRequest,
+) -> Result<RebornCommandResponse, RebornServicesError>
+where
+    S: ProductSurface + ?Sized,
+{
+    let command_id = RebornCommandId::parse(request.command_id.as_str())
+        .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
+    match command_id {
+        RebornCommandId::CreateThread => RebornCommandResponse::json(
+            surface
+                .create_thread(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::SubmitTurn => RebornCommandResponse::json(
+            surface
+                .submit_turn(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::CancelRun => RebornCommandResponse::json(
+            surface
+                .cancel_run(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::ResolveGate => RebornCommandResponse::json(
+            surface
+                .resolve_gate(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::RetryRun => RebornCommandResponse::json(
+            surface
+                .retry_run(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::ProjectCreate => RebornCommandResponse::json(
+            surface
+                .create_project(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::ProjectFsRead => Ok(RebornCommandResponse::project_file(
+            surface
+                .read_project_file(caller, product_command_input(request.input)?)
+                .await?,
+        )),
+        RebornCommandId::FsRead => Ok(RebornCommandResponse::project_file(
+            surface
+                .read_fs_file(caller, product_command_input(request.input)?)
+                .await?,
+        )),
+        RebornCommandId::AttachmentRead => Ok(RebornCommandResponse::attachment(
+            surface
+                .read_attachment(caller, product_command_input(request.input)?)
+                .await?,
+        )),
+        RebornCommandId::TraceAccountLoginLink => {
+            views::parse_empty_view_params(request.input)?;
+            RebornCommandResponse::json(surface.trace_account_login_link(caller).await?)
+        }
+        RebornCommandId::TraceHoldAuthorize => {
+            let request: RebornTraceHoldAuthorizeProductRequest =
+                product_command_input(request.input)?;
+            RebornCommandResponse::json(
+                surface
+                    .authorize_trace_hold(caller, request.submission_id)
+                    .await?,
+            )
+        }
+        RebornCommandId::OperatorConfigSetKey => {
+            let request: RebornOperatorConfigSetProductRequest =
+                product_command_input(request.input)?;
+            RebornCommandResponse::json(
+                surface
+                    .set_operator_config_key(
+                        caller,
+                        request.key,
+                        RebornOperatorConfigSetRequest {
+                            value: request.value,
+                        },
+                    )
+                    .await?,
+            )
+        }
+        RebornCommandId::OperatorServiceLifecycle => RebornCommandResponse::json(
+            surface
+                .run_operator_service_lifecycle(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::LlmTestConnection => RebornCommandResponse::json(
+            surface
+                .test_llm_connection(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::LlmListModels => RebornCommandResponse::json(
+            surface
+                .list_llm_models(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::LlmNearAiLogin => RebornCommandResponse::json(
+            surface
+                .start_nearai_login(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::LlmNearAiWalletLogin => RebornCommandResponse::json(
+            surface
+                .complete_nearai_wallet_login(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+        RebornCommandId::LlmCodexLogin => {
+            views::parse_empty_view_params(request.input)?;
+            RebornCommandResponse::json(surface.start_codex_login(caller).await?)
+        }
+        RebornCommandId::AdminUserCreate => RebornCommandResponse::json(
+            surface
+                .create_admin_user(caller, product_command_input(request.input)?)
+                .await?,
+        ),
+    }
+}
+
+/// Input carried by the generic ProductSurface command conduit.
+///
+/// Most capabilities are ordinary JSON payloads. Secret-bearing ProductSurface
+/// requests use typed variants so they do not cross the WebUI/product boundary
+/// as raw, debug-printable JSON values.
+pub enum ProductCapabilityInput {
+    Json(serde_json::Value),
+    LlmProviderUpsert(UpsertLlmProviderRequest),
+}
+
+impl ProductCapabilityInput {
+    pub fn json(input: serde_json::Value) -> Self {
+        Self::Json(input)
+    }
+
+    pub fn llm_provider_upsert(request: UpsertLlmProviderRequest) -> Self {
+        Self::LlmProviderUpsert(request)
+    }
+
+    pub fn into_json(self) -> Result<serde_json::Value, RebornServicesError> {
+        match self {
+            Self::Json(input) => Ok(input),
+            Self::LlmProviderUpsert(_) => Err(RebornServicesError::internal_from(
+                "secret-bearing product capability input cannot be delegated as JSON",
+            )),
+        }
+    }
+}
+
 /// ProductSurface command descriptor.
 ///
 /// Capability declarations stay as one stable id plus origin/policy metadata
@@ -2643,7 +2905,12 @@ impl ProductCapabilityDescriptor {
     {
         let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
         surface
-            .invoke(caller, self.capability_id()?, input, activity_id)
+            .invoke(
+                caller,
+                self.capability_id()?,
+                ProductCapabilityInput::json(input),
+                activity_id,
+            )
             .await
     }
 }
@@ -3045,28 +3312,21 @@ where
 
         match (request.provider_id, request.adapter) {
             (Some(provider_id), Some(adapter)) => {
-                let mut input = serde_json::Map::new();
-                input.insert("id".to_string(), serde_json::json!(provider_id));
-                input.insert("adapter".to_string(), serde_json::json!(adapter));
-                input.insert("set_active".to_string(), serde_json::json!(true));
-                if let Some(base_url) = request.base_url {
-                    input.insert("base_url".to_string(), serde_json::json!(base_url));
-                }
-                if let Some(model) = request.model {
-                    input.insert("default_model".to_string(), serde_json::json!(model));
-                    input.insert("model".to_string(), serde_json::json!(model));
-                }
-                if let Some(api_key) = request.api_key {
-                    input.insert(
-                        "api_key".to_string(),
-                        serde_json::json!(api_key.expose_secret()),
-                    );
-                }
+                let model = request.model;
                 let resolution = self
                     .invoke(
                         caller.clone(),
                         LLM_PROVIDER_UPSERT_CAPABILITY.capability_id()?,
-                        serde_json::Value::Object(input),
+                        ProductCapabilityInput::llm_provider_upsert(UpsertLlmProviderRequest {
+                            id: provider_id,
+                            name: None,
+                            adapter,
+                            base_url: request.base_url,
+                            default_model: model.clone(),
+                            api_key: request.api_key,
+                            set_active: true,
+                            model,
+                        }),
                         ActivityId::new(),
                     )
                     .await?;
@@ -3077,10 +3337,10 @@ where
                     .invoke(
                         caller,
                         LLM_ACTIVE_SET_CAPABILITY.capability_id()?,
-                        serde_json::json!({
+                        ProductCapabilityInput::json(serde_json::json!({
                             "provider_id": provider_id,
                             "model": request.model,
-                        }),
+                        })),
                         ActivityId::new(),
                     )
                     .await?;
@@ -3387,17 +3647,28 @@ where
         &self,
         caller: WebUiAuthenticatedCaller,
         capability: CapabilityId,
-        input: serde_json::Value,
+        input: ProductCapabilityInput,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
         if capability.as_str() == OPERATOR_SETUP_RUN_CAPABILITY_ID {
-            self.invoke_operator_setup_run(caller, input).await?;
+            self.invoke_operator_setup_run(caller, input.into_json()?)
+                .await?;
             return self.api_capability_success(activity_id, "operator setup updated");
         }
         if capability.as_str() == LLM_PROVIDER_UPSERT_CAPABILITY_ID {
-            self.invoke_llm_provider_upsert(caller, input).await?;
+            let ProductCapabilityInput::LlmProviderUpsert(request) = input else {
+                return Err(RebornServicesError::validation(
+                    WebUiInboundValidationError::new(
+                        "input",
+                        WebUiInboundValidationCode::InvalidValue,
+                    ),
+                ));
+            };
+            self.invoke_llm_provider_upsert(caller, request).await?;
             return self.api_capability_success(activity_id, "llm provider updated");
         }
+
+        let input = input.into_json()?;
         if capability.as_str() == LLM_PROVIDER_DELETE_CAPABILITY_ID {
             self.invoke_llm_provider_delete(caller, input).await?;
             return self.api_capability_success(activity_id, "llm provider deleted");
@@ -3836,10 +4107,11 @@ where
         key: String,
         request: RebornOperatorConfigSetRequest,
     ) -> Result<RebornOperatorConfigGetResponse, RebornServicesError> {
-        if self.operator_approval_config.is_none() {
+        let Some(config) = &self.operator_approval_config else {
             let _ = (caller, key, request);
             return Err(RebornServicesError::service_unavailable(false));
-        }
+        };
+        let scope = caller_resource_scope(&caller);
         if key == AUTO_APPROVE_CONFIG_KEY {
             let enabled = request
                 .value
@@ -3850,35 +4122,28 @@ where
                     caller.clone(),
                     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
                     serde_json::json!({ "enabled": enabled }),
-                    ActivityId::new(),
+                    operator_config_auto_approve_activity_id(&caller, enabled),
                 )
                 .await?;
-            api_capability_mutation_succeeded(resolution)?;
+            operator_config_mutation_succeeded(resolution)?;
             return self
                 .build_operator_config_key_view(caller, serde_json::json!({ "key": key }))
                 .await;
         }
 
-        let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) else {
+        let actor = caller.actor();
+        let entry = if let Some(capability_id) = key.strip_prefix(TOOL_CONFIG_PREFIX) {
+            let tool = find_operator_tool(config, capability_id, &scope.user_id).await?;
+            if tool_permission_locked(&tool) {
+                return Err(operator_config_invalid_value("state"));
+            }
+            let state = parse_tool_permission_state(&request.value)?;
+            apply_tool_permission_state(config, &scope, &actor, &tool, state).await?;
+            tool_config_entry(config, &scope, &tool).await?
+        } else {
             return Err(operator_config_unknown_key_error("key"));
         };
-        {
-            let state = parse_tool_permission_state(&request.value)?;
-            let resolution = self
-                .invoke_json_capability(
-                    caller.clone(),
-                    OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY,
-                    serde_json::json!({
-                        "capability_id": capability_id,
-                        "state": tool_permission_update_wire(state),
-                    }),
-                    ActivityId::new(),
-                )
-                .await?;
-            api_capability_mutation_succeeded(resolution)?;
-            self.build_operator_config_key_view(caller, serde_json::json!({ "key": key }))
-                .await
-        }
+        Ok(RebornOperatorConfigGetResponse { entry })
     }
 
     /// `requested_thread_id` makes the caller's choice authoritative.
@@ -4229,6 +4494,7 @@ where
         caller: WebUiAuthenticatedCaller,
         query: RebornViewQuery,
     ) -> Result<RebornViewPage, RebornServicesError> {
+        authorize_product_view(&caller, &query.view_id)?;
         if self.view_provider.descriptor().id == query.view_id {
             return self
                 .view_provider

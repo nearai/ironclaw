@@ -265,7 +265,7 @@ pub struct UpsertLlmProviderRequest {
 }
 
 /// Select the active provider + model.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetActiveLlmRequest {
     pub provider_id: String,
     #[serde(default)]
@@ -353,14 +353,12 @@ where
     pub(super) async fn invoke_llm_provider_upsert(
         &self,
         caller: WebUiAuthenticatedCaller,
-        input: serde_json::Value,
+        request: UpsertLlmProviderRequest,
     ) -> Result<(), RebornServicesError> {
         let service = self
             .llm_config
             .as_ref()
             .ok_or_else(llm_config_unavailable)?;
-        let request: UpsertLlmProviderRequest =
-            serde_json::from_value(input).map_err(|_| llm_config_input_error("input"))?;
         super::validate_llm_base_url(request.base_url.as_deref())?;
         service
             .upsert_provider(caller, request)

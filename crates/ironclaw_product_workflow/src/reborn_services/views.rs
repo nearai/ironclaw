@@ -244,61 +244,6 @@ impl<Params, Output> ProductSurfaceCommand<Params, Output> {
     }
 }
 
-impl<Params, Output> ProductSurfaceCommand<Params, Output>
-where
-    Params: Serialize,
-    Output: DeserializeOwned,
-{
-    pub async fn execute_on<S>(
-        &self,
-        surface: &S,
-        caller: WebUiAuthenticatedCaller,
-        input: Params,
-    ) -> Result<Output, RebornServicesError>
-    where
-        S: ProductSurface + ?Sized,
-    {
-        let response = surface.command(caller, self.request(input)?).await?;
-        response.into_json()
-    }
-}
-
-impl<Params> ProductSurfaceCommand<Params, ProjectFsFile>
-where
-    Params: Serialize,
-{
-    pub async fn execute_file_on<S>(
-        &self,
-        surface: &S,
-        caller: WebUiAuthenticatedCaller,
-        input: Params,
-    ) -> Result<ProjectFsFile, RebornServicesError>
-    where
-        S: ProductSurface + ?Sized,
-    {
-        let response = surface.command(caller, self.request(input)?).await?;
-        response.into_project_file()
-    }
-}
-
-impl<Params> ProductSurfaceCommand<Params, RebornAttachmentBytes>
-where
-    Params: Serialize,
-{
-    pub async fn execute_attachment_on<S>(
-        &self,
-        surface: &S,
-        caller: WebUiAuthenticatedCaller,
-        input: Params,
-    ) -> Result<RebornAttachmentBytes, RebornServicesError>
-    where
-        S: ProductSurface + ?Sized,
-    {
-        let response = surface.command(caller, self.request(input)?).await?;
-        response.into_attachment()
-    }
-}
-
 /// One registered, result-bearing product command invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornCommandRequest {
