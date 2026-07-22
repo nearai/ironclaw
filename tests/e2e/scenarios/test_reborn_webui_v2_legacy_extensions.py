@@ -2412,7 +2412,7 @@ async def test_reborn_legacy_telegram_configure_hosts_pairing_panel(
         await harness["context"].close()
 
 
-async def test_reborn_legacy_configure_oauth_requires_https_authorization_url(
+async def test_reborn_legacy_configure_oauth_localizes_https_authorization_error(
     reborn_v2_server, reborn_v2_browser
 ):
     harness = await _open_mocked_extensions_page(
@@ -2455,6 +2455,11 @@ async def test_reborn_legacy_configure_oauth_requires_https_authorization_url(
     try:
         page = harness["page"]
         await page.evaluate(
+            "() => localStorage.setItem('ironclaw_language', 'zh-CN')"
+        )
+        await page.reload(wait_until="domcontentloaded")
+        await expect(page.locator("html")).to_have_attribute("lang", "zh-CN")
+        await page.evaluate(
             """
             () => {
               window.__openedUrls = [];
@@ -2480,10 +2485,10 @@ async def test_reborn_legacy_configure_oauth_requires_https_authorization_url(
 
         card = _card_by_title(page, "OAuth Tool")
         await expect(card).to_be_visible(timeout=5000)
-        await card.get_by_role("button", name="Configure").click()
-        await page.get_by_role("button", name="Authorize").click()
+        await card.get_by_role("button", name="配置").click()
+        await page.get_by_role("button", name="去授权").click()
 
-        await expect(page.get_by_text("Authorization URL must use HTTPS.")).to_be_visible(
+        await expect(page.get_by_text("授权 URL 必须使用 HTTPS。")).to_be_visible(
             timeout=5000
         )
         opened = await page.evaluate("() => window.__openedUrls")

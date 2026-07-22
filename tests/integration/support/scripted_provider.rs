@@ -191,11 +191,43 @@ impl LlmProvider for ParkingLlm {
 // category coverage (C-ERRORS).
 // ---------------------------------------------------------------------------
 
-/// A raw `LlmProvider` that always fails with non-retryable `LlmError::ContextLengthExceeded`
-/// — deliberately not `RequestFailed` (retryable, would add several seconds of real backoff).
-/// Same vendor-SDK seam as `scripted_trace_llm`/`ParkingLlm`; proves the real decorator
-/// chain's non-retryable-error mapping through to `TurnStatus::Failed`.
-pub struct ErrLlm;
+/// Which fixed, non-retryable `LlmError` an [`ErrLlm`] provider fails with.
+/// Both variants are excluded from `ironclaw_llm::retry::is_retryable` —
+/// deliberately not `RequestFailed` (retryable, would add several seconds of
+/// real backoff) — so the run fails promptly through the real decorator chain.
+#[derive(Debug, Clone, Copy)]
+pub enum ErrLlmKind {
+    /// `LlmError::ContextLengthExceeded` — the batch-2 provider-fidelity
+    /// `model_context_overflow` category arm.
+    ContextLength,
+    /// `LlmError::AuthFailed` — the credentials arm; maps through
+    /// `map_provider_error` to `CredentialUnavailable` and must surface the
+    /// pinned `model_credentials_unavailable` failure category.
+    AuthFailed,
+}
+
+/// A raw `LlmProvider` that always fails with the fixed, non-retryable
+/// `LlmError` selected by its [`ErrLlmKind`]. Same vendor-SDK seam as
+/// `scripted_trace_llm`/`ParkingLlm`; proves the real decorator chain's
+/// non-retryable-error mapping through to `TurnStatus::Failed`.
+pub struct ErrLlm {
+    kind: ErrLlmKind,
+}
+
+impl ErrLlm {
+    pub fn new(kind: ErrLlmKind) -> Self {
+        Self { kind }
+    }
+
+    fn make_error(&self) -> LlmError {
+        match self.kind {
+            ErrLlmKind::ContextLength => LlmError::ContextLengthExceeded { used: 1, limit: 1 },
+            ErrLlmKind::AuthFailed => LlmError::AuthFailed {
+                provider: "scripted".to_string(),
+            },
+        }
+    }
+}
 
 #[async_trait]
 impl LlmProvider for ErrLlm {
@@ -208,14 +240,14 @@ impl LlmProvider for ErrLlm {
     }
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        Err(LlmError::ContextLengthExceeded { used: 1, limit: 1 })
+        Err(self.make_error())
     }
 
     async fn complete_with_tools(
         &self,
         _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        Err(LlmError::ContextLengthExceeded { used: 1, limit: 1 })
+        Err(self.make_error())
     }
 }
 

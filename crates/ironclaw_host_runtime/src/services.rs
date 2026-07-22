@@ -89,6 +89,7 @@ mod production_services;
 mod production_wiring;
 mod runtime_adapters;
 mod tool_resolver;
+mod wasm_blocking;
 mod wasm_diagnostics;
 mod wasm_execution;
 

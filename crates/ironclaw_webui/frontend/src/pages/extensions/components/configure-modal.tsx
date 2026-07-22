@@ -96,13 +96,13 @@ export function ConfigureModal({ extension, onActivate, onClose, onSaved }) {
       // popup — surface it and stop before burning the OAuth flow start,
       // mirroring the in-chat startOnboardingOAuth guard.
       if (!popup) {
-        setPopupBlockedError("Authorization popup was blocked.");
+        setPopupBlockedError(t("authGate.popupBlocked"));
         return;
       }
       setPopupBlockedError("");
       oauthMutation.mutate({ secret, popup });
     },
-    [oauthMutation]
+    [oauthMutation, t]
   );
 
   // Some channel extensions may still use proof-code setup: redeem a code,

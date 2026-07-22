@@ -433,6 +433,7 @@ pub enum RecoveryAttemptClass {
     ModelInvalidOutput,
     ModelUnavailable,
     ModelInternal,
+    ModelStaleRequest,
 }
 
 /// Persistent state owned by `ReplyAdmissionStrategy`.

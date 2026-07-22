@@ -345,8 +345,9 @@ async fn assert_egress_body_contains_any_fails_when_url_absent() {
 }
 
 /// Error path: a scripted Exa fetch-error response surfaces as a model-visible
-/// `Failed`/`operation_failed` tool error, and the run still reaches
-/// `Completed` with a final reply rather than terminal `driver_unavailable`.
+/// `Failed`/`operation_failed` tool error. The next real model request sees the
+/// failure, changes strategy to a search, observes that successful result, and
+/// only then finalizes the run rather than terminalizing it.
 #[tokio::test]
 async fn get_content_fetch_error_surfaces_recoverable_failed() {
     let harness = RebornIntegrationHarness::test_default()
@@ -354,13 +355,19 @@ async fn get_content_fetch_error_surfaces_recoverable_failed() {
             MCP_INIT_BODY.to_vec(),
             MCP_NOTIF_BODY.to_vec(),
             mcp_tool_call_result_body("Error fetching https://example.com: 404 not found"),
+            MCP_INIT_BODY.to_vec(),
+            MCP_NOTIF_BODY.to_vec(),
+            mcp_tool_call_result_body(
+                "Title: Example Domain\nURL: https://example.com\nText: fallback search succeeded",
+            ),
         ])
         .script([
             RebornScriptedReply::tool_call(
                 "web-access.get_content",
                 json!({"url": "https://example.com"}),
             ),
-            RebornScriptedReply::text("done"),
+            RebornScriptedReply::tool_call("web-access.search", json!({"query": "Example Domain"})),
+            RebornScriptedReply::text("Recovered with the fallback search result."),
         ])
         .build()
         .await
@@ -375,8 +382,34 @@ async fn get_content_fetch_error_surfaces_recoverable_failed() {
         .assert_tool_error(ToolErrorClass::Failed, "operation_failed")
         .await
         .expect("Exa fetch-error content surfaced as a model-visible Failed tool error");
+    let model_requests = harness.scripted_llm.captured_requests();
+    assert_eq!(
+        model_requests.len(),
+        3,
+        "failure, corrected action, and final reply each require a model turn"
+    );
+    let recovery_request =
+        serde_json::to_string(&model_requests[1]).expect("recovery model request serializes");
+    for expected in [
+        "operation_failed",
+        "respect_failure_constraint",
+        "same_call_retry",
+    ] {
+        assert!(
+            recovery_request.contains(expected),
+            "the immediate recovery request must contain {expected:?}: {recovery_request}"
+        );
+    }
     harness
-        .assert_reply_contains("done")
+        .assert_tool_invoked("web-access.search")
+        .await
+        .expect("the model changed strategy after observing the failure");
+    harness
+        .assert_tool_result_contains("fallback search succeeded")
+        .await
+        .expect("the corrected fallback action succeeded");
+    harness
+        .assert_reply_contains("Recovered with the fallback search result.")
         .await
         .expect("run recovered and finalized (not terminal driver_unavailable)");
 }
