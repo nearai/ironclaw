@@ -611,11 +611,12 @@ use ironclaw_loop_host::{
 use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleReadinessBlocker,
-    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillListResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
-    WebUiCreateThreadRequest, WebUiListAutomationsRequest, WebUiResolveGateRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    ProductCapabilityInput, RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornSkillListResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_gate_ref,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_skills::SkillTrust;
@@ -5281,7 +5282,7 @@ async fn submit_webui_extension_setup(
             caller.clone(),
             CapabilityId::new(ironclaw_product_workflow::EXTENSION_SETUP_SUBMIT_CAPABILITY_ID)
                 .expect("setup submit capability id"),
-            input,
+            ProductCapabilityInput::json(input),
             ActivityId::new(),
         )
         .await
@@ -5432,7 +5433,7 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
                 ironclaw_product_workflow::OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
             )
             .expect("outbound preferences capability id"),
-            serde_json::json!({}),
+            ProductCapabilityInput::json(serde_json::json!({})),
             ActivityId::new(),
         )
         .await
@@ -5517,10 +5518,10 @@ async fn local_dev_webui_bundle_invokes_skill_install_with_scoped_mounts() {
                 ironclaw_product_workflow::SKILL_INSTALL_CAPABILITY_ID,
             )
             .expect("skill install capability id"),
-            serde_json::json!({
+            ProductCapabilityInput::json(serde_json::json!({
                 "name": "product-surface-skill",
                 "content": "---\nname: product-surface-skill\n---\n# Product Surface\n"
-            }),
+            })),
             ActivityId::new(),
         )
         .await

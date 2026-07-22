@@ -1167,6 +1167,55 @@ fn operator_config_capability_forbidden() -> RebornServicesError {
     RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
 }
 
+fn product_view_forbidden() -> RebornServicesError {
+    RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
+}
+
+fn product_view_requires_operator_webui_config(view_id: &str) -> bool {
+    matches!(
+        view_id,
+        id if id == ADMIN_CONFIGURATION_VIEW.id
+            || id == OPERATOR_LOGS_VIEW.id
+            || id == LLM_CONFIG_VIEW.id
+            || id == OPERATOR_SETUP_VIEW.id
+            || id == OPERATOR_DIAGNOSTICS_VIEW.id
+            || id == OPERATOR_STATUS_VIEW.id
+    )
+}
+
+fn authorize_product_view(
+    caller: &WebUiAuthenticatedCaller,
+    view_id: &str,
+) -> Result<(), RebornServicesError> {
+    if product_view_requires_operator_webui_config(view_id) && !caller.operator_webui_config {
+        return Err(product_view_forbidden());
+    }
+    Ok(())
+}
+
+fn operator_config_auto_approve_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    enabled: bool,
+) -> ActivityId {
+    let mut seed = Vec::new();
+    for segment in [
+        "product-surface-operator-config-auto-approve",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        if enabled { "enabled" } else { "disabled" },
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    ActivityId::from_uuid(Uuid::new_v5(&Uuid::NAMESPACE_OID, &seed))
+}
+
 fn operator_config_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
@@ -1893,13 +1942,14 @@ pub trait RebornServicesApi: Send + Sync {
     /// `caller` is trusted ingress input. `capability` and `input` are
     /// designators only; a wired implementation must resolve and authorize
     /// them rather than treating either as authority. `activity_id` is the
-    /// client-minted idempotency identity and must be preserved across retries.
+    /// stable idempotency identity for this mutation and must be preserved
+    /// across retries.
     /// The unwired default fails closed without performing any side effect.
     async fn invoke(
         &self,
         caller: WebUiAuthenticatedCaller,
         capability: CapabilityId,
-        input: serde_json::Value,
+        input: ProductCapabilityInput,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
         let _ = (caller, capability, input, activity_id);
@@ -2438,6 +2488,35 @@ pub trait ProductSurface: RebornServicesApi {}
 
 impl<T> ProductSurface for T where T: RebornServicesApi + ?Sized {}
 
+/// Input carried by the generic ProductSurface command conduit.
+///
+/// Most capabilities are ordinary JSON payloads. Secret-bearing ProductSurface
+/// requests use typed variants so they do not cross the WebUI/product boundary
+/// as raw, debug-printable JSON values.
+pub enum ProductCapabilityInput {
+    Json(serde_json::Value),
+    LlmProviderUpsert(UpsertLlmProviderRequest),
+}
+
+impl ProductCapabilityInput {
+    pub fn json(input: serde_json::Value) -> Self {
+        Self::Json(input)
+    }
+
+    pub fn llm_provider_upsert(request: UpsertLlmProviderRequest) -> Self {
+        Self::LlmProviderUpsert(request)
+    }
+
+    pub fn into_json(self) -> Result<serde_json::Value, RebornServicesError> {
+        match self {
+            Self::Json(input) => Ok(input),
+            Self::LlmProviderUpsert(_) => Err(RebornServicesError::internal_from(
+                "secret-bearing product capability input cannot be delegated as JSON",
+            )),
+        }
+    }
+}
+
 /// ProductSurface command descriptor.
 ///
 /// Capability declarations stay as one stable id plus origin/policy metadata
@@ -2470,7 +2549,12 @@ impl ProductCapabilityDescriptor {
     {
         let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
         surface
-            .invoke(caller, self.capability_id()?, input, activity_id)
+            .invoke(
+                caller,
+                self.capability_id()?,
+                ProductCapabilityInput::json(input),
+                activity_id,
+            )
             .await
     }
 }
@@ -3124,13 +3208,23 @@ where
         &self,
         caller: WebUiAuthenticatedCaller,
         capability: CapabilityId,
-        input: serde_json::Value,
+        input: ProductCapabilityInput,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
         if capability.as_str() == LLM_PROVIDER_UPSERT_CAPABILITY_ID {
-            self.invoke_llm_provider_upsert(caller, input).await?;
+            let ProductCapabilityInput::LlmProviderUpsert(request) = input else {
+                return Err(RebornServicesError::validation(
+                    WebUiInboundValidationError::new(
+                        "input",
+                        WebUiInboundValidationCode::InvalidValue,
+                    ),
+                ));
+            };
+            self.invoke_llm_provider_upsert(caller, request).await?;
             return self.api_capability_success(activity_id, "llm provider updated");
         }
+
+        let input = input.into_json()?;
         if capability.as_str() == LLM_PROVIDER_DELETE_CAPABILITY_ID {
             self.invoke_llm_provider_delete(caller, input).await?;
             return self.api_capability_success(activity_id, "llm provider deleted");
@@ -3513,7 +3607,7 @@ where
                     caller.clone(),
                     OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY,
                     serde_json::json!({ "enabled": enabled }),
-                    ActivityId::new(),
+                    operator_config_auto_approve_activity_id(&caller, enabled),
                 )
                 .await?;
             operator_config_mutation_succeeded(resolution)?;
@@ -3885,6 +3979,7 @@ where
         caller: WebUiAuthenticatedCaller,
         query: RebornViewQuery,
     ) -> Result<RebornViewPage, RebornServicesError> {
+        authorize_product_view(&caller, &query.view_id)?;
         if self.view_provider.descriptor().id == query.view_id {
             return self
                 .view_provider

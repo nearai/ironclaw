@@ -65,36 +65,37 @@ use ironclaw_product_workflow::{
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
     OUTBOUND_PREFERENCES_VIEW, OperatorLogsService, OperatorServiceLifecycleService,
     OperatorStatusService, OutboundPreferencesProductFacade, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductCapabilityInvoker, ProductWorkflowError, ProjectCaller,
-    ProjectFsEntry, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
-    ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
-    RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
-    RebornAutomationSource, RebornAutomationState, RebornChannelConfigField,
-    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
-    RebornExtensionOnboardingState, RebornExtensionSurface, RebornFsListRequest,
-    RebornGetProjectRequest, RebornGetRunStateRequest, RebornListAutomationsResponse,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
-    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornProjectInfo,
-    RebornProjectMemberInfo, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornResolveGateResponse, RebornRunArtifact,
-    RebornRunArtifactRequest, RebornServiceLifecycleAction, RebornServiceLifecycleRequest,
-    RebornServiceLifecycleResponse, RebornServiceLifecycleState, RebornServices, RebornServicesApi,
-    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    ProductAgentBoundCaller, ProductCapabilityInput, ProductCapabilityInvoker,
+    ProductWorkflowError, ProjectCaller, ProjectFsEntry, ProjectFsError, ProjectFsFile,
+    ProjectFsStat, ProjectService, ProjectServiceError, RUN_ARTIFACT_VIEW,
+    RebornAccountTracesResponse, RebornAddMemberRequest, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
+    RebornAutomationState, RebornChannelConfigField, RebornChannelConnectAction,
+    RebornChannelConnectStrategy, RebornCreateProjectRequest, RebornDeleteProjectRequest,
+    RebornDeleteThreadRequest, RebornExtensionListResponse, RebornExtensionOnboardingState,
+    RebornExtensionSurface, RebornFsListRequest, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectResponse, RebornProjectRole, RebornProjectState, RebornRemoveMemberRequest,
+    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillInfo,
+    RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
     RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
     RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
@@ -2235,7 +2236,7 @@ async fn default_invoke_uses_canonical_host_types_and_fails_closed() {
         .invoke(
             caller(),
             CapabilityId::new("product.test_invoke").expect("valid capability id"),
-            json!({"request": "test"}),
+            ProductCapabilityInput::json(json!({"request": "test"})),
             ActivityId::new(),
         )
         .await;
@@ -6243,7 +6244,7 @@ async fn outbound_preferences_unwired_mutations_and_target_listing_fail_closed()
         .invoke(
             caller(),
             CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({ "final_reply_target_id": "slack-dm-alpha" }),
+            ProductCapabilityInput::json(json!({ "final_reply_target_id": "slack-dm-alpha" })),
             ActivityId::new(),
         )
         .await
@@ -6304,7 +6305,7 @@ async fn outbound_preferences_facade_forwards_caller_and_request() {
         .invoke(
             caller_for_user_with_project("user-bravo", None),
             CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({ "final_reply_target_id": "slack-dm-beta" }),
+            ProductCapabilityInput::json(json!({ "final_reply_target_id": "slack-dm-beta" })),
             ActivityId::new(),
         )
         .await
@@ -6496,7 +6497,7 @@ async fn set_outbound_preferences_can_clear_final_target() {
         .invoke(
             caller(),
             CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({}),
+            ProductCapabilityInput::json(json!({})),
             ActivityId::new(),
         )
         .await
@@ -6551,7 +6552,7 @@ async fn set_outbound_preferences_accepts_max_length_target_id_before_facade() {
         .invoke(
             caller(),
             CapabilityId::new(OUTBOUND_PREFERENCES_SET_CAPABILITY_ID).expect("capability id"),
-            json!({ "final_reply_target_id": max_length_target_id }),
+            ProductCapabilityInput::json(json!({ "final_reply_target_id": max_length_target_id })),
             ActivityId::new(),
         )
         .await
@@ -7158,7 +7159,7 @@ async fn query_operator_logs_bounds_query_before_logs_service() {
     let boundary_source = format!("{}é", "s".repeat(254));
     let response = query_operator_logs_view(
         &services,
-        caller(),
+        caller().with_operator_webui_config(true),
         RebornOperatorLogsQuery {
             limit: Some(u32::MAX),
             cursor: Some(oversized_cursor),
@@ -7212,7 +7213,7 @@ async fn query_operator_logs_forwards_follow_mode_to_logs_service() {
 
     query_operator_logs_view(
         &services,
-        caller(),
+        caller().with_operator_webui_config(true),
         RebornOperatorLogsQuery {
             limit: Some(25),
             cursor: Some("after:7".to_string()),
@@ -7252,7 +7253,7 @@ async fn query_operator_logs_rejects_ambiguous_tail_follow_modes() {
 
     let err = query_operator_logs_view(
         &services,
-        caller(),
+        caller().with_operator_webui_config(true),
         RebornOperatorLogsQuery {
             limit: None,
             cursor: None,
@@ -9754,7 +9755,7 @@ async fn invoke_extension_setup_submit<S: RebornServicesApi + ?Sized>(
         .invoke(
             caller,
             CapabilityId::new(EXTENSION_SETUP_SUBMIT_CAPABILITY_ID).expect("capability id"),
-            input,
+            ProductCapabilityInput::json(input),
             ActivityId::new(),
         )
         .await
@@ -9785,7 +9786,7 @@ async fn extension_import_is_available_as_product_capability() {
         .invoke(
             caller(),
             CapabilityId::new(EXTENSION_IMPORT_CAPABILITY_ID).expect("capability id"),
-            json!({ "bundle_base64": STANDARD.encode(&bundle) }),
+            ProductCapabilityInput::json(json!({ "bundle_base64": STANDARD.encode(&bundle) })),
             ActivityId::new(),
         )
         .await
@@ -10471,7 +10472,8 @@ async fn operator_diagnostics_aggregates_status_setup_and_config_reasons() {
     let services = services_with_setup_llm_config(llm_config.clone())
         .with_operator_status_service(status_service.clone());
     let diagnostics_caller =
-        caller_for_user_with_project("user-diagnostics", Some("project-diagnostics"));
+        caller_for_user_with_project("user-diagnostics", Some("project-diagnostics"))
+            .with_operator_webui_config(true);
 
     let page = services
         .query(
@@ -10541,9 +10543,10 @@ async fn operator_command_plane_reads_are_available_as_product_views() {
             }),
         ));
 
+    let operator = caller().with_operator_webui_config(true);
     let diagnostics_page = services
         .query(
-            caller(),
+            operator.clone(),
             RebornViewQuery {
                 view_id: OPERATOR_DIAGNOSTICS_VIEW.id.to_string(),
                 params: json!({}),
@@ -10565,7 +10568,7 @@ async fn operator_command_plane_reads_are_available_as_product_views() {
 
     let status_page = services
         .query(
-            caller(),
+            operator,
             RebornViewQuery {
                 view_id: OPERATOR_STATUS_VIEW.id.to_string(),
                 params: json!({}),
@@ -10586,7 +10589,8 @@ async fn llm_config_snapshot_is_available_as_product_view() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     llm_config.use_active_snapshot("openai", "gpt-5-mini");
     let services = services_with_setup_llm_config(llm_config.clone());
-    let snapshot_caller = caller_for_user_with_project("user-llm", Some("project-llm"));
+    let snapshot_caller = caller_for_user_with_project("user-llm", Some("project-llm"))
+        .with_operator_webui_config(true);
 
     let page = services
         .query(
@@ -10620,6 +10624,31 @@ async fn llm_config_snapshot_is_available_as_product_view() {
 }
 
 #[tokio::test]
+async fn operator_only_product_views_require_operator_webui_config() {
+    let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
+    let services = services_with_setup_llm_config(llm_config.clone());
+
+    let err = services
+        .query(
+            caller_for_user_with_project("user-llm", Some("project-llm")),
+            RebornViewQuery {
+                view_id: LLM_CONFIG_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
+        .await
+        .expect_err("non-operator caller cannot query operator-only product views");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
+    assert_eq!(
+        llm_config.snapshot_callers(),
+        Vec::<WebUiAuthenticatedCaller>::new()
+    );
+}
+
+#[tokio::test]
 async fn operator_diagnostics_reports_setup_service_absence_without_failing_route() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -10635,7 +10664,7 @@ async fn operator_diagnostics_reports_setup_service_absence_without_failing_rout
 
     let page = services
         .query(
-            caller(),
+            caller().with_operator_webui_config(true),
             RebornViewQuery {
                 view_id: OPERATOR_DIAGNOSTICS_VIEW.id.to_string(),
                 params: json!({}),
@@ -10660,7 +10689,7 @@ async fn get_operator_setup_returns_snapshot_from_llm_config() {
     llm_config.use_active_snapshot("openai", "gpt-5-mini");
     let services = services_with_setup_llm_config(llm_config.clone());
 
-    let response = query_operator_setup(&services, caller())
+    let response = query_operator_setup(&services, caller().with_operator_webui_config(true))
         .await
         .expect("setup response");
 
@@ -10686,7 +10715,7 @@ async fn get_operator_setup_without_llm_config_returns_service_unavailable() {
         Arc::new(FakeTurnCoordinator::default()),
     );
 
-    let err = query_operator_setup(&services, caller())
+    let err = query_operator_setup(&services, caller().with_operator_webui_config(true))
         .await
         .expect_err("setup service is unavailable");
 
@@ -10972,24 +11001,25 @@ async fn upsert_llm_provider_allows_loopback_base_url_for_self_hosted() {
     let llm_config = Arc::new(SetupRecordingLlmConfigService::default());
     let services = services_with_setup_llm_config(llm_config.clone());
 
-    let resolution = services
+    services
         .invoke(
             caller(),
             CapabilityId::new(LLM_PROVIDER_UPSERT_CAPABILITY_ID).expect("capability id"),
-            json!({
-                "id": "ollama",
-                "adapter": "ollama",
-                "base_url": "http://127.0.0.1:11434/v1"
+            ProductCapabilityInput::llm_provider_upsert(UpsertLlmProviderRequest {
+                id: "ollama".to_string(),
+                name: None,
+                adapter: "ollama".to_string(),
+                base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+                default_model: None,
+                api_key: None,
+                set_active: false,
+                model: None,
             }),
             ActivityId::new(),
         )
         .await
         .expect("loopback endpoint reaches the service");
 
-    assert!(matches!(
-        resolution,
-        Resolution::Done(outcome) if outcome.verdict.is_success()
-    ));
     assert_eq!(llm_config.upsert_provider_count(), 1);
 }
 
@@ -10999,33 +11029,25 @@ async fn llm_config_mutations_are_available_as_product_capabilities() {
     llm_config.use_active_snapshot("openai", "gpt-5-mini");
     let services = services_with_setup_llm_config(llm_config.clone());
 
-    let delete_resolution = services
+    services
         .invoke(
             caller(),
             CapabilityId::new(LLM_PROVIDER_DELETE_CAPABILITY_ID).expect("capability id"),
-            json!({ "provider_id": "acme" }),
+            ProductCapabilityInput::json(json!({ "provider_id": "acme" })),
             ActivityId::new(),
         )
         .await
         .expect("delete provider");
-    let active_resolution = services
+    services
         .invoke(
             caller(),
             CapabilityId::new(LLM_ACTIVE_SET_CAPABILITY_ID).expect("capability id"),
-            json!({ "provider_id": "openai", "model": "gpt-5-mini" }),
+            ProductCapabilityInput::json(json!({ "provider_id": "openai", "model": "gpt-5-mini" })),
             ActivityId::new(),
         )
         .await
         .expect("set active provider");
 
-    assert!(matches!(
-        delete_resolution,
-        Resolution::Done(outcome) if outcome.verdict.is_success()
-    ));
-    assert!(matches!(
-        active_resolution,
-        Resolution::Done(outcome) if outcome.verdict.is_success()
-    ));
     assert_eq!(
         llm_config
             .delete_provider_calls

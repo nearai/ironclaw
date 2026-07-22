@@ -41,22 +41,22 @@ use ironclaw_product_workflow::{
     OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW,
     OPERATOR_LOGS_VIEW, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
     OUTBOUND_PREFERENCES_SET_CAPABILITY, OUTBOUND_PREFERENCES_VIEW, ProductCapabilityDescriptor,
-    ProductOutboundEnvelope, ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAdminCreateUserRequest, RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse,
-    RebornAdminSecretResponse, RebornAdminSetRoleRequest, RebornAdminSetStatusRequest,
-    RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse, RebornAdminUserDeletedResponse,
-    RebornAdminUserListQuery, RebornAdminUserListResponse, RebornAdminUserResponse,
-    RebornAdminUserSecretsListResponse, RebornAttachmentRequest, RebornAutomationMutationResponse,
-    RebornCancelRunResponse, RebornCreateProjectRequest, RebornCreateThreadResponse,
-    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornDeleteThreadResponse,
-    RebornExtensionActionResponse, RebornExtensionListResponse, RebornExtensionOnboardingState,
-    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse,
-    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
-    RebornGetProjectRequest, RebornListAutomationsResponse, RebornListMembersRequest,
-    RebornListMembersResponse, RebornListProjectsRequest, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
+    ProductCapabilityInput, ProductOutboundEnvelope, ProductSurface, ProductWorkflowError,
+    ProjectFsFile, ProjectionCursor, RebornAccountLoginLinkResponse, RebornAccountTracesResponse,
+    RebornAddMemberRequest, RebornAdminCreateUserRequest, RebornAdminPutSecretRequest,
+    RebornAdminSecretDeletedResponse, RebornAdminSecretResponse, RebornAdminSetRoleRequest,
+    RebornAdminSetStatusRequest, RebornAdminUpdateUserRequest, RebornAdminUserCreatedResponse,
+    RebornAdminUserDeletedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
+    RebornAdminUserResponse, RebornAdminUserSecretsListResponse, RebornAttachmentRequest,
+    RebornAutomationMutationResponse, RebornCancelRunResponse, RebornCreateProjectRequest,
+    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionListResponse,
+    RebornExtensionOnboardingState, RebornExtensionRegistryResponse, RebornFsListRequest,
+    RebornFsListResponse, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
+    RebornFsStatResponse, RebornGetProjectRequest, RebornListAutomationsResponse,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse, RebornOperatorConfigGetResponse,
     RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest,
@@ -70,19 +70,22 @@ use ironclaw_product_workflow::{
     RebornSkillListResponse, RebornSkillSearchResponse, RebornStreamEventsRequest,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     RebornTraceCreditsResponse, RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
-    SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
-    SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
-    SettingsToolPermissionState, THREADS_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW,
+    RebornUpdateProjectRequest, RebornViewDescriptor, RebornViewQuery,
+    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY, SKILL_AUTO_ACTIVATE_SET_CAPABILITY,
+    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY, SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW,
+    SKILL_UPDATE_CAPABILITY, SKILLS_VIEW, SetActiveLlmRequest, SettingsToolPermissionState,
+    THREADS_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, UpsertLlmProviderRequest,
     WebUiAttachmentCapabilities, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
     WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     WebUiSetupExtensionRequest, webui_attachment_capabilities,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use ironclaw_host_api::{ActivityId, Blocked, FailureKind, Resolution, SecretHandle, UserId};
+use secrecy::ExposeSecret;
 use uuid::Uuid;
 
 use crate::webui_v2::error::WebUiV2HttpError;
@@ -1466,19 +1469,14 @@ pub async fn trace_credits(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornTraceCreditsResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: TRACE_CREDITS_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
-        )
-        .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        TRACE_CREDITS_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1491,19 +1489,14 @@ pub async fn trace_account_traces(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornAccountTracesResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: TRACE_ACCOUNT_TRACES_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
-        )
-        .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        TRACE_ACCOUNT_TRACES_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1545,19 +1538,14 @@ pub async fn get_outbound_preferences(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornOutboundPreferencesResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
-        )
-        .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        OUTBOUND_PREFERENCES_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1575,24 +1563,18 @@ pub async fn set_outbound_preferences(
         caller.clone(),
         OUTBOUND_PREFERENCES_SET_CAPABILITY,
         body,
-        ActivityId::new(),
     )
     .await?;
     outbound_preferences_mutation_succeeded(resolution)?;
 
-    let page = state
-        .services()
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: OUTBOUND_PREFERENCES_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
-        )
-        .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        OUTBOUND_PREFERENCES_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1654,19 +1636,14 @@ pub async fn list_outbound_delivery_targets(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornOutboundDeliveryTargetListResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
-        )
-        .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        OUTBOUND_DELIVERY_TARGETS_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1675,19 +1652,14 @@ pub async fn list_extensions(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornExtensionListResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: EXTENSIONS_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
-        )
-        .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        EXTENSIONS_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1696,19 +1668,14 @@ pub async fn list_skills(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornSkillListResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: SKILLS_VIEW.id.to_string(),
-                params: serde_json::json!({}),
-                cursor: None,
-            },
-        )
-        .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        SKILLS_VIEW,
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1718,19 +1685,14 @@ pub async fn search_skills(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<SearchSkillsBody>,
 ) -> Result<Json<RebornSkillSearchResponse>, WebUiV2HttpError> {
-    let page = state
-        .services()
-        .query(
-            caller,
-            RebornViewQuery {
-                view_id: SKILL_SEARCH_VIEW.id.to_string(),
-                params: serde_json::json!({ "query": body.query }),
-                cursor: None,
-            },
-        )
-        .await?;
-    let response =
-        serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)?;
+    let response = query_product_view(
+        state.services(),
+        caller,
+        SKILL_SEARCH_VIEW,
+        serde_json::json!({ "query": body.query }),
+        None,
+    )
+    .await?;
     Ok(Json(response))
 }
 
@@ -1749,7 +1711,6 @@ pub async fn install_skill(
             "name": name.clone(),
             "content": body.content,
         }),
-        ActivityId::new(),
     )
     .await?;
     skill_mutation_succeeded(resolution)?;
@@ -1796,7 +1757,6 @@ pub async fn update_skill(
             "name": name.clone(),
             "content": body.content,
         }),
-        ActivityId::new(),
     )
     .await?;
     skill_mutation_succeeded(resolution)?;
@@ -1817,7 +1777,6 @@ pub async fn remove_skill(
         caller,
         SKILL_REMOVE_CAPABILITY,
         serde_json::json!({ "name": name.clone() }),
-        ActivityId::new(),
     )
     .await?;
     skill_mutation_succeeded(resolution)?;
@@ -1843,7 +1802,6 @@ pub async fn set_skill_auto_activate(
             "name": name.clone(),
             "enabled": enabled,
         }),
-        ActivityId::new(),
     )
     .await?;
     skill_mutation_succeeded(resolution)?;
@@ -1869,7 +1827,6 @@ pub async fn set_auto_activate_learned(
         caller,
         SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
         serde_json::json!({ "enabled": enabled }),
-        ActivityId::new(),
     )
     .await?;
     skill_mutation_succeeded(resolution)?;
@@ -1966,7 +1923,6 @@ pub async fn install_extension(
         caller,
         EXTENSION_INSTALL_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
-        ActivityId::new(),
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
@@ -1990,7 +1946,6 @@ pub async fn import_extension(
         caller,
         EXTENSION_IMPORT_CAPABILITY,
         serde_json::json!({ "bundle_base64": STANDARD.encode(body.as_ref()) }),
-        ActivityId::new(),
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
@@ -2013,7 +1968,6 @@ pub async fn activate_extension(
         caller.clone(),
         EXTENSION_ACTIVATE_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
-        ActivityId::new(),
     )
     .await?;
     let response =
@@ -2036,7 +1990,6 @@ pub async fn remove_extension(
         caller,
         EXTENSION_REMOVE_CAPABILITY,
         serde_json::json!({ "extension_id": package_ref.id.as_str() }),
-        ActivityId::new(),
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
@@ -2233,7 +2186,6 @@ pub async fn setup_extension(
         caller.clone(),
         EXTENSION_SETUP_SUBMIT_CAPABILITY,
         input,
-        ActivityId::new(),
     )
     .await?;
     extension_lifecycle_mutation_succeeded(resolution)?;
@@ -2323,7 +2275,7 @@ pub async fn replace_extension_admin_configuration(
     let activity_id =
         admin_configuration_activity_id(&caller, &path.group_id, &body.idempotency_key)?;
     let expected_revision = body.expected_revision;
-    let resolution = invoke_product_capability(
+    let resolution = invoke_product_capability_with_activity_id(
         state.services(),
         caller.clone(),
         ADMIN_CONFIGURATION_REPLACE_CAPABILITY,
@@ -2380,6 +2332,21 @@ async fn invoke_product_capability<T>(
     caller: WebUiAuthenticatedCaller,
     capability: ProductCapabilityDescriptor,
     input: T,
+) -> Result<Resolution, RebornServicesError>
+where
+    T: Serialize,
+{
+    let input = serde_json::to_value(input).map_err(RebornServicesError::internal_from)?;
+    let activity_id = product_capability_activity_id(&caller, capability, &input)?;
+    invoke_product_capability_with_activity_id(services, caller, capability, input, activity_id)
+        .await
+}
+
+async fn invoke_product_capability_with_activity_id<T>(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    capability: ProductCapabilityDescriptor,
+    input: T,
     activity_id: ActivityId,
 ) -> Result<Resolution, RebornServicesError>
 where
@@ -2388,6 +2355,101 @@ where
     capability
         .invoke_on(services.as_ref(), caller, input, activity_id)
         .await
+}
+
+fn product_capability_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    capability: ProductCapabilityDescriptor,
+    input: &serde_json::Value,
+) -> Result<ActivityId, RebornServicesError> {
+    let capability_id = capability.capability_id()?;
+    let input_bytes = serde_json::to_vec(input).map_err(RebornServicesError::internal_from)?;
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-product-capability",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        capability_id.as_str(),
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    seed.extend_from_slice(&(input_bytes.len() as u64).to_be_bytes());
+    seed.extend_from_slice(&input_bytes);
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
+}
+
+fn llm_provider_upsert_activity_id(
+    caller: &WebUiAuthenticatedCaller,
+    request: &UpsertLlmProviderRequest,
+) -> Result<ActivityId, RebornServicesError> {
+    let capability_id = LLM_PROVIDER_UPSERT_CAPABILITY.capability_id()?;
+    let mut seed = Vec::new();
+    for segment in [
+        "webui-product-capability",
+        caller.tenant_id.as_str(),
+        caller.user_id.as_str(),
+        caller.agent_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
+        caller
+            .project_id
+            .as_ref()
+            .map(|id| id.as_str())
+            .unwrap_or(""),
+        capability_id.as_str(),
+        request.id.as_str(),
+        request.name.as_deref().unwrap_or(""),
+        request.adapter.as_str(),
+        request.base_url.as_deref().unwrap_or(""),
+        request.default_model.as_deref().unwrap_or(""),
+        if request.set_active { "active" } else { "" },
+        request.model.as_deref().unwrap_or(""),
+    ] {
+        seed.extend_from_slice(&(segment.len() as u64).to_be_bytes());
+        seed.extend_from_slice(segment.as_bytes());
+    }
+    if let Some(api_key) = request.api_key.as_ref() {
+        let secret = api_key.expose_secret().as_bytes();
+        seed.extend_from_slice(&(secret.len() as u64).to_be_bytes());
+        seed.extend_from_slice(secret);
+    } else {
+        seed.extend_from_slice(&0_u64.to_be_bytes());
+    }
+    Ok(ActivityId::from_uuid(Uuid::new_v5(
+        &Uuid::NAMESPACE_OID,
+        &seed,
+    )))
+}
+
+async fn query_product_view<T>(
+    services: &std::sync::Arc<dyn ProductSurface>,
+    caller: WebUiAuthenticatedCaller,
+    view: RebornViewDescriptor,
+    params: serde_json::Value,
+    cursor: Option<String>,
+) -> Result<T, RebornServicesError>
+where
+    T: DeserializeOwned,
+{
+    let page = services
+        .query(
+            caller,
+            RebornViewQuery {
+                view_id: view.id.to_string(),
+                params,
+                cursor,
+            },
+        )
+        .await?;
+    serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
 }
 
 async fn query_extension_admin_configuration(
@@ -3052,17 +3114,19 @@ pub async fn upsert_llm_provider(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<UpsertLlmProviderRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let resolution = invoke_product_capability(
-        state.services(),
-        caller.clone(),
-        LLM_PROVIDER_UPSERT_CAPABILITY,
-        body,
-        ActivityId::new(),
-    )
-    .await?;
+    let activity_id = llm_provider_upsert_activity_id(&caller, &body)?;
+    let resolution = state
+        .services()
+        .invoke(
+            caller.clone(),
+            LLM_PROVIDER_UPSERT_CAPABILITY.capability_id()?,
+            ProductCapabilityInput::llm_provider_upsert(body),
+            activity_id,
+        )
+        .await?;
     llm_config_mutation_succeeded(resolution)?;
     let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
@@ -3081,7 +3145,6 @@ pub async fn delete_llm_provider(
         caller.clone(),
         LLM_PROVIDER_DELETE_CAPABILITY,
         serde_json::json!({ "provider_id": provider_id }),
-        ActivityId::new(),
     )
     .await?;
     llm_config_mutation_succeeded(resolution)?;
@@ -3094,7 +3157,7 @@ pub async fn set_active_llm(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Extension(capabilities): Extension<WebUiV2Capabilities>,
-    Json(body): Json<serde_json::Value>,
+    Json(body): Json<SetActiveLlmRequest>,
 ) -> Result<Json<LlmConfigSnapshot>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let resolution = invoke_product_capability(
@@ -3102,7 +3165,6 @@ pub async fn set_active_llm(
         caller.clone(),
         LLM_ACTIVE_SET_CAPABILITY,
         body,
-        ActivityId::new(),
     )
     .await?;
     llm_config_mutation_succeeded(resolution)?;
