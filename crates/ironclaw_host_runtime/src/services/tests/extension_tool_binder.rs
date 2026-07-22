@@ -45,6 +45,7 @@ fn first_party_test_package(service: &str, capability_id: &str) -> ExtensionPack
                 required_host_ports: Vec::new(),
                 runtime_credentials: Vec::new(),
                 resource_profile: None,
+                origin_gate_matrix: None,
             }],
             hooks: Vec::new(),
         },

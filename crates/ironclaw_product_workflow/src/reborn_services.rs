@@ -2761,10 +2761,10 @@ pub trait InboundAttachmentReader: Send + Sync {
 /// Product-side command membrane for the generic [`RebornServicesApi::invoke`]
 /// conduit.
 ///
-/// The concrete host-runtime adapter lives in composition: this crate owns the
-/// product contract but must not depend on `ironclaw_host_runtime`. The facade
-/// is generic over this boundary so the production capability hot path does
-/// not add another `Arc<dyn ...>` seam solely for test substitution.
+/// The concrete execution adapter lives in composition: this crate owns the
+/// product contract and remains independent of runtime implementation crates.
+/// The facade is generic over this boundary so the production capability hot
+/// path does not add another `Arc<dyn ...>` seam solely for test substitution.
 #[async_trait]
 pub trait ProductCapabilityInvoker: Send + Sync {
     async fn invoke(

@@ -55,9 +55,10 @@ async fn oauth_connect_binds_channel_identity_through_the_generic_hook() {
     use ironclaw_extensions::{
         ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
         ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-        InMemoryExtensionInstallationStore, ManifestSource,
+        FilesystemExtensionInstallationStore, ManifestSource,
     };
-    use ironclaw_host_api::ExtensionId;
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{ExtensionId, VirtualPath};
     use ironclaw_reborn_composition::{
         ChannelIdentityBindingConfig, RebornUserIdentityBinding,
         RebornUserIdentityBindingDeleteStore, RebornUserIdentityBindingError,
@@ -190,7 +191,18 @@ team_id = "/team/id"
 app_id = "/app_id"
 "#
     );
-    let installation_store = Arc::new(InMemoryExtensionInstallationStore::default());
+    let installation_store = Arc::new(
+        FilesystemExtensionInstallationStore::load_at(
+            Arc::new(InMemoryBackend::new()),
+            VirtualPath::new("/system/extensions/.installations/oauth-popup")
+                .expect("valid installation root"),
+            ironclaw_host_runtime::default_host_port_catalog().expect("host port catalog"),
+            ironclaw_host_runtime::default_host_api_contract_registry()
+                .expect("host API contracts"),
+        )
+        .await
+        .expect("filesystem installation store"),
+    );
     let record = ExtensionManifestRecord::from_toml(
         &manifest,
         ManifestSource::HostBundled,
