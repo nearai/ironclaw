@@ -1,0 +1,68 @@
+{
+  "model_name": "reborn-qa-qa_10g_slack_last_message_sent_global",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "What is the exact text of the most recent message I sent in Slack? Include the exact marker REBORN_QA_10G_GLOBAL_LAST_SENT_1784642976489 in your answer."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "What is the exact text of the most recent message I sent in Slack? Include the e",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_c19ba3eba5cd4c7db1289130",
+            "name": "slack__whoami",
+            "arguments": {}
+          }
+        ],
+        "input_tokens": 17406,
+        "output_tokens": 48
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "What is the exact text of the most recent message I sent in Slack? Include the e",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_998bcbb50ad04a2280f7b45a",
+            "name": "slack__search_messages",
+            "arguments": {
+              "count": 5,
+              "query": "from:me",
+              "sort": "timestamp"
+            }
+          }
+        ],
+        "input_tokens": 17602,
+        "output_tokens": 82
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "What is the exact text of the most recent message I sent in Slack? Include the e",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "text",
+        "content": "Your most recent message in Slack (in a DM) was:\n\n**LASTSENT_GLOBAL_1784642976489**\n\nThat's the exact text — including the marker `REBORN_QA_10G_GLOBAL_LAST_SENT_1784642976489`.",
+        "input_tokens": 18449,
+        "output_tokens": 58
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "slack.search_messages"
+    ]
+  }
+}

@@ -1,4 +1,3 @@
-// arch-exempt: large_file, serve command aggregates config+wiring+mounts, plan #6310
 use std::env;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
@@ -7,22 +6,15 @@ use std::sync::Arc;
 use anyhow::{Context, anyhow};
 use clap::Args;
 use ironclaw_reborn_composition::build_openai_compat_route_mount;
-use ironclaw_reborn_composition::build_telegram_host_runtime_mounts;
-use ironclaw_reborn_composition::build_webui_services_with_slack_and_telegram_host_mounts;
+use ironclaw_reborn_composition::build_webui_services;
 use ironclaw_reborn_composition::host_api::{
     AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_reborn_composition::{
-    GoogleOAuthRouteConfig, RebornBuildInput, RebornReadiness, RebornRuntimeIdentity,
-    RebornRuntimeInput, RebornWebuiBundle, TriggerFireAccessPolicy, build_reborn_runtime,
+    RebornBuildInput, RebornReadiness, RebornRuntimeIdentity, RebornRuntimeInput,
+    RebornWebuiBundle, TriggerFireAccessPolicy, build_reborn_runtime,
 };
-use ironclaw_reborn_composition::{
-    SlackOperatorRouteVisibility, build_slack_host_beta_runtime_mounts,
-    build_webui_services_with_slack_host_beta_mounts,
-};
-use ironclaw_reborn_config::{
-    IdentitySection, RebornConfigFile, seed_default_config_file_if_missing,
-};
+use ironclaw_reborn_config::{IdentitySection, seed_default_config_file_if_missing};
 use ironclaw_webui::{
     DeferredWebuiRouterHandle, EnvBearerAuthenticator, RebornWebuiServeError,
     RebornWebuiServeOptions, WebuiAuthenticator, WebuiServeConfig,
@@ -31,7 +23,7 @@ use ironclaw_webui::{
 use secrecy::SecretString;
 
 use crate::context::RebornCliContext;
-use crate::runtime::{RuntimeInputOptions, resolve_google_oauth_config_from_env};
+use crate::runtime::RuntimeInputOptions;
 
 // pub(crate): reused by onboard's finale login-link print (same default host:port).
 pub(crate) const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
@@ -72,7 +64,7 @@ pub(crate) fn present_unicode_env_var(name: &str) -> anyhow::Result<Option<Strin
 /// store is deterministic in its signing key (operator secret + tenant), so a
 /// token minted here validates under the SSO login surface's own store.
 struct SignedSessionTokenMinter {
-    session_store: Arc<dyn ironclaw_webui::SessionStore>,
+    session_store: Arc<ironclaw_webui::SignedTokenSessionStore>,
 }
 
 #[async_trait::async_trait]
@@ -136,12 +128,14 @@ impl ServeCommand {
                 confirm_host_access: self.confirm_host_access,
             },
         )?;
-        let slack_personal_lazy_slot = built.slack_personal_lazy_slot;
         let runtime_input = built.inner;
         let boot_config = context.boot_config();
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
                 .map_err(anyhow::Error::from)?;
+        if let Some(file) = config_file.as_ref() {
+            reject_legacy_slack_config(file, &boot_config.home().config_file_path())?;
+        }
 
         // Tenant id is host-trusted (operator-owned config), never
         // browser-influenced. Falls back to the same default the CLI's
@@ -246,35 +240,6 @@ impl ServeCommand {
             runtime_input.with_admin_api_token_minter(Arc::new(SignedSessionTokenMinter {
                 session_store: admin_session_store,
             }));
-        let slack_host_beta_config = resolve_slack_host_beta_config_for_serve_command(
-            config_file.as_ref(),
-            &tenant_id,
-            &default_agent_id,
-            default_project_id.as_ref(),
-            &user_id,
-            &boot_config.home().config_file_path(),
-        )?;
-        // Resolved BEFORE the composition build (`build_reborn_runtime` below)
-        // so `provider_instance_readiness_map` sees the same build-time
-        // signal the post-build Slack mount step below consumes (mirrors how
-        // `google_oauth_configured` arrives via `with_google_oauth_backend`).
-        runtime_input =
-            runtime_input.with_slack_host_beta_enabled(slack_host_beta_config.is_some());
-        // Second Slack readiness axis, from the redirect URI already resolved
-        // by `build_runtime_input_with_options` above (line ~144) — not a
-        // second read of the environment. Without it the extension route
-        // mounts but the WebUI Connect button 503s, which is the dead end the
-        // readiness map exists to replace with actionable text.
-        runtime_input = runtime_input
-            .with_slack_personal_oauth_redirect_uri_configured(slack_personal_lazy_slot.is_some());
-        let telegram_host_config = resolve_telegram_host_config_for_serve_command(
-            config_file.as_ref(),
-            &tenant_id,
-            &default_agent_id,
-            default_project_id.as_ref(),
-            &user_id,
-        )?;
-
         // Resolve listen address with explicit precedence:
         //   CLI flag (Some(...)) > config file > compile-time default.
         // Both `host` and `port` are `Option<>` in the clap struct so
@@ -424,17 +389,6 @@ impl ServeCommand {
         }
         seed_default_config_file_if_missing(&context.boot_config().home().config_file_path())
             .map_err(anyhow::Error::from)?;
-        // Resolved synchronously, before `rt.block_on` below: `config_file`
-        // is borrowed by several `let`s above and by `async move` capture
-        // rules would otherwise need to be moved whole into the future,
-        // conflicting with those borrows. `resolve_google_oauth_config_from_env`
-        // is itself synchronous (it opens the secret store via its own
-        // internal `block_on_cli`, which already handles being called from
-        // inside a live tokio runtime — see its doc), so there is no reason
-        // to defer this into the async block at all.
-        let google_oauth_config =
-            resolve_google_oauth_config_from_env(boot_config, config_file.as_ref())
-                .context("failed to resolve Google OAuth setup config for WebUI")?;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             // The agent loop executes a deep async dispatch chain (turn runner ->
@@ -462,13 +416,14 @@ impl ServeCommand {
             // owner may always fire; when SSO is also on, any active tenant
             // member (the users SSO login persists in the identity store) may
             // too — the union the former single trigger-access store expressed.
-            runtime_input = runtime_input.with_trigger_fire_access_policy(trigger_fire_access_policy(
-                trigger_poller_enabled,
-                sso_enabled,
-                &user_id,
-                &default_agent_id,
-                default_project_id.as_ref(),
-            ));
+            runtime_input =
+                runtime_input.with_trigger_fire_access_policy(trigger_fire_access_policy(
+                    trigger_poller_enabled,
+                    sso_enabled,
+                    &user_id,
+                    &default_agent_id,
+                    default_project_id.as_ref(),
+                ));
 
             let runtime = build_reborn_runtime(runtime_input)
                 .await
@@ -501,68 +456,7 @@ impl ServeCommand {
                 );
             }
 
-            let slack_mounts = if let Some(slack_config) = slack_host_beta_config {
-                match build_slack_host_beta_runtime_mounts(&runtime, slack_config)
-                    .await
-                    .context("failed to compose Slack host-beta routes")
-                {
-                    Ok(mounts) => {
-                        if let Some(slot) = &slack_personal_lazy_slot {
-                            mounts.fill_slack_personal_oauth_slot(slot);
-                        }
-                        Some(mounts)
-                    }
-                    Err(error) => {
-                        let shutdown_result = runtime.shutdown().await;
-                        if let Err(shutdown_error) = shutdown_result {
-                            return Err(error.context(format!(
-                                "runtime shutdown after Slack route composition failure also failed: {shutdown_error}"
-                            )));
-                        }
-                        return Err(error);
-                    }
-                }
-            } else {
-                None
-            };
-            // Telegram host mounts, after Slack's: same fail-closed shutdown
-            // path when route composition fails.
-            let telegram_mounts = if let Some(telegram_config) = telegram_host_config {
-                match build_telegram_host_runtime_mounts(&runtime, telegram_config)
-                    .await
-                    .context("failed to compose Telegram host routes")
-                {
-                    Ok(mounts) => Some(mounts),
-                    Err(error) => {
-                        let shutdown_result = runtime.shutdown().await;
-                        if let Err(shutdown_error) = shutdown_result {
-                            return Err(error.context(format!(
-                                "runtime shutdown after Telegram route composition failure also failed: {shutdown_error}"
-                            )));
-                        }
-                        return Err(error);
-                    }
-                }
-            } else {
-                None
-            };
-            let operator_route_visibility =
-                slack_operator_route_visibility_for_authenticator(env_authenticator.as_ref());
-            let bundle: RebornWebuiBundle = match telegram_mounts.as_ref() {
-                Some(telegram_mounts) => build_webui_services_with_slack_and_telegram_host_mounts(
-                    &runtime,
-                    None,
-                    slack_mounts.as_ref(),
-                    operator_route_visibility,
-                    telegram_mounts,
-                )?,
-                None => build_webui_services_with_slack_host_beta_mounts(
-                    &runtime,
-                    None,
-                    slack_mounts.as_ref(),
-                    operator_route_visibility,
-                )?,
-            };
+            let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
             let openai_compat_mount = build_openai_compat_route_mount(
                 &runtime,
                 tenant_id.clone(),
@@ -656,24 +550,10 @@ impl ServeCommand {
             {
                 serve_config = serve_config.with_protected_route_mount(openai_compat_mount);
             }
-            if let Some(google_oauth) = google_oauth_config {
-                let mut route_config = GoogleOAuthRouteConfig::new(
-                    google_oauth.client.client_id.as_str(),
-                    google_oauth.client.redirect_uri.as_str(),
-                )
-                .context("invalid Google OAuth route config for WebUI")?;
-                if let Some(hosted_domain_hint) = google_oauth.hosted_domain_hint {
-                    route_config = route_config
-                        .with_hosted_domain_hint(hosted_domain_hint)
-                        .context("invalid Google OAuth hosted-domain hint for WebUI")?;
-                }
-                serve_config = serve_config.with_google_oauth(route_config);
-            }
-            {
-                if let Some(slot) = slack_personal_lazy_slot {
-                    serve_config = serve_config.with_slack_personal_oauth(slot);
-                }
-            }
+            // Google/Slack OAuth start + callback run on the generic
+            // recipe-driven engine routes; the deployment client material is
+            // wired on the build input (`resolve_google_oauth_config_from_env`
+            // in runtime/mod.rs) rather than on the serve config.
             if let Some(value) = csp_override {
                 serve_config = serve_config
                     .with_csp_header_str(value)
@@ -685,20 +565,27 @@ impl ServeCommand {
             if let Some(host) = canonical_host {
                 serve_config = serve_config.with_canonical_host(host);
             }
-            if let Some(slack_mounts) = slack_mounts {
-                let slack_personal_oauth_binding = slack_mounts.personal_oauth_binding_config();
-                serve_config = serve_config
-                    .with_public_route_mount(slack_mounts.events)
-                    .with_slack_personal_oauth_binding(slack_personal_oauth_binding)
-                    .with_slack_channel_routes(slack_mounts.channel_routes);
+            // Generic extension channel ingress (extension-runtime P4): one
+            // mount serves `/webhooks/extensions/{extension_id}/{route_suffix}`
+            // for every active extension; the route table follows the active
+            // snapshot.
+            if let Some(ingress_parts) = runtime.services().extension_ingress_parts() {
+                let ingress_mount =
+                    ironclaw_reborn_composition::extension_ingress_route_mount(&ingress_parts)
+                        .context("failed to compose the extension ingress route mount")?;
+                serve_config = serve_config.with_public_route_mount(ingress_mount);
             }
-            if let Some(telegram_mounts) = telegram_mounts {
-                // Bearer-authed setup/pairing routes ride the generic
-                // protected-route seam; the updates webhook is public.
-                let telegram_protected_routes = telegram_mounts.protected_routes();
-                serve_config = serve_config
-                    .with_public_route_mount(telegram_mounts.events)
-                    .with_protected_route_mount(telegram_protected_routes);
+            // The generic post-OAuth channel identity binding: installed
+            // channel extensions bind through generic discovery over the
+            // durable installation store; bindings land in the generic
+            // channel-identity store.
+            if let Some(channel_identity_binding) = runtime.channel_identity_binding_config() {
+                serve_config = serve_config.with_channel_identity_binding(channel_identity_binding);
+            }
+            // Generic WebGeneratedCode pairing routes (mint/status/unpair per
+            // extension), riding the shared protected-route seam.
+            if let Some(pairing_mount) = runtime.channel_pairing_route_mount() {
+                serve_config = serve_config.with_protected_route_mount(pairing_mount);
             }
             // Public NEAR AI login callback route (token redirect target). Built
             // from the runtime's LLM seam; absent when no LLM was wired.
@@ -751,48 +638,6 @@ impl ServeCommand {
 
         Ok(())
     }
-}
-
-fn resolve_slack_host_beta_config_for_serve_command(
-    config_file: Option<&RebornConfigFile>,
-    tenant_id: &TenantId,
-    default_agent_id: &AgentId,
-    default_project_id: Option<&ProjectId>,
-    default_user_id: &UserId,
-    config_path: &std::path::Path,
-) -> anyhow::Result<Option<ironclaw_reborn_composition::SlackHostBetaRuntimeConfig>> {
-    crate::commands::serve_slack::resolve_slack_config_for_serve(
-        config_file.and_then(|file| file.slack.as_ref()),
-        tenant_id,
-        default_agent_id,
-        default_project_id,
-        default_user_id,
-        config_path,
-    )
-}
-
-fn resolve_telegram_host_config_for_serve_command(
-    config_file: Option<&RebornConfigFile>,
-    tenant_id: &TenantId,
-    default_agent_id: &AgentId,
-    default_project_id: Option<&ProjectId>,
-    default_user_id: &UserId,
-) -> anyhow::Result<Option<ironclaw_reborn_composition::TelegramHostRuntimeConfig>> {
-    // Reuse the deployment public origin the hosted OAuth surface derives its
-    // redirect URIs from (`IRONCLAW_REBORN_WEBUI_BASE_URL`): the same origin
-    // is where Telegram must reach the updates webhook. When unset (e.g.
-    // loopback-only dev), setup derivation fails closed and the admin supplies
-    // an explicit webhook URL override through the WebUI setup surface.
-    let public_base_url = crate::commands::serve_sso::webui_public_base_url_from_env()
-        .context("invalid hosted WebUI base URL from IRONCLAW_REBORN_WEBUI_BASE_URL")?;
-    crate::commands::serve_telegram::resolve_telegram_config_for_serve(
-        config_file.and_then(|file| file.telegram.as_ref()),
-        tenant_id,
-        default_agent_id,
-        default_project_id,
-        default_user_id,
-        public_base_url,
-    )
 }
 
 struct StartupServe {
@@ -900,10 +745,9 @@ fn with_notion_dcr_oauth_backend(
     services: RebornBuildInput,
     callback_origin: &str,
 ) -> anyhow::Result<RebornBuildInput> {
-    // Provider-visible DCR client display name shown during Notion OAuth consent.
     services
-        .with_notion_dcr_oauth_backend(callback_origin, "Ironclaw")
-        .map_err(|error| anyhow!("Notion DCR OAuth backend rejected callback origin: {error}"))
+        .with_dcr_oauth_callback(callback_origin)
+        .map_err(|error| anyhow!("OAuth callback origin rejected: {error}"))
 }
 
 fn webui_notion_dcr_callback_origin(
@@ -1024,6 +868,46 @@ fn trigger_fire_access_policy(
     policy
 }
 
+/// The legacy `[slack]` setup fields are a retired configuration surface:
+/// Slack is configured by installing the Slack extension and completing
+/// workspace OAuth in the WebUI (`/extensions`). A populated setup field
+/// means the operator is following retired instructions — fail closed with
+/// the migration pointer instead of silently ignoring it. `[slack].enabled`
+/// is not rejected: the flag is unused, but existing installs may still
+/// carry it and must keep booting.
+fn reject_legacy_slack_config(
+    config_file: &ironclaw_reborn_config::RebornConfigFile,
+    config_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let Some(slack) = config_file.slack.as_ref() else {
+        return Ok(());
+    };
+    let offending = [
+        ("installation_id", slack.installation_id.is_some()),
+        ("team_id", slack.team_id.is_some()),
+        ("api_app_id", slack.api_app_id.is_some()),
+        ("slack_user_id", slack.slack_user_id.is_some()),
+        ("user_id", slack.user_id.is_some()),
+        (
+            "shared_subject_user_id",
+            slack.shared_subject_user_id.is_some(),
+        ),
+        ("channel_routes", !slack.channel_routes.is_empty()),
+        ("signing_secret_env", slack.signing_secret_env.is_some()),
+        ("bot_token_env", slack.bot_token_env.is_some()),
+    ];
+    if let Some((field, _)) = offending.iter().find(|(_, set)| *set) {
+        anyhow::bail!(
+            "`[slack].{field}` in {path} is a retired configuration surface: Slack is \
+             configured by installing the Slack extension and completing workspace OAuth \
+             in the WebUI (/extensions). Remove the `[slack]` section to continue.",
+            field = field,
+            path = config_path.display(),
+        );
+    }
+    Ok(())
+}
+
 fn resolve_webui_default_agent(
     identity_section: Option<&IdentitySection>,
     runtime_identity: &RebornRuntimeIdentity,
@@ -1046,7 +930,7 @@ fn resolve_webui_default_agent(
 /// `present_unicode_env_var`).
 fn resolve_webui_user_id_raw(
     env_user_id_var: &str,
-    config_file: Option<&RebornConfigFile>,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
 ) -> anyhow::Result<String> {
     Ok(present_unicode_env_var(env_user_id_var)?
         .filter(|value| !value.is_empty())
@@ -1084,16 +968,6 @@ fn resolve_webui_runtime_owner(
         ));
     }
     Ok(webui_user_id.to_string())
-}
-
-fn slack_operator_route_visibility_for_authenticator(
-    authenticator: &dyn WebuiAuthenticator,
-) -> SlackOperatorRouteVisibility {
-    if authenticator.mounts_operator_webui_config_routes() {
-        SlackOperatorRouteVisibility::Visible
-    } else {
-        SlackOperatorRouteVisibility::Hidden
-    }
 }
 
 fn print_serve_banner(
@@ -1353,7 +1227,7 @@ mod tests {
         // before the guard drops.
         unsafe { std::env::set_var(WEBUI_USER_ID_TEST_ENV, "env-user") };
 
-        let config_file = RebornConfigFile {
+        let config_file = ironclaw_reborn_config::RebornConfigFile {
             identity: Some(IdentitySection::default().set_default_owner("config-user")),
             ..Default::default()
         };
@@ -1374,7 +1248,7 @@ mod tests {
         // SAFETY: serialized by the shared crate process-env lock.
         unsafe { std::env::remove_var(WEBUI_USER_ID_TEST_ENV) };
 
-        let config_file = RebornConfigFile {
+        let config_file = ironclaw_reborn_config::RebornConfigFile {
             identity: Some(IdentitySection::default().set_default_owner("config-user")),
             ..Default::default()
         };
@@ -1393,7 +1267,7 @@ mod tests {
         // before the guard drops.
         unsafe { std::env::set_var(WEBUI_USER_ID_TEST_ENV, "") };
 
-        let config_file = RebornConfigFile {
+        let config_file = ironclaw_reborn_config::RebornConfigFile {
             identity: Some(IdentitySection::default().set_default_owner("config-user")),
             ..Default::default()
         };
@@ -1506,19 +1380,12 @@ slack_user_id = "U123"
 "#,
         )
         .expect("write config");
-        let config_file = RebornConfigFile::load(&config_path)
+        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
             .expect("config file loads")
             .expect("config exists");
 
-        let error = resolve_slack_host_beta_config_for_serve_command(
-            Some(&config_file),
-            &TenantId::new("serve-slack-tenant").expect("tenant id"),
-            &AgentId::new("serve-slack-agent").expect("agent id"),
-            None,
-            &UserId::new("serve-slack-user").expect("user id"),
-            &config_path,
-        )
-        .expect_err("serve startup must reject legacy Slack config fields");
+        let error = reject_legacy_slack_config(&config_file, &config_path)
+            .expect_err("serve startup must reject legacy Slack config fields");
         let message = error.to_string();
 
         assert!(
@@ -1529,46 +1396,21 @@ slack_user_id = "U123"
             message.contains(&config_path.display().to_string()),
             "message: {message}"
         );
-    }
+        assert!(message.contains("/extensions"), "message: {message}");
 
-    #[test]
-    fn slack_operator_route_visibility_follows_authenticator_route_mount_capability() {
-        struct HiddenAuth;
-
-        #[async_trait::async_trait]
-        impl WebuiAuthenticator for HiddenAuth {
-            async fn authenticate(
-                &self,
-                _token: &str,
-            ) -> Option<ironclaw_webui::WebuiAuthentication> {
-                None
-            }
-        }
-
-        struct OperatorRouteAuth;
-
-        #[async_trait::async_trait]
-        impl WebuiAuthenticator for OperatorRouteAuth {
-            async fn authenticate(
-                &self,
-                _token: &str,
-            ) -> Option<ironclaw_webui::WebuiAuthentication> {
-                None
-            }
-
-            fn mounts_operator_webui_config_routes(&self) -> bool {
-                true
-            }
-        }
-
-        assert_eq!(
-            slack_operator_route_visibility_for_authenticator(&HiddenAuth),
-            SlackOperatorRouteVisibility::Hidden
-        );
-        assert_eq!(
-            slack_operator_route_visibility_for_authenticator(&OperatorRouteAuth),
-            SlackOperatorRouteVisibility::Visible
-        );
+        // Boundary: `enabled` alone is not a setup field. It is unused, but
+        // existing installs may still carry it — a boot refusal over an
+        // inert flag would strand them.
+        std::fs::write(
+            &config_path,
+            "api_version = \"ironclaw.runtime/v1\"\n\n[slack]\nenabled = true\n",
+        )
+        .expect("write config");
+        let config_file = ironclaw_reborn_config::RebornConfigFile::load(&config_path)
+            .expect("config file loads")
+            .expect("config exists");
+        reject_legacy_slack_config(&config_file, &config_path)
+            .expect("an inert [slack].enabled must not block startup");
     }
 
     #[test]
@@ -1867,3 +1709,4 @@ slack_user_id = "U123"
         clear_webui_env();
     }
 }
+// arch-exempt: large_file, serve composition remains centralized during assembly cleanup, plan #6175

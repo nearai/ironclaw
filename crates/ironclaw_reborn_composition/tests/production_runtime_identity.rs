@@ -19,7 +19,6 @@
 //! not starve the lib unit tests' hard `RunTimeout` budgets, and is gated on
 //! `libsql` because the production-runtime path under test requires the libSQL
 //! substrate.
-#![cfg(feature = "libsql")]
 
 use std::sync::Arc;
 use std::time::Duration;

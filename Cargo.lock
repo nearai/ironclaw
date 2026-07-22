@@ -167,7 +167,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -178,7 +178,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1143,7 +1143,7 @@ dependencies = [
  "cap-primitives",
  "cap-std",
  "io-lifetimes",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1172,7 +1172,7 @@ dependencies = [
  "maybe-owned",
  "rustix 1.1.4",
  "rustix-linux-procfs",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
  "winx",
 ]
 
@@ -2066,7 +2066,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2245,7 +2245,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2436,7 +2436,7 @@ checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
 dependencies = [
  "io-lifetimes",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3053,7 +3053,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -3268,7 +3268,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2285ddfe3054097ef4b2fe909ef8c3bcd1ea52a8f0d274416caebeef39f04a65"
 dependencies = [
  "io-lifetimes",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3296,11 +3296,14 @@ dependencies = [
  "dotenvy",
  "hex",
  "ironclaw_common",
+ "ironclaw_extension_host",
  "ironclaw_filesystem",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",
  "ironclaw_secrets",
+ "ironclaw_slack_extension",
+ "ironclaw_telegram_extension",
  "ironclaw_webui",
  "libc",
  "rand 0.10.1",
@@ -3313,6 +3316,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -3361,7 +3365,10 @@ dependencies = [
 name = "ironclaw_architecture"
 version = "0.1.0"
 dependencies = [
+ "ironclaw_host_api",
  "serde_json",
+ "tempfile",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
@@ -3387,12 +3394,18 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_common",
  "ironclaw_host_api",
+ "ironclaw_secrets",
+ "psl",
+ "rand 0.10.1",
  "secrecy",
  "serde",
  "serde_json",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
  "url",
  "urlencoding",
  "uuid",
@@ -3442,56 +3455,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_channel_delivery"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "ironclaw_auth",
- "ironclaw_channel_host",
- "ironclaw_conversations",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_outbound",
- "ironclaw_product_adapters",
- "ironclaw_product_workflow",
- "ironclaw_run_state",
- "ironclaw_threads",
- "ironclaw_triggers",
- "ironclaw_turns",
- "ironclaw_wasm_product_adapters",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ironclaw_channel_host"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum 0.8.9",
- "ironclaw_auth",
- "ironclaw_conversations",
- "ironclaw_extensions",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_host_runtime",
- "ironclaw_outbound",
- "ironclaw_product_adapter_registry",
- "ironclaw_product_adapters",
- "ironclaw_product_workflow",
- "ironclaw_threads",
- "ironclaw_turns",
- "ironclaw_wasm_product_adapters",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "ironclaw_common"
 version = "0.4.2"
 dependencies = [
@@ -3535,9 +3498,8 @@ name = "ironclaw_dispatcher"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ironclaw_events",
- "ironclaw_extensions",
- "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_resources",
  "serde_json",
@@ -3620,6 +3582,32 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_extension_host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hmac 0.13.0",
+ "ironclaw_auth",
+ "ironclaw_dispatcher",
+ "ironclaw_extensions",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_product_adapters",
+ "ironclaw_secrets",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -3764,6 +3752,7 @@ dependencies = [
  "static_assertions",
  "thiserror 2.0.18",
  "tokio",
+ "toml 1.1.2+spec-1.1.0",
  "uuid",
  "zeroize",
 ]
@@ -3997,6 +3986,7 @@ dependencies = [
  "reqwest 0.12.28",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
  "url",
  "zeroize",
 ]
@@ -4071,6 +4061,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "ironclaw_extensions",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_product_adapters",
  "serde",
@@ -4134,7 +4125,7 @@ dependencies = [
  "ironclaw_reborn_traces",
  "ironclaw_run_state",
  "ironclaw_runner",
- "ironclaw_telegram_v2_adapter",
+ "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_trust",
  "ironclaw_turns",
@@ -4197,13 +4188,12 @@ dependencies = [
  "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_capabilities",
- "ironclaw_channel_delivery",
- "ironclaw_channel_host",
  "ironclaw_common",
  "ironclaw_conversations",
  "ironclaw_event_projections",
  "ironclaw_event_streams",
  "ironclaw_events",
+ "ironclaw_extension_host",
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_first_party_extension_ports",
@@ -4239,13 +4229,11 @@ dependencies = [
  "ironclaw_safety",
  "ironclaw_secrets",
  "ironclaw_skills",
- "ironclaw_slack_v2_adapter",
- "ironclaw_telegram_extension",
+ "ironclaw_slack_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
  "ironclaw_turns",
- "ironclaw_wasm_product_adapters",
  "ironclaw_webui",
  "libc",
  "libsql",
@@ -4341,7 +4329,10 @@ dependencies = [
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
+ "deadpool-postgres",
  "hex",
+ "hmac 0.13.0",
+ "http-body-util",
  "insta",
  "ironclaw_agent_loop",
  "ironclaw_approvals",
@@ -4353,6 +4344,7 @@ dependencies = [
  "ironclaw_conversations",
  "ironclaw_embeddings",
  "ironclaw_events",
+ "ironclaw_extension_host",
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_first_party_extensions",
@@ -4377,7 +4369,8 @@ dependencies = [
  "ironclaw_runtime_policy",
  "ironclaw_safety",
  "ironclaw_secrets",
- "ironclaw_slack_v2_adapter",
+ "ironclaw_slack_extension",
+ "ironclaw_telegram_extension",
  "ironclaw_threads",
  "ironclaw_triggers",
  "ironclaw_trust",
@@ -4398,6 +4391,7 @@ dependencies = [
  "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "tokio-test",
  "toml 1.1.2+spec-1.1.0",
  "tower 0.5.3",
@@ -4407,46 +4401,6 @@ dependencies = [
  "url",
  "uuid",
  "zip",
-]
-
-[[package]]
-name = "ironclaw_reborn_migration"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "async-trait",
- "chrono",
- "chrono-tz",
- "clap",
- "deadpool-postgres",
- "hkdf 0.13.0",
- "ironclaw_common",
- "ironclaw_extensions",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_host_runtime",
- "ironclaw_memory",
- "ironclaw_memory_native",
- "ironclaw_reborn_composition",
- "ironclaw_reborn_identity",
- "ironclaw_secrets",
- "ironclaw_threads",
- "ironclaw_triggers",
- "libsql",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "testcontainers-modules",
- "thiserror 2.0.18",
- "tokio",
- "tokio-postgres",
- "tracing",
- "tracing-subscriber",
- "ulid",
- "uuid",
 ]
 
 [[package]]
@@ -4576,6 +4530,7 @@ dependencies = [
  "ironclaw_reborn_event_store",
  "ironclaw_resources",
  "ironclaw_run_state",
+ "ironclaw_runner",
  "ironclaw_safety",
  "ironclaw_scripts",
  "ironclaw_skills",
@@ -4689,11 +4644,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_slack_v2_adapter"
+name = "ironclaw_slack_extension"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_host_api",
  "ironclaw_product_adapters",
  "ironclaw_turns",
  "serde",
@@ -4735,42 +4691,16 @@ name = "ironclaw_telegram_extension"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum 0.8.9",
  "chrono",
- "http-body-util",
- "ironclaw_auth",
- "ironclaw_authorization",
- "ironclaw_channel_delivery",
- "ironclaw_channel_host",
- "ironclaw_common",
- "ironclaw_conversations",
- "ironclaw_extensions",
- "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_host_runtime",
- "ironclaw_network",
- "ironclaw_outbound",
- "ironclaw_processes",
  "ironclaw_product_adapters",
- "ironclaw_product_workflow",
- "ironclaw_resources",
- "ironclaw_run_state",
- "ironclaw_safety",
- "ironclaw_secrets",
  "ironclaw_telegram_v2_adapter",
- "ironclaw_threads",
- "ironclaw_triggers",
  "ironclaw_turns",
- "ironclaw_wasm_product_adapters",
- "rand 0.9.4",
- "secrecy",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
- "tower 0.5.3",
- "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4906,29 +4836,6 @@ version = "0.1.0"
 dependencies = [
  "tracing",
  "wasmtime",
-]
-
-[[package]]
-name = "ironclaw_wasm_product_adapters"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "hex",
- "hmac 0.13.0",
- "http 1.4.2",
- "ironclaw_product_adapters",
- "ironclaw_wasm",
- "serde_json",
- "sha2 0.11.0",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "wasmtime",
- "wat",
- "wit-component 0.245.1",
- "wit-parser 0.245.1",
 ]
 
 [[package]]
@@ -5611,7 +5518,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6294,6 +6201,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "psl"
+version = "2.1.219"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c29b88c3f8002851c2571f798b898d257cec88d40246523af0afc7e6b30b3640"
+dependencies = [
+ "psl-types",
+]
+
+[[package]]
+name = "psl-types"
+version = "2.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+
+[[package]]
 name = "ptr_meta"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6349,7 +6271,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls 0.23.41",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -6387,7 +6309,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -6943,7 +6865,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6956,7 +6878,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7060,7 +6982,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7587,7 +7509,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7755,7 +7677,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8504,7 +8426,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9376,7 +9298,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9645,7 +9567,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
 dependencies = [
  "bitflags 2.13.0",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

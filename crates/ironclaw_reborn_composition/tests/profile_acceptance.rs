@@ -1,7 +1,3 @@
-// Only the `#[cfg(not(feature = "libsql"))]` no-libsql regression test below
-// consumes this error type; CI builds enable `libsql`.
-#[cfg(not(feature = "libsql"))]
-use ironclaw_reborn_composition::RebornRuntimeProfileError;
 use ironclaw_reborn_composition::{
     RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness, RebornReadiness,
     RebornReadinessDiagnostic, RebornReadinessDiagnosticComponent, RebornReadinessDiagnosticReason,
@@ -440,7 +436,6 @@ fn hosted_single_tenant_volume_is_visible_as_preview_readiness() {
     assert!(diagnostic.blocks_production);
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnostic() {
     let dir = tempfile::tempdir().unwrap();
@@ -465,25 +460,6 @@ async fn hosted_single_tenant_volume_factory_readiness_includes_preview_diagnost
         services.readiness.diagnostics,
         vec![RebornReadinessDiagnostic::hosted_single_tenant_volume()]
     );
-}
-
-#[cfg(not(feature = "libsql"))]
-#[test]
-fn hosted_single_tenant_volume_input_errors_without_libsql_feature() {
-    let dir = tempfile::tempdir().unwrap();
-    // `RebornBuildInput` (the Ok type) is not `Debug`, so `unwrap_err()` won't
-    // compile; match on the `Result` directly instead.
-    let result = local_runtime_build_input_with_options(
-        RebornCompositionProfile::HostedSingleTenantVolume,
-        "readiness-contract-owner",
-        dir.path().to_path_buf(),
-        Default::default(),
-    );
-
-    assert!(matches!(
-        result,
-        Err(RebornRuntimeProfileError::MissingLibsqlFeature)
-    ));
 }
 
 #[tokio::test]

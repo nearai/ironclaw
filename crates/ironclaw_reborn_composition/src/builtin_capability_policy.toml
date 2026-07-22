@@ -9,6 +9,7 @@ authority_effects = [
     "spawn_process",
     "execute_code",
     "network",
+    "use_secret",
     "external_write",
 ]
 
@@ -71,6 +72,10 @@ exempt_capabilities = [
     #   to exempt here (unlike `memory_write`, an arbitrary-path write that is
     #   NOT exempt and still hits the gate).
     "builtin.profile_set",
+    # This API-only capability is reachable only from an authenticated
+    # operator's explicit save gesture. Its handler repeats operator identity
+    # enforcement and uses revision CAS plus idempotent replay.
+    "builtin.admin_configuration_replace",
 ]
 
 [approval_defaults.spawn_capability]

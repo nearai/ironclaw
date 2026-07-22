@@ -45,7 +45,7 @@ async fn members_install_the_same_tool_independently() {
 
     // alice installs → visible to alice only.
     let response = install("alice").await.expect("alice installs for herself");
-    assert_eq!(response.phase, LifecyclePhase::Installed);
+    assert_eq!(response.phase, InstallationState::Installed);
     let owner_row = || async {
         installation_store
             .get_installation(&installation_id)
@@ -65,7 +65,7 @@ async fn members_install_the_same_tool_independently() {
     let response = install("bob")
         .await
         .expect("bob installs the same tool for himself (membership, not a slot)");
-    assert_eq!(response.phase, LifecyclePhase::Installed);
+    assert_eq!(response.phase, InstallationState::Installed);
     let installation = owner_row().await;
     assert!(!installation.owner().is_tenant());
     assert!(
@@ -117,7 +117,7 @@ async fn members_install_the_same_tool_independently() {
             )
             .await
             .expect("member activates the tool they hold");
-        assert_eq!(response.phase, LifecyclePhase::Active);
+        assert_eq!(response.phase, InstallationState::Active);
     }
 
     // Non-members (carol AND the operator) stay masked on activate/remove:
@@ -195,7 +195,7 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
         )
         .await
         .expect("alice removes the tool for herself");
-    assert_eq!(response.phase, LifecyclePhase::Removed);
+    assert_eq!(response.phase, InstallationState::Removed);
     let installation = installation_store
         .get_installation(&installation_id)
         .await
@@ -307,7 +307,7 @@ async fn operator_install_evicts_member_installs_to_tenant_shared() {
         )
         .await
         .expect("operator install evicts member installs and takes the id");
-    assert_eq!(response.phase, LifecyclePhase::Installed);
+    assert_eq!(response.phase, InstallationState::Installed);
     let installation = installation_store
         .get_installation(&installation_id)
         .await
@@ -443,7 +443,7 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
         )
         .await
         .expect("command install derives caller from auth claim");
-    assert_eq!(response.phase, LifecyclePhase::Installed);
+    assert_eq!(response.phase, InstallationState::Installed);
     let installation = installation_store
         .get_installation(&installation_id)
         .await

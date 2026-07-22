@@ -93,6 +93,9 @@ const FROZEN_OTHER_MODE_TYPES: &[&str] = &[
     // --- Hosted*: JUSTIFIED (Bucket-3 false positive) — "hosted MCP" is a real
     //     domain concept (platform-hosted MCP server), not a deployment-mode tier.
     "HostedMcpDiscoveredTool",
+    // Branch-side hosted-MCP discovery test double (network script fake for the
+    // discovery egress) — same Bucket-3 domain-name class as its siblings.
+    "HostedMcpDiscoveryNetworkScript",
     "HostedMcpDiscoveredToolAnnotations",
     "HostedMcpDiscoveryEgress",
     "HostedMcpDiscoveryError",
@@ -133,7 +136,6 @@ fn reborn_other_mode_typename_allowlist_is_frozen() {
         KEYWORDS,
         &is_other_mode_name,
         &[
-            "reborn_inmemory_store_ratchet.rs",
             "reborn_localdev_typename_ratchet.rs",
             "reborn_deployment_mode_typename_ratchet.rs",
         ],

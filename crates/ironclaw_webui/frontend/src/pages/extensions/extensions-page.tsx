@@ -5,7 +5,7 @@ import { useT } from "../../lib/i18n";
 import { ActionToast } from "./components/action-toast";
 import { ChannelsTab } from "./components/channels-tab";
 import { ConfigureModal } from "./components/configure-modal";
-import { McpTab } from "./components/mcp-tab";
+import { ToolsTab } from "./components/tools-tab";
 import { RegistryTab } from "./components/registry-tab";
 import { useExtensions } from "./hooks/useExtensions";
 
@@ -54,11 +54,10 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
   const {
     status,
     channels,
-    mcpServers,
+    tools,
     channelRegistry,
-    mcpRegistry,
+    toolRegistry,
     catalogEntries,
-    connectableChannels,
     isExtensionsLoading,
     isRegistryLoading,
     extensionsError,
@@ -100,7 +99,13 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
     [activate]
   );
 
-  if (!["channels", "mcp", "registry"].includes(tab)) {
+  // `mcp` was the pre-unification name of the tools view; keep main-era deep
+  // links working while the canonical tab id is `tools` (product taxonomy —
+  // MCP is a runtime badge, never a grouping axis).
+  if (tab === "mcp") {
+    return (<Navigate to="/extensions/tools" replace />);
+  }
+  if (!["channels", "tools", "registry"].includes(tab)) {
     return (<Navigate to="/extensions/registry" replace />);
   }
 
@@ -152,9 +157,7 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
 
   const tabContent = {
     channels: (<ChannelsTab
-      status={status}
       channels={channels}
-      connectableChannels={connectableChannels}
       channelRegistry={channelRegistry}
       onActivate={activate}
       onConfigure={handleConfigure}
@@ -162,9 +165,9 @@ export function ExtensionsPage({ isAdmin = false } = {}) {
       onInstall={handleInstall}
       isBusy={isBusy}
     />),
-    mcp: (<McpTab
-      mcpServers={mcpServers}
-      mcpRegistry={mcpRegistry}
+    tools: (<ToolsTab
+      tools={tools}
+      toolRegistry={toolRegistry}
       onActivate={activate}
       onConfigure={handleConfigure}
       onRemove={setExtensionToRemove}

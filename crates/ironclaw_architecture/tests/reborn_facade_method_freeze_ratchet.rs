@@ -10,8 +10,11 @@
 //!
 //! This test freezes the `RebornServicesApi` method set after the first view
 //! migration replaced the two dedicated log-query methods with the generic
-//! `query` read conduit. The allowlist therefore shrank by one method overall;
-//! it did not grow to admit the conduit. It fails on any subsequent change:
+//! `query` read conduit. It now also admits `invoke`, the second generic conduit
+//! named by §5.2. Adding that canonical target conduit is convergence toward the
+//! frozen end-state, not a feature-method exception: `invoke` is admitted by
+//! exact name, both conduits are required below, and every other addition stays
+//! banned. The ratchet fails on any subsequent change:
 //!
 //! - a **new** trait method (not in [`FROZEN_REBORN_SERVICES_METHODS`]) fails —
 //!   the feature belongs in a capability/view descriptor, not a new facade method;
@@ -53,8 +56,9 @@ const FACADE_TRAIT: &str = "RebornServicesApi";
 /// The frozen inventory of `RebornServicesApi` methods, as of the §5.2.5 freeze.
 /// Grouped by the product domain each method serves, so a reviewer can see which
 /// cluster is migrating as entries disappear. Remove an entry in the same PR that
-/// deletes its method (because the method became a capability/view descriptor);
-/// never add one — a new product operation is a descriptor, not a facade method.
+/// deletes its method (because the method became a capability/view descriptor).
+/// The sole post-freeze addition is §5.2's canonical `invoke` target conduit,
+/// already listed below; never add another product operation here.
 const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     // --- turn lifecycle (the irreducible core, §5.2.3) ---
     "create_thread",
@@ -70,6 +74,7 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "resolve_gate",
     "retry_run",
     "get_run_state",
+    "invoke",
     "query",
     // --- filesystem / project browsing (→ view descriptors, §5.2.2) ---
     "list_project_dir",
@@ -101,8 +106,7 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "trace_account_traces",
     "trace_account_login_link",
     "authorize_trace_hold",
-    // --- outbound + connectable channels ---
-    "list_connectable_channels",
+    // --- outbound channels ---
     "get_outbound_preferences",
     "set_outbound_preferences",
     "list_outbound_delivery_targets",
@@ -271,6 +275,14 @@ fn reborn_facade_method_allowlist_is_frozen_and_only_shrinks() {
 
     let frozen: BTreeSet<&str> = FROZEN_REBORN_SERVICES_METHODS.iter().copied().collect();
     let found_set: BTreeSet<&str> = found.iter().map(String::as_str).collect();
+
+    for conduit in ["invoke", "query"] {
+        assert!(
+            found_set.contains(conduit),
+            "`{FACADE_TRAIT}` must retain §5.2's canonical `{conduit}` conduit; removing or \
+             renaming it reopens per-feature facade growth."
+        );
+    }
 
     let added: Vec<&str> = found_set.difference(&frozen).copied().collect();
     assert!(

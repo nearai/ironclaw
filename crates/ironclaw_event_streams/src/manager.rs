@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use ironclaw_event_projections::{
     EventCursor, EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest,
@@ -21,7 +21,8 @@ use crate::{
     types::{
         LagReason, ProductProjectionEnvelope, ProjectionFetchRequest, ProjectionFetchResponse,
         ProjectionStreamItem, ProjectionSubscribeRequest, ProjectionSubscription, ProjectionTarget,
-        ProjectionViewClass, PushCandidatesForUpdateRequest,
+        ProjectionViewClass, PushCandidatesForUpdateRequest, ThreadLiveProjectionItem,
+        ThreadLiveProjectionUpdate,
     },
     update_source::{ProjectionLiveUpdateRequest, ProjectionUpdateSource},
 };
@@ -220,7 +221,8 @@ impl EventStreamManager {
                 Err(error) => return Err(map_projection_error(error)),
             },
         };
-        let buffered_live = self
+        let is_fresh_subscription = request.after_cursor.is_none();
+        let mut buffered_live = self
             .update_source
             .replay_after(
                 ProjectionLiveUpdateRequest {
@@ -233,6 +235,9 @@ impl EventStreamManager {
                 request.limit,
             )
             .await?;
+        if is_fresh_subscription {
+            buffered_live = compact_live_replay_to_current_state(buffered_live);
+        }
         for envelope in buffered_live {
             validate_stream_envelope(
                 envelope.as_ref(),
@@ -379,6 +384,88 @@ impl EventStreamManager {
             .map(ProductProjectionEnvelope::ThreadSnapshot)
             .map_err(map_projection_error)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum LiveProjectionItemKey {
+    Text(String),
+    Thinking(String),
+    CapabilityActivity(String),
+    WorkSummary(String),
+    SkillActivation(String),
+}
+
+fn live_projection_item_key(item: &ThreadLiveProjectionItem) -> LiveProjectionItemKey {
+    match item {
+        ThreadLiveProjectionItem::Text { id, .. } => LiveProjectionItemKey::Text(id.clone()),
+        ThreadLiveProjectionItem::Thinking { id, .. } => {
+            LiveProjectionItemKey::Thinking(id.clone())
+        }
+        ThreadLiveProjectionItem::CapabilityActivity { invocation_id, .. } => {
+            LiveProjectionItemKey::CapabilityActivity(invocation_id.to_string())
+        }
+        ThreadLiveProjectionItem::WorkSummary { id, .. } => {
+            LiveProjectionItemKey::WorkSummary(id.clone())
+        }
+        ThreadLiveProjectionItem::SkillActivation { id, .. } => {
+            LiveProjectionItemKey::SkillActivation(id.clone())
+        }
+    }
+}
+
+/// A new subscriber needs current live projection state, not the sequence of
+/// cumulative values that built it. Cursor-based subscribers retain normal
+/// incremental replay; only an origin subscription compacts the retained live
+/// window to the latest value for each stable projection identity.
+fn compact_live_replay_to_current_state(
+    replay: Vec<Arc<ProductProjectionEnvelope>>,
+) -> Vec<Arc<ProductProjectionEnvelope>> {
+    let mut passthrough = Vec::new();
+    let mut latest_items = HashMap::new();
+    let mut live_item_order = 0_usize;
+    let mut latest_live_position = None;
+    let mut latest_live_update = None;
+
+    for (position, envelope) in replay.into_iter().enumerate() {
+        match envelope.as_ref() {
+            ProductProjectionEnvelope::ThreadLiveUpdate(update) => {
+                latest_live_position = Some(position);
+                latest_live_update = Some((update.cursor.clone(), update.thread_id.clone()));
+                for item in update.items.iter().cloned() {
+                    let key = live_projection_item_key(&item);
+                    if let Some((_, latest_item)) = latest_items.get_mut(&key) {
+                        *latest_item = item;
+                    } else {
+                        latest_items.insert(key, (live_item_order, item));
+                        live_item_order = live_item_order.saturating_add(1);
+                    }
+                }
+            }
+            _ => passthrough.push((position, envelope)),
+        }
+    }
+
+    if let (Some(position), Some((cursor, thread_id))) = (latest_live_position, latest_live_update)
+    {
+        let mut items = latest_items.into_values().collect::<Vec<_>>();
+        items.sort_by_key(|(position, _)| *position);
+        passthrough.push((
+            position,
+            Arc::new(ProductProjectionEnvelope::ThreadLiveUpdate(
+                ThreadLiveProjectionUpdate {
+                    cursor,
+                    thread_id,
+                    items: items.into_iter().map(|(_, item)| item).collect(),
+                },
+            )),
+        ));
+    }
+
+    passthrough.sort_by_key(|(position, _)| *position);
+    passthrough
+        .into_iter()
+        .map(|(_, envelope)| envelope)
+        .collect()
 }
 
 impl std::fmt::Debug for EventStreamManager {

@@ -54,6 +54,7 @@ async fn webui_event_stream_rejects_runtime_delivery_offset_above_payload_limit(
             runtime_projection_scope(&actor, &scope),
         )),
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: WEBUI_RUNTIME_ITEM_MAX_PAYLOADS + 2,
@@ -107,6 +108,7 @@ async fn webui_event_stream_rejects_runtime_delivery_offset_above_item_payload_c
             runtime_projection_scope(&actor, &scope),
         )),
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 3,
@@ -158,6 +160,7 @@ async fn webui_event_stream_rejects_legacy_partial_snapshot_offset_above_item_pa
     let cursor = product_cursor_from_webui_cursor(&WebuiProjectionCursor {
         runtime: None,
         live: None,
+        live_epoch: None,
         runtime_item: None,
         turn: None,
         runtime_payloads_delivered: 3,

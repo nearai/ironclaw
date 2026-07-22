@@ -6,9 +6,8 @@ set -euo pipefail
 # the single-file reborn_integration_*.rs suites, each spins up one runtime and
 # drives several tenants' shared libsql-backed stores across threads, so they
 # run in a dedicated low-contention job instead of the modulo-partitioned
-# integration runner. `--features libsql` is explicit so the group binaries
-# exercise the libsql-backed shared store independently of any future change to
-# the default feature set.
+# integration runner. Database backends always compile, so no backend feature
+# flag is required to exercise the libsql-backed shared store.
 
 test_timeout="${REBORN_GROUP_TEST_TIMEOUT:-28m}"
 
@@ -34,8 +33,8 @@ if [ "${#test_names[@]}" -eq 0 ]; then
 fi
 
 for test_name in "${test_names[@]}"; do
-  echo "::group::cargo test --test ${test_name} --features libsql"
+  echo "::group::cargo test --test ${test_name}"
   timeout --signal=INT --kill-after=30s "${test_timeout}" \
-    cargo test --test "${test_name}" --features libsql -- --nocapture
+    cargo test --test "${test_name}" -- --nocapture
   echo "::endgroup::"
 done

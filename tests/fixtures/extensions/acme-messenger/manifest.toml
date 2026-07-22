@@ -1,0 +1,100 @@
+# The invented-vendor fixture extension (overview.md §8, implementation.md §12).
+#
+# Drives every generic end-to-end path in the integration harness — install →
+# configure → connect → inbound → turn → outbound → upgrade → remove — proving
+# that no generic path needs a real product. Its identifiers ("acme", the
+# acme.example hosts) are part of the package inventory the specificity
+# scanner derives from, so generic production code can never hardcode them.
+schema_version = "reborn.extension_manifest.v3"
+id = "acme-messenger"
+name = "Acme Messenger"
+version = "0.1.0"
+description = "Invented-vendor fixture: one tool, one channel, and an OAuth recipe for the generic extension runtime's conformance and integration suites."
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "acme-messenger.extension/v1"
+
+# ---- tool surface ----------------------------------------------------------
+
+[[tools]]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+id = "acme-messenger.send_note"
+description = "Send a note to an Acme Messenger conversation as the connected user. Side effect inside a job; never used to deliver the final answer."
+effects = ["network", "use_secret", "external_write"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/acme/send_note.input.v1.json"
+prompt_doc_ref = "prompts/acme/send_note.md"
+
+[[tools.credentials]]
+handle = "acme_user_token"
+vendor = "acme"
+scopes = ["notes:write"]
+audience = { scheme = "https", host = "api.acme.example" }
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+
+# ---- channel surface (at most one per extension) ---------------------------
+
+[channel]
+id = "messages"
+display_name = "Acme messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+
+[channel.ingress]
+route_suffix = "events"           # served at /webhooks/extensions/acme-messenger/events
+method = "post"
+body_limit_bytes = 1048576
+
+[channel.ingress.verification]
+kind = "hmac_sha256"
+secret_handle = "acme_signing_secret"
+signature_header = "X-Acme-Signature"
+signature_prefix = "v0="
+signature_encoding = "hex"
+timestamp_header = "X-Acme-Request-Timestamp"
+max_age_seconds = 300
+signed_payload = [
+  { literal = "v0:" },
+  { header = "X-Acme-Request-Timestamp" },
+  { literal = ":" },
+  { body = true },
+]
+
+[channel.config]                  # operator setup; the host renders the generic form
+fields = [
+  { handle = "acme_bot_token", label = "Bot token", secret = true },
+  { handle = "acme_signing_secret", label = "Signing secret", secret = true },
+]
+
+[[channel.egress]]
+scheme = "https"
+host = "api.acme.example"
+methods = ["post"]
+credential_handle = "acme_bot_token"
+
+[channel.presentation]
+supports_markdown = true
+supports_threads = false
+max_message_chars = 4000
+
+# ---- auth surface: recipe data, zero extension code ------------------------
+
+[auth.acme]                       # section key = the vendor id
+method = "oauth2_code"
+display_name = "Acme account"
+authorization_endpoint = "https://auth.acme.example/oauth/authorize"
+token_endpoint = "https://auth.acme.example/oauth/token"
+pkce = "s256"
+scopes = ["notes:write"]
+client_credentials = { client_id_handle = "acme_oauth_client_id", client_secret_handle = "acme_oauth_client_secret" }
+
+[auth.acme.token_response]
+access_token = "/access_token"
+scope = { path = "/scope", missing = "fallback_to_requested" }
+
+[auth.acme.identity]
+account_id = "/account/id"

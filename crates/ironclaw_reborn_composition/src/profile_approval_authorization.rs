@@ -5,10 +5,54 @@ use ironclaw_approvals::{ToolPermissionOverride, permission_mode_allows_persiste
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_host_api::{
     Action, ApprovalRequest, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant,
-    CapabilityId, Decision, DenyReason, EffectKind, ExecutionContext, Principal, ResourceEstimate,
-    ResourceScope, Timestamp, runtime_policy::ApprovalPolicy,
+    CapabilityId, Decision, DenyReason, EffectKind, ExecutionContext, InvocationOrigin,
+    OriginGateMatrix, Principal, ResourceEstimate, ResourceScope, Timestamp,
+    runtime_policy::ApprovalPolicy,
 };
 use ironclaw_trust::TrustDecision;
+
+/// The origin→gate matrix's class-A contribution to one authorization (§5.2.1/S4).
+///
+/// Computed by [`ProfileApprovalGatePolicy::origin_gate_requirement`] from the
+/// descriptor's [`OriginGateMatrix`] and the invocation's resolved
+/// [`InvocationOrigin`]. The matrix maps onto the TWO existing gate tiers so its
+/// §5.2.7 semantics are preserved exactly:
+/// - [`OriginGateRequirement::Deny`] short-circuits to a hard deny ahead of the
+///   class-B per-scope steps;
+/// - [`OriginGateRequirement::GateHardFloor`] (`AskAlways`) composes with
+///   `effects_force_approval` at the hard-floor step (ahead of class-B
+///   auto-approve/always-allow), so "every invocation gates; persistent grants
+///   never honored" holds — only a genuine one-shot approval lease satisfies it;
+/// - [`OriginGateRequirement::GateSoft`] (`GatedUnlessGranted`) is OR'd into the
+///   effect-based intrinsic gate at the soft step, so the same class-B
+///   grant/always-allow machinery satisfies its "unless granted".
+///
+/// Class-B modulation (tool overrides, leases, auto-approve, always-allow) stays
+/// entirely between the two tiers, exactly as for the effect gates it mirrors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OriginGateRequirement {
+    /// The origin may not invoke this capability at all — a hard deny
+    /// (fail-closed), not suppressible by any class-B grant/lease or by the
+    /// Minimal (yolo) approval bypass.
+    Deny,
+    /// Hard-floor gate (`AskAlways`, §5.2.7): every invocation gates and no
+    /// stored auto-approve/always-allow grant can bypass it — only a genuine
+    /// one-shot approval lease satisfies it. Mirrors `effects_force_approval`:
+    /// composed at the hard-floor step and NOT suppressed by the Minimal (yolo)
+    /// bypass.
+    GateHardFloor,
+    /// Soft gate (`GatedUnlessGranted`, §5.2.7): contributes an intrinsic
+    /// approval gate whose "unless granted" is satisfied by the same class-B
+    /// grant/always-allow machinery that satisfies the effect gate (no separate
+    /// grant check here). Mirrors `effects_require_approval`: OR'd into the soft
+    /// gate and suppressed under the Minimal-bypass guard so yolo stays
+    /// "no prompts".
+    GateSoft,
+    /// The matrix adds no gate for this origin (`ConsentSufficient` / `Ungated`),
+    /// or there is no matrix contribution to make (no resolvable origin — a
+    /// test-only context that stamps neither `origin` nor `run_id`).
+    None,
+}
 
 pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
     fn capability_exempt_from_approval(&self, _capability: &CapabilityId) -> bool {
@@ -29,6 +73,38 @@ pub(crate) trait ProfileApprovalGatePolicy: Send + Sync {
     /// effects. Defaults to "no floor".
     fn effects_force_approval(&self, _effects: &[EffectKind]) -> bool {
         false
+    }
+
+    /// Class-A origin→gate matrix contribution (§5.2.1/S4): the intrinsic gate
+    /// requirement implied by the descriptor's [`OriginGateMatrix`] for the
+    /// invocation's resolved [`InvocationOrigin`].
+    ///
+    /// Composed at the SAME class-A points as the effect gates it mirrors, so
+    /// class-B stays between the two tiers unchanged. Contract:
+    /// - no resolvable `origin` (test-only contexts) → [`OriginGateRequirement::None`]
+    ///   (no contribution — keeps pre-S4 behavior neutral);
+    /// - `matrix` is `None` with an origin present → fail-closed
+    ///   [`OriginGateRequirement::Deny`] (production descriptors always declare
+    ///   one; only test fixtures are `None`, and those carry no origin);
+    /// - `Forbidden` → [`OriginGateRequirement::Deny`] (not suppressed by the
+    ///   Minimal bypass);
+    /// - `AskAlways` → [`OriginGateRequirement::GateHardFloor`] (hard floor,
+    ///   §5.2.7; NOT suppressed by the Minimal bypass — mirrors
+    ///   `effects_force_approval`);
+    /// - `GatedUnlessGranted` → [`OriginGateRequirement::GateSoft`], suppressed
+    ///   to `None` under the SAME Minimal-bypass guard [`Self::effects_require_approval`]
+    ///   uses;
+    /// - `ConsentSufficient` / `Ungated` → [`OriginGateRequirement::None`].
+    ///
+    /// The default is `None` (no contribution), so a gate policy that does not
+    /// consult the matrix leaves authorization exactly as it was pre-S4.
+    fn origin_gate_requirement(
+        &self,
+        _approval_policy: ApprovalPolicy,
+        _origin: Option<&InvocationOrigin>,
+        _matrix: Option<&OriginGateMatrix>,
+    ) -> OriginGateRequirement {
+        OriginGateRequirement::None
     }
 }
 
@@ -201,8 +277,58 @@ async fn require_approval_for_profile_policy(
     // the approval gate against the same elevated effect set so a dispatch-only
     // capability cannot be spawned as a live process without an approval gate.
     let gate_effects = approval_gate_effects(action_kind, descriptor);
-    let profile_requires_approval =
+    let effect_based_intrinsic_gate =
         gate_policy.effects_require_approval(approval_policy, &gate_effects);
+
+    // Class-A origin→gate matrix contribution (§5.2.1/S4). Origin is resolved
+    // through `ExecutionContext::resolved_origin` (the single definition of the
+    // `run_id`-implies-`LoopRun` rule, shared with `seal_authorization`), so a
+    // loop context that stamped only `run_id` still has its `LoopRun` column
+    // consulted, and a context that stamps neither (test-only) resolves to
+    // `None` — the matrix then contributes nothing, keeping pre-S4 decisions
+    // neutral.
+    let origin = context.resolved_origin();
+    let origin_requirement = gate_policy.origin_gate_requirement(
+        approval_policy,
+        origin.as_ref(),
+        descriptor.origin_gate_matrix.as_ref(),
+    );
+    let (origin_denied, origin_requires_approval, origin_forces_approval) = match origin_requirement
+    {
+        OriginGateRequirement::Deny => (true, false, false),
+        OriginGateRequirement::GateHardFloor => (false, false, true),
+        OriginGateRequirement::GateSoft => (false, true, false),
+        OriginGateRequirement::None => (false, false, false),
+    };
+
+    // A `Forbidden` origin is denied regardless of any class-B grant/lease and
+    // regardless of the Minimal (yolo) bypass — the origin may not invoke this
+    // capability at all. Short-circuited to a sanitized, model-visible
+    // `Decision::Deny` ahead of the class-B steps. The internal audit reason is
+    // preserved in the debug log; the wire `DenyReason` carries no free-form
+    // detail (`PolicyDenied`, matching the explicit-`disabled` deny path). No
+    // production capability declares `Forbidden` for the live `LoopRun` origin,
+    // and product/automation origins have no live producer, so this deny path is
+    // unreachable in production today (fail-closed for the future).
+    if origin_denied {
+        tracing::debug!(
+            capability = descriptor.id.as_str(),
+            origin = origin.as_ref().map(InvocationOrigin::kind),
+            "origin-gate matrix forbids this origin; denying dispatch (§5.2.1)"
+        );
+        return Decision::Deny {
+            reason: DenyReason::PolicyDenied,
+        };
+    }
+
+    // The soft class-A intrinsic gate is the OR of the effect-based gate and the
+    // matrix's SOFT (`GatedUnlessGranted`) contribution: both live at the same
+    // (step-9) precedence, so both are satisfied by the same class-B
+    // grant/always-allow steps below and both are suppressed together under the
+    // Minimal bypass. The matrix's HARD-FLOOR (`AskAlways`) contribution is NOT
+    // folded here — it composes with `effects_force_approval` at step 3, ahead
+    // of class-B (see below), so an always-allow/auto-approve cannot bypass it.
+    let profile_requires_approval = effect_based_intrinsic_gate || origin_requires_approval;
 
     let require_approval = || Decision::RequireApproval {
         request: approval_request(context, descriptor, estimate, action_kind),
@@ -233,7 +359,11 @@ async fn require_approval_for_profile_policy(
         return decision;
     }
     // 3. Hard floor: never auto-approve / never satisfiable by a stored grant.
-    if gate_policy.effects_force_approval(&gate_effects) {
+    //    The matrix's `AskAlways` hard-floor gate composes here (§5.2.7): it
+    //    beats class-B auto-approve/always-allow (steps 6/7/8 below) and is
+    //    satisfied only by the one-shot approval lease checked in step 2 — the
+    //    same semantics as `effects_force_approval`.
+    if gate_policy.effects_force_approval(&gate_effects) || origin_forces_approval {
         return require_approval();
     }
     // 4. Explicit per-tool `ask_each_time` → always gate fresh invocations,
@@ -580,6 +710,7 @@ mod tests {
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
             resource_profile: None,
+            origin_gate_matrix: None,
         }
     }
 
@@ -1261,5 +1392,432 @@ mod tests {
             "reason should contain action kind, got: {:?}",
             req.reason
         );
+    }
+
+    /// S4 (§5.2.1): the origin→gate matrix fold, driven through the REAL
+    /// `RuntimeProfileApprovalGatePolicy` + `profile_approval_authorizer` (not a
+    /// leaf). Proves (a) behavior-neutrality for `LoopRun` across profiles, and
+    /// (b) that the fold demonstrably works with crafted matrices.
+    mod origin_gate_matrix_fold {
+        use ironclaw_host_api::{OriginGatePolicy, ProductKind, RunId};
+        use ironclaw_runtime_policy::MinimalApprovalBypass;
+
+        use super::*;
+        use crate::runtime_profile_approval_policy::{
+            RuntimeProfileApprovalGateEffectSets, RuntimeProfileApprovalGatePolicy,
+        };
+
+        /// The gated effect set today's `AskDestructive`/`AskWrites` gate uses
+        /// (mirrors `builtin_capability_policy.toml`: everything except
+        /// `read_filesystem` and `dispatch_capability`).
+        fn gated_effect_set() -> Vec<EffectKind> {
+            vec![
+                EffectKind::WriteFilesystem,
+                EffectKind::DeleteFilesystem,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::Network,
+                EffectKind::UseSecret,
+                EffectKind::ModifyExtension,
+                EffectKind::ModifyApproval,
+                EffectKind::ModifyBudget,
+                EffectKind::ExternalWrite,
+                EffectKind::Financial,
+            ]
+        }
+
+        /// The production gate policy, so the fold is exercised through the real
+        /// `origin_gate_requirement` impl (matrix mapping + Minimal-bypass
+        /// suppression), not the test double.
+        fn real_gate_policy(bypass: MinimalApprovalBypass) -> Arc<dyn ProfileApprovalGatePolicy> {
+            let set = gated_effect_set();
+            Arc::new(RuntimeProfileApprovalGatePolicy::new(
+                bypass,
+                RuntimeProfileApprovalGateEffectSets::new(set.clone(), set),
+            ))
+        }
+
+        /// The four (ApprovalPolicy, MinimalApprovalBypass) pairs the neutrality
+        /// claim covers: three non-Minimal profiles plus Minimal-yolo.
+        fn profiles() -> Vec<(ApprovalPolicy, MinimalApprovalBypass)> {
+            vec![
+                (
+                    ApprovalPolicy::AskDestructive,
+                    MinimalApprovalBypass::Denied,
+                ),
+                (ApprovalPolicy::AskAlways, MinimalApprovalBypass::Denied),
+                (ApprovalPolicy::AskWrites, MinimalApprovalBypass::Denied),
+                (ApprovalPolicy::Minimal, MinimalApprovalBypass::Allowed),
+            ]
+        }
+
+        fn descriptor(
+            id: &str,
+            effects: Vec<EffectKind>,
+            permission: PermissionMode,
+            matrix: Option<OriginGateMatrix>,
+        ) -> CapabilityDescriptor {
+            let mut d = test_descriptor_with_id(CapabilityId::new(id).unwrap(), effects);
+            d.default_permission = permission;
+            d.origin_gate_matrix = matrix;
+            d
+        }
+
+        fn decision_kind(decision: &Decision) -> &'static str {
+            match decision {
+                Decision::Allow { .. } => "allow",
+                Decision::Deny { .. } => "deny",
+                Decision::RequireApproval { .. } => "require_approval",
+            }
+        }
+
+        /// Drive the real authorizer for `descriptor` under `origin`, with a
+        /// granting lease so the base decision is `Allow` (the gate only ever
+        /// upgrades an `Allow`). Fixed default settings (global auto-approve off,
+        /// no override, no always-allow) so any decision difference is
+        /// attributable to the matrix fold, not class-B state.
+        async fn decide(
+            approval_policy: ApprovalPolicy,
+            bypass: MinimalApprovalBypass,
+            descriptor: &CapabilityDescriptor,
+            origin: Option<InvocationOrigin>,
+        ) -> Decision {
+            decide_with_settings(
+                approval_policy,
+                bypass,
+                descriptor,
+                origin,
+                StubSettingsProvider {
+                    tool_override: None,
+                    global_auto_approve: false,
+                    tool_always_allow: false,
+                },
+            )
+            .await
+        }
+
+        /// As [`decide`], but with caller-chosen class-B settings — used to prove
+        /// the `AskAlways` hard-floor tier beats an always-allow/auto-approve that
+        /// would otherwise resolve the decision to `Allow` at class-B.
+        async fn decide_with_settings(
+            approval_policy: ApprovalPolicy,
+            bypass: MinimalApprovalBypass,
+            descriptor: &CapabilityDescriptor,
+            origin: Option<InvocationOrigin>,
+            settings: StubSettingsProvider,
+        ) -> Decision {
+            let mut ctx = test_context(CapabilitySet {
+                grants: vec![CapabilityGrant {
+                    id: CapabilityGrantId::new(),
+                    capability: descriptor.id.clone(),
+                    grantee: Principal::Extension(descriptor.provider.clone()),
+                    issued_by: Principal::HostRuntime,
+                    constraints: GrantConstraints {
+                        allowed_effects: descriptor.effects.clone(),
+                        mounts: MountView::default(),
+                        network: NetworkPolicy::default(),
+                        secrets: Vec::new(),
+                        resource_ceiling: None,
+                        expires_at: None,
+                        max_invocations: None,
+                    },
+                }],
+            });
+            ctx.origin = origin;
+            let trust = TrustDecision {
+                effective_trust: EffectiveTrustClass::user_trusted(),
+                authority_ceiling: AuthorityCeiling {
+                    allowed_effects: descriptor.effects.clone(),
+                    max_resource_ceiling: None,
+                },
+                provenance: TrustProvenance::AdminConfig,
+                evaluated_at: chrono::Utc::now(),
+            };
+            profile_approval_authorizer(
+                approval_policy,
+                real_gate_policy(bypass),
+                Arc::new(settings),
+            )
+            .authorize_dispatch_with_trust(&ctx, descriptor, &ResourceEstimate::default(), &trust)
+            .await
+        }
+
+        /// NEUTRALITY: for representative production caps, consulting the matrix
+        /// for a `LoopRun` origin yields the IDENTICAL decision as not consulting
+        /// it (an origin-less context, which reproduces the pre-S4 effect-only
+        /// path), under AskDestructive, AskAlways, AskWrites, and Minimal-yolo.
+        /// Covered per-cap at BOTH `default_permission` postures: the
+        /// durable-eligible `Allow` (class-B dominated) and the ineligible `Deny`
+        /// (reaches the step-9 effect/matrix compose), so the OR fold is proven
+        /// neutral exactly where it can bite.
+        #[tokio::test]
+        async fn matrix_fold_is_behavior_neutral_for_loop_run() {
+            // (id, effects, matrix loop_run policy) — matrices are the S3 seed:
+            // read_file Ungated; write_file/http/gmail(read+write) GatedUnlessGranted.
+            let caps: Vec<(&str, Vec<EffectKind>)> = vec![
+                ("builtin.read_file", vec![EffectKind::ReadFilesystem]),
+                ("builtin.write_file", vec![EffectKind::WriteFilesystem]),
+                (
+                    "builtin.http",
+                    vec![EffectKind::DispatchCapability, EffectKind::Network],
+                ),
+                (
+                    "gmail.messages_list",
+                    vec![EffectKind::Network, EffectKind::UseSecret],
+                ),
+                (
+                    "gmail.messages_send",
+                    vec![
+                        EffectKind::Network,
+                        EffectKind::UseSecret,
+                        EffectKind::ExternalWrite,
+                    ],
+                ),
+            ];
+            for (id, effects) in caps {
+                let matrix = OriginGateMatrix::builtin_loop_run_seed(id);
+                for permission in [PermissionMode::Allow, PermissionMode::Deny] {
+                    for (approval_policy, bypass) in profiles() {
+                        // With the matrix consulted (LoopRun origin, matrix declared).
+                        let with = decide(
+                            approval_policy,
+                            bypass,
+                            &descriptor(id, effects.clone(), permission, Some(matrix.clone())),
+                            Some(InvocationOrigin::LoopRun(RunId::new())),
+                        )
+                        .await;
+                        // Without the matrix consulted (no origin -> no contribution:
+                        // exactly the pre-S4 effect-only decision).
+                        let without = decide(
+                            approval_policy,
+                            bypass,
+                            &descriptor(id, effects.clone(), permission, None),
+                            None,
+                        )
+                        .await;
+                        assert_eq!(
+                            decision_kind(&with),
+                            decision_kind(&without),
+                            "matrix fold changed the decision for {id} \
+                             (permission={permission:?}, policy={approval_policy:?}): \
+                             with={with:?} without={without:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        /// MECHANISM (hard-floor tier — the key §5.2.7 proof): a crafted
+        /// `loop_run: AskAlways` matrix gates EVEN when both `global_auto_approve`
+        /// and per-tool `always_allow` are on (class-B would otherwise resolve the
+        /// decision to `Allow`) under a non-Minimal profile. This proves the
+        /// AskAlways gate composes at the hard-floor step, ahead of class-B, and
+        /// is not bypassable by a stored auto-approve/always-allow.
+        #[tokio::test]
+        async fn ask_always_matrix_gates_even_when_class_b_would_allow() {
+            let matrix = OriginGateMatrix {
+                loop_run: OriginGatePolicy::AskAlways,
+                product: OriginGatePolicy::Forbidden,
+                automation: OriginGatePolicy::Forbidden,
+            };
+            // Durable-eligible (`Allow`) + auto-approve ON + always-allow ON: class-B
+            // (steps 6/7) would return `Allow` for any soft-gated cap. NO gating
+            // effect, so the effect gate is false — AskAlways is the only gate.
+            let cap = descriptor(
+                "builtin.effectless",
+                vec![EffectKind::DispatchCapability],
+                PermissionMode::Allow,
+                Some(matrix),
+            );
+            let bypassing_settings = || StubSettingsProvider {
+                tool_override: None,
+                global_auto_approve: true,
+                tool_always_allow: true,
+            };
+            let gated = decide_with_settings(
+                ApprovalPolicy::AskDestructive,
+                MinimalApprovalBypass::Denied,
+                &cap,
+                Some(InvocationOrigin::LoopRun(RunId::new())),
+                bypassing_settings(),
+            )
+            .await;
+            assert!(
+                matches!(gated, Decision::RequireApproval { .. }),
+                "AskAlways must gate even with auto-approve + always-allow on, got {gated:?}"
+            );
+            // Same class-B-bypassing settings, but no matrix consulted (origin-less):
+            // class-B auto-approve/always-allow resolves it to `Allow`. Isolates the
+            // AskAlways hard floor as the sole cause of the gate above.
+            let allowed = decide_with_settings(
+                ApprovalPolicy::AskDestructive,
+                MinimalApprovalBypass::Denied,
+                &descriptor(
+                    "builtin.effectless",
+                    vec![EffectKind::DispatchCapability],
+                    PermissionMode::Allow,
+                    None,
+                ),
+                None,
+                bypassing_settings(),
+            )
+            .await;
+            assert!(
+                matches!(allowed, Decision::Allow { .. }),
+                "without the AskAlways matrix, class-B auto-approve/always-allow allows, got {allowed:?}"
+            );
+        }
+
+        /// MECHANISM (hard-floor tier is NOT yolo-suppressed): an `AskAlways`
+        /// matrix gates even under Minimal-yolo, unlike the soft
+        /// `GatedUnlessGranted` tier (see
+        /// `minimal_yolo_suppresses_gated_unless_granted_matrix`). Mirrors
+        /// `effects_force_approval`, which also fires under yolo.
+        #[tokio::test]
+        async fn ask_always_matrix_gates_under_minimal_yolo() {
+            let matrix = OriginGateMatrix {
+                loop_run: OriginGatePolicy::AskAlways,
+                product: OriginGatePolicy::Forbidden,
+                automation: OriginGatePolicy::Forbidden,
+            };
+            // NO gating effect, so the effect gate is false under Minimal-yolo —
+            // AskAlways is the only possible gate, isolating "not suppressed".
+            let cap = descriptor(
+                "builtin.effectless",
+                vec![EffectKind::DispatchCapability],
+                PermissionMode::Allow,
+                Some(matrix),
+            );
+            let decision = decide_with_settings(
+                ApprovalPolicy::Minimal,
+                MinimalApprovalBypass::Allowed,
+                &cap,
+                Some(InvocationOrigin::LoopRun(RunId::new())),
+                // Even auto-approve + always-allow (the yolo default posture) must
+                // not bypass the AskAlways hard floor.
+                StubSettingsProvider {
+                    tool_override: None,
+                    global_auto_approve: true,
+                    tool_always_allow: true,
+                },
+            )
+            .await;
+            assert!(
+                matches!(decision, Decision::RequireApproval { .. }),
+                "AskAlways is a hard floor and must gate even under Minimal-yolo, got {decision:?}"
+            );
+        }
+
+        /// MECHANISM: a `product: Forbidden` matrix + a `Product` origin is a hard
+        /// deny (sanitized `PolicyDenied`), even though the base decision is an
+        /// `Allow`.
+        #[tokio::test]
+        async fn forbidden_product_origin_is_denied() {
+            // The S3 builtin seed sets product = Forbidden for every cap.
+            let cap = descriptor(
+                "builtin.read_file",
+                vec![EffectKind::ReadFilesystem],
+                PermissionMode::Allow,
+                Some(OriginGateMatrix::builtin_loop_run_seed("builtin.read_file")),
+            );
+            let decision = decide(
+                ApprovalPolicy::AskDestructive,
+                MinimalApprovalBypass::Denied,
+                &cap,
+                Some(InvocationOrigin::Product(
+                    ProductKind::new("settings").unwrap(),
+                )),
+            )
+            .await;
+            assert!(
+                matches!(
+                    decision,
+                    Decision::Deny {
+                        reason: DenyReason::PolicyDenied
+                    }
+                ),
+                "a Forbidden product origin must be denied, got {decision:?}"
+            );
+        }
+
+        /// MECHANISM: `Ungated` (LoopRun) and `ConsentSufficient` (Product) add no
+        /// gate — an effectless cap stays `Allow` under a non-Minimal profile.
+        #[tokio::test]
+        async fn ungated_and_consent_sufficient_add_no_gate() {
+            let matrix = OriginGateMatrix {
+                loop_run: OriginGatePolicy::Ungated,
+                product: OriginGatePolicy::ConsentSufficient,
+                automation: OriginGatePolicy::Forbidden,
+            };
+            let cap = descriptor(
+                "builtin.effectless",
+                vec![EffectKind::DispatchCapability],
+                PermissionMode::Deny,
+                Some(matrix),
+            );
+            for origin in [
+                InvocationOrigin::LoopRun(RunId::new()),
+                InvocationOrigin::Product(ProductKind::new("settings").unwrap()),
+            ] {
+                let decision = decide(
+                    ApprovalPolicy::AskDestructive,
+                    MinimalApprovalBypass::Denied,
+                    &cap,
+                    Some(origin.clone()),
+                )
+                .await;
+                assert!(
+                    matches!(decision, Decision::Allow { .. }),
+                    "{} matrix policy must add no gate, got {decision:?}",
+                    origin.kind()
+                );
+            }
+        }
+
+        /// MECHANISM (Minimal-bypass suppression, the critical S4 invariant):
+        /// under Minimal-yolo a `GatedUnlessGranted` matrix does NOT re-introduce
+        /// a prompt — the matrix gate is suppressed behind the same bypass guard
+        /// the effect gate uses. The SAME descriptor under a non-Minimal profile
+        /// DOES gate, proving the suppression (not the absence of a matrix) is
+        /// what silences yolo.
+        #[tokio::test]
+        async fn minimal_yolo_suppresses_gated_unless_granted_matrix() {
+            let matrix = OriginGateMatrix {
+                loop_run: OriginGatePolicy::GatedUnlessGranted,
+                product: OriginGatePolicy::Forbidden,
+                automation: OriginGatePolicy::Forbidden,
+            };
+            // Effectless so the effect gate is false on both profiles: the matrix
+            // is the only possible gate source, isolating the suppression.
+            let cap = descriptor(
+                "builtin.effectless",
+                vec![EffectKind::DispatchCapability],
+                PermissionMode::Deny,
+                Some(matrix),
+            );
+            let origin = InvocationOrigin::LoopRun(RunId::new());
+            let yolo = decide(
+                ApprovalPolicy::Minimal,
+                MinimalApprovalBypass::Allowed,
+                &cap,
+                Some(origin.clone()),
+            )
+            .await;
+            assert!(
+                matches!(yolo, Decision::Allow { .. }),
+                "Minimal-yolo must suppress the GatedUnlessGranted matrix (no prompt), got {yolo:?}"
+            );
+            let non_minimal = decide(
+                ApprovalPolicy::AskDestructive,
+                MinimalApprovalBypass::Denied,
+                &cap,
+                Some(origin),
+            )
+            .await;
+            assert!(
+                matches!(non_minimal, Decision::RequireApproval { .. }),
+                "the same GatedUnlessGranted matrix gates under a non-Minimal profile, got {non_minimal:?}"
+            );
+        }
     }
 }

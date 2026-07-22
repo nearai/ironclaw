@@ -243,7 +243,7 @@ fn verified_auth_evidence_can_carry_tenant_scope_for_host_minted_claims() {
 async fn workflow_default_behavior_accepts_inbound_and_records_envelope() {
     let workflow = FakeProductWorkflow::new();
     let ack = workflow
-        .accept_inbound(sample_envelope("update:1"))
+        .submit_inbound(sample_envelope("update:1"))
         .await
         .expect("accept");
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
@@ -255,9 +255,9 @@ async fn workflow_dedupes_duplicate_external_event_id_per_source_binding() {
     let workflow = FakeProductWorkflow::new();
     let first = sample_envelope("update:42");
     let second = sample_envelope("update:42");
-    let first_ack = workflow.accept_inbound(first).await.expect("first");
+    let first_ack = workflow.submit_inbound(first).await.expect("first");
     assert!(matches!(first_ack, ProductInboundAck::Accepted { .. }));
-    let second_ack = workflow.accept_inbound(second).await.expect("duplicate");
+    let second_ack = workflow.submit_inbound(second).await.expect("duplicate");
     assert!(matches!(second_ack, ProductInboundAck::Duplicate { .. }));
     assert_eq!(workflow.accepted_count(), 1);
 }
@@ -281,13 +281,13 @@ async fn workflow_returns_programmed_outcomes() {
     );
 
     let busy_ack = workflow
-        .accept_inbound(sample_envelope("update:busy"))
+        .submit_inbound(sample_envelope("update:busy"))
         .await
         .expect("busy");
     assert!(matches!(busy_ack, ProductInboundAck::DeferredBusy { .. }));
 
     let reject_ack = workflow
-        .accept_inbound(sample_envelope("update:reject"))
+        .submit_inbound(sample_envelope("update:reject"))
         .await
         .expect("reject");
     assert!(matches!(reject_ack, ProductInboundAck::Rejected(_)));
@@ -370,7 +370,7 @@ async fn workflow_propagates_transient_failure() {
         reason: RedactedString::new("store unavailable"),
     });
     let err = workflow
-        .accept_inbound(sample_envelope("update:1"))
+        .submit_inbound(sample_envelope("update:1"))
         .await
         .expect_err("transient failure");
     assert!(err.is_retryable());

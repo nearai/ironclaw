@@ -24,18 +24,14 @@ use ironclaw_events::{
     InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::ExtensionRegistry;
-#[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
-#[cfg(feature = "libsql")]
-use ironclaw_filesystem::RootFilesystem;
-use ironclaw_filesystem::{DiskFilesystem, FilesystemOperation};
+use ironclaw_filesystem::{DiskFilesystem, FilesystemOperation, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
     HostRuntime, HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig,
-    ProductionWiringIssueKind, RuntimeCapabilityAuthResumeRequest, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-    RuntimeStatusRequest, RuntimeWorkId, TenantSandboxProcessPort, builtin_first_party_handlers,
+    ProductionWiringIssueKind, RuntimeCapabilityOutcome, RuntimeFailureKind, RuntimeStatusRequest,
+    RuntimeWorkId, TenantSandboxProcessPort, builtin_first_party_handlers,
 };
 use ironclaw_processes::{
     BackgroundProcessManager, FilesystemProcessResultStore, FilesystemProcessStore, ProcessError,
@@ -54,10 +50,8 @@ use ironclaw_secrets::{
     FilesystemSecretStore, InMemoryCredentialBroker, SecretMaterial, SecretStore,
 };
 use ironclaw_triggers::InMemoryTriggerRepository;
-#[cfg(feature = "libsql")]
 use ironclaw_turns::FilesystemTurnStateRowStore;
 use ironclaw_turns::NoopTurnRunWakeNotifier;
-#[cfg(feature = "libsql")]
 use ironclaw_turns::{
     InMemoryRunProfileResolver, SubmitTurnResponse, TurnCoordinator, TurnStateStore,
 };
@@ -644,7 +638,6 @@ async fn production_wiring_validation_rejects_unsupported_runtime_requirements()
 // graph restart over `DiskFilesystem`) and the `ironclaw_run_state`
 // contract suite.
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -679,7 +672,6 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -716,7 +708,6 @@ async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -757,7 +748,6 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     assert_eq!(notifier.wakes()[0].run_id, run_id);
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -1494,7 +1484,7 @@ async fn host_runtime_services_builds_dispatcher_runtime_and_health_from_registe
 
     let runtime = services.host_runtime_for_local_testing();
     let context = execution_context_with_dispatch_grant(script_capability_id());
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context,
         script_capability_id(),
         ResourceEstimate::default(),
@@ -1549,7 +1539,6 @@ async fn host_runtime_services_wires_combined_store_for_atomic_approval_block() 
     .await;
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn host_runtime_services_preserves_combined_store_after_root_filesystem_selection() {
     let db_dir = tempfile::tempdir().unwrap();
@@ -1611,7 +1600,7 @@ async fn host_runtime_services_writes_runtime_events_to_durable_event_log_metada
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -1707,7 +1696,7 @@ async fn host_runtime_services_consumes_reborn_jsonl_event_store_without_v1_comp
     let scope = sample_scope(InvocationId::new());
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -1773,7 +1762,7 @@ async fn host_runtime_services_durable_event_replay_cursor_and_gap_behavior() {
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -1866,7 +1855,7 @@ async fn host_runtime_services_runtime_events_project_through_replay_projection_
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -1953,7 +1942,7 @@ async fn host_runtime_services_projection_rejects_foreign_cursor_and_surfaces_re
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(
                 script_capability_id(),
                 scope_a.clone(),
@@ -2061,7 +2050,7 @@ async fn host_runtime_services_jsonl_event_store_projects_same_runtime_sequence_
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -2161,7 +2150,7 @@ async fn host_runtime_services_approval_resolution_projects_durable_audit_metada
     .await;
     approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2548,7 +2537,7 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
             .await;
 
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -2590,7 +2579,7 @@ async fn host_runtime_services_resumes_approved_capability_and_consumes_lease_on
     );
 
     let second = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2646,7 +2635,7 @@ async fn host_runtime_services_resume_missing_runtime_secret_returns_auth_gate()
         approve_dispatch_for_services(&services, &scope, gate.approval_request_id, None).await;
 
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2706,7 +2695,7 @@ async fn host_runtime_services_resume_changed_input_fails_before_lease_claim_or_
             .await;
 
     let outcome = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2753,7 +2742,7 @@ async fn host_runtime_services_resume_wrong_user_scope_is_hidden_before_dispatch
         execution_context_with_dispatch_grant_for_scope(script_capability_id(), wrong_scope);
 
     let outcome = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             wrong_context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2806,7 +2795,7 @@ async fn host_runtime_services_resume_expired_lease_fails_before_dispatch() {
     .await;
 
     let outcome = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2850,7 +2839,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
     };
     let wrong_context = execution_context_without_grants_for_scope(wrong_scope);
     let wrong_scope_outcome = broken_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             wrong_context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2871,7 +2860,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
     let mut invalid_context = context.clone();
     invalid_context.user_id = UserId::new("tampered-user").unwrap();
     let invalid_context_error = broken_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             invalid_context,
             gate.approval_request_id,
             script_capability_id(),
@@ -2893,7 +2882,7 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
     .await;
 
     let matching_outcome = broken_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -2945,7 +2934,7 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
     let denied_runtime = resume_runtime_with_policy(&fixture, network_denied_runtime_policy());
 
     let outcome = denied_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -3007,7 +2996,7 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
     for attempted_actor in [Some("slack-bob"), None] {
         let attempted_context = with_authenticated_actor(alice_context.clone(), attempted_actor);
         let outcome = broken_runtime
-            .resume_capability(RuntimeCapabilityResumeRequest::new(
+            .resume_capability((
                 attempted_context,
                 gate.approval_request_id,
                 script_capability_id(),
@@ -3043,7 +3032,7 @@ async fn host_runtime_services_resume_rejects_changed_actor_before_preflight_mut
     }
 
     let valid_alice_outcome = broken_runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             alice_context,
             gate.approval_request_id,
             script_capability_id(),
@@ -3092,7 +3081,7 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
     for attempted_actor in [Some("slack-bob"), None] {
         let attempted_context = with_authenticated_actor(alice_context.clone(), attempted_actor);
         let outcome = broken_runtime
-            .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+            .auth_resume_capability((
                 attempted_context,
                 script_capability_id(),
                 estimate.clone(),
@@ -3117,13 +3106,7 @@ async fn host_runtime_services_auth_resume_rejects_changed_actor_before_prefligh
     }
 
     let valid_alice_outcome = broken_runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
-            alice_context,
-            script_capability_id(),
-            estimate,
-            input,
-            None,
-        ))
+        .auth_resume_capability((alice_context, script_capability_id(), estimate, input, None))
         .await
         .unwrap();
 
@@ -3172,7 +3155,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
     let input = process_sandbox_input();
     let estimate = process_sandbox_estimate();
     let blocked = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             alice_context.clone(),
             process_sandbox_capability_id(),
             estimate.clone(),
@@ -3206,7 +3189,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
     for attempted_actor in [Some("slack-bob"), None] {
         let attempted_context = with_authenticated_actor(alice_context.clone(), attempted_actor);
         let outcome = broken_runtime
-            .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+            .resume_spawn_capability((
                 attempted_context,
                 approval_request_id,
                 process_sandbox_capability_id(),
@@ -3245,7 +3228,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
     }
 
     let invalid_input_outcome = broken_runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             with_authenticated_actor(alice_context.clone(), Some("slack-bob")),
             approval_request_id,
             process_sandbox_capability_id(),
@@ -3264,7 +3247,7 @@ async fn host_runtime_services_resume_spawn_rejects_changed_actor_before_input_a
     .await;
 
     let valid_alice_outcome = broken_runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             alice_context,
             approval_request_id,
             process_sandbox_capability_id(),
@@ -3340,7 +3323,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
 
     // Phase 2: resume with credential absent → AuthRequired / BlockedAuth.
     let auth_gate = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context.clone(),
             gate.approval_request_id,
             script_capability_id(),
@@ -3372,7 +3355,7 @@ async fn host_runtime_services_auth_resume_dispatches_blocked_auth_run() {
         .unwrap();
 
     let auth_resumed = runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+        .auth_resume_capability((
             context.clone(),
             script_capability_id(),
             estimate.clone(),
@@ -3465,7 +3448,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
     };
     let wrong_context = execution_context_without_grants_for_scope(wrong_scope);
     let wrong_outcome = broken_runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+        .auth_resume_capability((
             wrong_context,
             script_capability_id(),
             estimate.clone(),
@@ -3493,7 +3476,7 @@ async fn host_runtime_services_auth_resume_trust_preflight_failure_fails_blocked
     // Pre-fix: the run was left as stale BlockedAuth because
     // fail_matching_blocked_auth_resume_on_preflight_error was not called.
     let matching_outcome = broken_runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+        .auth_resume_capability((
             context.clone(),
             script_capability_id(),
             estimate.clone(),
@@ -3584,7 +3567,7 @@ async fn host_runtime_services_auth_resume_with_approval_id_fails_blocked_auth_r
     // the run stuck as BlockedAuth.
     let orphan_approval_id = ApprovalRequestId::new();
     let outcome = broken_runtime
-        .auth_resume_capability(RuntimeCapabilityAuthResumeRequest::new(
+        .auth_resume_capability((
             context.clone(),
             script_capability_id(),
             estimate.clone(),
@@ -3632,7 +3615,7 @@ async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
     .host_runtime_for_local_testing();
 
     let outcome = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             execution_context_without_grants(),
             ApprovalRequestId::new(),
             script_capability_id(),
@@ -3782,7 +3765,7 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
     .host_runtime_for_local_testing();
     let scope = sample_scope(InvocationId::new());
     let mut request = process_sandbox_runtime_request_for_scope(scope);
-    request.input = invalid_process_sandbox_input();
+    request.3 = invalid_process_sandbox_input();
 
     // A malformed/invalid plan is model-fixable: it must surface as a
     // recoverable, model-visible tool error (InvalidInput) so the run
@@ -3799,6 +3782,12 @@ async fn host_runtime_spawn_process_sandbox_rejects_invalid_plan_before_executor
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+            assert!(
+                failure
+                    .model_visible_cause()
+                    .is_some_and(|cause| cause.contains("run command must not be empty")),
+                "public spawn_capability must preserve the corrective validation cause: {failure:?}"
             );
             assert!(
                 failure
@@ -3917,7 +3906,7 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
     let estimate = process_sandbox_estimate();
 
     let blocked = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context.clone(),
             process_sandbox_capability_id(),
             estimate.clone(),
@@ -3940,7 +3929,7 @@ async fn host_runtime_spawn_process_sandbox_blocks_for_approval_before_executor(
 
     approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
     let resumed = runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             context,
             approval_request_id,
             process_sandbox_capability_id(),
@@ -3989,7 +3978,7 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
     let estimate = process_sandbox_estimate();
 
     let blocked = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context.clone(),
             process_sandbox_capability_id(),
             estimate.clone(),
@@ -4005,7 +3994,7 @@ async fn host_runtime_spawn_process_sandbox_resume_changed_input_fails_before_ex
     let lease = approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
 
     let outcome = runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             context,
             approval_request_id,
             process_sandbox_capability_id(),
@@ -4062,7 +4051,7 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
     let estimate = process_sandbox_estimate();
 
     let blocked = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context.clone(),
             process_sandbox_capability_id(),
             estimate.clone(),
@@ -4081,7 +4070,7 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
     // is model-fixable, so it must surface as a recoverable InvalidInput tool
     // error rather than a terminal host runtime error.
     let outcome = runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             context,
             approval_request_id,
             process_sandbox_capability_id(),
@@ -4097,6 +4086,12 @@ async fn host_runtime_spawn_process_sandbox_resume_invalid_plan_fails_before_exe
             assert_eq!(
                 failure.disposition(),
                 ironclaw_host_runtime::CapabilityFailureDisposition::ModelVisibleToolError,
+            );
+            assert!(
+                failure
+                    .model_visible_cause()
+                    .is_some_and(|cause| cause.contains("run command must not be empty")),
+                "public resume_spawn_capability must preserve the corrective validation cause: {failure:?}"
             );
             assert!(
                 failure
@@ -4156,7 +4151,7 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
     let estimate = process_sandbox_estimate();
 
     let blocked = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
+        .spawn_capability((
             context.clone(),
             process_sandbox_capability_id(),
             estimate.clone(),
@@ -4172,7 +4167,7 @@ async fn host_runtime_spawn_process_sandbox_resume_host_failure_fails_after_appr
     approve_spawn_for_services(&services, &scope, approval_request_id, None).await;
 
     let outcome = runtime
-        .resume_spawn_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_spawn_capability((
             context,
             approval_request_id,
             process_sandbox_capability_id(),
@@ -4214,7 +4209,7 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant(script_capability_id()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4256,7 +4251,7 @@ async fn host_runtime_services_maps_script_exit_failure_through_private_adapter(
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant(script_capability_id()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4283,7 +4278,7 @@ async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter()
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant(mcp_capability_id()),
             mcp_capability_id(),
             ResourceEstimate::default(),
@@ -4329,7 +4324,7 @@ async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4381,7 +4376,7 @@ async fn host_runtime_services_rejects_broader_scoped_mount_before_dispatch() {
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4431,7 +4426,7 @@ async fn host_runtime_services_writes_obligation_audit_records_to_durable_log_me
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -4556,7 +4551,7 @@ async fn host_runtime_services_projects_resource_network_secret_obligation_audit
 
     let runtime = services.host_runtime_for_local_testing();
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default()
@@ -4669,7 +4664,7 @@ async fn host_runtime_services_enforces_output_limit_and_reconciles_resource_usa
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default()
@@ -4727,7 +4722,7 @@ async fn host_runtime_services_releases_reservation_when_dispatch_preflight_fail
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant_for_scope(script_capability_id(), scope.clone()),
             script_capability_id(),
             ResourceEstimate::default().set_concurrency_slots(1),
@@ -4778,7 +4773,7 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
 
     let outcome = services
         .host_runtime_for_local_testing()
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             execution_context_with_dispatch_grant(script_capability_id()),
             script_capability_id(),
             ResourceEstimate::default(),
@@ -6076,12 +6071,7 @@ async fn invoke_capability_missing_credential_returns_auth_before_approval() {
     let input = json!({"message": "needs credential"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6162,12 +6152,7 @@ async fn invoke_capability_present_credential_proceeds_to_approval() {
     let input = json!({"message": "has credential"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6244,12 +6229,7 @@ async fn spawn_capability_present_credential_proceeds_to_approval() {
     let input = json!({"message": "spawn has credential"});
 
     let outcome = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .spawn_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6283,12 +6263,7 @@ async fn invoke_capability_no_credential_requirement_proceeds_normally() {
     let input = json!({"message": "no credential needed"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6340,12 +6315,7 @@ async fn spawn_capability_missing_credential_returns_auth_before_approval() {
     let input = json!({"message": "needs credential via spawn"});
 
     let outcome = runtime
-        .spawn_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .spawn_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6413,12 +6383,7 @@ async fn invoke_capability_no_credential_requirement_with_wired_store_proceeds_n
     let input = json!({"message": "no credential needed"});
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context,
-            script_capability_id(),
-            estimate,
-            input,
-        ))
+        .invoke_capability((context, script_capability_id(), estimate, input))
         .await
         .unwrap();
 
@@ -6502,7 +6467,7 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
 
     // Step 1: store error → pre-flight skips → approval gate fires.
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context.clone(),
             script_capability_id(),
             estimate.clone(),
@@ -6580,7 +6545,7 @@ async fn invoke_capability_secret_store_error_skips_preflight() {
         .unwrap();
 
     let resumed = runtime
-        .resume_capability(RuntimeCapabilityResumeRequest::new(
+        .resume_capability((
             context,
             gate.approval_request_id,
             script_capability_id(),

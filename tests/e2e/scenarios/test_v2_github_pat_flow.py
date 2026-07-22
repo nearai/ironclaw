@@ -330,7 +330,7 @@ class TestGitHubPatWireShape:
     reason=(
         "Playwright browser test requires the ironclaw binary with the "
         "IRONCLAW_REBORN_WEBUI_TOKEN env wired. "
-        "Build with: cargo build --features libsql"
+        "Build with: cargo build"
     )
 )
 async def test_github_pat_browser_auth_card_renders(v2_pat_server, browser):

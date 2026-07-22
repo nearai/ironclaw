@@ -358,7 +358,6 @@ jobs:
       - name: Test Reborn libSQL restart integration
         run: |
           cargo test -p ironclaw_runner \
-            --features libsql-restart-tests \
             --test loop_driver_host \
             turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen \
             -- --nocapture

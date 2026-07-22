@@ -151,17 +151,17 @@ use ironclaw_turns::{
     run_profile::ModelProfileId,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-        CapabilityDeniedReasonKind, CapabilityInvocation, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, InstructionMaterializationStore, LoopCapabilityPort,
-        LoopContextBundle, LoopContextCompactionKind, LoopContextCompactionMetadata,
-        LoopContextMessage, LoopContextPort, LoopContextRequest, LoopContextSnippet,
-        LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
-        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopModelUsage,
-        LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
-        LoopTranscriptPort, MemoryPromptContextService, ModelStreamChunk, ParentLoopOutput,
-        PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
-        resolution, sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
+        AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
+        LoopCapabilityPort, LoopContextBundle, LoopContextCompactionKind,
+        LoopContextCompactionMetadata, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopContextSnippet, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
+        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopModelUsage, LoopPromptBundleAuthority, LoopRequest, LoopRequestBatch, LoopRunContext,
+        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, MemoryPromptContextService,
+        ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface, resolution,
+        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -945,7 +945,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
         let empty_surface_version = empty_surface_version()?;
         if request.surface_version != empty_surface_version {
@@ -959,7 +959,7 @@ impl ironclaw_turns::run_profile::LoopCapabilityPort for EmptyLoopCapabilityPort
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
         let empty_surface_version = empty_surface_version()?;
         if request
@@ -1882,6 +1882,9 @@ fn sanitized_reasoning_deltas(reasoning: Option<String>) -> Vec<String> {
 pub enum HostManagedModelErrorKind {
     /// Caller-side misuse of the host model port (unknown tool, malformed request).
     InvalidRequest,
+    /// The request was valid when built but no longer matches current host
+    /// state. Callers may rebuild the prompt/surface and retry.
+    StaleRequest,
     /// Provider/model output was structurally invalid for the active loop contract.
     /// This is model-side bad output, not caller misuse.
     #[serde(alias = "invalid_output")]
@@ -2297,6 +2300,7 @@ fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => AgentLoopHostErrorKind::InvalidInvocation,
+        HostManagedModelErrorKind::StaleRequest => AgentLoopHostErrorKind::StaleSurface,
         HostManagedModelErrorKind::InvalidOutput => AgentLoopHostErrorKind::InvalidOutput,
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
@@ -2318,6 +2322,7 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
 fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
     match kind {
         HostManagedModelErrorKind::InvalidRequest => "model request is invalid",
+        HostManagedModelErrorKind::StaleRequest => "model request surface is stale",
         HostManagedModelErrorKind::InvalidOutput => "model output was structurally invalid",
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
@@ -2424,6 +2429,19 @@ mod tests {
             mapped.safe_summary,
             "resource accounting storage is unavailable"
         );
+    }
+
+    #[test]
+    fn model_gateway_error_preserves_stale_request_kind() {
+        let error = HostManagedModelError::safe(
+            HostManagedModelErrorKind::StaleRequest,
+            "model request surface is stale",
+        );
+
+        let mapped = model_gateway_error(error);
+
+        assert_eq!(mapped.kind, AgentLoopHostErrorKind::StaleSurface);
+        assert_eq!(mapped.safe_summary, "model request surface is stale");
     }
 
     #[test]

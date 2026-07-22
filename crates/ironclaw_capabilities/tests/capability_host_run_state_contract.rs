@@ -32,12 +32,7 @@ async fn capability_host_blocks_for_approval_without_dispatch() {
     let input = json!({"message": "needs approval"});
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
-            context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(context, capability_id(), estimate.clone(), input.clone())
         .await
         .unwrap_err();
 
@@ -78,7 +73,13 @@ trust = "third_party"
 kind = "wasm"
 module = "builtin.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "builtin.shell"
 description = "Runs a shell command."
 effects = ["dispatch_capability", "spawn_process", "execute_code", "network"]
@@ -91,6 +92,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
         manifest_toml,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     let package = ExtensionPackage::from_manifest(
@@ -115,12 +117,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
     });
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
-            context,
-            capability_id,
-            estimate: ResourceEstimate::default(),
-            input,
-        })
+        .invoke_json(context, capability_id, ResourceEstimate::default(), input)
         .await
         .unwrap_err();
 
@@ -171,12 +168,7 @@ async fn capability_host_uses_combined_store_for_atomic_approval_block() {
     let input = json!({"message": "needs atomic approval"});
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
-            context,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(context, capability_id(), estimate.clone(), input.clone())
         .await
         .unwrap_err();
 
@@ -222,12 +214,7 @@ async fn capability_host_separate_store_setters_clear_combined_atomic_path() {
     let input = json!({"message": "split stores by explicit setter order"});
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
-            context,
-            capability_id: capability_id(),
-            estimate,
-            input,
-        })
+        .invoke_json(context, capability_id(), estimate, input)
         .await
         .unwrap_err();
 
@@ -265,12 +252,12 @@ async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_appr
     let input = json!({"message": "not approved yet"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -287,13 +274,7 @@ async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_appr
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate,
-            input,
-        })
+        .resume_json(context, approval_id, capability_id(), estimate, input)
         .await
         .unwrap_err();
 
@@ -357,12 +338,12 @@ async fn assert_mismatched_approval_request_rejected(
     let invocation_id = context.invocation_id;
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs approval"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs approval"}),
+        )
         .await
         .unwrap_err();
 
@@ -398,12 +379,12 @@ async fn capability_host_does_not_point_run_at_approval_before_approval_is_persi
     let scope = context.resource_scope.clone();
     let invocation_id = context.invocation_id;
 
-    let invocation = host.invoke_json(CapabilityInvocationRequest {
+    let invocation = host.invoke_json(
         context,
-        capability_id: capability_id(),
-        estimate: ResourceEstimate::default(),
-        input: json!({"message": "needs approval"}),
-    });
+        capability_id(),
+        ResourceEstimate::default(),
+        json!({"message": "needs approval"}),
+    );
     tokio::pin!(invocation);
 
     tokio::select! {
@@ -445,12 +426,12 @@ async fn capability_host_marks_run_failed_when_obligations_are_unsupported() {
     let invocation_id = context.invocation_id;
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "blocked obligation"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "blocked obligation"}),
+        )
         .await
         .unwrap_err();
 
@@ -474,12 +455,12 @@ async fn capability_host_returns_business_error_when_run_state_fail_transition_f
     let context = execution_context(CapabilitySet::default());
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "denied"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "denied"}),
+        )
         .await
         .unwrap_err();
 
@@ -510,12 +491,12 @@ async fn capability_host_returns_resume_business_error_when_run_state_fail_trans
     let input = json!({"message": "needs approval"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -536,13 +517,7 @@ async fn capability_host_returns_resume_business_error_when_run_state_fail_trans
     // business error is still returned. An unknown id would short-circuit to
     // `UnknownCapability` in `resume_preflight` before reaching this path.
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context,
-            approval_request_id: approval_id,
-            capability_id: other_capability_id(),
-            estimate,
-            input,
-        })
+        .resume_json(context, approval_id, other_capability_id(), estimate, input)
         .await
         .unwrap_err();
 
@@ -570,12 +545,12 @@ async fn capability_host_does_not_orphan_approval_when_run_block_fails() {
     let invocation_id = context.invocation_id;
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "needs approval"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "needs approval"}),
+        )
         .await
         .unwrap_err();
 
@@ -635,12 +610,12 @@ async fn capability_host_returns_specific_error_for_authorizer_fingerprint_misma
     let context = execution_context(CapabilitySet::default());
 
     let err = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "real input"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "real input"}),
+        )
         .await
         .unwrap_err();
 
@@ -663,12 +638,12 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
     });
 
     let result = host
-        .invoke_json(CapabilityInvocationRequest {
+        .invoke_json(
             context,
-            capability_id: capability_id(),
-            estimate: ResourceEstimate::default(),
-            input: json!({"message": "authorized"}),
-        })
+            capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "authorized"}),
+        )
         .await
         .unwrap();
 
@@ -694,12 +669,12 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
     let input = json!({"message": "approved"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -737,13 +712,13 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
     let mut forged_context = context.clone();
     forged_context.authenticated_actor_user_id = Some(UserId::new("slack-bob").unwrap());
     let forged_error = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: forged_context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_json(
+            forged_context,
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -769,13 +744,13 @@ async fn capability_host_resumes_approved_invocation_and_consumes_matching_lease
     );
 
     let result = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
+        .resume_json(
+            context.clone(),
+            approval_id,
+            capability_id(),
             estimate,
             input,
-        })
+        )
         .await
         .unwrap();
 
@@ -812,12 +787,12 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
     let input = json!({"message": "approved"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -853,13 +828,7 @@ async fn capability_host_returns_dispatch_result_when_run_completion_fails_after
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let result = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate,
-            input,
-        })
+        .resume_json(context, approval_id, capability_id(), estimate, input)
         .await
         .unwrap();
 
@@ -883,12 +852,12 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
     let input = json!({"message": "approved"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -933,13 +902,7 @@ async fn capability_host_denies_resume_when_trust_ceiling_omits_capability_effec
     .with_approval_requests(&approval_requests)
     .with_capability_leases(&leases);
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate,
-            input,
-        })
+        .resume_json(context, approval_id, capability_id(), estimate, input)
         .await
         .unwrap_err();
 
@@ -978,12 +941,12 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
     let input = json!({"message": "approved but dispatch fails"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -1019,13 +982,7 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate,
-            input,
-        })
+        .resume_json(context, approval_id, capability_id(), estimate, input)
         .await
         .unwrap_err();
 
@@ -1066,12 +1023,12 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
     let input = json!({"message": "approved"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -1107,13 +1064,13 @@ async fn capability_host_returns_dispatch_result_when_lease_consume_fails_after_
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let result = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context: context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
+        .resume_json(
+            context.clone(),
+            approval_id,
+            capability_id(),
             estimate,
             input,
-        })
+        )
         .await
         .unwrap();
 
@@ -1142,12 +1099,12 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
     let input = json!({"message": "approved"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -1183,20 +1140,14 @@ async fn capability_host_does_not_overwrite_completed_run_when_concurrent_resume
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
 
-    let first = resume_host.resume_json(CapabilityResumeRequest {
-        context: context.clone(),
-        approval_request_id: approval_id,
-        capability_id: capability_id(),
-        estimate: estimate.clone(),
-        input: input.clone(),
-    });
-    let second = resume_host.resume_json(CapabilityResumeRequest {
-        context,
-        approval_request_id: approval_id,
-        capability_id: capability_id(),
-        estimate,
-        input,
-    });
+    let first = resume_host.resume_json(
+        context.clone(),
+        approval_id,
+        capability_id(),
+        estimate.clone(),
+        input.clone(),
+    );
+    let second = resume_host.resume_json(context, approval_id, capability_id(), estimate, input);
     let (first_result, second_result) = tokio::join!(first, second);
 
     assert!(first_result.is_ok());
@@ -1225,12 +1176,12 @@ async fn capability_host_rejects_resume_with_mismatched_capability_id() {
     let input = json!({"message": "approved"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -1252,13 +1203,13 @@ async fn capability_host_rejects_resume_with_mismatched_capability_id() {
     // precedence is covered by a dedicated test.)
     let wrong_capability = other_capability_id();
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
+        .resume_json(
             context,
-            approval_request_id: approval_id,
-            capability_id: wrong_capability.clone(),
+            approval_id,
+            wrong_capability.clone(),
             estimate,
             input,
-        })
+        )
         .await
         .unwrap_err();
 
@@ -1304,12 +1255,12 @@ async fn capability_host_resume_unknown_capability_fails_matching_blocked_run() 
     let input = json!({"message": "approved"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -1328,13 +1279,7 @@ async fn capability_host_resume_unknown_capability_fails_matching_blocked_run() 
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate,
-            input,
-        })
+        .resume_json(context, approval_id, capability_id(), estimate, input)
         .await
         .unwrap_err();
 
@@ -1367,12 +1312,12 @@ async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
     let input = json!({"message": "approved"});
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     let real_approval_id = run_state
@@ -1391,13 +1336,7 @@ async fn capability_host_rejects_resume_with_mismatched_approval_request_id() {
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
-            context,
-            approval_request_id: bogus_approval_id,
-            capability_id: capability_id(),
-            estimate,
-            input,
-        })
+        .resume_json(context, bogus_approval_id, capability_id(), estimate, input)
         .await
         .unwrap_err();
 
@@ -1430,12 +1369,12 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
     let estimate = ResourceEstimate::default();
 
     block_host
-        .invoke_json(CapabilityInvocationRequest {
-            context: context.clone(),
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: json!({"message": "approved"}),
-        })
+        .invoke_json(
+            context.clone(),
+            capability_id(),
+            estimate.clone(),
+            json!({"message": "approved"}),
+        )
         .await
         .unwrap_err();
     let approval_id = run_state
@@ -1471,13 +1410,13 @@ async fn capability_host_rejects_resume_with_mutated_input_before_lease_claim_or
         .with_approval_requests(&approval_requests)
         .with_capability_leases(&leases);
     let err = resume_host
-        .resume_json(CapabilityResumeRequest {
+        .resume_json(
             context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
+            approval_id,
+            capability_id(),
             estimate,
-            input: json!({"message": "mutated"}),
-        })
+            json!({"message": "mutated"}),
+        )
         .await
         .unwrap_err();
 
@@ -2343,4 +2282,15 @@ impl CapabilityLeaseStore for ConsumeFailingLeaseStore {
     async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
         self.inner.active_leases_for_context(context).await
     }
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

@@ -93,7 +93,7 @@ async fn model_provider_command_executes_through_reborn_provider_admin_service()
         "set-provider openai --model gpt-5-mini",
     );
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     let ProductInboundAck::CommandResult { command, payload } = ack else {
         panic!("expected provider-admin command result");
@@ -133,7 +133,7 @@ api_key_env = "OPENAI_API_KEY"
     let (workflow, inbound) = workflow_for_reborn_home(&reborn_home);
     let envelope = sample_command_envelope("command-model-set", "model", "gpt-5.3-codex");
 
-    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+    let ack = workflow.submit_inbound(envelope).await.expect("accept");
 
     let ProductInboundAck::CommandResult { command, payload } = ack else {
         panic!("expected provider-admin command result");
@@ -164,7 +164,7 @@ async fn model_provider_command_rejects_unknown_provider_as_invalid_binding() {
     );
 
     let err = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect_err("unknown provider should reject");
 
@@ -188,7 +188,7 @@ async fn non_model_command_is_rejected_by_provider_admin_service() {
     let envelope = sample_command_envelope("command-status-provider-admin", "status", "");
 
     let ack = workflow
-        .accept_inbound(envelope)
+        .submit_inbound(envelope)
         .await
         .expect("non-model command should produce rejection ack");
 

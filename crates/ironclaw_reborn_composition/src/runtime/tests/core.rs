@@ -1,7 +1,13 @@
-// arch-exempt: large_file, pre-existing ~6.9K-line composition runtime test suite; this change only repoints existing cutover-gate cases at DeploymentConfig plus one shared helper, plan #6168
-//
-// Decomposition into per-concern test modules is tracked with the composition
-// god-crate shrink (#6168); this file is not the place to add unrelated cases.
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
+}
 use std::sync::{
     Arc, Mutex as StdMutex,
     atomic::{AtomicUsize, Ordering},
@@ -11,6 +17,37 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_auth::{GOOGLE_CALENDAR_EVENTS_SCOPE, GOOGLE_CALENDAR_READONLY_SCOPE};
+
+#[derive(Default)]
+struct SlackDmOpenNetworkEgress {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl ironclaw_network::NetworkHttpEgress for SlackDmOpenNetworkEgress {
+    async fn execute(
+        &self,
+        request: ironclaw_network::NetworkHttpRequest,
+    ) -> Result<ironclaw_network::NetworkHttpResponse, ironclaw_network::NetworkHttpError> {
+        assert!(
+            request.url.ends_with("/api/conversations.open"),
+            "unexpected Slack request: {}",
+            request.url
+        );
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let body = br#"{"ok":true,"channel":{"id":"D-RUNTIME-RACE"}}"#.to_vec();
+        Ok(ironclaw_network::NetworkHttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            usage: ironclaw_network::NetworkUsage {
+                request_bytes: request.body.len() as u64,
+                response_bytes: body.len() as u64,
+                resolved_ip: None,
+            },
+            body,
+        })
+    }
+}
 
 #[test]
 fn persistent_grantee_resolver_maps_outbound_delivery_target_set_to_synthetic_provider() {
@@ -46,7 +83,13 @@ trust = "third_party"
 kind = "wasm"
 module = "wasm/approval-provider.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "approval-provider.write"
 description = "write"
 effects = ["external_write"]
@@ -59,6 +102,7 @@ output_schema_ref = "schemas/write.output.json"
         manifest,
         ironclaw_extensions::ManifestSource::HostBundled,
         &ironclaw_host_api::HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .expect("manifest parses");
     let package = ironclaw_extensions::ExtensionPackage::from_manifest(
@@ -154,6 +198,129 @@ fn local_dev_test_support_interaction_service_accessors_return_none_without_loca
         auth.is_none(),
         "auth accessor must be None without a local-dev runtime"
     );
+}
+
+#[tokio::test]
+async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activation() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let network_egress = Arc::new(SlackDmOpenNetworkEgress::default());
+    let build_input = RebornBuildInput::local_dev(
+        "runtime-channel-bind-race-owner",
+        root.path().join("local-dev"),
+    )
+    .with_runtime_policy(local_dev_runtime_policy())
+    .with_network_http_egress_for_test(network_egress.clone())
+    .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
+        extension_id: "slack".to_string(),
+        adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
+        inbound_payload_classifier: None,
+        preference_target_codec: None,
+    }]);
+    let input =
+        RebornRuntimeInput::from_services(build_input).with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-channel-bind-race-tenant".to_string(),
+            agent_id: "runtime-channel-bind-race-agent".to_string(),
+            source_binding_id: "runtime-channel-bind-race-source".to_string(),
+            reply_target_binding_id: "runtime-channel-bind-race-reply".to_string(),
+        });
+    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+    let local_runtime = runtime
+        .services
+        .local_runtime
+        .as_ref()
+        .expect("local runtime services");
+    let extension_management = local_runtime
+        .extension_management
+        .as_ref()
+        .expect("extension management");
+    let operator = extension_management
+        .tenant_operator_user_id_for_test()
+        .clone();
+    let slack_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
+        .expect("valid Slack ref");
+    extension_management
+        .install(slack_ref.clone(), &operator)
+        .await
+        .expect("install Slack before OAuth callback");
+
+    let slack_id = ironclaw_host_api::ExtensionId::new("slack").expect("Slack extension id");
+    local_runtime
+        .channel_config
+        .as_ref()
+        .expect("channel config service")
+        .save(
+            &slack_id,
+            vec![
+                ("slack_bot_token".to_string(), "xoxb-test".to_string()),
+                (
+                    "slack_signing_secret".to_string(),
+                    "signing-test".to_string(),
+                ),
+                ("slack_team_id".to_string(), "T-RUNTIME".to_string()),
+                ("slack_api_app_id".to_string(), "A-RUNTIME".to_string()),
+            ],
+        )
+        .await
+        .expect("configure Slack channel deployment values");
+
+    let binding_config = runtime
+        .channel_identity_binding_config()
+        .expect("production runtime channel identity binding config");
+    let mut resource = ResourceScope::local_default(operator.clone(), InvocationId::new())
+        .expect("callback resource scope");
+    resource.tenant_id = runtime.thread_scope.tenant_id.clone();
+    let callback_scope =
+        ironclaw_auth::AuthProductScope::new(resource, ironclaw_auth::AuthSurface::Callback);
+    let identity = ironclaw_auth::OAuthProviderIdentity::new(
+        "U-RUNTIME",
+        Some("T-RUNTIME".to_string()),
+        None,
+        Some("A-RUNTIME".to_string()),
+    )
+    .expect("proven Slack identity");
+    let rollback = crate::extension_host::channel_identity::bind_channel_identities_for_callback(
+        &binding_config,
+        "slack",
+        &callback_scope,
+        Some(&identity),
+    )
+    .await
+    .expect("bind Slack identity before activation")
+    .expect("Slack callback maps to the installed channel extension");
+    drop(rollback);
+
+    let dm_targets = local_runtime
+        .channel_dm_target_store
+        .as_ref()
+        .expect("channel DM-target store");
+
+    let record = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(record) = dm_targets
+                .load("slack", &operator)
+                .await
+                .expect("load deployment-owned DM target")
+            {
+                break record;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("deployment channel should provision before user activation");
+    assert_eq!(record.target["conversation_id"], "D-RUNTIME-RACE");
+    assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
+
+    extension_management
+        .activate_with_prechecked_credentials_for_test(slack_ref, ExtensionActivationMode::Static)
+        .await
+        .expect("activate Slack and publish the generic host snapshot");
+
+    // Deployment registration wins over the compatibility activation snapshot,
+    // so activation must not create a second delivery binding or provider call.
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
 }
 
 /// Wiring guard: the `regex_skill_activation_enabled` flag from
@@ -381,7 +548,6 @@ fn runtime_cutover_gate_rejects_local_dev_readiness_for_hosted_single_tenant() {
 // postgres substrate.  The guard is gated on the same `libsql | postgres`
 // cfg as the production composition path it protects.
 
-#[cfg(feature = "libsql")]
 #[test]
 fn production_scheduler_wake_guard_rejects_production_with_absent_wiring() {
     let err =
@@ -398,7 +564,6 @@ fn production_scheduler_wake_guard_rejects_production_with_absent_wiring() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[test]
 fn production_scheduler_wake_guard_rejects_migration_dry_run_with_absent_wiring() {
     let err = super::check_production_scheduler_wake_wiring(
@@ -415,7 +580,6 @@ fn production_scheduler_wake_guard_rejects_migration_dry_run_with_absent_wiring(
     );
 }
 
-#[cfg(feature = "libsql")]
 #[test]
 fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
     // Local-dev never mints scheduler wake wiring; the guard must not
@@ -426,7 +590,7 @@ fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
 
 use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_events::{EventStreamKey, ReadScope};
-#[cfg(feature = "libsql")]
+use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
     Action, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId, CorrelationId,
@@ -446,12 +610,12 @@ use ironclaw_loop_host::{
 };
 use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
-    LifecyclePackageKind, LifecyclePackageRef, LifecyclePhase, LifecycleProductPayload,
-    LifecycleReadinessBlocker, RebornExtensionCredentialSetup, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
-    WebUiListAutomationsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest, approval_gate_ref,
+    LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload, LifecycleReadinessBlocker,
+    RebornExtensionCredentialSetup, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
+    approval_gate_ref,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_skills::SkillTrust;
@@ -474,11 +638,9 @@ use ironclaw_turns::{
 };
 use rust_decimal_macros::dec;
 
-#[cfg(feature = "libsql")]
 use crate::RebornRuntimeProcessBinding;
 use crate::extension_host::extension_lifecycle::ExtensionActivationMode;
 use crate::input::RebornBuildInput;
-#[cfg(feature = "libsql")]
 use crate::observability::hooks::HooksActivationConfig;
 use crate::runtime_input::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TriggerFireAccessCheck,
@@ -487,7 +649,6 @@ use crate::runtime_input::{
 };
 use crate::webui::facade::build_webui_services;
 use crate::{RebornCompositionProfile, RebornReadiness, RebornReadinessState, RebornRuntimeError};
-#[cfg(feature = "libsql")]
 use ironclaw_reborn_config::{RebornBootConfig, RebornHome, RebornProfile};
 
 use super::{
@@ -1422,11 +1583,11 @@ async fn send_nearai_auth_capture_raw_request(base_url: &str, request: String) -
 async fn nearai_auth_capture_server_rejects_incomplete_body() {
     let (base_url, _auth_rx) = start_nearai_auth_capture_server().await;
     let response = send_nearai_auth_capture_raw_request(
-            &base_url,
-            "POST /v1/chat/completions HTTP/1.1\r\nhost: localhost\r\ncontent-length: 32\r\n\r\n{\"stream\":true"
-                .to_string(),
-        )
-        .await;
+        &base_url,
+        "POST /v1/chat/completions HTTP/1.1\r\nhost: localhost\r\ncontent-length: 32\r\n\r\n{\"stream\":true"
+            .to_string(),
+    )
+    .await;
 
     assert!(
         response.starts_with("HTTP/1.1 400 Bad Request"),
@@ -1784,7 +1945,7 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
         )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePhase::Active);
+    assert_eq!(projection.phase, InstallationState::Active);
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -1799,7 +1960,6 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     let _env_guard =
@@ -1892,7 +2052,7 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
         )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, LifecyclePhase::Active);
+    assert_eq!(projection.phase, InstallationState::Active);
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -1907,7 +2067,6 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
     stop_turn_runner_worker_for_manual_state_test(&runtime).await;
 }
 
-#[cfg(feature = "libsql")]
 async fn nearai_mcp_runtime_access_secret(
     runtime: &super::RebornRuntime,
     owner_scope: ResourceScope,
@@ -1952,7 +2111,6 @@ async fn nearai_mcp_runtime_access_secret(
     secrecy::ExposeSecret::expose_secret(&material).to_string()
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn runtime_nearai_mcp_prebuild_api_key_is_not_replaced_by_stored_key() {
     let _env_guard =
@@ -2321,6 +2479,53 @@ async fn provider_factory_survives_live_reload() {
     );
 }
 
+/// Regression guard for the trace-recording gap: `IRONCLAW_RECORD_TRACE=1` on
+/// the serve/run path must place a `RecordingLlm` in the turn provider chain.
+/// The runtime builds turns through `wrap_swappable_gateway`, which never calls
+/// `RecordingLlm::from_env`, and hot-reloads through
+/// `build_provider_chain_components`, which also does not — so the recorder is
+/// wired *only* via `ResolvedRebornLlm::with_env_trace_recording`. Nothing
+/// pinned "serve + IRONCLAW_RECORD_TRACE ⇒ recorder attached" before, which is
+/// exactly why the env "enabled" recording yet serve emitted nothing (the
+/// committed reborn_qa fixtures were recorded through the in-process harness,
+/// whose `build_provider_chain` path *does* wire the recorder).
+///
+/// This asserts the gate at the exact serve/run resolution seam. That the
+/// attached factory actually wraps a recorder which records and flushes to disk
+/// incrementally (no explicit `flush()`, matching serve's signalled shutdown)
+/// is proven in
+/// `ironclaw_llm::recording::tests::complete_flushes_incrementally_without_explicit_flush`
+/// — the crate that owns `RecordingLlm` and can set real env vars, which this
+/// `#![forbid(unsafe_code)]` crate cannot.
+#[tokio::test]
+async fn env_trace_recording_attaches_recorder_factory_only_when_enabled() {
+    let session_dir = tempfile::tempdir().expect("session tempdir");
+    let config = dead_endpoint_nearai_config(session_dir.path().join("session.json"));
+
+    // Disabled: no factory attached; the resolved LLM is returned unchanged.
+    {
+        let _guard = RuntimeEnvGuard::with([("IRONCLAW_RECORD_TRACE", None)]).await;
+        let disabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config.clone())
+            .with_env_trace_recording();
+        assert!(
+            disabled.provider_factory.is_none(),
+            "no recording factory should attach when IRONCLAW_RECORD_TRACE is unset"
+        );
+    }
+
+    // Enabled: the serve/run resolution path attaches the recording factory.
+    {
+        let _guard = RuntimeEnvGuard::set("IRONCLAW_RECORD_TRACE", "1").await;
+        let enabled = crate::runtime_input::ResolvedRebornLlm::from_llm_config(config)
+            .with_env_trace_recording();
+        assert!(
+            enabled.provider_factory.is_some(),
+            "IRONCLAW_RECORD_TRACE must attach the recording provider factory on the \
+             serve/run resolution path"
+        );
+    }
+}
+
 /// Regression guard for the benchmark instrumentation seam: a
 /// `ResolvedRebornLlm` carrying a `provider_factory` must have that factory
 /// invoked during `build_reborn_runtime`, i.e. the caller's instrumentation
@@ -2387,7 +2592,6 @@ async fn provider_factory_runs_during_production_boot() {
 /// reload adapter can re-resolve `[llm.default]` from disk) instead of
 /// pre-baking the stored key into a directly-supplied `ResolvedRebornLlm`
 /// (which no longer feeds the gateway at all).
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     // NOTE on isolation: this test does not need to override
@@ -2480,7 +2684,6 @@ async fn local_dev_runtime_startup_uses_stored_nearai_api_key_after_restart() {
     runtime.shutdown().await.expect("runtime shutdown");
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn production_runtime_rejects_enabled_hooks_without_local_runtime() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2547,7 +2750,6 @@ async fn production_runtime_rejects_enabled_hooks_without_local_runtime() {
     );
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn build_reborn_runtime_allows_validated_production_readiness() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2617,7 +2819,6 @@ async fn build_reborn_runtime_allows_validated_production_readiness() {
 /// through the local-dev capability path, so supplying one to a production
 /// runtime (no local runtime to observe) must fail fast rather than silently
 /// produce an empty trajectory.
-#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn build_reborn_runtime_rejects_trajectory_observer_for_production() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -2680,16 +2881,14 @@ async fn build_reborn_runtime_rejects_trajectory_observer_for_production() {
     };
     assert!(
         matches!(err, super::RebornRuntimeError::InvalidArgument { ref reason }
-                if reason.contains("trajectory observer") && reason.contains("local-dev")),
+            if reason.contains("trajectory observer") && reason.contains("local-dev")),
         "expected an InvalidArgument naming the local-dev-only constraint, got {err:#}"
     );
 }
 
-#[cfg(feature = "libsql")]
 #[derive(Debug)]
 struct RecordingSandboxTransport;
 
-#[cfg(feature = "libsql")]
 #[async_trait]
 impl ironclaw_host_runtime::SandboxCommandTransport for RecordingSandboxTransport {
     async fn run_command(
@@ -3486,10 +3685,25 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
         )
         .await
         .expect("install Notion MCP");
+    // v3 hosted-MCP packages publish no model-visible tools on static
+    // activation; script tools/list discovery so the notion-search tool
+    // the auth-gate gateway calls exists as a model-visible capability.
     extension_management
-        .activate_with_prechecked_credentials_for_test(notion_ref, ExtensionActivationMode::Static)
+        .activate_with_prechecked_credentials_for_test(
+            notion_ref,
+            ExtensionActivationMode::HostedMcpDiscovery {
+                scope: ResourceScope::local_default(
+                    UserId::new("runtime-auth-gate-owner").expect("valid user"),
+                    InvocationId::new(),
+                )
+                .expect("valid scope"),
+                runtime_http_egress: Arc::new(
+                    crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
+                ),
+            },
+        )
         .await
-        .expect("activate Notion MCP");
+        .expect("activate Notion MCP with scripted discovery");
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     runtime
@@ -4300,46 +4514,6 @@ async fn local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls() {
 }
 
 #[tokio::test]
-async fn local_dev_runtime_backfills_legacy_owner_skill_root() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let storage_root = root.path().join("local-dev");
-    std::fs::create_dir_all(storage_root.join("skills/legacy-helper")).expect("legacy skill dir");
-    std::fs::write(
-        storage_root.join("skills/legacy-helper/SKILL.md"),
-        skill_md(
-            "legacy-helper",
-            "legacy helper description",
-            "LEGACY_HELPER_PROMPT_SENTINEL",
-        ),
-    )
-    .expect("write legacy helper skill");
-
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-legacy-skill-owner", storage_root.clone())
-            .with_runtime_policy(local_dev_runtime_policy()),
-    );
-    let runtime = build_reborn_runtime(input).await.expect("runtime");
-    let conversation = runtime.new_conversation().await.expect("conversation");
-
-    let result = runtime
-        .execute_skill_message(&conversation, "$legacy-helper")
-        .await
-        .expect("execute skill message");
-
-    assert_eq!(result.plan.activations().len(), 1);
-    assert_eq!(result.plan.activations()[0].name, "legacy-helper");
-    assert!(
-        storage_root
-            .join(
-                "tenants/reborn-cli/users/runtime-legacy-skill-owner/skills/legacy-helper/SKILL.md"
-            )
-            .exists()
-    );
-
-    runtime.shutdown().await.expect("runtime shutdown");
-}
-
-#[tokio::test]
 async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
     let root = tempfile::tempdir().expect("tempdir");
     let storage_root = root.path().join("local-dev");
@@ -5114,7 +5288,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
         .expect("setup extension lifecycle projection");
 
     assert_eq!(setup.package_ref.id.as_str(), "github");
-    assert_eq!(setup.phase, LifecyclePhase::Discovered);
+    assert_eq!(setup.phase, InstallationState::Installed);
     assert!(setup.blockers.is_empty());
     assert_eq!(setup.secrets.len(), 1);
     assert_eq!(setup.secrets[0].name, "github_runtime_token");
@@ -5301,103 +5475,6 @@ async fn webui_route_rejects_list_automations_without_agent_binding() {
 }
 
 #[tokio::test]
-async fn open_reborn_identity_resolver_migrates_legacy_webui_identities_through_runtime() {
-    use ironclaw_reborn_identity::{
-        ExternalSubjectId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
-    };
-
-    let root = tempfile::tempdir().expect("tempdir");
-    let gateway = Arc::new(RecordingGateway {
-        reply: "unused".to_string(),
-        requests: Arc::new(StdMutex::new(Vec::new())),
-    });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-identity-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
-    )
-    .with_identity(RebornRuntimeIdentity {
-        tenant_id: "runtime-identity-tenant".to_string(),
-        agent_id: "runtime-identity-agent".to_string(),
-        source_binding_id: "runtime-identity-source".to_string(),
-        reply_target_binding_id: "runtime-identity-reply".to_string(),
-    })
-    .with_poll_settings(PollSettings {
-        interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
-    })
-    .with_model_gateway_override(gateway);
-
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let tenant = TenantId::new("runtime-identity-tenant").expect("tenant");
-
-    // Seed a legacy pre-#4381 WebUI identity into the SAME substrate DB the
-    // runtime owns, exactly as the old store wrote it.
-    let substrate = Arc::clone(
-        runtime
-            .services
-            .local_runtime
-            .as_ref()
-            .expect("local runtime substrate")
-            .identity_substrate_db
-            .as_ref()
-            .expect("libSQL identity substrate"),
-    );
-    let seed = substrate.connect().expect("substrate connection");
-    seed.execute_batch(
-        "CREATE TABLE user_identities (\
-                 provider TEXT NOT NULL, provider_user_id TEXT NOT NULL, \
-                 user_id TEXT NOT NULL, email TEXT, email_verified INTEGER NOT NULL, \
-                 created_at TEXT NOT NULL, \
-                 PRIMARY KEY (provider, provider_user_id));",
-    )
-    .await
-    .expect("seed legacy schema");
-    seed.execute(
-        "INSERT INTO user_identities \
-                 (provider, provider_user_id, user_id, email, email_verified, created_at) \
-                 VALUES ('google', 'g-legacy', 'legacy-runtime-user', 'legacy@x.com', 1, \
-                     '2026-01-01T00:00:00Z')",
-        (),
-    )
-    .await
-    .expect("seed legacy identity");
-    // Drop the raw seed connection before the fold runs: production never
-    // holds a second raw handle on the substrate, and an idle extra
-    // connection here would contend with the filesystem-backed writes.
-    drop(seed);
-
-    // The production accessor `serve` relies on: it opens the resolver on
-    // the runtime-owned substrate handle and runs the legacy fold, so the
-    // returning legacy user must resolve to their original UserId rather
-    // than being re-minted.
-    let resolver = runtime
-        .open_reborn_identity_resolver(&tenant)
-        .await
-        .expect("runtime carries a local-runtime substrate")
-        .expect("resolver opens");
-    let resolved = resolver
-        .resolve_or_create(ResolveExternalIdentity {
-            tenant_id: tenant.clone(),
-            surface_kind: SurfaceKind::Oauth,
-            provider_kind: ProviderKind::new("google").expect("provider"),
-            provider_instance_id: None,
-            external_subject_id: ExternalSubjectId::new("g-legacy").expect("subject"),
-            email: Some("legacy@x.com".to_string()),
-            email_verified: true,
-            display_name: None,
-        })
-        .await
-        .expect("resolve");
-    assert_eq!(
-        resolved.as_str(),
-        "legacy-runtime-user",
-        "a returning legacy SSO user keeps their UserId through the runtime accessor"
-    );
-
-    runtime.shutdown().await.expect("runtime shutdown");
-}
-
-#[tokio::test]
 async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() {
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
@@ -5484,101 +5561,6 @@ async fn webui_operator_diagnostics_route_exposes_composed_readiness_evidence() 
                 == "operator_doctor_readiness_composition_profile_blocked"
                 && diagnostic["key"] == "readiness_composition_profile"),
         "diagnostics route should expose readiness-derived doctor diagnostics: {json}"
-    );
-
-    runtime.shutdown().await.expect("runtime shutdown");
-}
-
-#[tokio::test]
-async fn open_reborn_identity_resolver_migrates_legacy_verified_email_linking() {
-    use ironclaw_reborn_identity::{
-        ExternalSubjectId, ProviderKind, ResolveExternalIdentity, SurfaceKind,
-    };
-
-    let root = tempfile::tempdir().expect("tempdir");
-    let gateway = Arc::new(RecordingGateway {
-        reply: "unused".to_string(),
-        requests: Arc::new(StdMutex::new(Vec::new())),
-    });
-    let input = RebornRuntimeInput::from_services(
-        RebornBuildInput::local_dev("runtime-identity-link-owner", root.path().join("local-dev"))
-            .with_runtime_policy(local_dev_runtime_policy()),
-    )
-    .with_identity(RebornRuntimeIdentity {
-        tenant_id: "runtime-identity-link-tenant".to_string(),
-        agent_id: "runtime-identity-link-agent".to_string(),
-        source_binding_id: "runtime-identity-link-source".to_string(),
-        reply_target_binding_id: "runtime-identity-link-reply".to_string(),
-    })
-    .with_poll_settings(PollSettings {
-        interval: Duration::from_millis(10),
-        max_total: Duration::from_secs(3),
-    })
-    .with_model_gateway_override(gateway);
-
-    let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let tenant = TenantId::new("runtime-identity-link-tenant").expect("tenant");
-
-    // Seed a legacy pre-#4381 WebUI Google identity with a VERIFIED email.
-    let substrate = Arc::clone(
-        runtime
-            .services
-            .local_runtime
-            .as_ref()
-            .expect("local runtime substrate")
-            .identity_substrate_db
-            .as_ref()
-            .expect("libSQL identity substrate"),
-    );
-    let seed = substrate.connect().expect("substrate connection");
-    seed.execute_batch(
-        "CREATE TABLE user_identities (\
-                 provider TEXT NOT NULL, provider_user_id TEXT NOT NULL, \
-                 user_id TEXT NOT NULL, email TEXT, email_verified INTEGER NOT NULL, \
-                 created_at TEXT NOT NULL, \
-                 PRIMARY KEY (provider, provider_user_id));",
-    )
-    .await
-    .expect("seed legacy schema");
-    seed.execute(
-        "INSERT INTO user_identities \
-                 (provider, provider_user_id, user_id, email, email_verified, created_at) \
-                 VALUES ('google', 'g-legacy', 'legacy-link-user', 'shared@x.com', 1, \
-                     '2026-01-01T00:00:00Z')",
-        (),
-    )
-    .await
-    .expect("seed legacy identity");
-    drop(seed);
-
-    // The fold must seed the canonical verified-email index from the
-    // migrated row's verified email — not just preserve the per-subject id.
-    let resolver = runtime
-        .open_reborn_identity_resolver(&tenant)
-        .await
-        .expect("runtime carries a local-runtime substrate")
-        .expect("resolver opens");
-
-    // The upgrade case: a LATER login through a DIFFERENT OAuth provider
-    // with the SAME verified email must link to the migrated user instead
-    // of minting a second one.
-    let via_github = resolver
-        .resolve_or_create(ResolveExternalIdentity {
-            tenant_id: tenant.clone(),
-            surface_kind: SurfaceKind::Oauth,
-            provider_kind: ProviderKind::new("github").expect("provider"),
-            provider_instance_id: None,
-            external_subject_id: ExternalSubjectId::new("gh-new").expect("subject"),
-            email: Some("shared@x.com".to_string()),
-            email_verified: true,
-            display_name: None,
-        })
-        .await
-        .expect("resolve");
-    assert_eq!(
-        via_github.as_str(),
-        "legacy-link-user",
-        "a migrated verified legacy email must link a later different-provider login"
     );
 
     runtime.shutdown().await.expect("runtime shutdown");
@@ -5842,7 +5824,7 @@ async fn local_dev_webui_bundle_routes_auth_gates_into_interaction_service() {
                 thread_id: Some(created.thread.thread_id.to_string()),
                 run_id: Some(TurnRunId::new().to_string()),
                 gate_ref: Some("gate:hook-auth-missing".to_string()),
-                resolution: Some("denied".to_string()),
+                resolution: Some("declined".to_string()),
                 always: None,
                 credential_ref: None,
             },
@@ -6934,3 +6916,4 @@ async fn scheduler_stopped_rejects_send_user_message() {
     // shutdown() handles the already-taken scheduler handle gracefully.
     runtime.shutdown().await.expect("runtime shutdown");
 }
+// arch-exempt: large_file, runtime composition contract coverage remains centralized, plan #6175

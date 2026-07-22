@@ -85,19 +85,12 @@ pub struct RebornConfigFile {
     /// `serve` subcommand is invoked. Optional — sparse configs
     /// fall back to compiled defaults documented on each field.
     pub webui: Option<WebuiSection>,
-    /// Slack Events API host-beta route settings. Consumed by
-    /// `ironclaw-reborn serve` only when the binary is built with the
-    /// Slack host-beta feature. Secrets are env-only; this section stores
-    /// IDs and environment variable names.
+    /// Legacy-compatible Slack host enablement and rejected setup fields.
     pub slack: Option<SlackSection>,
-    /// Telegram channel host enablement. Consumed by `ironclaw-reborn serve`
-    /// only when the binary is built with the Telegram host feature. Bot
-    /// identity and secrets are configured through the WebUI setup surface,
-    /// never in this file.
+    /// Telegram host enablement. Runtime setup remains extension-owned.
     pub telegram: Option<TelegramSection>,
-    /// Google OAuth client identity for the Gmail/Calendar/Drive
-    /// first-party extension. Public identifiers only — `client_secret`
-    /// is never stored here (see [`GoogleSection`]'s doc).
+    /// Google OAuth client identity for Gmail/Calendar/Drive extensions.
+    /// Public identifiers only; the client secret stays in the secret store.
     pub google: Option<GoogleSection>,
     /// Cost-based budgets. Composition seeds defaults on first reservation
     /// for each user/project; per-account overrides happen through the
@@ -400,43 +393,32 @@ pub struct WebuiSection {
     pub canonical_host: Option<String>,
 }
 
-/// Slack Events API host-beta enablement.
-///
-/// `enabled = true` or `IRONCLAW_REBORN_SLACK_ENABLED=true` mounts the Slack
-/// route. The env var overrides only this enablement gate. Installation
-/// identifiers, channel routing, and Slack secrets are configured through the
-/// WebUI channel setup surface. The deprecated fields below are **boot-rejected**,
-/// not bridged: `ironclaw serve` fails closed at startup
-/// (`reject_legacy_slack_setup_fields`, `commands/serve_slack.rs`) if any of
-/// them are set in `config.toml`, with an error pointing the operator at the
-/// WebUI Slack OAuth setup flow instead. They remain on this struct only so a
-/// legacy file produces that specific rejection message rather than an
-/// `unknown field` parse error.
+/// Public Google OAuth client configuration. Secret material deliberately has
+/// no representation in `config.toml`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GoogleSection {
+    pub client_id: Option<String>,
+    pub redirect_uri: Option<String>,
+    pub hosted_domain_hint: Option<String>,
+}
+
+/// Slack listener enablement. The additional fields remain parseable so old
+/// files receive a precise startup migration error rather than an unknown-key
+/// parse failure; new setup belongs to the extension lifecycle.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SlackSection {
-    /// Explicit host-beta enablement gate. Omitted/false means the Slack route
-    /// is not mounted by `ironclaw-reborn serve` unless
-    /// `IRONCLAW_REBORN_SLACK_ENABLED` overrides it.
     pub enabled: Option<bool>,
-    /// Deprecated: adapter installation id for legacy config-backed setup.
     pub installation_id: Option<String>,
-    /// Deprecated: Slack team id for legacy config-backed setup.
     pub team_id: Option<String>,
-    /// Deprecated: Slack app id for legacy config-backed setup.
     pub api_app_id: Option<String>,
-    /// Deprecated: optional Slack user id for legacy static personal binding.
     pub slack_user_id: Option<String>,
-    /// Deprecated: Reborn user id for legacy Slack setup.
     pub user_id: Option<String>,
-    /// Deprecated: Reborn user id whose scope owns shared Slack channel turns.
     pub shared_subject_user_id: Option<String>,
-    /// Deprecated: channel-specific shared subjects for Slack app mentions.
     #[serde(default)]
     pub channel_routes: Vec<SlackChannelRouteSection>,
-    /// Deprecated: environment variable name containing the Slack signing secret.
     pub signing_secret_env: Option<String>,
-    /// Deprecated: environment variable name containing the Slack bot token.
     pub bot_token_env: Option<String>,
 }
 
@@ -446,51 +428,8 @@ impl SlackSection {
         self
     }
 
-    pub fn set_installation_id(mut self, installation_id: impl Into<String>) -> Self {
-        self.installation_id = Some(installation_id.into());
-        self
-    }
-
-    pub fn set_team_id(mut self, team_id: impl Into<String>) -> Self {
-        self.team_id = Some(team_id.into());
-        self
-    }
-
-    pub fn set_api_app_id(mut self, api_app_id: impl Into<String>) -> Self {
-        self.api_app_id = Some(api_app_id.into());
-        self
-    }
-
-    pub fn set_slack_user_id(mut self, slack_user_id: impl Into<String>) -> Self {
-        self.slack_user_id = Some(slack_user_id.into());
-        self
-    }
-
-    pub fn set_user_id(mut self, user_id: impl Into<String>) -> Self {
-        self.user_id = Some(user_id.into());
-        self
-    }
-
-    pub fn set_shared_subject_user_id(mut self, shared_subject_user_id: impl Into<String>) -> Self {
-        self.shared_subject_user_id = Some(shared_subject_user_id.into());
-        self
-    }
-
-    pub fn set_channel_routes(
-        mut self,
-        channel_routes: impl IntoIterator<Item = SlackChannelRouteSection>,
-    ) -> Self {
-        self.channel_routes = channel_routes.into_iter().collect();
-        self
-    }
-
-    pub fn set_signing_secret_env(mut self, signing_secret_env: impl Into<String>) -> Self {
-        self.signing_secret_env = Some(signing_secret_env.into());
-        self
-    }
-
-    pub fn set_bot_token_env(mut self, bot_token_env: impl Into<String>) -> Self {
-        self.bot_token_env = Some(bot_token_env.into());
+    pub fn set_user_id(mut self, value: impl Into<String>) -> Self {
+        self.user_id = Some(value.into());
         self
     }
 }
@@ -502,19 +441,9 @@ pub struct SlackChannelRouteSection {
     pub subject_user_id: Option<String>,
 }
 
-/// Telegram channel host enablement.
-///
-/// `enabled = true` or `IRONCLAW_REBORN_TELEGRAM_ENABLED=true` mounts the
-/// Telegram updates route and the WebUI setup/pairing surface. The env var
-/// overrides only this enablement gate. The bot token, webhook registration,
-/// and pairing are configured at runtime through the WebUI channel setup
-/// surface; no Telegram identifiers or secrets live in this file.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelegramSection {
-    /// Explicit enablement gate. Omitted/false means the Telegram routes are
-    /// not mounted by `ironclaw-reborn serve` unless
-    /// `IRONCLAW_REBORN_TELEGRAM_ENABLED` overrides it.
     pub enabled: Option<bool>,
 }
 
@@ -523,29 +452,6 @@ impl TelegramSection {
         self.enabled = Some(enabled);
         self
     }
-}
-
-/// `[google]` section. Google OAuth client identity for Gmail/Calendar/
-/// Drive first-party extension setup. Unlike Slack's `SlackSection`,
-/// values are stored **literally** (not as env-var name pointers) —
-/// `client_id`/`redirect_uri`/`hosted_domain_hint` are public, non-secret
-/// identifiers safe to round-trip through a declarative file.
-/// `client_secret` deliberately has NO field here: it is secret material
-/// and always routes to the encrypted secret store
-/// (`ironclaw_reborn_composition::GoogleOauthSecretStore`), never
-/// `config.toml` — the same law `reject_inline_secret` enforces for every
-/// other section in this file.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct GoogleSection {
-    /// OAuth client id, e.g. `<id>.apps.googleusercontent.com`. Public —
-    /// safe to store literally.
-    pub client_id: Option<String>,
-    /// OAuth redirect URI registered with the Google Cloud Console
-    /// project (e.g. `http://127.0.0.1:3000/oauth/google/callback`).
-    pub redirect_uri: Option<String>,
-    /// Optional Google Workspace hosted-domain hint (`hd` parameter).
-    pub hosted_domain_hint: Option<String>,
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -1647,7 +1553,6 @@ mod tests {
         assert!(cfg.skills.is_none());
         assert!(cfg.storage.is_none());
         assert!(cfg.llm.is_none());
-        assert!(cfg.slack.is_none());
     }
 
     #[test]
@@ -1744,11 +1649,6 @@ provider_id = "anthropic"
 model = "claude-3-5-sonnet-latest"
 api_key_env = "ANTHROPIC_API_KEY"
 
-[slack]
-enabled = true
-
-[telegram]
-enabled = true
 "#;
         let cfg = RebornConfigFile::parse_text(toml, &attributed()).expect("must parse");
         assert_eq!(cfg.api_version.as_deref(), Some("ironclaw.runtime/v1"));
@@ -1785,28 +1685,6 @@ enabled = true
         assert_eq!(default_slot.api_key_env.as_deref(), Some("OPENAI_API_KEY"));
         let llm = cfg.llm.as_ref().unwrap();
         assert!(llm.contains_key("mission"));
-        let slack = cfg.slack.as_ref().expect("slack section present");
-        assert_eq!(slack.enabled, Some(true));
-        let telegram = cfg.telegram.as_ref().expect("telegram section present");
-        assert_eq!(telegram.enabled, Some(true));
-    }
-
-    #[test]
-    fn telegram_section_rejects_unknown_fields() {
-        // The Telegram section deliberately carries only the enablement gate:
-        // bot identity and secrets are WebUI-managed. A config file trying to
-        // smuggle them in must fail parse closed, not be silently ignored.
-        let toml = r#"
-[telegram]
-enabled = true
-bot_token = "123:abc"
-"#;
-        let error = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("unknown [telegram] fields must be rejected");
-        assert!(
-            error.to_string().contains("bot_token"),
-            "error should name the rejected field: {error}"
-        );
     }
 
     #[test]
@@ -2132,49 +2010,6 @@ api_key_env = "sk-proj-1234567890abcdef1234567890"
     }
 
     #[test]
-    fn parses_legacy_slack_setup_fields() {
-        let toml = r#"
-[slack]
-enabled = true
-installation_id = "install-alpha"
-team_id = "T123"
-api_app_id = "A123"
-slack_user_id = "U123"
-user_id = "user:operator"
-shared_subject_user_id = "user:slack-shared"
-signing_secret_env = "IRONCLAW_REBORN_SLACK_SIGNING_SECRET"
-bot_token_env = "IRONCLAW_REBORN_SLACK_BOT_TOKEN"
-
-[[slack.channel_routes]]
-channel_id = "CENG"
-subject_user_id = "user:eng-team-agent"
-"#;
-        let cfg = RebornConfigFile::parse_text(toml, &attributed())
-            .expect("legacy Slack setup fields should remain parse-compatible");
-        let slack = cfg.slack.expect("slack section");
-        assert_eq!(slack.enabled, Some(true));
-        assert_eq!(slack.installation_id.as_deref(), Some("install-alpha"));
-        assert_eq!(slack.team_id.as_deref(), Some("T123"));
-        assert_eq!(slack.api_app_id.as_deref(), Some("A123"));
-        assert_eq!(slack.slack_user_id.as_deref(), Some("U123"));
-        assert_eq!(slack.user_id.as_deref(), Some("user:operator"));
-        assert_eq!(
-            slack.shared_subject_user_id.as_deref(),
-            Some("user:slack-shared")
-        );
-        assert_eq!(
-            slack.signing_secret_env.as_deref(),
-            Some("IRONCLAW_REBORN_SLACK_SIGNING_SECRET")
-        );
-        assert_eq!(slack.channel_routes.len(), 1);
-        assert_eq!(slack.channel_routes[0].channel_id.as_deref(), Some("CENG"));
-        assert_eq!(
-            slack.channel_routes[0].subject_user_id.as_deref(),
-            Some("user:eng-team-agent")
-        );
-    }
-
-    #[test]
     fn parses_storage_postgres_env_reference() {
         let toml = r#"
 [storage]
@@ -2317,36 +2152,6 @@ secret_master_key_env = "postgres://user:password.example.com/ironclaw"
         assert!(
             !err.to_string().contains("password"),
             "error must not echo credential-bearing value: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_inline_secret_in_legacy_slack_secret_env_name() {
-        let toml = r#"
-[slack]
-enabled = true
-signing_secret_env = "sk-proj-1234567890abcdef1234567890"
-"#;
-        let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("legacy Slack env name must not accept raw secrets");
-        assert!(
-            err.to_string().contains("slack.signing_secret_env"),
-            "error should identify legacy Slack field: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_inline_secret_in_legacy_slack_bot_token_env_name() {
-        let toml = r#"
-[slack]
-enabled = true
-bot_token_env = "sk-proj-1234567890abcdef1234567890"
-"#;
-        let err = RebornConfigFile::parse_text(toml, &attributed())
-            .expect_err("legacy Slack bot token env name must not accept raw secrets");
-        assert!(
-            err.to_string().contains("slack.bot_token_env"),
-            "error should identify legacy Slack field: {err}"
         );
     }
 
@@ -2748,3 +2553,4 @@ not_a_field = true
         assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 }
+// arch-exempt: large_file, versioned config migration remains centralized, plan #6175

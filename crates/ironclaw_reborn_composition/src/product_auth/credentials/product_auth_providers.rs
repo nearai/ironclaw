@@ -1,851 +1,308 @@
+//! Auth-engine composition: assembles the ONE recipe-driven
+//! [`ironclaw_auth::AuthEngine`] behind the product-auth services.
+//!
+//! There is deliberately no per-vendor provider client, no provider spec
+//! constant, and no string→client multiplexor here (checklist AUTH-1/16):
+//! vendors resolve to recipe DATA through the injected
+//! [`ironclaw_auth::AuthRecipeResolver`], and deployment client credentials
+//! resolve through a handle-keyed data map.
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use ironclaw_auth::SLACK_PERSONAL_PROVIDER_ID;
 use ironclaw_auth::{
-    AuthProductError, AuthProviderClient, GOOGLE_PROVIDER_ID, OAuthProviderCallbackRequest,
-    OAuthProviderExchange, OAuthProviderExchangeContext, OAuthProviderRefresh,
-    OAuthProviderRefreshRequest,
+    AuthEngine, AuthEngineDeps, AuthProductError, AuthProviderClient, AuthRecipeResolver,
+    EngineCallbackBase, EngineClientCredentialsSource, EngineOAuthClientMaterial, OAuthClientId,
+    StaticAuthRecipeResolver,
 };
-use ironclaw_capabilities::CapabilityObligationHandler;
-use ironclaw_host_api::RuntimeHttpEgress;
+use ironclaw_host_api::{RecipeClientCredentials, RuntimeHttpEgress};
 use ironclaw_host_runtime::ProductAuthProviderRuntimePorts;
 use ironclaw_secrets::SecretStore;
+use secrecy::SecretString;
 
 use crate::RebornBuildError;
-use crate::input::{OAuthDcrProviderBackendConfig, OAuthProviderBackendConfig};
-use crate::product_auth::oauth::oauth_dcr::{OAuthDcrProvider, OAuthDcrProviderRegistry};
-use crate::product_auth::oauth::oauth_gate::{
-    GoogleOAuthGateProvider, OAuthGateFlowDriver, OAuthGateProviderRegistry,
-};
-use crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient;
-use crate::slack::slack_personal_oauth::{
-    SlackPersonalOAuthGateProvider, slack_personal_provider_spec,
-};
-use crate::slack::slack_setup::SlackPersonalSetupServiceSlot;
+use crate::extension_host::channel_config::ChannelConfigService;
+use crate::input::{OAuthDcrCallbackConfig, OAuthProviderBackendConfig};
+use crate::product_auth::oauth::oauth_gate::OAuthGateFlowDriver;
+use crate::product_auth::oauth::staged_egress::ObligationStagedAuthEgress;
+
+/// Display name sent with RFC 7591 dynamic client registration.
+const DCR_CLIENT_NAME: &str = "Ironclaw";
+
+/// The static vendor-callback base path (`{base}/{vendor}/callback` — the
+/// serve layer mounts the matching `{provider}` route).
+pub(crate) const PRODUCT_AUTH_OAUTH_ROUTE_BASE: &str = "/api/reborn/product-auth/oauth";
 
 #[derive(Clone)]
 pub(crate) struct OAuthProviderComposition {
+    pub(crate) engine: Option<Arc<AuthEngine>>,
     pub(crate) client: Option<Arc<dyn AuthProviderClient>>,
-    pub(crate) dcr_registry: Option<Arc<OAuthDcrProviderRegistry>>,
-    /// One generic gate registry over every provider (Google + Slack personal).
-    pub(crate) gate_registry: Option<Arc<OAuthGateProviderRegistry>>,
+    pub(crate) gate_driver: Option<Arc<OAuthGateFlowDriver>>,
 }
 
+/// One resolvable value for a deployment client-credential handle.
+#[derive(Clone)]
+pub(crate) enum ClientCredentialValue {
+    Static(SecretString),
+}
+
+/// Deferred handle source over the operator channel configuration
+/// (`[channel.config]`): the configure service is built after the auth
+/// engine (its durable stores land later in factory assembly), so the
+/// engine holds this slot and resolves handles through it at request time.
+/// Unfilled (startup window, or a composition path without the configure
+/// surface) it resolves nothing — the engine's existing not-configured
+/// path applies.
+#[derive(Clone, Default)]
+pub(crate) struct ChannelConfigCredentialSlot {
+    inner: Arc<std::sync::OnceLock<Arc<ChannelConfigService>>>,
+}
+
+impl ChannelConfigCredentialSlot {
+    pub(crate) fn fill(&self, service: Arc<ChannelConfigService>) {
+        let _ = self.inner.set(service);
+    }
+
+    fn get(&self) -> Option<Arc<ChannelConfigService>> {
+        self.inner.get().cloned()
+    }
+}
+
+impl fmt::Debug for ChannelConfigCredentialSlot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChannelConfigCredentialSlot")
+            .field("filled", &self.inner.get().is_some())
+            .finish()
+    }
+}
+
+/// Handle-keyed deployment client-credential data. Recipes name their
+/// `client_credentials` handles; composition registers values for those
+/// handles (env config) — data, never a vendor code path. Handles without a
+/// registered value fall back to the operator channel configuration, so
+/// recipe client material saved through the generic configure surface
+/// resolves with no per-vendor wiring.
+#[derive(Clone, Default)]
+pub(crate) struct CompositionClientCredentials {
+    values: BTreeMap<String, ClientCredentialValue>,
+    channel_config: Option<ChannelConfigCredentialSlot>,
+}
+
+impl CompositionClientCredentials {
+    pub(crate) fn register_static(&mut self, handle: impl Into<String>, value: SecretString) {
+        self.values
+            .insert(handle.into(), ClientCredentialValue::Static(value));
+    }
+
+    /// Attach the operator channel-config fallback for unregistered handles.
+    pub(crate) fn with_channel_config_fallback(&mut self, slot: ChannelConfigCredentialSlot) {
+        self.channel_config = Some(slot);
+    }
+
+    async fn resolve_handle(&self, handle: &str) -> Result<Option<SecretString>, AuthProductError> {
+        match self.values.get(handle) {
+            Some(ClientCredentialValue::Static(value)) => return Ok(Some(value.clone())),
+            None => {}
+        }
+        let Some(service) = self.channel_config.as_ref().and_then(|slot| slot.get()) else {
+            return Ok(None);
+        };
+        service
+            .credential_handle_value(handle)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    handle,
+                    "operator channel-config client-credential lookup failed"
+                );
+                AuthProductError::BackendUnavailable
+            })
+    }
+}
+
+impl fmt::Debug for CompositionClientCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CompositionClientCredentials")
+            .field("handles", &self.values.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+#[async_trait]
+impl EngineClientCredentialsSource for CompositionClientCredentials {
+    async fn resolve(
+        &self,
+        vendor: &str,
+        credentials: &RecipeClientCredentials,
+    ) -> Result<EngineOAuthClientMaterial, AuthProductError> {
+        use secrecy::ExposeSecret as _;
+        let Some(client_id) = self
+            .resolve_handle(credentials.client_id_handle.as_str())
+            .await?
+        else {
+            tracing::debug!(
+                vendor,
+                handle = credentials.client_id_handle.as_str(),
+                "vendor OAuth client id is not configured"
+            );
+            return Err(AuthProductError::MalformedConfig);
+        };
+        let client_secret = match &credentials.client_secret_handle {
+            None => None,
+            Some(handle) => self.resolve_handle(handle.as_str()).await?,
+        };
+        Ok(EngineOAuthClientMaterial {
+            client_id: OAuthClientId::new(client_id.expose_secret())?,
+            client_secret,
+        })
+    }
+}
+
+/// Compose the auth engine from deployment inputs: the recipe catalog comes
+/// from the bundled first-party manifests, deployment client material from
+/// the vendor-keyed configs, and the static vendor-callback base from the
+/// DCR callback origin or any configured redirect URI.
 pub(crate) fn compose_provider_client(
     configs: Vec<OAuthProviderBackendConfig>,
-    dcr_configs: Vec<OAuthDcrProviderBackendConfig>,
+    dcr_callback: Option<OAuthDcrCallbackConfig>,
     secret_store: Arc<dyn SecretStore>,
     runtime_ports: ProductAuthProviderRuntimePorts,
-    slack_personal_oauth_slot: Option<SlackPersonalSetupServiceSlot>,
+    channel_config_credentials: ChannelConfigCredentialSlot,
 ) -> Result<OAuthProviderComposition, RebornBuildError> {
-    compose_provider_client_with_runtime(
-        configs,
-        dcr_configs,
+    let recipes: Arc<dyn AuthRecipeResolver> = Arc::new(StaticAuthRecipeResolver::new(
+        crate::extension_host::available_extensions::AvailableExtensionCatalog::bundled_vendor_recipes()
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("bundled vendor auth recipes could not be resolved: {error}"),
+            })?,
+    ));
+
+    let mut client_credentials = CompositionClientCredentials::default();
+    for config in &configs {
+        register_vendor_client_config(&mut client_credentials, recipes.as_ref(), config);
+    }
+    client_credentials.with_channel_config_fallback(channel_config_credentials);
+    let callback_base = dcr_callback
+        .map(|dcr| {
+            EngineCallbackBase::new(format!(
+                "{}{PRODUCT_AUTH_OAUTH_ROUTE_BASE}",
+                dcr.callback_origin.trim_end_matches('/')
+            ))
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("OAuth callback origin rejected: {error}"),
+            })
+        })
+        .transpose()?
+        .or_else(|| {
+            configs
+                .iter()
+                .find_map(|config| callback_base_from_redirect(config.client.redirect_uri.as_str()))
+        });
+
+    compose_auth_engine(
+        recipes,
+        client_credentials,
+        callback_base,
         secret_store,
-        OAuthProviderRuntimePorts::from_product_auth_ports(runtime_ports),
-        slack_personal_oauth_slot,
+        runtime_ports,
     )
 }
 
-fn compose_provider_client_with_runtime(
-    configs: Vec<OAuthProviderBackendConfig>,
-    dcr_configs: Vec<OAuthDcrProviderBackendConfig>,
-    secret_store: Arc<dyn SecretStore>,
-    runtime_ports: OAuthProviderRuntimePorts,
-    slack_personal_oauth_slot: Option<SlackPersonalSetupServiceSlot>,
-) -> Result<OAuthProviderComposition, RebornBuildError> {
-    let mut clients = Vec::new();
-    let mut gate_drivers = Vec::new();
-    for config in configs {
-        let provider_id = config.spec.provider_id;
-        if provider_id == GOOGLE_PROVIDER_ID {
-            gate_drivers.push(Arc::new(OAuthGateFlowDriver::new(
-                Arc::new(GoogleOAuthGateProvider::new(config.client.clone())),
-                Arc::clone(&secret_store),
-            )));
-        }
-        let mut client = HostOAuthProviderClient::new(
-            config.spec,
-            runtime_ports.runtime_http_egress(),
-            Arc::clone(&secret_store),
-            runtime_ports.obligation_handler(),
-            config.client.client_id,
-            config.client.redirect_uri,
-        )
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!(
-                "{provider_id} OAuth provider backend could not be configured: {error}"
-            ),
-        })?;
-        if let Some(client_secret) = config.client.client_secret {
-            client = client.with_client_secret(client_secret);
-        }
-        clients.push((provider_id, Arc::new(client) as Arc<dyn AuthProviderClient>));
-    }
-    if let Some(slot) = slack_personal_oauth_slot {
-        gate_drivers.push(Arc::new(OAuthGateFlowDriver::new(
-            Arc::new(SlackPersonalOAuthGateProvider::new(slot.clone())),
-            Arc::clone(&secret_store),
-        )));
-        clients.push((
-            SLACK_PERSONAL_PROVIDER_ID,
-            Arc::new(LazySlackPersonalExchangeClient {
-                slot,
-                spec: slack_personal_provider_spec(),
-                egress: runtime_ports.runtime_http_egress(),
-                secret_store: Arc::clone(&secret_store),
-                obligation_handler: runtime_ports.obligation_handler(),
-            }) as Arc<dyn AuthProviderClient>,
-        ));
-    }
-    let mut dcr_providers = Vec::new();
-    for config in dcr_configs {
-        let provider_id = config.config.spec.provider_id;
-        let provider = Arc::new(
-            OAuthDcrProvider::new(
-                config.config,
-                runtime_ports.runtime_http_egress(),
-                Arc::clone(&secret_store),
-                runtime_ports.obligation_handler(),
-            )
-            .map_err(|error| RebornBuildError::InvalidConfig {
-                reason: format!(
-                    "{provider_id} DCR OAuth provider backend could not be configured: {error}"
-                ),
-            })?,
+/// Fill the vendor recipe's client-credential handles from deployment config.
+fn register_vendor_client_config(
+    credentials: &mut CompositionClientCredentials,
+    recipes: &dyn AuthRecipeResolver,
+    config: &OAuthProviderBackendConfig,
+) {
+    use secrecy::ExposeSecret as _;
+    let Some(resolved) = recipes.recipe_for_vendor(&config.vendor) else {
+        tracing::warn!(
+            vendor = config.vendor,
+            "no bundled recipe for configured OAuth vendor; client material not wired"
         );
-        let client = HostOAuthProviderClient::new_with_client_material(
-            provider.spec().clone(),
-            runtime_ports.runtime_http_egress(),
-            Arc::clone(&secret_store),
-            runtime_ports.obligation_handler(),
-            provider.clone(),
-        )
-        .map_err(|error| RebornBuildError::InvalidConfig {
-            reason: format!(
-                "{provider_id} DCR OAuth provider backend could not be configured: {error}"
-            ),
-        })?;
-        clients.push((provider_id, Arc::new(client) as Arc<dyn AuthProviderClient>));
-        dcr_providers.push(provider);
-    }
-    tracing::debug!(
-        provider_count = clients.len(),
-        providers = ?clients.iter().map(|(provider, _)| *provider).collect::<Vec<_>>(),
-        dcr_provider_count = dcr_providers.len(),
-        gate_provider_count = gate_drivers.len(),
-        "product-auth OAuth provider clients composed"
+        return;
+    };
+    let ironclaw_host_api::VendorAuthRecipe::Oauth2Code(recipe) = &resolved.recipe else {
+        tracing::warn!(
+            vendor = config.vendor,
+            "configured OAuth vendor's recipe is not oauth2_code; client material not wired"
+        );
+        return;
+    };
+    let Some(handles) = &recipe.client_credentials else {
+        tracing::debug!(
+            vendor = config.vendor,
+            "vendor recipe uses dynamic client registration; static client material ignored"
+        );
+        return;
+    };
+    credentials.register_static(
+        handles.client_id_handle.as_str(),
+        SecretString::from(config.client.client_id.as_str().to_string()),
     );
-    let dcr_registry =
-        (!dcr_providers.is_empty()).then(|| Arc::new(OAuthDcrProviderRegistry::new(dcr_providers)));
-    let gate_registry =
-        (!gate_drivers.is_empty()).then(|| Arc::new(OAuthGateProviderRegistry::new(gate_drivers)));
-    Ok(OAuthProviderComposition {
-        client: compose_provider_clients(clients),
-        dcr_registry,
-        gate_registry,
-    })
+    if let (Some(secret_handle), Some(secret)) =
+        (&handles.client_secret_handle, &config.client.client_secret)
+    {
+        credentials.register_static(
+            secret_handle.as_str(),
+            SecretString::from(secret.expose_secret().to_string()),
+        );
+    }
 }
 
-struct LazySlackPersonalExchangeClient {
-    slot: SlackPersonalSetupServiceSlot,
-    spec: crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderSpec,
-    egress: Arc<dyn RuntimeHttpEgress>,
+/// Derive the static callback base from a configured vendor redirect URI of
+/// the `{base}/{vendor}/callback` shape.
+fn callback_base_from_redirect(redirect: &str) -> Option<EngineCallbackBase> {
+    let prefix = redirect.strip_suffix("/callback")?;
+    let (base, _vendor) = prefix.rsplit_once('/')?;
+    EngineCallbackBase::new(base).ok()
+}
+
+/// Compose the auth engine and the blocked-gate driver.
+///
+/// `callback_base` is the deployment's static vendor-callback base
+/// (`.../product-auth/oauth`); without it (no public callback configured) no
+/// engine is composed and OAuth connect flows stay unavailable, matching the
+/// previous no-providers-configured behavior.
+pub(crate) fn compose_auth_engine(
+    recipes: Arc<dyn AuthRecipeResolver>,
+    client_credentials: CompositionClientCredentials,
+    callback_base: Option<EngineCallbackBase>,
     secret_store: Arc<dyn SecretStore>,
-    obligation_handler: Arc<dyn CapabilityObligationHandler>,
-}
-
-impl LazySlackPersonalExchangeClient {
-    async fn build_client(
-        &self,
-    ) -> Result<
-        crate::product_auth::oauth::oauth_provider_client::HostOAuthProviderClient,
-        AuthProductError,
-    > {
-        let service = self.slot.get().ok_or_else(|| {
-            tracing::warn!("Slack personal OAuth exchange: setup service not yet initialized");
-            AuthProductError::BackendUnavailable
-        })?;
-        let (client_id, client_secret) = service.oauth_credentials().await.map_err(|e| {
-            tracing::warn!(error = %e, "Slack personal OAuth credentials not configured");
-            AuthProductError::MalformedConfig
-        })?;
-        HostOAuthProviderClient::new(
-            self.spec.clone(),
-            Arc::clone(&self.egress),
-            Arc::clone(&self.secret_store),
-            Arc::clone(&self.obligation_handler),
-            client_id,
-            self.slot.redirect_uri().clone(),
-        )
-        .map(|client| client.with_client_secret(client_secret))
-        .map_err(|e| {
-            tracing::warn!(error = %e, "failed to build Slack personal OAuth exchange client");
-            AuthProductError::BackendUnavailable
-        })
-    }
-}
-
-impl fmt::Debug for LazySlackPersonalExchangeClient {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("LazySlackPersonalExchangeClient")
-            .finish()
-    }
-}
-
-#[async_trait]
-impl AuthProviderClient for LazySlackPersonalExchangeClient {
-    async fn exchange_callback(
-        &self,
-        context: OAuthProviderExchangeContext,
-        request: OAuthProviderCallbackRequest,
-    ) -> Result<OAuthProviderExchange, AuthProductError> {
-        self.build_client()
-            .await?
-            .exchange_callback(context, request)
-            .await
-    }
-
-    async fn refresh_token(
-        &self,
-        request: OAuthProviderRefreshRequest,
-    ) -> Result<OAuthProviderRefresh, AuthProductError> {
-        self.build_client().await?.refresh_token(request).await
-    }
-
-    async fn cleanup_exchange(
-        &self,
-        context: OAuthProviderExchangeContext,
-        exchange: &OAuthProviderExchange,
-    ) -> Result<(), AuthProductError> {
-        self.build_client()
-            .await?
-            .cleanup_exchange(context, exchange)
-            .await
-    }
-}
-
-#[derive(Clone)]
-struct OAuthProviderRuntimePorts {
-    runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-    obligation_handler: Arc<dyn CapabilityObligationHandler>,
-}
-
-impl OAuthProviderRuntimePorts {
-    fn from_product_auth_ports(ports: ProductAuthProviderRuntimePorts) -> Self {
-        Self {
-            runtime_http_egress: ports.runtime_http_egress(),
-            obligation_handler: ports.obligation_handler(),
-        }
-    }
-
-    #[cfg(test)]
-    fn new(
-        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
-        obligation_handler: Arc<dyn CapabilityObligationHandler>,
-    ) -> Self {
-        Self {
-            runtime_http_egress,
-            obligation_handler,
-        }
-    }
-
-    fn runtime_http_egress(&self) -> Arc<dyn RuntimeHttpEgress> {
-        Arc::clone(&self.runtime_http_egress)
-    }
-
-    fn obligation_handler(&self) -> Arc<dyn CapabilityObligationHandler> {
-        Arc::clone(&self.obligation_handler)
-    }
-}
-
-fn compose_provider_clients(
-    clients: Vec<(&'static str, Arc<dyn AuthProviderClient>)>,
-) -> Option<Arc<dyn AuthProviderClient>> {
-    if clients.is_empty() {
-        return None;
-    }
-    Some(Arc::new(MultiplexAuthProviderClient::from_clients(clients)))
-}
-
-#[derive(Default)]
-struct MultiplexAuthProviderClient {
-    providers: BTreeMap<String, Arc<dyn AuthProviderClient>>,
-}
-
-impl MultiplexAuthProviderClient {
-    fn from_clients(clients: Vec<(&'static str, Arc<dyn AuthProviderClient>)>) -> Self {
-        Self {
-            providers: clients
-                .into_iter()
-                .map(|(provider, client)| (provider.to_string(), client))
-                .collect(),
-        }
-    }
-
-    fn client_for(&self, provider: &str) -> Result<Arc<dyn AuthProviderClient>, AuthProductError> {
-        self.providers.get(provider).cloned().ok_or_else(|| {
-            tracing::warn!(
-                provider,
-                configured_providers = ?self.providers.keys().collect::<Vec<_>>(),
-                "product-auth OAuth provider client is not configured"
-            );
-            AuthProductError::BackendUnavailable
-        })
-    }
-}
-
-impl fmt::Debug for MultiplexAuthProviderClient {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("MultiplexAuthProviderClient")
-            .field("providers", &self.providers.keys().collect::<Vec<_>>())
-            .finish()
-    }
-}
-
-#[async_trait]
-impl AuthProviderClient for MultiplexAuthProviderClient {
-    async fn exchange_callback(
-        &self,
-        context: OAuthProviderExchangeContext,
-        request: OAuthProviderCallbackRequest,
-    ) -> Result<OAuthProviderExchange, AuthProductError> {
-        self.client_for(request.provider.as_str())?
-            .exchange_callback(context, request)
-            .await
-    }
-
-    async fn refresh_token(
-        &self,
-        request: OAuthProviderRefreshRequest,
-    ) -> Result<OAuthProviderRefresh, AuthProductError> {
-        self.client_for(request.provider.as_str())?
-            .refresh_token(request)
-            .await
-    }
-
-    async fn cleanup_exchange(
-        &self,
-        context: OAuthProviderExchangeContext,
-        exchange: &OAuthProviderExchange,
-    ) -> Result<(), AuthProductError> {
-        self.client_for(exchange.provider.as_str())?
-            .cleanup_exchange(context, exchange)
-            .await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::OAuthClientConfig;
-    use crate::product_auth::oauth::google_oauth::google_provider_spec;
-    use crate::product_auth::oauth::notion_oauth::{NOTION_PROVIDER_ID, notion_provider_spec};
-    use crate::product_auth::oauth::oauth_gate::OAuthGateChallengeRequest;
-    use ironclaw_auth::{
-        AuthFlowManager, AuthFlowRecordSource, AuthGateRef, AuthProductScope, AuthProviderId,
-        AuthSurface, AuthorizationCodeHash, CredentialAccountLabel, CredentialAccountLookupRequest,
-        CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-        CredentialRefreshRequest, GOOGLE_CALENDAR_READONLY_SCOPE, InMemoryAuthProductServices,
-        NewCredentialAccount, OAuthAuthorizationCode, OAuthClientId, OAuthRedirectUri,
-        PkceVerifierHash, PkceVerifierSecret, ProviderBackedCredentialAccountService,
-        ProviderScope,
+    runtime_ports: ProductAuthProviderRuntimePorts,
+) -> Result<OAuthProviderComposition, RebornBuildError> {
+    let Some(callback_base) = callback_base else {
+        tracing::debug!("no OAuth callback base configured; auth engine not composed");
+        return Ok(OAuthProviderComposition {
+            engine: None,
+            client: None,
+            gate_driver: None,
+        });
     };
-    use ironclaw_capabilities::{CapabilityObligationError, CapabilityObligationRequest};
-    use ironclaw_host_api::{
-        AgentId, ExtensionId, InvocationId, ResourceScope, RuntimeCredentialAccountProviderId,
-        RuntimeCredentialAuthRequirement, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-        RuntimeHttpEgressResponse, SecretHandle, TenantId, ThreadId, UserId,
-    };
-    use ironclaw_product_adapters::AuthPromptChallengeKind;
-    use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
-    use ironclaw_turns::{TurnRunId, TurnScope};
-    use secrecy::SecretString;
-    use std::sync::Mutex;
-
-    #[test]
-    fn compose_provider_clients_omits_mux_for_zero_clients() {
-        assert!(compose_provider_clients(Vec::new()).is_none());
-    }
-
-    #[tokio::test]
-    async fn compose_provider_clients_uses_mux_even_for_one_client() {
-        let client = compose_provider_clients(vec![("google", Arc::new(PanicProviderClient))])
-            .expect("one provider still returns mux");
-
-        let error = client
-            .exchange_callback(exchange_context(), callback_request("notion"))
-            .await
-            .expect_err("unknown provider must be rejected by mux before reaching client");
-
-        assert_eq!(
-            error.code(),
-            ironclaw_auth::AuthErrorCode::BackendUnavailable
-        );
-    }
-
-    #[tokio::test]
-    async fn compose_provider_client_routes_notion_to_configured_provider_spec() {
-        let egress = Arc::new(RecordingEgress::ok(
-            br#"{"access_token":"notion-access","refresh_token":"notion-refresh","expires_in":3600}"#
-                .to_vec(),
-        ));
-        let client = compose_provider_client_with_runtime(
-            vec![
-                OAuthProviderBackendConfig {
-                    spec: google_provider_spec(),
-                    client: oauth_client("google-client", "https://app.example/oauth/google"),
-                },
-                OAuthProviderBackendConfig {
-                    spec: notion_provider_spec(),
-                    client: oauth_client("notion-client", "https://app.example/oauth/notion"),
-                },
-            ],
-            Vec::new(),
-            Arc::new(FilesystemSecretStore::ephemeral()),
-            OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
-            None,
-        )
-        .expect("provider client composition")
-        .client
-        .expect("mux client");
-
-        client
-            .exchange_callback(exchange_context(), callback_request(NOTION_PROVIDER_ID))
-            .await
-            .expect("notion exchange should route to notion spec");
-
-        let request = egress.single_request();
-        assert_eq!(request.url, "https://mcp.notion.com/token");
-        let body = form_params(&request.body);
-        assert_eq!(
-            body.get("client_id").map(String::as_str),
-            Some("notion-client")
-        );
-        assert_eq!(
-            body.get("resource").map(String::as_str),
-            Some("https://mcp.notion.com/mcp")
-        );
-        assert_eq!(
-            request
-                .network_policy
-                .allowed_targets
-                .first()
-                .map(|target| target.host_pattern.as_str()),
-            Some("mcp.notion.com")
-        );
-    }
-
-    #[tokio::test]
-    async fn compose_provider_client_registers_google_oauth_gate_provider() {
-        let composition = compose_provider_client_with_runtime(
-            vec![OAuthProviderBackendConfig {
-                spec: google_provider_spec(),
-                client: oauth_client("google-client", "https://app.example/oauth/google"),
-            }],
-            Vec::new(),
-            Arc::new(FilesystemSecretStore::ephemeral()),
-            OAuthProviderRuntimePorts::new(
-                Arc::new(RecordingEgress::ok(Vec::new())),
-                Arc::new(NoopObligationHandler),
-            ),
-            None,
-        )
-        .expect("provider composition");
-        let registry = composition.gate_registry.expect("google gate registry");
-        let shared = Arc::new(InMemoryAuthProductServices::new());
-        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
-        let flow_source: Arc<dyn AuthFlowRecordSource> = shared;
-        let scope = TurnScope::new(
-            TenantId::new("tenant-a").unwrap(),
-            Some(AgentId::new("agent-a").unwrap()),
-            None,
-            ThreadId::new("thread-a").unwrap(),
-        );
-        let owner_user_id = UserId::new("user-a").unwrap();
-        let run_id = TurnRunId::new();
-        let gate_ref = AuthGateRef::new("gate:google-auth").unwrap();
-        let requirements = vec![RuntimeCredentialAuthRequirement {
-            provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
-            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
-                scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
-            },
-            requester_extension: ExtensionId::new("google-calendar").unwrap(),
-            provider_scopes: vec![GOOGLE_CALENDAR_READONLY_SCOPE.to_string()],
-        }];
-
-        let view = registry
-            .challenge_for_blocked_gate(OAuthGateChallengeRequest {
-                flow_manager: &flow_manager,
-                flow_source: &flow_source,
-                requirements: &requirements,
-                scope: &scope,
-                owner_user_id: &owner_user_id,
-                run_id,
-                gate_ref: &gate_ref,
-            })
-            .await
-            .expect("gate challenge")
-            .expect("google oauth challenge");
-
-        assert_eq!(view.kind, AuthPromptChallengeKind::OAuthUrl);
-        assert_eq!(view.provider.as_str(), "google");
-        assert!(
-            view.authorization_url
-                .as_ref()
-                .is_some_and(|url| url.as_str().starts_with("https://accounts.google.com/"))
-        );
-    }
-
-    #[tokio::test]
-    async fn composed_google_provider_refreshes_account_through_credential_service() {
-        let egress = Arc::new(RecordingEgress::ok(
-            br#"{"access_token":"new-google-access","refresh_token":"new-google-refresh","expires_in":3600}"#
-                .to_vec(),
-        ));
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-        let resource_scope = sample_scope();
-        let auth_scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Callback);
-        let old_access = SecretHandle::new("google-old-access").unwrap();
-        let old_refresh = SecretHandle::new("google-old-refresh").unwrap();
-        secret_store
-            .put(
-                resource_scope,
-                old_refresh.clone(),
-                SecretString::from("stored-google-refresh".to_string()),
-                None,
-            )
-            .await
-            .expect("seed refresh token");
-        let shared = Arc::new(InMemoryAuthProductServices::new());
-        let account = shared
-            .create_account(NewCredentialAccount {
-                scope: auth_scope.clone(),
-                provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
-                label: CredentialAccountLabel::new("work account").unwrap(),
-                status: CredentialAccountStatus::Expired,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(old_access.clone()),
-                refresh_secret: Some(old_refresh.clone()),
-                scopes: vec![ProviderScope::new(GOOGLE_CALENDAR_READONLY_SCOPE).unwrap()],
-            })
-            .await
-            .expect("expired google account");
-        let provider = compose_provider_client_with_runtime(
-            vec![OAuthProviderBackendConfig {
-                spec: google_provider_spec(),
-                client: oauth_client("google-client", "https://app.example/oauth/google"),
-            }],
-            Vec::new(),
-            secret_store,
-            OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
-            None,
-        )
-        .expect("provider composition")
-        .client
-        .expect("google provider client");
-        let auth =
-            ProviderBackedCredentialAccountService::new(shared.clone(), shared.clone(), provider);
-
-        let report = auth
-            .refresh_account(CredentialRefreshRequest::new(
-                auth_scope.clone(),
-                AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
-                account.id,
-            ))
-            .await
-            .expect("google refresh succeeds");
-
-        assert!(report.refreshed);
-        assert_eq!(report.account.status, CredentialAccountStatus::Configured);
-        let stored = shared
-            .get_account(CredentialAccountLookupRequest::new(auth_scope, account.id))
-            .await
-            .expect("lookup")
-            .expect("refreshed account");
-        assert_eq!(stored.status, CredentialAccountStatus::Configured);
-        let new_access = stored
-            .access_secret
-            .as_ref()
-            .expect("refresh must persist a new access token handle");
-        let new_refresh = stored
-            .refresh_secret
-            .as_ref()
-            .expect("refresh must persist a new refresh token handle");
-        assert_ne!(new_access, &old_access);
-        assert_ne!(new_refresh, &old_refresh);
-        assert_eq!(
-            stored.scopes,
-            vec![ProviderScope::new(GOOGLE_CALENDAR_READONLY_SCOPE).unwrap()]
-        );
-        let request = egress.single_request();
-        assert_eq!(request.url, "https://oauth2.googleapis.com/token");
-        let body = form_params(&request.body);
-        assert_eq!(
-            body.get("grant_type").map(String::as_str),
-            Some("refresh_token")
-        );
-        assert_eq!(
-            body.get("client_id").map(String::as_str),
-            Some("google-client")
-        );
-        assert_eq!(
-            body.get("refresh_token").map(String::as_str),
-            Some("stored-google-refresh")
-        );
-
-        let serialized = serde_json::to_string(&report).expect("serialize report");
-        assert!(!serialized.contains("stored-google-refresh"));
-        assert!(!serialized.contains("new-google-access"));
-        assert!(!serialized.contains("new-google-refresh"));
-    }
-
-    #[tokio::test]
-    async fn composed_google_provider_marks_revoked_on_invalid_grant_token_response() {
-        // A3: invalid_grant responses must set status Revoked (permanent revocation),
-        // not RefreshFailed (transient). The original test used the same body but
-        // expected RefreshFailed — updated to reflect the new classification.
-        let egress = Arc::new(RecordingEgress::with_status(
-            400,
-            br#"{"error":"invalid_grant"}"#.to_vec(),
-        ));
-        let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
-        let resource_scope = sample_scope();
-        let auth_scope = AuthProductScope::new(resource_scope.clone(), AuthSurface::Callback);
-        let old_access = SecretHandle::new("google-old-access").unwrap();
-        let old_refresh = SecretHandle::new("google-old-refresh").unwrap();
-        secret_store
-            .put(
-                resource_scope,
-                old_refresh.clone(),
-                SecretString::from("stored-google-refresh".to_string()),
-                None,
-            )
-            .await
-            .expect("seed refresh token");
-        let shared = Arc::new(InMemoryAuthProductServices::new());
-        let account = shared
-            .create_account(NewCredentialAccount {
-                scope: auth_scope.clone(),
-                provider: AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
-                label: CredentialAccountLabel::new("work account").unwrap(),
-                status: CredentialAccountStatus::Expired,
-                ownership: CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(old_access.clone()),
-                refresh_secret: Some(old_refresh.clone()),
-                scopes: vec![ProviderScope::new(GOOGLE_CALENDAR_READONLY_SCOPE).unwrap()],
-            })
-            .await
-            .expect("expired google account");
-        let provider = compose_provider_client_with_runtime(
-            vec![OAuthProviderBackendConfig {
-                spec: google_provider_spec(),
-                client: oauth_client("google-client", "https://app.example/oauth/google"),
-            }],
-            Vec::new(),
-            secret_store,
-            OAuthProviderRuntimePorts::new(egress.clone(), Arc::new(NoopObligationHandler)),
-            None,
-        )
-        .expect("provider composition")
-        .client
-        .expect("google provider client");
-        let auth =
-            ProviderBackedCredentialAccountService::new(shared.clone(), shared.clone(), provider);
-
-        let report = auth
-            .refresh_account(CredentialRefreshRequest::new(
-                auth_scope.clone(),
-                AuthProviderId::new(GOOGLE_PROVIDER_ID).unwrap(),
-                account.id,
-            ))
-            .await
-            .expect("google refresh failure is handled by the account service");
-
-        assert!(!report.refreshed);
-        assert_eq!(
-            report.account.status,
-            CredentialAccountStatus::Revoked,
-            "invalid_grant must produce Revoked status (permanent revocation, not transient failure)"
-        );
-        let stored = shared
-            .get_account(CredentialAccountLookupRequest::new(auth_scope, account.id))
-            .await
-            .expect("lookup")
-            .expect("failed refresh account");
-        assert_eq!(
-            stored.status,
-            CredentialAccountStatus::Revoked,
-            "stored account must reflect Revoked status after invalid_grant"
-        );
-        assert_eq!(stored.access_secret, Some(old_access));
-        assert_eq!(stored.refresh_secret, Some(old_refresh));
-        assert_eq!(
-            stored.scopes,
-            vec![ProviderScope::new(GOOGLE_CALENDAR_READONLY_SCOPE).unwrap()]
-        );
-        let request = egress.single_request();
-        assert_eq!(request.url, "https://oauth2.googleapis.com/token");
-        let body = form_params(&request.body);
-        assert_eq!(
-            body.get("grant_type").map(String::as_str),
-            Some("refresh_token")
-        );
-        assert_eq!(
-            body.get("client_id").map(String::as_str),
-            Some("google-client")
-        );
-        assert_eq!(
-            body.get("refresh_token").map(String::as_str),
-            Some("stored-google-refresh")
-        );
-    }
-
-    fn oauth_client(client_id: &str, redirect_uri: &str) -> OAuthClientConfig {
-        OAuthClientConfig {
-            client_id: OAuthClientId::new(client_id).unwrap(),
-            client_secret: None,
-            redirect_uri: OAuthRedirectUri::new(redirect_uri).unwrap(),
-            hosted_domain_hint: None,
-        }
-    }
-
-    fn exchange_context() -> OAuthProviderExchangeContext {
-        OAuthProviderExchangeContext {
-            scope: AuthProductScope::new(sample_scope(), AuthSurface::Callback),
-            flow_id: ironclaw_auth::AuthFlowId::new(),
-        }
-    }
-
-    fn callback_request(provider: &str) -> OAuthProviderCallbackRequest {
-        OAuthProviderCallbackRequest {
-            provider: AuthProviderId::new(provider).unwrap(),
-            account_label: CredentialAccountLabel::new("work account").unwrap(),
-            authorization_code: OAuthAuthorizationCode::new(SecretString::from(
-                "raw-auth-code".to_string(),
-            ))
-            .unwrap(),
-            authorization_code_hash: AuthorizationCodeHash::new(fake_digest("code")).unwrap(),
-            pkce_verifier: PkceVerifierSecret::new(SecretString::from(
-                "raw-pkce-verifier".to_string(),
-            ))
-            .unwrap(),
-            pkce_verifier_hash: PkceVerifierHash::new(fake_digest("pkce")).unwrap(),
-            scopes: vec![ProviderScope::new("workspace").unwrap()],
-        }
-    }
-
-    fn sample_scope() -> ResourceScope {
-        ResourceScope {
-            tenant_id: TenantId::new("tenant-a").unwrap(),
-            user_id: UserId::new("user-a").unwrap(),
-            agent_id: None,
-            project_id: None,
-            mission_id: None,
-            thread_id: None,
-            invocation_id: InvocationId::new(),
-        }
-    }
-
-    fn form_params(body: &[u8]) -> std::collections::BTreeMap<String, String> {
-        url::form_urlencoded::parse(body).into_owned().collect()
-    }
-
-    fn fake_digest(value: &str) -> String {
-        format!(
-            "{:064x}",
-            value.bytes().fold(0_u64, |hash, byte| {
-                hash.wrapping_mul(31).wrapping_add(u64::from(byte))
-            })
-        )
-    }
-
-    #[derive(Debug)]
-    struct PanicProviderClient;
-
-    #[async_trait]
-    impl AuthProviderClient for PanicProviderClient {
-        async fn exchange_callback(
-            &self,
-            _context: OAuthProviderExchangeContext,
-            _request: OAuthProviderCallbackRequest,
-        ) -> Result<OAuthProviderExchange, AuthProductError> {
-            panic!("mux should reject unknown provider before invoking single configured client");
-        }
-
-        async fn refresh_token(
-            &self,
-            _request: OAuthProviderRefreshRequest,
-        ) -> Result<OAuthProviderRefresh, AuthProductError> {
-            panic!("not used");
-        }
-    }
-
-    #[derive(Debug)]
-    struct RecordingEgress {
-        status: u16,
-        response_body: Vec<u8>,
-        requests: Mutex<Vec<RuntimeHttpEgressRequest>>,
-    }
-
-    impl RecordingEgress {
-        fn ok(response_body: Vec<u8>) -> Self {
-            Self::with_status(200, response_body)
-        }
-
-        fn with_status(status: u16, response_body: Vec<u8>) -> Self {
-            Self {
-                status,
-                response_body,
-                requests: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn single_request(&self) -> RuntimeHttpEgressRequest {
-            let requests = self.requests.lock().unwrap();
-            assert_eq!(requests.len(), 1);
-            requests[0].clone()
-        }
-    }
-
-    #[async_trait]
-    impl RuntimeHttpEgress for RecordingEgress {
-        async fn execute(
-            &self,
-            request: RuntimeHttpEgressRequest,
-        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
-            self.requests.lock().unwrap().push(request);
-            Ok(RuntimeHttpEgressResponse {
-                status: self.status,
-                headers: vec![("content-type".to_string(), "application/json".to_string())],
-                body: self.response_body.clone(),
-                saved_body: None,
-                request_bytes: 0,
-                response_bytes: 0,
-                redaction_applied: true,
-            })
-        }
-    }
-
-    #[derive(Debug)]
-    struct NoopObligationHandler;
-
-    #[async_trait]
-    impl CapabilityObligationHandler for NoopObligationHandler {
-        async fn satisfy(
-            &self,
-            _request: CapabilityObligationRequest<'_>,
-        ) -> Result<(), CapabilityObligationError> {
-            Ok(())
-        }
-    }
+    let egress: Arc<dyn RuntimeHttpEgress> = Arc::new(ObligationStagedAuthEgress::new(
+        runtime_ports.runtime_http_egress(),
+        runtime_ports.obligation_handler(),
+    ));
+    let engine = Arc::new(AuthEngine::new(AuthEngineDeps {
+        recipes,
+        client_credentials: Arc::new(client_credentials),
+        egress,
+        secret_store: Arc::clone(&secret_store),
+        callback_base,
+        dcr_client_name: DCR_CLIENT_NAME.to_string(),
+    }));
+    let gate_driver = Arc::new(OAuthGateFlowDriver::new(
+        Arc::clone(&engine),
+        Arc::clone(&secret_store),
+    ));
+    tracing::debug!("product-auth auth engine composed");
+    Ok(OAuthProviderComposition {
+        client: Some(Arc::clone(&engine) as Arc<dyn AuthProviderClient>),
+        engine: Some(engine),
+        gate_driver: Some(gate_driver),
+    })
 }

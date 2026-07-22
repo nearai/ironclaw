@@ -101,10 +101,8 @@ consumer chooses to.
   for free.
 - The audit / observability story is uniform — every write goes through
   one method.
-- Feature-flag dispatch (`#[cfg(feature = "libsql")]` /
-  `#[cfg(feature = "postgres")]`) concentrates in
-  `crates/ironclaw_filesystem/`; consumer crates lose their per-backend
-  branches.
+- Backend-specific dispatch concentrates in `crates/ironclaw_filesystem/`;
+  consumer crates lose their per-backend branches.
 
 **Costs:**
 

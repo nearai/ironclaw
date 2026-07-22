@@ -11,9 +11,9 @@ async-trait = "0.1"
 axum = "0.8"
 deadpool-postgres = "0.14"
 ironclaw_filesystem = { path = "../../../crates/ironclaw_filesystem" }
-ironclaw_host_runtime = { path = "../../../crates/ironclaw_host_runtime", features = ["libsql", "postgres"] }
+ironclaw_host_runtime = { path = "../../../crates/ironclaw_host_runtime" }
 ironclaw_host_api = { path = "../../../crates/ironclaw_host_api" }
-ironclaw_reborn_composition = { path = "../../../crates/ironclaw_reborn_composition", features = ["libsql", "postgres"] }
+ironclaw_reborn_composition = { path = "../../../crates/ironclaw_reborn_composition" }
 ironclaw_reborn_event_store = { path = "../../../crates/ironclaw_reborn_event_store" }
 ironclaw_resources = { path = "../../../crates/ironclaw_resources" }
 ironclaw_run_state = { path = "../../../crates/ironclaw_run_state" }
@@ -21,6 +21,7 @@ ironclaw_secrets = { path = "../../../crates/ironclaw_secrets" }
 ironclaw_triggers = { path = "../../../crates/ironclaw_triggers" }
 ironclaw_trust = { path = "../../../crates/ironclaw_trust" }
 ironclaw_turns = { path = "../../../crates/ironclaw_turns" }
+ironclaw_webui = { path = "../../../crates/ironclaw_webui" }
 chrono = "0.4"
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 secrecy = "0.10"

@@ -77,7 +77,13 @@ trust = "third_party"
 kind = "wasm"
 module = "acme.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "acme.shell"
 description = "Runs a shell command."
 effects = ["dispatch_capability", "spawn_process", "execute_code", "network"]
@@ -90,6 +96,7 @@ output_schema_ref = "schemas/shell.output.v1.json"
         manifest_toml,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     let package = ExtensionPackage::from_manifest(
@@ -222,13 +229,13 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     let mut forged_context = context.clone();
     forged_context.authenticated_actor_user_id = Some(UserId::new("slack-bob").unwrap());
     let forged_error = resume_host
-        .resume_spawn_json(CapabilityResumeRequest {
-            context: forged_context,
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
-            estimate: estimate.clone(),
-            input: input.clone(),
-        })
+        .resume_spawn_json(
+            forged_context,
+            approval_id,
+            capability_id(),
+            estimate.clone(),
+            input.clone(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -255,13 +262,13 @@ async fn capability_host_resumes_approved_spawn_and_consumes_matching_lease() {
     );
 
     let result = resume_host
-        .resume_spawn_json(CapabilityResumeRequest {
-            context: context.clone(),
-            approval_request_id: approval_id,
-            capability_id: capability_id(),
+        .resume_spawn_json(
+            context.clone(),
+            approval_id,
+            capability_id(),
             estimate,
             input,
-        })
+        )
         .await
         .unwrap();
 
@@ -508,6 +515,7 @@ impl ProcessManager for RecordingProcessManager {
             mounts: start.mounts,
             estimated_resources: start.estimated_resources,
             resource_reservation_id: start.resource_reservation_id,
+            authorized_continuation: start.authorized_continuation,
             error_kind: None,
         })
     }
@@ -620,4 +628,15 @@ impl TrustAwareCapabilityDispatchAuthorizer for SpawnAuthorizer {
             obligations: Obligations::empty(),
         }
     }
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

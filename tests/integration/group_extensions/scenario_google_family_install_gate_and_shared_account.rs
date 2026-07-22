@@ -43,8 +43,8 @@ const GOOGLE_DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive";
 pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let g = RebornIntegrationGroup::extension_lifecycle_google_oauth_configured().await?;
     let g = &g;
-    let google_provider = ironclaw_host_api::RuntimeCredentialAccountProviderId::new("google")
-        .map_err(|error| error.to_string())?;
+    let google_provider =
+        ironclaw_host_api::VendorId::new("google").map_err(|error| error.to_string())?;
 
     // ── Phase 1: calendar install parks at the google gate despite the
     //    existing (gmail-scoped) google account ─────────────────────────────
@@ -223,6 +223,9 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     calendar_restore
         .assert_tool_result_contains("\"activated\":true")
         .await?;
+    calendar_restore
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
+        .await?;
 
     let drive_restore = g
         .thread("google-family-drive-restore")
@@ -238,6 +241,9 @@ pub async fn run(_g: &RebornIntegrationGroup) -> HarnessResult<()> {
     drive_restore.submit_turn("activate google drive").await?;
     drive_restore
         .assert_tool_result_contains("\"activated\":true")
+        .await?;
+    drive_restore
+        .assert_model_message_content_contains(r#"\"activated\":true"#)
         .await?;
 
     Ok(())

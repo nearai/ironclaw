@@ -15,8 +15,8 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
   - `src/webui_v2/descriptors.rs` + `tests/webui_v2_descriptors_contract.rs` — the route contract.
   - `src/webui_v2/handlers.rs` + `tests/webui_v2_handlers_contract.rs` — handler dispatch.
   - `src/webui_serve.rs` — the `webui_v2_app` gateway assembly + middleware order.
-  - `Cargo.toml` — the `test-support` feature gate and the
-    (deliberately narrow) dependency shape.
+  - `Cargo.toml` — feature gates (`openai-compat-beta`,
+    `dev-in-memory-session`) and the (deliberately narrow) dependency shape.
 
 ## What this crate owns (composed subsystems)
 
@@ -32,12 +32,12 @@ one `products`-layer crate above `ironclaw_reborn_composition`. Driven by the
    config)` composes the full `axum::Router` and layers the fixed middleware
    stack — ws-origin → body limit → bearer auth → rate limit → handler — plus the
    `WebuiAuthenticator` / `WebuiAuthentication` host-auth vocabulary and the
-   Slack / OpenAI-compat mounts.
+   feature-gated OpenAI-compat mounts.
 3. **Serve loop + host authentication** (`src/lib.rs`, `src/auth/`,
    `src/session.rs`, `src/oidc.rs`, `src/signed_session_login.rs`):
    `serve_webui_v2` (listener bind + `axum::serve` + graceful shutdown), the
-   `Env` / `Session` / `Oidc` authenticators, the `SessionStore` trait + stores,
-   and the `/auth/*` OAuth login surface (Google/GitHub via the `OAuthProvider`
+   `Env` / `Session` / `Oidc` authenticators, `SignedTokenSessionStore`, and
+   the `/auth/*` OAuth login surface (Google/GitHub via the `OAuthProvider`
    trait).
 
 ## Do not move in here

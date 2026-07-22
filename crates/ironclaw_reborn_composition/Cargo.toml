@@ -14,14 +14,6 @@ publish = false
 layer = "app"
 
 [features]
-# Composition assembles a *runtime*, and several of its parts have no
-# non-durable form: conversation bindings must survive a restart, admin
-# secret provisioning needs the secret-store crypto, and the
-# OpenAI-compatible mount refuses to serve non-durable bindings. Every
-# consumer and every shipped artifact already selects a backend, so the
-# default names one instead of declaring a build shape nothing uses.
-# `--no-default-features --features postgres` selects the other.
-default = ["libsql"]
 # Compile the mem0 third-party memory provider into the composed runtime.
 # Off by default (productionization, #5264) so default builds carry no mem0
 # code or its `reqwest`/`rustls` transport deps; an operator who binds memory
@@ -33,33 +25,18 @@ memory-mem0 = ["dep:ironclaw_memory_mem0"]
 # crates can drive `build_reborn_runtime` with a stub model gateway
 # (via `RebornRuntimeInput::with_model_gateway_override`) and inspect the
 # budget pipeline end-to-end. Enable with `cargo test --features
-# test-support` (plus whatever feature surface the test crate also
-# requires, e.g. `libsql`).
+# test-support.
 test-support = [
-    "ironclaw_channel_delivery/test-support",
     "ironclaw_host_runtime/test-support",
-]
-# Expose the narrow `extension_installation_store_for_migration` accessor for
-# the v1→Reborn migration tool (`ironclaw_reborn_migration`). Ships zero bytes in
-# a default production binary; mirrors the `test-support` substrate seams.
-migration-support = []
-libsql = [
-    "dep:libsql",
-    "ironclaw_host_runtime/libsql",
-]
-postgres = [
-    "dep:deadpool-postgres",
-    "ironclaw_host_runtime/postgres",
+    "ironclaw_runner/test-support",
 ]
 [dependencies]
 async-trait = "0.1"
 base64 = "0.22"
 chrono = "0.4"
-deadpool-postgres = { version = "0.14", optional = true }
+deadpool-postgres = "0.14"
 futures = "0.3"
 ironclaw_auth = { path = "../ironclaw_auth" }
-ironclaw_channel_host = { path = "../ironclaw_channel_host" }
-ironclaw_channel_delivery = { path = "../ironclaw_channel_delivery" }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_capabilities = { path = "../ironclaw_capabilities" }
 ironclaw_approvals = { path = "../ironclaw_approvals" }
@@ -74,6 +51,7 @@ ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_hooks = { path = "../ironclaw_hooks" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_extension_host = { path = "../ironclaw_extension_host" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", default-features = false, features = ["registry-provider-factory"] }
 ironclaw_loop_host = { path = "../ironclaw_loop_host" }
@@ -106,8 +84,6 @@ ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_safety = { path = "../ironclaw_safety" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_skills = { path = "../ironclaw_skills" }
-ironclaw_slack_v2_adapter = { path = "../ironclaw_slack_v2_adapter" }
-ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_triggers = { path = "../ironclaw_triggers" }
 ironclaw_projects = { path = "../ironclaw_projects" }
@@ -119,8 +95,7 @@ nix = { version = "0.30", default-features = false, features = ["process"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 # WebUI v2 route surface + static SPA bundle merged up into
 # `ironclaw_webui`; no longer a composition dependency.
-ironclaw_wasm_product_adapters = { path = "../ironclaw_wasm_product_adapters" }
-libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
 # axum + tower middleware stack used by the `webui_serve` module. Each
 # entry is feature-gated so non-beta builds carry no HTTP surface code.
@@ -147,7 +122,7 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
+ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
 async-trait = "0.1"
 chrono = "0.4"
 hmac = "0.13"
@@ -170,10 +145,7 @@ http = "1"
 http-body-util = "0.1"
 # Admin-user-management e2e test drives the composed app with a real session
 # authenticator so a minted API token can be validated (login-with-token).
-# Composition's own WebUI integration tests (`tests/webui_v2_product_auth*.rs`)
-# also call the `WebuiServeConfig::with_slack_*` setters, which moved into this
-# ingress crate and are now compiled in unconditionally.
-ironclaw_webui = { path = "../ironclaw_webui"}
+ironclaw_webui = { path = "../ironclaw_webui" }
 secrecy = { version = "0.10", features = ["serde"] }
 ironclaw_common = { path = "../ironclaw_common" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
@@ -181,12 +153,17 @@ ironclaw_host_runtime = { path = "../ironclaw_host_runtime", features = ["test-s
 # mem0 provider with its mock transport: the provider-swap integration test
 # drives the config-driven factory over the in-memory `MockMem0Transport`.
 ironclaw_memory_mem0 = { path = "../ironclaw_memory_mem0", features = ["test-support"] }
+ironclaw_loop_host = { path = "../ironclaw_loop_host", features = ["test-support"] }
 ironclaw_conversations = { path = "../ironclaw_conversations" }
 ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns", features = ["test-support"] }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+# The ported channel-host e2e suite drives the generic assembly with slack
+# fixtures; dev-dependency linkage of concrete extension crates is the
+# sanctioned test exception (DEL-7).
+ironclaw_slack_extension = { path = "../ironclaw_slack_extension" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 rust_decimal_macros = "1"
 sha2 = "0.11"
@@ -204,11 +181,9 @@ tracing-test = "0.2"
 
 [[test]]
 name = "production_runtime_automations"
-required-features = ["libsql"]
 
 [[test]]
 name = "resource_governor_libsql_contract"
-required-features = ["libsql"]
 
 [build-dependencies]
 ironclaw_skills = { path = "../ironclaw_skills" }

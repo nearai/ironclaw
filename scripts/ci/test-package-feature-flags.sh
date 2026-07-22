@@ -24,20 +24,14 @@ assert_flags() {
   echo "PASS ${package} -> '${expected}'"
 }
 
-# The channel-host support crate ships its webhook helpers (installation rate
-# limiter, sanitized webhook error mapping) unconditionally, so it needs no
-# recipe of its own.
-assert_flags ironclaw_channel_host ""
-
-# The delivery-support crate exposes its production surface without feature
-# gates; only downstream tests opt into its test-support seam.
-assert_flags ironclaw_channel_delivery ""
-
 # The telegram host crate is deliberately flag-free: its whole surface is
 # unconditional inside the crate.
 assert_flags ironclaw_telegram_extension ""
 
+# The runner restart regression is active without a crate feature gate.
+assert_flags ironclaw_runner ""
+
 # Guard the case-arm structure itself with one long-standing recipe.
-assert_flags ironclaw_reborn_composition "--features test-support,libsql"
+assert_flags ironclaw_reborn_composition "--features test-support"
 
 echo "PASS package-feature-flags recipes"

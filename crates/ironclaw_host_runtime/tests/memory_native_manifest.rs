@@ -42,7 +42,11 @@ fn aggregate_native_claim(contract: &CapabilityProfileContract) -> CapabilityPro
             .iter()
             .find(|op| {
                 op.input_schema_ref().as_str() == capability.input_schema_ref.as_str()
-                    && op.output_schema_ref().as_str() == capability.output_schema_ref.as_str()
+                    && Some(op.output_schema_ref().as_str())
+                        == capability
+                            .output_schema_ref
+                            .as_ref()
+                            .map(|schema_ref| schema_ref.as_str())
             })
             .unwrap_or_else(|| {
                 panic!(
@@ -55,7 +59,11 @@ fn aggregate_native_claim(contract: &CapabilityProfileContract) -> CapabilityPro
             CapabilityProfileClaimedOperation::new(
                 operation.id().clone(),
                 capability.input_schema_ref.as_str(),
-                capability.output_schema_ref.as_str(),
+                capability
+                    .output_schema_ref
+                    .as_ref()
+                    .map(|schema_ref| schema_ref.as_str())
+                    .expect("matched document-store operation requires an output schema ref"),
             )
             .expect("claimed operation must build"),
         );

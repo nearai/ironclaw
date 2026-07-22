@@ -55,14 +55,17 @@
 //! 14. [`result_read`] — `wrap_result_read_capability_for_test`, the
 //!     production `result_read` synthetic-capability wrap, for the same
 //!     durable tool-result projection coverage (issue #5838).
-//! 15. [`slack_channel_connection`] — `build_slack_channel_connection_for_test`,
-//!     [`SlackChannelConnectionTestBundle`] — the REAL Slack channel-connection
-//!     facade over durable host state, late-bound into the extension-lifecycle
-//!     cleanup slot, plus an OAuth-callback-shaped connect for the channel
-//!     lifecycle state machine (C-SLACK-LIFECYCLE seam, issue #6105).
+//! 15. [`channel_connection`] — [`ChannelConnectionTestBundle`],
+//!     `build_channel_connection_for_test` — the REAL generic
+//!     channel-connection facade (§6.4) + OAuth-callback-shaped identity
+//!     binding over a composed harness's own stores, late-bound into the
+//!     same removal-cleanup slot production fills (C-SLACK-LIFECYCLE seam,
+//!     issue #6105).
 
 mod automation;
 mod budget_gateway;
+#[cfg(feature = "test-support")]
+mod channel_connection;
 mod durable;
 mod local_dev_boot;
 mod local_dev_capability_io;
@@ -73,7 +76,6 @@ mod projection;
 mod refreshing_capability_port;
 mod result_read;
 mod skill_activation;
-mod slack_channel_connection;
 mod trace_capture;
 mod trigger_materializer;
 mod user_profile;
@@ -86,15 +88,18 @@ pub use budget_gateway::{
     BudgetTestGateway, FailingTestGateway, ScriptedReply, assistant_reply_without_text_for_test,
 };
 #[cfg(feature = "test-support")]
+pub use channel_connection::{
+    ChannelConnectionTestBundle, ChannelConnectionTestConfig, build_channel_connection_for_test,
+};
+#[cfg(feature = "test-support")]
 pub use durable::open_local_dev_extension_installation_store_for_test;
-#[cfg(all(feature = "test-support", feature = "libsql"))]
+#[cfg(feature = "test-support")]
 pub use durable::{
     open_local_dev_approval_request_store_for_test,
     open_local_dev_approval_settings_stores_for_test,
     open_local_dev_outbound_preferences_store_for_test, open_local_dev_trigger_repository_for_test,
 };
 pub use local_dev_boot::LOCAL_DEV_DB_FILENAME;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use local_dev_boot::build_secret_store_for_test;
 #[cfg(feature = "test-support")]
 pub use local_dev_boot::{
@@ -103,10 +108,13 @@ pub use local_dev_boot::{
 };
 #[cfg(feature = "test-support")]
 pub use local_dev_capability_io::staged_capability_io_for_test;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub use oauth_product_auth::build_google_oauth_product_auth_for_test;
+pub use oauth_product_auth::build_oauth_product_auth_for_test_on_libsql;
+pub use oauth_product_auth::build_oauth_product_auth_for_test_on_root;
 pub use oauth_product_auth::{
     OAuthProductAuthTestBundle, ScriptedOAuthTokenEgress, build_oauth_product_auth_for_test,
+    build_oauth_product_auth_with_identity_for_test,
+    handle_oauth_callback_with_channel_identity_binding_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use outbound_delivery::{
@@ -126,11 +134,6 @@ pub use result_read::{RESULT_READ_CAPABILITY_ID, wrap_result_read_capability_for
 #[cfg(feature = "test-support")]
 pub use skill_activation::{
     SKILL_ACTIVATE_CAPABILITY_ID, SkillActivationTestSource, build_skill_context_source_for_test,
-};
-#[cfg(feature = "test-support")]
-pub use slack_channel_connection::{
-    SlackChannelConnectionTestBundle, SlackChannelConnectionTestConfig,
-    build_slack_channel_connection_for_test,
 };
 #[cfg(feature = "test-support")]
 pub use trace_capture::trace_capture_turn_event_sink_for_test;

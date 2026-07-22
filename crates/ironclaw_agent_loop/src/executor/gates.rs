@@ -23,6 +23,30 @@ use super::{
     failed_exit, gate_tool_result_summary, loop_gate_kind, push_completed_result,
 };
 
+/// Enforce [`GateOutcome::validate_for_gate_kind`] before a stage honors a
+/// strategy outcome (§5a.1, docs/plans/2026-07-03-loop-failure-matrix.md): a
+/// `SkipAndContinue` on an Approval / AwaitDependentRun / ExternalTool gate is
+/// a strategy-contract violation, and silently skipping the gated call would
+/// mask a driver bug behind a normal completion. The invalid outcome is
+/// enforced as `Abort` with the validator's failure kind (`DriverBug`) so the
+/// run fails through the standard abort path.
+fn enforce_gate_outcome_contract(outcome: GateOutcome, kind: GateKind) -> GateOutcome {
+    match outcome.validate_for_gate_kind(kind) {
+        Ok(()) => outcome,
+        Err(failure_kind) => {
+            tracing::warn!(
+                gate_kind = ?kind,
+                failure_kind = failure_kind.as_str(),
+                "gate strategy returned an outcome that is invalid for this gate kind; failing the run"
+            );
+            let (GateOutcome::Block { gate }
+            | GateOutcome::SkipAndContinue { gate }
+            | GateOutcome::Abort { gate, .. }) = outcome;
+            GateOutcome::Abort { gate, failure_kind }
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct GateStage;
 
@@ -63,7 +87,8 @@ impl ExecutorStage<GateInput> for GateStage {
             kind,
             gate_ref: gate_ref.clone(),
         };
-        match ctx.planner.gate().handle(&state, &summary).await {
+        let outcome = ctx.planner.gate().handle(&state, &summary).await;
+        match enforce_gate_outcome_contract(outcome, kind) {
             GateOutcome::Block { gate } => {
                 state.gate_state = gate;
                 state.last_gate = Some(gate_ref.clone());
@@ -233,7 +258,8 @@ impl ExecutorStage<AwaitDependentRunGateInput> for AwaitDependentRunGateStage {
             kind: GateKind::AwaitDependentRun,
             gate_ref: gate_ref.clone(),
         };
-        match ctx.planner.gate().handle(&state, &summary).await {
+        let outcome = ctx.planner.gate().handle(&state, &summary).await;
+        match enforce_gate_outcome_contract(outcome, GateKind::AwaitDependentRun) {
             GateOutcome::Block { gate } => {
                 state.gate_state = gate;
                 state.last_gate = Some(gate_ref.clone());

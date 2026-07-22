@@ -1,0 +1,101 @@
+{
+  "model_name": "reborn-qa-qa_4e_github_release_email_delivery",
+  "steps": [
+    {
+      "response": {
+        "type": "user_input",
+        "content": "QA case 4E: perform the GitHub release email side effect now. Check the latest public nearai/ironclaw release using live web or HTTP context. The release API URL is https://api.github.com/repos/nearai/ironclaw/releases/latest and the expected latest release tag is ironclaw-v1.0.0-rc.1. Send the Gmail message using structured message fields, not `message.raw`. Use this exact gmail.send_message input: {\"message\":{\"from\":\"EMAIL_REDACTED\",\"to\":\"EMAIL_REDACTED\",\"subject\":\"Reborn QA 4E release ironclaw-v1.0.0-rc.1 1784643142584\",\"body\":\"REBORN_QA_4E_GITHUB_RELEASE_EMAIL_DELIVERED_1784643142584\\n\\nGitHub release check for nearai/ironclaw: ironclaw-v1.0.0-rc.1.\"}}. In the final answer include the exact marker REBORN_QA_4E_GITHUB_RELEASE_EMAIL_DELIVERED_1784643142584, include the word Gmail, and include the release tag ironclaw-v1.0.0-rc.1."
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 4E: perform the GitHub release email side effect now. Check the latest p",
+        "min_message_count": 2
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_1d2bb44e274e4853878c98de",
+            "name": "builtin__http",
+            "arguments": {
+              "method": "get",
+              "response_body_limit": 8192,
+              "url": "https://api.github.com/repos/nearai/ironclaw/releases/latest"
+            }
+          }
+        ],
+        "input_tokens": 16583,
+        "output_tokens": 110
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 4E: perform the GitHub release email side effect now. Check the latest p",
+        "min_message_count": 4
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_c44626bac63c4aedb84219bd",
+            "name": "builtin__http",
+            "arguments": {
+              "headers": {
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "IronClaw-4E/1.0"
+              },
+              "method": "get",
+              "response_body_limit": 8192,
+              "url": "https://api.github.com/repos/nearai/ironclaw/releases/latest"
+            }
+          }
+        ],
+        "input_tokens": 17153,
+        "output_tokens": 156
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 4E: perform the GitHub release email side effect now. Check the latest p",
+        "min_message_count": 6
+      },
+      "response": {
+        "type": "tool_calls",
+        "tool_calls": [
+          {
+            "id": "call_e0a25c4ebf7045b8a4061246",
+            "name": "gmail__send_message",
+            "arguments": {
+              "message": {
+                "body": "REBORN_QA_4E_GITHUB_RELEASE_EMAIL_DELIVERED_1784643142584\n\nGitHub release check for nearai/ironclaw: ironclaw-v1.0.0-rc.1.",
+                "from": "EMAIL_REDACTED",
+                "subject": "Reborn QA 4E release ironclaw-v1.0.0-rc.1 1784643142584",
+                "to": "EMAIL_REDACTED"
+              }
+            }
+          }
+        ],
+        "input_tokens": 21274,
+        "output_tokens": 182
+      }
+    },
+    {
+      "request_hint": {
+        "last_user_message_contains": "QA case 4E: perform the GitHub release email side effect now. Check the latest p",
+        "min_message_count": 8
+      },
+      "response": {
+        "type": "text",
+        "content": "**QA case 4E — Release check + Gmail side effect: PASSED**\n\n1. **GitHub release check**: Queried `https://api.github.com/repos/nearai/ironclaw/releases/latest` — confirmed the latest release tag is **`ironclaw-v1.0.0-rc.1`** (published 2026-07-21T03:57:55Z).\n\n2. **Gmail sent**: Delivered to `EMAIL_REDACTED` via Gmail with:\n   - **Subject**: `Reborn QA 4E release ironclaw-v1.0.0-rc.1 1784643142584`\n   - **Body**: `REBORN_QA_4E_GITHUB_RELEASE_EMAIL_DELIVERED_1784643142584` + release detail\n   - Message ID: `19f85056fe8745a4`\n\n**Markers present:**\n- `REBORN_QA_4E_GITHUB_RELEASE_EMAIL_DELIVERED_1784643142584`\n- **Gmail** — used for the side-effect delivery\n- Release tag **ironclaw-v1.0.0-rc.1**",
+        "input_tokens": 21619,
+        "output_tokens": 265
+      }
+    }
+  ],
+  "expects": {
+    "tools_used": [
+      "gmail.send_message"
+    ]
+  }
+}

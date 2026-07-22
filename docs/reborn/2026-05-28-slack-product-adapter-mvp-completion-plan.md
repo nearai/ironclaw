@@ -26,7 +26,7 @@ The key boundary is:
 - Merge-blocked with `DIRTY` merge state against `reborn-integration`.
 - Scoped to adapter-core / protocol-boundary work only.
 
-It currently adds a native `ironclaw_slack_v2_adapter` crate that is intended to own:
+It currently adds a native `ironclaw_slack_extension` crate that is intended to own:
 
 - Slack Events API inbound normalization:
   - DM `message` events -> `ProductInboundPayload::UserMessage`.

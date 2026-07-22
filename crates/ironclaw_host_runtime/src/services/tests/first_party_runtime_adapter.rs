@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    DispatchError, ExtensionId, ResourceEstimate, RuntimeCredentialAccountProviderId,
-    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, UserId,
+    DispatchError, ExtensionId, ResourceEstimate, RuntimeCredentialAuthRequirement,
+    RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, UserId, VendorId,
 };
 use serde_json::json;
 
@@ -41,7 +41,7 @@ async fn first_party_handler_receives_authenticated_actor_distinct_from_subject_
     );
 
     adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -122,7 +122,7 @@ async fn first_party_adapter_maps_handler_auth_required_to_dispatch_auth_require
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -186,7 +186,7 @@ async fn first_party_adapter_releases_reservation_when_handler_returns_auth_requ
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -242,7 +242,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -272,7 +272,7 @@ async fn first_party_adapter_forwards_required_secrets_from_auth_required_handle
 #[tokio::test]
 async fn first_party_adapter_forwards_credential_requirements_from_auth_required_handler() {
     let requirement = RuntimeCredentialAuthRequirement {
-        provider: RuntimeCredentialAccountProviderId::new("google").unwrap(),
+        provider: VendorId::new("google").unwrap(),
         setup: ironclaw_host_api::RuntimeCredentialAccountSetup::OAuth {
             scopes: vec!["https://www.googleapis.com/auth/gmail.readonly".to_string()],
         },
@@ -307,7 +307,7 @@ async fn first_party_adapter_forwards_credential_requirements_from_auth_required
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -364,7 +364,7 @@ async fn first_party_adapter_maps_panicking_handler_to_backend() {
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -506,6 +506,13 @@ impl ResourceGovernor for ReconcileFailingGovernor {
         Err(ironclaw_resources::ResourceError::UnknownReservation { id: reservation_id })
     }
 
+    fn validate_reservation(
+        &self,
+        reservation: &ironclaw_host_api::ResourceReservation,
+    ) -> Result<(), ironclaw_resources::ResourceError> {
+        self.inner.validate_reservation(reservation)
+    }
+
     fn release(
         &self,
         reservation_id: ironclaw_host_api::ResourceReservationId,
@@ -551,7 +558,7 @@ async fn first_party_adapter_releases_reservation_when_reconcile_fails_after_suc
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,
@@ -652,7 +659,7 @@ async fn first_party_adapter_releases_reservation_when_dispatch_future_is_cancel
     // Non-zero estimate so the held reservation is observable in the tally.
     let estimate = ResourceEstimate::default().set_output_bytes(128);
 
-    let dispatch = adapter.dispatch_json(RuntimeAdapterRequest {
+    let dispatch = adapter.dispatch_json(RuntimeLaneRequest {
         run_id: None,
         package: &package,
         descriptor: &descriptor,
@@ -765,7 +772,7 @@ async fn first_party_adapter_preserves_handler_error_when_account_failed_reconci
     );
 
     let result = adapter
-        .dispatch_json(RuntimeAdapterRequest {
+        .dispatch_json(RuntimeLaneRequest {
             run_id: None,
             package: &package,
             descriptor: &descriptor,

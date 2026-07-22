@@ -176,8 +176,6 @@ mod tests {
         assert!(entries.iter().any(|e| e.key == "llm.default.provider_id"));
         assert!(entries.iter().any(|e| e.key == "webui.listen_port"));
         assert!(entries.iter().any(|e| e.key == "budget.user_daily_usd"));
-        assert!(entries.iter().any(|e| e.key == "slack.enabled"));
-        assert!(entries.iter().any(|e| e.key == "slack.team_id"));
         assert!(entries.iter().any(|e| e.key == "trigger_poller.enabled"));
         assert!(
             entries

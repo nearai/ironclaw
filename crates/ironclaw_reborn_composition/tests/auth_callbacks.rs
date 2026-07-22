@@ -50,6 +50,12 @@ impl RebornAuthContinuationDispatcher for RecordingContinuationDispatcher {
             .push(event);
         Ok(())
     }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
 }
 
 struct FailingProviderClient {
@@ -217,6 +223,12 @@ impl RebornAuthContinuationDispatcher for BlockingContinuationDispatcher {
             .forget();
         Ok(())
     }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -279,6 +291,12 @@ impl RebornAuthContinuationDispatcher for FailingContinuationDispatcher {
         _event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         Err(self.error.clone())
+    }
+    async fn dispatch_canceled_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Ok(())
     }
 }
 

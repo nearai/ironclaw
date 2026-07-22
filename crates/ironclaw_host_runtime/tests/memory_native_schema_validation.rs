@@ -40,10 +40,13 @@ fn every_native_capability_schema_compiles() {
     let manifest = native_memory_manifest().expect("native memory manifest must parse");
     assert!(!manifest.capabilities.is_empty());
     for capability in &manifest.capabilities {
-        for schema_ref in [
-            capability.input_schema_ref.as_str(),
-            capability.output_schema_ref.as_str(),
-        ] {
+        let output_schema_ref = capability
+            .output_schema_ref
+            .as_ref()
+            .map(|schema_ref| schema_ref.as_str());
+        for schema_ref in
+            std::iter::once(capability.input_schema_ref.as_str()).chain(output_schema_ref)
+        {
             let schema = load_schema(schema_ref);
             jsonschema::validator_for(&schema).unwrap_or_else(|err| {
                 panic!(

@@ -169,8 +169,8 @@ IronClaw's 68+ crates are organized into 7 functional groups:
 | `ironclaw_product_adapters` | Product adapter framework (Slack, Telegram, etc.) |
 | `ironclaw_product_adapter_registry` | Discovery and lifecycle of product adapters |
 | `ironclaw_wasm_product_adapters` | WASM-based adapter implementations |
-| `ironclaw_slack_v2_adapter` | Slack workspace adapter |
-| `ironclaw_telegram_v2_adapter` | Telegram bot adapter |
+| `ironclaw_slack_extension` | Slack workspace adapter |
+| `ironclaw_telegram_extension` | Telegram bot adapter |
 | `ironclaw_skill_learning` | Skill extraction, classification, and refinement |
 | `ironclaw_outbound` | Outbound message delivery (replies, notifications) |
 | `ironclaw_triggers` | Trigger system, event subscriptions, automation |
@@ -260,7 +260,7 @@ Is the feature runtime/execution/agent-related?
 |---------|---------------|-----|
 | "Add GitHub issue tool" | `ironclaw_first_party_extensions`, `ironclaw_capabilities` | Capability implementation, registration |
 | "Require approval for file writes" | `ironclaw_approvals`, `ironclaw_safety` | Gate logic, policy enforcement |
-| "Support Slack threads" | `ironclaw_slack_v2_adapter`, `ironclaw_threads` | Channel adapter, thread metadata |
+| "Support Slack threads" | `ironclaw_slack_extension`, `ironclaw_threads` | Channel adapter, thread metadata |
 | "Encrypt user files" | `ironclaw_secrets`, `ironclaw_filesystem` | Encryption logic, file storage |
 | "Add cost tracking" | `ironclaw_resources`, `ironclaw_events` | Quota system, event projection |
 

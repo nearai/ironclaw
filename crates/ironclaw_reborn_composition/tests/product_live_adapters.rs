@@ -47,7 +47,7 @@ use ironclaw_runner::{
             store::FilesystemAwaitEdgeStore,
         },
         flavors::StaticSubagentDefinitionResolver,
-        goal_store::InMemoryBoundedSubagentGoalStore,
+        goal_store::{FilesystemSubagentGoalStore, in_memory_backed_subagent_goal_store},
     },
 };
 use ironclaw_threads::{InMemorySessionThreadService, SessionThreadService, ThreadScope};
@@ -56,16 +56,19 @@ use ironclaw_turns::{
     CheckpointStateStore, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
     RunProfileResolver, TurnId, TurnRunId, TurnScope, TurnStateStore,
     run_profile::{
-        AgentLoopHostError, CapabilityInputRef, CapabilityInvocation,
-        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCancelReasonKind,
-        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext, NoOpBudgetAccountant,
-        NoOpPolicyGuard, PromptMode, ProviderToolCall, RegisterProviderToolCallRequest,
-        VisibleCapabilityRequest,
+        AgentLoopHostError, CapabilityInputRef, InMemoryLoopHostMilestoneSink,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopModelBudgetAccountant,
+        LoopModelPolicyGuard, LoopRequest, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard,
+        PromptMode, ProviderToolCall, RegisterProviderToolCallRequest, VisibleCapabilityRequest,
     },
 };
 
 use ironclaw_loop_host::in_memory_backed_checkpoint_state_store as in_memory_checkpoint_state_store;
 use ironclaw_turns::test_support::in_memory_turn_state_store;
+
+fn in_memory_subagent_goal_store() -> Arc<FilesystemSubagentGoalStore<InMemoryBackend>> {
+    Arc::new(in_memory_backed_subagent_goal_store())
+}
 
 async fn write_capability_result_for_test(
     io: &ProductLiveCapabilityIo,
@@ -485,7 +488,7 @@ async fn local_dev_adapter_gates_builtin_echo_when_global_auto_approve_is_off() 
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
@@ -615,7 +618,7 @@ async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() 
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id: capability_id.clone(),
@@ -715,7 +718,7 @@ async fn local_dev_adapter_invokes_extension_scoped_grants_with_loop_driver_prin
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -867,7 +870,7 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
     );
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: candidate.activity_id,
             surface_version: candidate.surface_version,
             capability_id,
@@ -1131,7 +1134,7 @@ async fn local_dev_adapter_invokes_read_file_with_configured_mounts() {
         .unwrap();
 
     let outcome = capability_port
-        .invoke_capability(CapabilityInvocation {
+        .invoke_capability(LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: surface.version,
             capability_id,
@@ -1388,7 +1391,7 @@ async fn adapter_bundle_satisfies_product_live_runtime_readiness_gate() {
     let await_edge_store = Arc::new(FilesystemAwaitEdgeStore::new(Arc::new(
         ScopedFilesystem::with_fixed_view(Arc::new(InMemoryBackend::new()), await_edge_mounts),
     )));
-    let subagent_goal_store = Arc::new(InMemoryBoundedSubagentGoalStore::new());
+    let subagent_goal_store = in_memory_subagent_goal_store();
     let await_edge_resolver = Arc::new(AwaitEdgeResolver::new_unbound(
         Arc::clone(&await_edge_store),
         subagent_goal_store.clone() as Arc<dyn ironclaw_loop_host::SubagentSpawnGoalStore>,

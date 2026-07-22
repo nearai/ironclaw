@@ -113,18 +113,18 @@ use ironclaw_turns::{
     TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
-        CapabilityBatchInvocation, CapabilityInvocation, CommunicationContextProvider,
+        CommunicationContextProvider, EphemeralInstructionMaterializationStore,
         FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
-        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
-        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
-        InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
-        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome, LoopCompactionPort,
-        LoopCompactionRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
-        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelGateway, LoopModelPolicyGuard, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        HostManagedLoopPromptPort, InstructionBundleMaterializedMessage,
+        InstructionMaterializationStore, InstructionSafetyContext, LoadCheckpointPayloadRequest,
+        LoadedCheckpointPayload, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCompactionError, LoopCompactionOutcome,
+        LoopCompactionPort, LoopCompactionRequest, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRequest, LoopRequestBatch, LoopRunContext,
         LoopRunInfoPort, LoopRuntimeContext, LoopTranscriptPort, MemoryPromptContextService,
         NoOpBudgetAccountant, NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition,
         RegisterProviderToolCallRequest, RunScopedHookMilestoneSink, StageCheckpointPayloadRequest,
@@ -301,7 +301,7 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         let may_change_surface = capability_may_change_visible_surface(&request.capability_id);
         let resolution = self.inner.invoke_capability(request).await?;
@@ -313,7 +313,7 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         let may_change_surface = request
             .invocations
@@ -395,7 +395,7 @@ impl HookCapabilityInputResolverAdapter {
 impl HookCapabilityInputResolver for HookCapabilityInputResolverAdapter {
     async fn resolve(
         &self,
-        invocation: &ironclaw_turns::run_profile::CapabilityInvocation,
+        invocation: &ironclaw_turns::run_profile::LoopRequest,
     ) -> Option<serde_json::Value> {
         let value = match self
             .inner
@@ -1658,7 +1658,7 @@ where
             event_subscription_started_at,
         );
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
-            Arc::new(InMemoryInstructionMaterializationStore::default());
+            Arc::new(EphemeralInstructionMaterializationStore::default());
         let surface_state = Arc::new(CapabilitySurfaceState::default());
         let mut capabilities: Arc<dyn LoopCapabilityPort> = Arc::new(
             SurfaceTrackingLoopCapabilityPort::new(capabilities, Arc::clone(&surface_state)),
@@ -2174,14 +2174,14 @@ impl LoopCapabilityPort for RebornLoopDriverHost {
 
     async fn invoke_capability(
         &self,
-        request: CapabilityInvocation,
+        request: LoopRequest,
     ) -> Result<Resolution, AgentLoopHostError> {
         self.capabilities.invoke_capability(request).await
     }
 
     async fn invoke_capability_batch(
         &self,
-        request: CapabilityBatchInvocation,
+        request: LoopRequestBatch,
     ) -> Result<ResolutionBatch, AgentLoopHostError> {
         self.capabilities.invoke_capability_batch(request).await
     }
@@ -2657,8 +2657,8 @@ mod hook_resolver_adapter_tests {
     use super::*;
     use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilityInvocation,
-        CapabilitySurfaceVersion,
+        AgentLoopHostError, AgentLoopHostErrorKind, CapabilityInputRef, CapabilitySurfaceVersion,
+        LoopRequest,
     };
     use ironclaw_turns::{
         InMemoryRunProfileResolver, RunProfileResolutionRequest, RunProfileResolver, TurnId,
@@ -2683,8 +2683,8 @@ mod hook_resolver_adapter_tests {
         LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved)
     }
 
-    fn invocation(input_ref: &str) -> CapabilityInvocation {
-        CapabilityInvocation {
+    fn invocation(input_ref: &str) -> LoopRequest {
+        LoopRequest {
             activity_id: ironclaw_turns::CapabilityActivityId::new(),
             surface_version: CapabilitySurfaceVersion::new("v1")
                 .expect("surface version literal valid"),

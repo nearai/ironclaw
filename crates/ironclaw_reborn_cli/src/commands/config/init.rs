@@ -258,12 +258,6 @@ regex_activation_enabled = true
 # model       = "claude-3-5-sonnet-latest"
 # api_key_env = "ANTHROPIC_API_KEY"
 
-# [slack]
-# # Host-beta Slack Events API route for `ironclaw serve`.
-# # Can also be overridden by IRONCLAW_REBORN_SLACK_ENABLED.
-# enabled = false
-# # Configure Slack app ids, bot token, signing secret, and channel mappings
-# # from WebUI channel setup after the server starts.
 "#,
         api_version = REBORN_CONFIG_API_VERSION,
         default_llm_provider_id = DEFAULT_LLM_PROVIDER_ID,
@@ -279,7 +273,7 @@ regex_activation_enabled = true
 /// file appends and overrides by id/alias.
 const PROVIDERS_STUB: &str = r#"[
   {
-    "id": "acme-openrouter",
+    "id": "example-openrouter",
     "aliases": [],
     "protocol": "open_ai_completions",
     "api_key_env": "ACME_OPENROUTER_KEY",

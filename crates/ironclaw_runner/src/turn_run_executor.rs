@@ -1118,14 +1118,14 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: ironclaw_turns::run_profile::CapabilityInvocation,
+            _request: ironclaw_turns::run_profile::LoopRequest,
         ) -> Result<ironclaw_host_api::Resolution, AgentLoopHostError> {
             unimplemented!("stub: not called by executor")
         }
 
         async fn invoke_capability_batch(
             &self,
-            _request: ironclaw_turns::run_profile::CapabilityBatchInvocation,
+            _request: ironclaw_turns::run_profile::LoopRequestBatch,
         ) -> Result<ironclaw_host_api::ResolutionBatch, AgentLoopHostError> {
             unimplemented!("stub: not called by executor")
         }

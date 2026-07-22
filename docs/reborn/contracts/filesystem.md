@@ -328,8 +328,8 @@ V1 backend types:
 
 ```text
 DiskFilesystem
-PostgresRootFilesystem   // feature = "postgres"
-LibSqlRootFilesystem     // feature = "libsql"
+PostgresRootFilesystem
+LibSqlRootFilesystem
 Memory/test backends as needed
 ```
 

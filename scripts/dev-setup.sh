@@ -8,8 +8,8 @@
 #   ./scripts/dev-setup.sh
 #
 # After running, you can:
-#   cargo check           # default features (postgres + libsql)
-#   cargo test            # default test suite (uses libsql temp DB)
+#   cargo check           # default build
+#   cargo test            # default test suite
 #   cargo test --all-features         # full test suite (requires Node.js 22 + Corepack/pnpm for WebUI bundle)
 
 set -euo pipefail
@@ -82,7 +82,7 @@ echo ""
 echo "=== Setup complete ==="
 echo ""
 echo "Quick start:"
-echo "  cargo run                            # Run with default features"
-echo "  cargo test                           # Test suite (libsql temp DB)"
+echo "  cargo run                            # Run the default build"
+echo "  cargo test                           # Test suite"
 echo "  cargo test --all-features            # Full test suite (requires Node.js 22 + Corepack/pnpm for WebUI bundle)"
 echo "  cargo clippy --all-features          # Lint all code (requires Node.js 22 + Corepack/pnpm for WebUI bundle)"

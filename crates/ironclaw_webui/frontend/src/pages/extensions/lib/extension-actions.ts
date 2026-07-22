@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { isChannelExtensionKind } from "./extensions-schema";
+import { hasChannelSurface } from "./extensions-schema";
 
 export function primaryExtensionAction(ext) {
   const state = extensionLifecycleState(ext);
@@ -15,7 +15,7 @@ export function primaryExtensionAction(ext) {
   // Channel-surface extensions are configured through their setup surfaces.
   // A generic Activate button bypasses that guidance and can hit the wrong
   // lifecycle endpoint.
-  if (isChannelExtensionKind(ext?.kind)) {
+  if (hasChannelSurface(ext)) {
     return null;
   }
 
@@ -30,7 +30,9 @@ export function extensionLifecycleState(ext) {
   if (ext?.needs_setup === true && ext?.authenticated === false) {
     return ext?.has_auth ? "auth_required" : "setup_required";
   }
-  return ext?.activation_status || ext?.activationStatus || (ext?.active ? "active" : "installed");
+  return (
+    ext?.installation_state || ext?.installationState || (ext?.active ? "active" : "installed")
+  );
 }
 
 export function extensionIsActive(ext) {

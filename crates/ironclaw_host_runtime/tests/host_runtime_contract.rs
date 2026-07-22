@@ -28,8 +28,7 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
     DefaultHostRuntime, HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBackendHealth,
-    RuntimeCapabilityRequest, RuntimeStatusRequest, RuntimeWorkId, SurfaceKind,
-    VisibleCapabilityRequest,
+    RuntimeStatusRequest, RuntimeWorkId, SurfaceKind, VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
     FilesystemProcessResultStore, FilesystemProcessStore, ProcessCancellationRegistry,
@@ -92,7 +91,7 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
     .with_approval_requests(approval_requests.clone());
 
     let context = execution_context_with_dispatch_grant();
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context.clone(),
         capability_id(),
         ResourceEstimate::default(),
@@ -133,7 +132,7 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
     .with_capability_leases(leases);
 
     let context = execution_context_with_dispatch_grant();
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context.clone(),
         capability_id(),
         ResourceEstimate::default(),
@@ -176,7 +175,7 @@ async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
     .with_capability_leases(leases);
 
     let context = execution_context_with_dispatch_grant();
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context.clone(),
         capability_id(),
         ResourceEstimate::default(),
@@ -245,7 +244,7 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
     .with_capability_leases(leases);
 
     let context = execution_context_with_dispatch_grant();
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context,
         capability_id(),
         ResourceEstimate::default(),
@@ -283,7 +282,7 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
 
     let context = execution_context_with_dispatch_grant();
     let scope = context.resource_scope.clone();
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context,
         capability_id(),
         ResourceEstimate::default(),
@@ -334,7 +333,7 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
     );
 
     let context = execution_context_with_dispatch_grant();
-    let request = RuntimeCapabilityRequest::new(
+    let request = (
         context,
         capability_id(),
         ResourceEstimate::default(),
@@ -375,7 +374,7 @@ async fn default_runtime_repeated_invocations_are_not_deduped_by_host_runtime_re
     .with_trust_policy(Arc::new(local_manifest_trust_policy()));
 
     let context_a = execution_context_with_dispatch_grant();
-    let request_a = RuntimeCapabilityRequest::new(
+    let request_a = (
         context_a,
         capability_id(),
         ResourceEstimate::default(),
@@ -384,7 +383,7 @@ async fn default_runtime_repeated_invocations_are_not_deduped_by_host_runtime_re
     let _ = runtime.invoke_capability(request_a).await.unwrap();
 
     let context_b = execution_context_with_dispatch_grant();
-    let request_b = RuntimeCapabilityRequest::new(
+    let request_b = (
         context_b,
         capability_id(),
         ResourceEstimate::default(),
@@ -1069,6 +1068,7 @@ fn process_start(context: &ExecutionContext, process_id: ProcessId) -> ProcessSt
         mounts: context.mounts.clone(),
         estimated_resources: ResourceEstimate::default(),
         resource_reservation_id: None,
+        authorized_continuation: None,
         input: json!({"message": "background"}),
     }
 }
@@ -1473,6 +1473,7 @@ fn parse_manifest(manifest: &str) -> ExtensionManifest {
         &manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap()
 }
@@ -1494,7 +1495,7 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
             max_invocations: None,
         },
     });
-    ExecutionContext::local_default(
+    let mut context = ExecutionContext::local_default(
         UserId::new("user").unwrap(),
         ExtensionId::new("caller").unwrap(),
         RuntimeKind::Wasm,
@@ -1502,7 +1503,9 @@ fn execution_context_with_dispatch_grant() -> ExecutionContext {
         grants,
         MountView::default(),
     )
-    .unwrap()
+    .unwrap();
+    context.run_id = Some(RunId::new());
+    context
 }
 
 fn visible_capability_request(context: ExecutionContext) -> VisibleCapabilityRequest {
@@ -1546,4 +1549,15 @@ fn capability_id() -> CapabilityId {
 
 fn extension_id() -> ExtensionId {
     ExtensionId::new("echo").unwrap()
+}
+
+fn capability_provider_contracts() -> ironclaw_extensions::HostApiContractRegistry {
+    let mut contracts = ironclaw_extensions::HostApiContractRegistry::new();
+    contracts
+        .register(std::sync::Arc::new(
+            ironclaw_extensions::CapabilityProviderHostApiContract::new()
+                .expect("capability provider contract"),
+        ))
+        .expect("register capability provider contract");
+    contracts
 }

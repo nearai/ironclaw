@@ -36,8 +36,8 @@ use ironclaw_turns::{
     TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AgentLoopHostErrorReasonKind,
-        CapabilitySurfaceVersion, HostManagedLoopModelPort, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
+        CapabilitySurfaceVersion, EphemeralInstructionMaterializationStore,
+        HostManagedLoopModelPort, HostManagedLoopPromptPort, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, InstructionMaterializationStore, InstructionSafetyContext,
         LoopCapabilityPort, LoopContextPort, LoopContextRequest, LoopContextSnippet,
         LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageBody, LoopInlineMessageRole,
@@ -2391,7 +2391,7 @@ async fn production_loop_model_gateway_accepts_inline_prompt_messages() {
 async fn production_loop_model_request_includes_runtime_context() {
     let fixture = ThreadFixture::new().await;
     let loop_started_at_utc = chrono::Utc::now();
-    let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let store = Arc::new(EphemeralInstructionMaterializationStore::default());
     let store_for_port: Arc<dyn InstructionMaterializationStore> = store.clone();
     let context_port = Arc::new(ThreadBackedLoopContextPort::new(
         Arc::clone(&fixture.thread_service),
@@ -3513,7 +3513,7 @@ async fn production_loop_request_with_safety_and_inline_messages(
     )
     .with_safety_context(safety_context)
     .with_instruction_materialization_store(Arc::new(
-        InMemoryInstructionMaterializationStore::default(),
+        EphemeralInstructionMaterializationStore::default(),
     ));
     let prompt_bundle = prompt_port
         .build_prompt_bundle(LoopPromptBundleRequest {
@@ -4361,7 +4361,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
 
     async fn invoke_capability(
         &self,
-        _request: ironclaw_turns::run_profile::CapabilityInvocation,
+        _request: ironclaw_turns::run_profile::LoopRequest,
     ) -> Result<ironclaw_host_api::Resolution, ironclaw_turns::run_profile::AgentLoopHostError>
     {
         panic!("gateway tests do not invoke capabilities")
@@ -4369,7 +4369,7 @@ impl LoopCapabilityPort for GatewayCapabilityPort {
 
     async fn invoke_capability_batch(
         &self,
-        _request: ironclaw_turns::run_profile::CapabilityBatchInvocation,
+        _request: ironclaw_turns::run_profile::LoopRequestBatch,
     ) -> Result<ironclaw_host_api::ResolutionBatch, ironclaw_turns::run_profile::AgentLoopHostError>
     {
         panic!("gateway tests do not invoke capability batches")
@@ -4405,3 +4405,4 @@ impl LlmProvider for RecordingLlmProvider {
         })
     }
 }
+// arch-exempt: large_file, LLM gateway contract coverage remains centralized, plan #6175

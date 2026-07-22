@@ -27,9 +27,9 @@ use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_host_api::{
     AgentId, CapabilityGrantId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId,
     GrantConstraints, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-    PackageId, Principal, ProjectId, ResourceEstimate, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId, VirtualPath,
+    PackageId, Principal, ProjectId, ResourceEstimate, RunId, RuntimeHttpEgress,
+    RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeKind,
+    TenantId, ThreadId, TrustClass, UserId, VirtualPath,
     runtime_policy::{
         ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
         NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -38,8 +38,7 @@ use ironclaw_host_api::{
 use ironclaw_host_runtime::builtin_first_party_package;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, MemoryBackedUserProfileSource,
-    PROFILE_SET_CAPABILITY_ID, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    builtin_first_party_handlers,
+    PROFILE_SET_CAPABILITY_ID, RuntimeCapabilityOutcome, builtin_first_party_handlers,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_triggers::InMemoryTriggerRepository;
@@ -177,6 +176,7 @@ fn agent_scoped_context(
     ctx.user_id = UserId::new(user_id).unwrap();
     ctx.agent_id = Some(AgentId::new(agent_id).unwrap());
     ctx.project_id = Some(ProjectId::new(project_id).unwrap());
+    ctx.run_id = Some(RunId::new());
     ctx.resource_scope.tenant_id = TenantId::new(tenant_id).unwrap();
     ctx.resource_scope.user_id = UserId::new(user_id).unwrap();
     ctx.resource_scope.agent_id = Some(AgentId::new(agent_id).unwrap());
@@ -269,7 +269,7 @@ async fn profile_set_then_runtime_context_renders_local_time_and_profile_line() 
     );
 
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context,
             ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),
@@ -389,7 +389,7 @@ async fn profile_set_for_one_user_is_not_visible_to_another() {
     // Write profile for user-A (agent+project scoped run).
     let context_a = agent_scoped_context("tenant-isolation", "user-A", "agent-x", "project-x");
     let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
+        .invoke_capability((
             context_a,
             ironclaw_host_api::CapabilityId::new(PROFILE_SET_CAPABILITY_ID).unwrap(),
             ResourceEstimate::default(),

@@ -124,6 +124,7 @@ pub(super) fn mock_mcp_extension_package(
             url: Some(mcp_url.to_string()),
         },
         host_apis: Vec::new(),
+        host_api_surfaces: Vec::new(),
         hooks: Vec::new(),
         capabilities: vec![CapabilityManifest {
             id: CapabilityId::new(capability_id)?,
@@ -135,14 +136,15 @@ pub(super) fn mock_mcp_extension_package(
             input_schema_ref: CapabilityProfileSchemaRef::new(
                 "schemas/mock-mcp/mock.input.v1.json",
             )?,
-            output_schema_ref: CapabilityProfileSchemaRef::new(
+            output_schema_ref: Some(CapabilityProfileSchemaRef::new(
                 "schemas/mock-mcp/mock.output.v1.json",
-            )?,
+            )?),
             prompt_doc_ref: None,
             required_host_ports: Vec::new(),
             runtime_credentials: Vec::new(),
             network_targets: Vec::new(),
             resource_profile: None,
+            origin_gate_matrix: None,
         }],
     };
     // Inline schema so surface_descriptor returns Ok(descriptor) without
@@ -160,6 +162,7 @@ pub(super) fn mock_mcp_extension_package(
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
         resource_profile: None,
+        origin_gate_matrix: None,
     }];
     let root = VirtualPath::new(format!("/system/extensions/{provider_id}"))?;
     Ok(

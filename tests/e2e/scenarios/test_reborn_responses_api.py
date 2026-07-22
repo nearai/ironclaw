@@ -184,7 +184,13 @@ async def create_response(
     client: httpx.AsyncClient, path: str = "/v1/responses", **payload: Any
 ) -> dict:
     body = {"model": "mock-model", **payload}
-    response = await client.post(path, json=body)
+    response = None
+    for attempt in range(6):
+        response = await client.post(path, json=body)
+        if response.status_code != 429 and not _is_retryable_service_unavailable(response):
+            break
+        await asyncio.sleep(1 + attempt * 0.5)
+    assert response is not None
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -194,6 +200,21 @@ async def create_chat_completion(client: httpx.AsyncClient, **payload: Any) -> d
     response = await client.post("/v1/chat/completions", json=body)
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def _is_retryable_service_unavailable(response: httpx.Response) -> bool:
+    if response.status_code != 503:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    if not isinstance(body, dict):
+        return False
+    error = body.get("error")
+    if isinstance(error, dict) and error.get("code") == "service_unavailable":
+        return True
+    return error == "service_unavailable" or body.get("kind") == "service_unavailable"
 
 
 def _function_calls(response: dict) -> list[dict]:

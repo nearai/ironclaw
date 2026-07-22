@@ -275,6 +275,18 @@ impl ExitStage {
                     }
                     None => false,
                 };
+                // Failed branch only (§5a.2, loop-failure matrix): when the
+                // nudge declines, attach the same failure explanation other
+                // explainable kinds get, before the Final checkpoint so the
+                // explanation ref is part of the checkpointed state. The nudge
+                // path above is untouched — a successful nudge still completes
+                // with no explanation call.
+                let explanation_message_ref = if completed {
+                    None
+                } else {
+                    attach_failure_explanation(ctx, &mut state, LoopFailureKind::NoProgressDetected)
+                        .await?
+                };
                 let checked = CheckpointStage
                     .write(ctx, state, CheckpointKind::Final)
                     .await?;
@@ -286,7 +298,11 @@ impl ExitStage {
                         checked.state,
                         LoopFailureKind::NoProgressDetected,
                         Some(checked.checkpoint_id),
-                        FailedExitDetails::default(),
+                        FailedExitDetails {
+                            diagnostic_ref: None,
+                            safe_summary: None,
+                            explanation_message_ref,
+                        },
                     )
                 }
             }

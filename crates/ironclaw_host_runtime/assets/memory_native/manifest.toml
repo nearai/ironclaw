@@ -14,10 +14,20 @@ trust = "first_party_requested"
 kind = "first_party"
 service = "native_memory_provider"
 
+# Model-facing tools are declared through the host-defined
+# `ironclaw.capability_provider/v1` contract (extension-runtime §5.5): top-level
+# `[[capabilities]]` is no longer accepted, so the memory tools live under the
+# `capability_provider.tools` section this host_api projects.
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
 # memory.document_store.v1 — read operation, exposed as a model-facing tool. The
 # schema refs match the document_store profile's read-operation refs so the
 # conformance harness binds this capability to that operation.
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "ironclaw.memory.read"
 implements = ["memory.document_store.v1"]
 description = "Read a Reborn persistent memory document in the current tenant/user/agent/project scope."
@@ -31,7 +41,7 @@ prompt_doc_ref = "prompts/memory-native/read.md"
 # memory.document_store.v1 — write operation, exposed as a model-facing tool.
 # Host prompt-write safety runs before dispatching writes to prompt-injected
 # memory files.
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "ironclaw.memory.write"
 implements = ["memory.document_store.v1"]
 description = "Write, append, or patch Reborn persistent memory documents in the current tenant/user/agent/project scope. For structured user facts (timezone, locale, location), use builtin.profile_set instead."
@@ -44,7 +54,7 @@ prompt_doc_ref = "prompts/memory-native/write.md"
 
 # Native search convenience. Implements no portable profile operation — it is a
 # provider-specific model tool layered on the same filesystem store.
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "ironclaw.memory.search"
 implements = []
 description = "Search only Reborn internal persistent memory documents in the current tenant/user/agent/project scope; this does not search connected app or extension data."
@@ -56,7 +66,7 @@ output_schema_ref = "schemas/memory/search.output.v1.json"
 prompt_doc_ref = "prompts/memory-native/search.md"
 
 # Native tree/list convenience. Implements no portable profile operation.
-[[capabilities]]
+[[capability_provider.tools.capabilities]]
 id = "ironclaw.memory.tree"
 implements = []
 description = "List Reborn persistent memory documents as a compact tree."

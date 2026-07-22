@@ -46,7 +46,6 @@ pub const WEBUI_V2_ROUTE_GET_OUTBOUND_PREFERENCES: &str = "webui.v2.get_outbound
 pub const WEBUI_V2_ROUTE_SET_OUTBOUND_PREFERENCES: &str = "webui.v2.set_outbound_preferences";
 pub const WEBUI_V2_ROUTE_LIST_OUTBOUND_DELIVERY_TARGETS: &str =
     "webui.v2.list_outbound_delivery_targets";
-pub const WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS: &str = "webui.v2.list_connectable_channels";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSIONS: &str = "webui.v2.list_extensions";
 pub const WEBUI_V2_ROUTE_LIST_EXTENSION_REGISTRY: &str = "webui.v2.list_extension_registry";
 pub const WEBUI_V2_ROUTE_INSTALL_EXTENSION: &str = "webui.v2.install_extension";
@@ -88,6 +87,10 @@ pub const WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS: &str = "webui.v2.operator.diagnos
 pub const WEBUI_V2_ROUTE_OPERATOR_STATUS: &str = "webui.v2.operator.status";
 pub const WEBUI_V2_ROUTE_OPERATOR_LOGS: &str = "webui.v2.operator.logs";
 pub const WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE: &str = "webui.v2.operator.service_lifecycle";
+pub const WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION: &str =
+    "webui.v2.operator.list_extension_configuration";
+pub const WEBUI_V2_ROUTE_OPERATOR_REPLACE_EXTENSION_CONFIGURATION: &str =
+    "webui.v2.operator.replace_extension_configuration";
 pub const WEBUI_V2_ROUTE_LOGS: &str = "webui.v2.logs";
 pub const WEBUI_V2_ROUTE_LIST_PROJECT_FILES: &str = "webui.v2.list_project_files";
 pub const WEBUI_V2_ROUTE_STAT_PROJECT_FILE: &str = "webui.v2.stat_project_file";
@@ -153,7 +156,6 @@ pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRETS: &str =
     "/api/webchat/v2/admin/users/{user_id}/secrets";
 pub const WEBUI_V2_PATTERN_ADMIN_USER_SECRET: &str =
     "/api/webchat/v2/admin/users/{user_id}/secrets/{handle}";
-pub const WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS: &str = "/api/webchat/v2/channels/connectable";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSIONS: &str = "/api/webchat/v2/extensions";
 pub const WEBUI_V2_PATTERN_LIST_EXTENSION_REGISTRY: &str = "/api/webchat/v2/extensions/registry";
 pub const WEBUI_V2_PATTERN_INSTALL_EXTENSION: &str = "/api/webchat/v2/extensions/install";
@@ -193,6 +195,10 @@ pub const WEBUI_V2_PATTERN_OPERATOR_DIAGNOSTICS: &str = "/api/webchat/v2/operato
 pub const WEBUI_V2_PATTERN_OPERATOR_STATUS: &str = "/api/webchat/v2/operator/status";
 pub const WEBUI_V2_PATTERN_OPERATOR_LOGS: &str = "/api/webchat/v2/operator/logs";
 pub const WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE: &str = "/api/webchat/v2/operator/service";
+pub const WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION: &str =
+    "/api/webchat/v2/operator/extension-configuration";
+pub const WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION_GROUP: &str =
+    "/api/webchat/v2/operator/extension-configuration/{group_id}";
 pub const WEBUI_V2_PATTERN_LIST_PROJECT_FILES: &str = "/api/webchat/v2/threads/{thread_id}/files";
 pub const WEBUI_V2_PATTERN_STAT_PROJECT_FILE: &str =
     "/api/webchat/v2/threads/{thread_id}/files/stat";
@@ -243,7 +249,6 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         get_outbound_preferences_descriptor(),
         set_outbound_preferences_descriptor(),
         list_outbound_delivery_targets_descriptor(),
-        list_connectable_channels_descriptor(),
         list_extensions_descriptor(),
         list_extension_registry_descriptor(),
         install_extension_descriptor(),
@@ -282,6 +287,8 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
         operator_status_descriptor(),
         operator_logs_descriptor(),
         operator_service_lifecycle_descriptor(),
+        operator_list_extension_configuration_descriptor(),
+        operator_replace_extension_configuration_descriptor(),
         list_project_files_descriptor(),
         stat_project_file_descriptor(),
         read_project_file_descriptor(),
@@ -311,14 +318,8 @@ pub fn webui_v2_routes() -> Vec<IngressRouteDescriptor> {
     ]
 }
 
-/// Returns whether a route id belongs to the legacy operator-wide LLM config surface.
-///
-/// Prefer [`is_webui_v2_operator_webui_config_route_id`] for host route gating;
-/// this older predicate intentionally excludes newer `operator/*` routes.
-#[deprecated(
-    note = "Use `is_webui_v2_operator_webui_config_route_id`; this predicate misses the operator/* routes."
-)]
-pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
+/// Returns whether a route id belongs to any operator-wide WebUI config surface.
+pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
     matches!(
         route_id,
         WEBUI_V2_ROUTE_GET_LLM_CONFIG
@@ -330,32 +331,27 @@ pub fn is_webui_v2_llm_config_route_id(route_id: &str) -> bool {
             | WEBUI_V2_ROUTE_START_NEARAI_LOGIN
             | WEBUI_V2_ROUTE_COMPLETE_NEARAI_WALLET_LOGIN
             | WEBUI_V2_ROUTE_START_CODEX_LOGIN
+    ) || matches!(
+        route_id,
+        WEBUI_V2_ROUTE_OPERATOR_GET_SETUP
+            | WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP
+            | WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG
+            | WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY
+            | WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY
+            | WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG
+            | WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS
+            | WEBUI_V2_ROUTE_OPERATOR_STATUS
+            | WEBUI_V2_ROUTE_OPERATOR_LOGS
+            | WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE
+            | WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION
+            | WEBUI_V2_ROUTE_OPERATOR_REPLACE_EXTENSION_CONFIGURATION
+            // The zip-upload import route is admin-only (#5499): classifying
+            // it here makes composition strip it from deployments without an
+            // operator surface and pre-gate non-operator callers before the
+            // request body is buffered, instead of relying on the
+            // handler-level capability check alone.
+            | WEBUI_V2_ROUTE_IMPORT_EXTENSION
     )
-}
-
-/// Returns whether a route id belongs to any operator-wide WebUI config surface.
-#[allow(deprecated)]
-pub fn is_webui_v2_operator_webui_config_route_id(route_id: &str) -> bool {
-    is_webui_v2_llm_config_route_id(route_id)
-        || matches!(
-            route_id,
-            WEBUI_V2_ROUTE_OPERATOR_GET_SETUP
-                | WEBUI_V2_ROUTE_OPERATOR_RUN_SETUP
-                | WEBUI_V2_ROUTE_OPERATOR_LIST_CONFIG
-                | WEBUI_V2_ROUTE_OPERATOR_GET_CONFIG_KEY
-                | WEBUI_V2_ROUTE_OPERATOR_SET_CONFIG_KEY
-                | WEBUI_V2_ROUTE_OPERATOR_VALIDATE_CONFIG
-                | WEBUI_V2_ROUTE_OPERATOR_DIAGNOSTICS
-                | WEBUI_V2_ROUTE_OPERATOR_STATUS
-                | WEBUI_V2_ROUTE_OPERATOR_LOGS
-                | WEBUI_V2_ROUTE_OPERATOR_SERVICE_LIFECYCLE
-                // The zip-upload import route is admin-only (#5499): classifying
-                // it here makes composition strip it from deployments without an
-                // operator surface and pre-gate non-operator callers before the
-                // request body is buffered, instead of relying on the
-                // handler-level capability check alone.
-                | WEBUI_V2_ROUTE_IMPORT_EXTENSION
-        )
 }
 
 fn get_session_descriptor() -> IngressRouteDescriptor {
@@ -1040,20 +1036,6 @@ fn list_outbound_delivery_targets_descriptor() -> IngressRouteDescriptor {
     )
 }
 
-fn list_connectable_channels_descriptor() -> IngressRouteDescriptor {
-    descriptor(
-        WEBUI_V2_ROUTE_LIST_CONNECTABLE_CHANNELS,
-        NetworkMethod::Get,
-        WEBUI_V2_PATTERN_LIST_CONNECTABLE_CHANNELS,
-        read_policy(
-            read_rate_limit(),
-            AuditTraceClass::UserAction,
-            AllowedEffectPath::ProjectionOnly,
-            StreamingMode::None,
-        ),
-    )
-}
-
 fn list_extensions_descriptor() -> IngressRouteDescriptor {
     descriptor(
         WEBUI_V2_ROUTE_LIST_EXTENSIONS,
@@ -1595,6 +1577,34 @@ fn operator_service_lifecycle_descriptor() -> IngressRouteDescriptor {
         WEBUI_V2_PATTERN_OPERATOR_SERVICE_LIFECYCLE,
         mutation_policy(
             body_limit_kib(4),
+            mutation_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProductWorkflow,
+        ),
+    )
+}
+
+fn operator_list_extension_configuration_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_OPERATOR_LIST_EXTENSION_CONFIGURATION,
+        NetworkMethod::Get,
+        WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION,
+        read_policy(
+            read_rate_limit(),
+            AuditTraceClass::UserAction,
+            AllowedEffectPath::ProjectionOnly,
+            StreamingMode::None,
+        ),
+    )
+}
+
+fn operator_replace_extension_configuration_descriptor() -> IngressRouteDescriptor {
+    descriptor(
+        WEBUI_V2_ROUTE_OPERATOR_REPLACE_EXTENSION_CONFIGURATION,
+        NetworkMethod::Put,
+        WEBUI_V2_PATTERN_OPERATOR_EXTENSION_CONFIGURATION_GROUP,
+        mutation_policy(
+            body_limit_kib(16),
             mutation_rate_limit(),
             AuditTraceClass::UserAction,
             AllowedEffectPath::ProductWorkflow,

@@ -54,10 +54,12 @@ pub const NATIVE_MEMORY_MANIFEST_TOML: &str = include_str!("../assets/memory_nat
 /// against the host-bundled rules and the default host-port catalog.
 pub fn native_memory_manifest() -> Result<ExtensionManifestV2, ManifestV2Error> {
     let catalog = default_host_port_catalog().map_err(ManifestV2Error::Contract)?;
+    let contracts = default_host_api_contract_registry()?;
     ExtensionManifestV2::parse(
         NATIVE_MEMORY_MANIFEST_TOML,
         ManifestSource::HostBundled,
         &catalog,
+        &contracts,
     )
 }
 
@@ -74,7 +76,7 @@ pub fn native_memory_first_party_package() -> Result<ExtensionPackage, Extension
     };
     let host_ports = default_host_port_catalog().map_err(|error| invalid(&error))?;
     let contracts = default_host_api_contract_registry().map_err(|error| invalid(&error))?;
-    let record = ExtensionManifestRecord::from_toml_with_contracts(
+    let record = ExtensionManifestRecord::from_toml(
         NATIVE_MEMORY_MANIFEST_TOML,
         ManifestSource::HostBundled,
         &host_ports,
