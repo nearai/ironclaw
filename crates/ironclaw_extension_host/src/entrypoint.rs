@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use ironclaw_extensions::ResolvedExtensionManifest;
+use ironclaw_extensions::{CapabilityVisibility, ResolvedExtensionManifest};
 use ironclaw_host_api::ToolAdapter;
 use ironclaw_product_adapters::ChannelAdapter;
 
@@ -56,6 +56,15 @@ pub enum BindError {
     /// The loader could not construct the entrypoint.
     #[error("extension could not be loaded: {reason}")]
     Load { reason: String },
+    /// A hosted-MCP declaration bound only its host-internal connection
+    /// template. Activation is not useful until discovery publishes at least
+    /// one callable tool from the server's effective contract.
+    #[error("hosted MCP discovery published no callable tools")]
+    EmptyHostedMcpToolCatalog,
+    /// Auth/config metadata alone does not produce runtime behavior. An
+    /// activation needs at least one tool, channel, or hook surface.
+    #[error("extension declares no tool, channel, or hook surface")]
+    MissingOperationalSurface,
 }
 
 /// Check bound adapters against the resolved contract: declared surfaces must
@@ -76,6 +85,17 @@ pub fn check_binding(
         (true, false) => return Err(BindError::MissingChannelAdapter),
         (false, true) => return Err(BindError::UndeclaredChannelAdapter),
         _ => {}
+    }
+    if resolved.mcp.is_some()
+        && !resolved
+            .tools
+            .iter()
+            .any(|tool| tool.visibility == CapabilityVisibility::Model)
+    {
+        return Err(BindError::EmptyHostedMcpToolCatalog);
+    }
+    if resolved.tools.is_empty() && !declares_channel && resolved.hooks.is_empty() {
+        return Err(BindError::MissingOperationalSurface);
     }
     Ok(())
 }
@@ -128,6 +148,30 @@ mod tests {
     fn exact_binding_passes() {
         let resolved = tool_and_channel_manifest();
         check_binding(&resolved, &tools_only(true, true)).expect("exact binding");
+    }
+
+    #[test]
+    fn hosted_mcp_template_without_discovered_tools_fails_activation_binding() {
+        let resolved = mcp_manifest();
+        let error = check_binding(&resolved, &tools_only(true, false))
+            .expect_err("the host-internal MCP connection template is not a usable tool set");
+        assert_eq!(error, BindError::EmptyHostedMcpToolCatalog);
+    }
+
+    #[test]
+    fn channel_only_binding_is_usable_without_model_tools() {
+        let resolved = channel_only_manifest();
+        check_binding(&resolved, &tools_only(false, true))
+            .expect("a bound channel surface is independently usable");
+    }
+
+    #[test]
+    fn extension_without_tool_channel_or_hook_surface_fails_activation_binding() {
+        let mut resolved = channel_only_manifest();
+        resolved.channel = None;
+        let error = check_binding(&resolved, &tools_only(false, false))
+            .expect_err("an extension with no operational surface must not activate");
+        assert_eq!(error, BindError::MissingOperationalSurface);
     }
 
     #[test]

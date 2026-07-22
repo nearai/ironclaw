@@ -425,10 +425,10 @@ impl RebornLocalExtensionManagementPort {
 
     /// Stage the hosted-MCP connection credential and server network policy
     /// for the discovery call. Best-effort by design: a staging failure
-    /// leaves discovery to fail transient and fall back to the bundled
-    /// manifest — exactly the pre-staging behavior — while a successful
-    /// stage lets live `tools/list` run with the same injected authority a
-    /// dispatched invocation would carry.
+    /// leaves discovery to fail transient; activation may use a real declared
+    /// static tool as fallback, but never the host-internal connection
+    /// template alone. A successful stage lets live `tools/list` run with the
+    /// same injected authority a dispatched invocation would carry.
     async fn stage_hosted_mcp_discovery_authority(
         &self,
         scope: &ResourceScope,
@@ -453,7 +453,7 @@ impl RebornLocalExtensionManagementPort {
                     capability_id = descriptor.id.as_str(),
                     required = requirement.required,
                     error = ?error,
-                    "hosted MCP discovery credential staging failed; discovery will fall back"
+                    "hosted MCP discovery credential staging failed; discovery will fail or use a declared static fallback"
                 );
             }
         }
@@ -1367,6 +1367,16 @@ impl RebornLocalExtensionManagementPort {
         {
             Ok(active_package) => active_package,
             Err(HostedMcpDiscoveryError::Transient(reason)) => {
+                if package_visible_capability_ids(&discovery.base_package).is_empty() {
+                    // The bundled hosted-MCP declaration may contain only the
+                    // host-internal connection template. That template is
+                    // discovery authority, not a callable fallback surface;
+                    // reporting activation success here would publish no
+                    // model-usable tools. Keep the install retryable instead.
+                    return Err(hosted_mcp_discovery_error(
+                        HostedMcpDiscoveryError::Transient(reason),
+                    ));
+                }
                 tracing::debug!(
                     extension_id = %extension_id.as_str(),
                     reason,
@@ -3737,12 +3747,18 @@ mod tests {
             "external channel activation should guide the model into generic pairing UI, got: {message}"
         );
         let Some(LifecycleProductPayload::ExtensionActivate {
+            activated,
+            visible_capability_ids,
             connection_required,
-            ..
         }) = activate.payload.as_ref()
         else {
             panic!("expected extension activate payload");
         };
+        assert!(*activated);
+        assert!(
+            visible_capability_ids.is_empty(),
+            "a channel-only extension is valid without model tools"
+        );
         let requirement = connection_required
             .as_ref()
             .expect("external channel activation must carry a structured connection requirement");
@@ -5238,8 +5254,63 @@ team_id = "/team/id"
     }
 
     #[tokio::test]
-    async fn hosted_mcp_activation_falls_back_to_bundled_manifest_when_discovery_returns_no_tools()
-    {
+    async fn hosted_mcp_activation_without_discovered_or_static_tools_stays_installed() {
+        let (_dir, _storage_root, facade, active_registry, installation_store) =
+            extension_lifecycle_fixture_with_catalog_and_service(
+                AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets"),
+                ExtensionLifecycleService::new(ExtensionRegistry::new()),
+            );
+        let facade = facade
+            .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts))
+            .with_runtime_http_egress(Arc::new(EmptyToolsHostedMcpEgress));
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+
+        // safety: sequential caller actions in a hermetic lifecycle test, not
+        // database statements that must share an atomic transaction.
+        facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("install Notion MCP");
+        let error = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionActivate {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect_err("zero discovered and static tools must not report activation success");
+
+        assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+        let installation_id =
+            ExtensionInstallationId::new("notion").expect("valid installation id");
+        let installation = installation_store
+            .get_installation(&installation_id)
+            .await
+            .expect("read installation")
+            .expect("Notion installation remains retryable");
+        assert_eq!(
+            installation.activation_state(),
+            ExtensionActivationState::Installed,
+            "failed discovery must leave the extension installed for retry"
+        );
+        let snapshot = active_registry.snapshot();
+        assert!(
+            snapshot
+                .get_extension(&ExtensionId::new("notion").expect("valid extension id"))
+                .is_none(),
+            "failed discovery must publish neither the hidden connection template nor tools"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_activation_with_static_tool_keeps_bundled_fallback() {
         let catalog =
             AvailableExtensionCatalog::from_first_party_assets().expect("first-party assets");
         let (_dir, _storage_root, port, active_registry, _installation_store) =
@@ -5248,54 +5319,29 @@ team_id = "/team/id"
                 ExtensionLifecycleService::new(ExtensionRegistry::new()),
             );
         let package_ref =
-            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
 
         port.install(package_ref.clone(), &lifecycle_owner())
             .await
-            .expect("install Notion MCP");
+            .expect("install hosted MCP extension");
         let activate = port
             .activate_with_prechecked_credentials_for_test(
                 package_ref,
                 ExtensionActivationMode::HostedMcpDiscovery {
-                    scope: hosted_mcp_scope("hosted-mcp-empty-tools"),
+                    scope: hosted_mcp_scope("hosted-mcp-static-fallback"),
                     runtime_http_egress: Arc::new(EmptyToolsHostedMcpEgress),
                 },
             )
             .await
-            .expect("transient discovery failure must not fail activation");
+            .expect("a declared static tool is a valid transient-discovery fallback");
 
         assert_eq!(activate.phase, InstallationState::Active);
-        // v3 hosted-MCP manifests declare no placeholder static tools, so the
-        // bundled-manifest fallback publishes only the host-internal MCP
-        // connection template; model-visible tools appear solely via live
-        // tools/list discovery.
-        let snapshot = active_registry.snapshot();
         assert!(
-            snapshot
-                .get_capability(&CapabilityId::new("notion.notion-search").unwrap())
-                .is_none(),
-            "v2 placeholder tools must not reappear on fallback"
-        );
-        let template_id = CapabilityId::new("notion.mcp_server").unwrap();
-        assert!(
-            snapshot.get_capability(&template_id).is_some(),
-            "fallback activation must publish the host-internal MCP connection template"
-        );
-        assert_eq!(
-            snapshot.capability_visibility(&template_id),
-            Some(CapabilityVisibility::HostInternal),
-            "MCP connection template must never be model-visible"
-        );
-        let model_visible_notion_tools = snapshot
-            .capabilities()
-            .filter(|descriptor| descriptor.provider.as_str() == "notion")
-            .filter(|descriptor| {
-                snapshot.capability_visibility(&descriptor.id) == Some(CapabilityVisibility::Model)
-            })
-            .count();
-        assert_eq!(
-            model_visible_notion_tools, 0,
-            "fallback activation must expose zero model-visible tools"
+            active_registry
+                .snapshot()
+                .get_capability(&CapabilityId::new("nearai.web_search").unwrap())
+                .is_some(),
+            "the declared static capability remains callable on fallback"
         );
     }
 

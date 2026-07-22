@@ -342,6 +342,10 @@ framework:
 - manifest declares `[[tools]]` or `[mcp]` → `tools` must be `Some`;
 - manifest declares `[channel]` → `channel` must be `Some`;
 - nothing undeclared may be bound; auth never binds (host-managed);
+- activation requires an operational surface: a tool, channel, or hook. The
+  host-internal `[mcp]` connection template is discovery authority, not a
+  callable tool, so an empty discovered catalog cannot activate by itself;
+  channel-only and hook-only contracts remain valid;
 - violations fail activation with a typed error. No partial extension activates.
 
 Loaders by runtime kind:

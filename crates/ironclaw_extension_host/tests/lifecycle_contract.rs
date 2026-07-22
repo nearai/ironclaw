@@ -105,6 +105,39 @@ async fn declared_tool_without_bound_adapter_fails_activation() {
     assert!(stored.last_error.is_some());
 }
 
+#[tokio::test]
+async fn hosted_mcp_connection_template_alone_fails_activation() {
+    let channel = Arc::new(FakeChannelAdapter::default());
+    let h = harness_with(
+        ExtensionBindings {
+            tools: Some(Arc::new(
+                ironclaw_extension_host::test_support::FakeToolAdapter,
+            )),
+            channel: None,
+        },
+        channel,
+    )
+    .await;
+    h.host
+        .install(record("acme-tools", mcp_manifest()))
+        .await
+        .unwrap();
+
+    let error = h.host.activate("acme-tools").await.unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            LifecycleError::Bind(ironclaw_extension_host::BindError::EmptyHostedMcpToolCatalog)
+        ),
+        "{error:?}"
+    );
+    assert!(h.host.snapshot().await.extension("acme-tools").is_none());
+    let stored = h.store.get("acme-tools").await.unwrap().unwrap();
+    assert_eq!(stored.state, InstallationState::Failed);
+    assert!(stored.last_error.is_some());
+}
+
 // -------------------------------------------------------------------------
 // LIFE-9: channel.activate() runs; failure aborts activation
 // -------------------------------------------------------------------------
