@@ -170,6 +170,7 @@ fn runtime_json_response(
 /// JSON-RPC call carried an `authorization` header on the wire.
 pub(crate) struct HostedMcpDiscoveryNetworkScript {
     tool_name: String,
+    tool_description: String,
     authorized_methods: std::sync::Mutex<Vec<(String, bool)>>,
 }
 
@@ -177,8 +178,14 @@ impl HostedMcpDiscoveryNetworkScript {
     pub(crate) fn with_tool_name(tool_name: &str) -> Self {
         Self {
             tool_name: tool_name.to_string(),
+            tool_description: format!("Scripted hosted MCP tool {tool_name}"),
             authorized_methods: std::sync::Mutex::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn with_tool_description(mut self, tool_description: impl Into<String>) -> Self {
+        self.tool_description = tool_description.into();
+        self
     }
 
     /// `(json_rpc_method, authorization_header_present)` per call, in order.
@@ -226,7 +233,7 @@ impl ironclaw_network::NetworkHttpEgress for HostedMcpDiscoveryNetworkScript {
             "tools/list" => serde_json::json!({
                 "tools": [{
                     "name": self.tool_name,
-                    "description": format!("Scripted hosted MCP tool {}", self.tool_name),
+                    "description": self.tool_description,
                     "inputSchema": {
                         "type": "object",
                         "properties": {"query": {"type": "string"}},

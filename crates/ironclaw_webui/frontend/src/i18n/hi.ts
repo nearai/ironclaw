@@ -1111,6 +1111,8 @@ registerPack("hi", {
   "admin.users.member": "सदस्य",
   "admin.users.admin": "व्यवस्थापक",
   "admin.users.suspend": "निलंबित",
+  "admin.users.actionFailed": "कार्रवाई विफल: {message}",
+  "admin.users.lastAdminRequired": "कम से कम एक सक्रिय व्यवस्थापक आवश्यक है। इस उपयोगकर्ता को बदलने से पहले किसी अन्य व्यवस्थापक को जोड़ें या सक्रिय करें।",
   "admin.users.activate": "सक्रिय करें",
   "admin.users.promote": "प्रचार करें",
   "admin.users.demote": "पदावनत करें",
@@ -1253,6 +1255,13 @@ registerPack("hi", {
   "extensions.removeFailed": "हटाना विफल",
   "extensions.openingAuth": "प्रमाणीकरण खुल रहा है...",
   "extensions.configurationRequired": "कॉन्फ़िगरेशन आवश्यक है",
+  "extensions.setupFailed": "सेटअप विफल रहा",
+  "extensions.oauthSetupFailed": "OAuth सेटअप विफल रहा",
+  "extensions.oauthInvalidAuthorizationUrl": "प्राधिकरण URL में HTTPS का उपयोग होना चाहिए।",
+  "extensions.oauthFailed": "प्राधिकरण विफल रहा। फिर से कनेक्ट करने का प्रयास करें।",
+  "extensions.oauthExpired": "प्राधिकरण की समय-सीमा समाप्त हो गई। फिर से कनेक्ट करने का प्रयास करें।",
+  "extensions.oauthCanceled": "प्राधिकरण रद्द कर दिया गया। फिर से कनेक्ट करने का प्रयास करें।",
+  "extensions.oauthTimedOut": "प्राधिकरण का समय समाप्त हो गया। फिर से कनेक्ट करने का प्रयास करें।",
   "extensions.getCredentials": "क्रेडेंशियल प्राप्त करें",
   "extensions.keepSecretPlaceholder": "••••••• (बनाए रखने के लिए खाली छोड़ें)",
   "extensions.runtime.wasm": "WASM टूल",
@@ -1361,6 +1370,10 @@ registerPack("hi", {
 
 registerPack("hi", {
   "app.checkingSession": "सत्र जांचा जा रहा है...",
+  "app.sessionCheckFailedTitle": "आपके सत्र की पुष्टि नहीं हो सकी",
+  "app.sessionCheckFailedDescription":
+    "अभी आपके सत्र की पुष्टि नहीं हो सकी। आपकी साइन-इन जानकारी अभी भी सहेजी हुई है। थोड़ी देर बाद फिर कोशिश करें।",
+  "app.retrySession": "फिर कोशिश करें",
   "common.close": "बंद करें",
   "common.download": "डाउनलोड",
   "common.copy": "कॉपी",

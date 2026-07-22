@@ -241,6 +241,11 @@ impl ResolvedRebornLlm {
         &self.model
     }
 
+    /// Whether a caller-installed provider decorator will run at cold boot.
+    pub fn has_provider_factory(&self) -> bool {
+        self.provider_factory.is_some()
+    }
+
     /// Base URL of the backend `serve` actually boots with, when the
     /// backend has one. See [`ironclaw_llm::LlmConfig::active_base_url`].
     pub fn base_url(&self) -> Option<String> {
@@ -272,6 +277,47 @@ impl ResolvedRebornLlm {
     pub fn with_provider_factory(mut self, factory: RebornProviderFactory) -> Self {
         self.provider_factory = Some(factory);
         self
+    }
+
+    /// Attach the LLM-trace-recording decorator when `IRONCLAW_RECORD_TRACE` is
+    /// set in the environment; otherwise return the resolved LLM unchanged.
+    ///
+    /// This is the *only* place the serve/run turn path wires
+    /// [`ironclaw_llm::RecordingLlm`]. The runtime builds its turn provider
+    /// through `wrap_swappable_gateway` and hot-reloads it through
+    /// `build_provider_chain_components`, and neither calls
+    /// `RecordingLlm::from_env` — that wiring lives only in
+    /// `build_provider_chain`/`build_static_provider_chain`, which serve uses
+    /// solely for onboarding/probe (`list_models`), never for turns. Without
+    /// this seam `IRONCLAW_RECORD_TRACE=1` on `ironclaw serve` produces no trace
+    /// files at all (the reason the committed reborn_qa fixtures were only ever
+    /// recorded through the in-process integration harness).
+    ///
+    /// The factory wraps the gateway's *swappable* provider (via
+    /// [`with_provider_factory`](Self::with_provider_factory)), so recording
+    /// follows the active inner provider across live config reloads. Recording
+    /// is off by default: an unset or empty env var leaves the resolved LLM
+    /// untouched, so production `serve`/`run` are unaffected unless the operator
+    /// opts in.
+    pub fn with_env_trace_recording(self) -> Self {
+        // Keep the enabling semantics with the recorder rather than duplicating
+        // its environment parsing at the composition seam.
+        if !ironclaw_llm::RecordingLlm::env_recording_enabled() {
+            return self;
+        }
+        // `RecordingLlm::from_env` re-reads `IRONCLAW_RECORD_TRACE` /
+        // `IRONCLAW_TRACE_OUTPUT` / `IRONCLAW_TRACE_MODEL_NAME` at cold boot when
+        // the gateway applies the factory, keeping the canonical env parsing in
+        // one place. If it declines (env cleared between resolve and boot), the
+        // provider passes through unwrapped.
+        let factory: RebornProviderFactory =
+            Arc::new(
+                |inner| match ironclaw_llm::RecordingLlm::from_env(Arc::clone(&inner)) {
+                    Some(recorder) => recorder as Arc<dyn ironclaw_llm::LlmProvider>,
+                    None => inner,
+                },
+            );
+        self.with_provider_factory(factory)
     }
 }
 

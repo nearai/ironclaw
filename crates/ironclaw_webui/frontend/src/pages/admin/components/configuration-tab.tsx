@@ -118,8 +118,9 @@ export function ConfigurationGroup({ group, state }) {
                   autoComplete={field.secret ? "new-password" : "off"}
                   spellCheck={false}
                   onChange={(event) => {
+                    const value = event.currentTarget.value;
                     setSaved(false);
-                    setValues((current) => ({ ...current, [field.handle]: event.currentTarget.value }));
+                    setValues((current) => ({ ...current, [field.handle]: value }));
                   }}
                 />
                 {hint && <p className="mt-1 text-[11px] text-iron-400">{hint}</p>}

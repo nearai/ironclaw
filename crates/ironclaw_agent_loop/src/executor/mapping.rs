@@ -102,15 +102,35 @@ pub(super) fn model_error_class(error: &AgentLoopHostError) -> Option<ModelError
         // path takes over rather than the recovery strategy.
         AgentLoopHostErrorKind::BudgetApprovalRequired => None,
         AgentLoopHostErrorKind::Cancelled => None,
+        // Unclassified so the runner derives the precise category from
+        // kind + reason_kind (`model_credits_exhausted` vs
+        // `model_credentials_unavailable`); classifying here would lose the
+        // reason_kind distinction. See
+        // `ironclaw_runner::model_failure_mapping::model_stage_failure_category`.
         AgentLoopHostErrorKind::CredentialUnavailable => None,
-        AgentLoopHostErrorKind::Unauthorized
-        | AgentLoopHostErrorKind::ScopeMismatch
-        | AgentLoopHostErrorKind::StaleSurface
-        | AgentLoopHostErrorKind::InvalidInvocation
+        // Model-fixable by rebuild: the request was built against a stale
+        // surface or prompt bundle (surface refreshed mid-iteration, host
+        // state moved). An iteration-scoped retry rebuilds both; exhaustion
+        // fails with the precise `model_stale_request` category. Audit
+        // §6.1/§7, docs/plans/2026-06-28-reborn-error-recoverability-audit.md.
+        AgentLoopHostErrorKind::StaleSurface => Some(ModelErrorClass::StaleRequest),
+        // Precise terminal categories: immediate abort via the recovery
+        // strategy so the run fails gracefully (`LoopExit::Failed` with a
+        // user-actionable category) instead of hard-borking as a generic
+        // model-stage unavailability.
+        AgentLoopHostErrorKind::Unauthorized => Some(ModelErrorClass::Unauthorized),
+        AgentLoopHostErrorKind::CheckpointRejected => Some(ModelErrorClass::CheckpointRejected),
+        AgentLoopHostErrorKind::TranscriptWriteFailed => {
+            Some(ModelErrorClass::TranscriptWriteFailed)
+        }
+        // Deliberately unclassified (terminal with diagnostics): deterministic
+        // request-invalid errors must not masquerade as stale/retryable, while
+        // policy denial and scope mismatch remain host/config-shaped. The
+        // runner preserves the original kind when categorizing the failure.
+        AgentLoopHostErrorKind::InvalidInvocation
         | AgentLoopHostErrorKind::Invalid
-        | AgentLoopHostErrorKind::PolicyDenied
-        | AgentLoopHostErrorKind::CheckpointRejected
-        | AgentLoopHostErrorKind::TranscriptWriteFailed => None,
+        | AgentLoopHostErrorKind::ScopeMismatch
+        | AgentLoopHostErrorKind::PolicyDenied => None,
     }
 }
 
@@ -248,6 +268,13 @@ pub(super) fn model_error_failure_category(
         ModelErrorClass::InvalidOutput => "model_invalid_output",
         ModelErrorClass::Unavailable => "model_unavailable",
         ModelErrorClass::Internal => "model_internal",
+        ModelErrorClass::StaleRequest => "model_stale_request",
+        // Pinned category shared with the runner's CredentialUnavailable
+        // mapping (`ironclaw_runner::failure_categories`): an unauthorized
+        // model call is a credentials/permission problem the user must fix.
+        ModelErrorClass::Unauthorized => "model_credentials_unavailable",
+        ModelErrorClass::CheckpointRejected => "checkpoint_rejected",
+        ModelErrorClass::TranscriptWriteFailed => "transcript_write_failed",
     })
 }
 
@@ -402,6 +429,74 @@ mod tests {
             capability_error_class(&CapabilityFailureKind::Permanent),
             CapabilityErrorClass::Permanent
         );
+    }
+
+    /// Classification lock for `model_error_class`: every model-path
+    /// `AgentLoopHostErrorKind` maps to a deliberate outcome. `Some(class)`
+    /// routes through the recovery strategy (retry / precise-category abort);
+    /// `None` is reserved for kinds the executor handles structurally
+    /// (`Cancelled`, gate-shaped `BudgetApprovalRequired`) or that must reach
+    /// the runner as `HostUnavailableWithDiagnostics{Model}` because the
+    /// runner derives their precise category from kind + reason_kind
+    /// (`CredentialUnavailable` -> credits/credentials,
+    /// `BudgetAccountingFailed` -> budget_accounting_failed). See
+    /// `docs/plans/2026-06-28-reborn-error-recoverability-audit.md` §1/§7.
+    #[test]
+    fn every_model_path_host_error_kind_has_a_deliberate_class() {
+        use AgentLoopHostErrorKind as K;
+        use ModelErrorClass as C;
+
+        let class_for = |kind: K| model_error_class(&AgentLoopHostError::new(kind, "test"));
+        let cases: &[(K, Option<C>)] = &[
+            (K::Unavailable, Some(C::Unavailable)),
+            (K::Internal, Some(C::Internal)),
+            (K::InvalidOutput, Some(C::InvalidOutput)),
+            (K::BudgetExceeded, Some(C::ContextOverflow)),
+            // Model-fixable-by-rebuild: iteration retry refreshes the surface
+            // and prompt bundle; exhaustion -> `model_stale_request`.
+            (K::StaleSurface, Some(C::StaleRequest)),
+            // Precise terminal categories, never silently retried.
+            (K::Unauthorized, Some(C::Unauthorized)),
+            (K::CheckpointRejected, Some(C::CheckpointRejected)),
+            (K::TranscriptWriteFailed, Some(C::TranscriptWriteFailed)),
+            // Structural / runner-categorized kinds stay unclassified.
+            (K::BudgetAccountingFailed, None),
+            (K::BudgetApprovalRequired, None),
+            (K::Cancelled, None),
+            (K::CredentialUnavailable, None),
+            (K::InvalidInvocation, None),
+            (K::Invalid, None),
+            (K::PolicyDenied, None),
+            (K::ScopeMismatch, None),
+        ];
+
+        for (kind, expected) in cases {
+            assert_eq!(
+                class_for(*kind),
+                *expected,
+                "model error class for {kind:?} changed — re-confirm the audit lane \
+                 (recoverable vs precise-terminal vs runner-categorized) is deliberate"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_request_and_precise_terminal_classes_have_precise_categories() {
+        for (class, category) in [
+            (ModelErrorClass::StaleRequest, "model_stale_request"),
+            (
+                ModelErrorClass::Unauthorized,
+                "model_credentials_unavailable",
+            ),
+            (ModelErrorClass::CheckpointRejected, "checkpoint_rejected"),
+            (
+                ModelErrorClass::TranscriptWriteFailed,
+                "transcript_write_failed",
+            ),
+        ] {
+            let failure = model_error_failure_category(class).expect("valid category");
+            assert_eq!(failure.category(), category);
+        }
     }
 
     #[test]

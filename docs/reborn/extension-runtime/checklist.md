@@ -1038,7 +1038,7 @@ Rules — kept short on purpose:
   setup POST → real product-auth OAuth connect against the fake vendor
   through the loopback-only rewrite seam → credential-gated activation →
   v0-signed inbound DM on the canonical generic route → coordinated
-  reply on `chat.postMessage` (+ the MIG-5 alias round trip) → remove
+  reply on `chat.postMessage` (while proving the retired MIG-5 alias is 404) → remove
   (no further admission, no further delivery). Green on the standard
   `webui-v2-beta` binary.
 
@@ -1086,15 +1086,11 @@ Rules — kept short on purpose:
   durable Enabled → an Active record in the first published generation
   (snapshot presence + capability resolves); durable Disabled → inactive
   after restart.
-- [x] MIG-5 `/webhooks/slack/events` forwards to the canonical route for one
-  release; a removal note names the release that deletes it. — The legacy
-  path is an internal forwarding alias into the generic router, homed in the
-  sanctioned compatibility table
-  (`composition/src/extension_host/legacy_ingress_aliases.rs`; the whole
-  ported `extension_host/channel_host/e2e_tests.rs` suite posts to it).
-  REMOVAL NOTE: delete the slack alias entry (and the module when the table
-  empties) in the first release after the P4 cutover ships; vendors
-  reconfigure their Events URL to `/webhooks/extensions/slack/events`.
+- [x] MIG-5 `/webhooks/slack/events` forwarded to the canonical route for the
+  cutover release and is now retired. The whole-path Slack E2E pins the legacy
+  path at 404 while the canonical
+  `/webhooks/extensions/slack/events` route remains live. Operators must use
+  the canonical Events URL.
 - [x] MIG-6 OAuth callback URLs are unchanged (no vendor reconfiguration
   needed) — verified by the route tests. — The
   `/api/reborn/product-auth/oauth/{provider}/callback` shape is unchanged

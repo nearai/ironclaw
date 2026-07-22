@@ -80,7 +80,7 @@ ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = 
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0", features = ["test-support"] }
 ironclaw_telegram_extension = { path = "../ironclaw_telegram_extension" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "test-util", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 # Durable-ledger contract tests drive the libSQL/Postgres RootFilesystem
 # backends directly; the Postgres leg builds its own pool. libSQL leg runs

@@ -860,6 +860,10 @@ test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow"
     channel: "slack",
     displayName: "Slack",
     onboardingState: "pairing_required",
+    translate: (key) =>
+      key === "authGate.popupBlocked"
+        ? "La ventana emergente de autorización fue bloqueada."
+        : key,
     blockPopup: true,
     setupResult: {
       secrets: [slackOauthSecret],
@@ -885,8 +889,8 @@ test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow"
     "a blocked popup must not burn the server-side OAuth flow start"
   );
   assert.ok(
-    stateSets.includes("Authorization popup was blocked."),
-    "the blocked-popup error is surfaced to the modal"
+    stateSets.includes("La ventana emergente de autorización fue bloqueada."),
+    "the blocked-popup error is surfaced to the modal in the selected language"
   );
 });
 

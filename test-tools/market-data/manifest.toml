@@ -33,6 +33,7 @@ id = "market-data.snp500"
 description = "Get the current S&P 500 (SPX) index snapshot — level, daily change, and percent change. Takes no arguments."
 effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "allow"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 visibility = "model"
 input_schema_ref = "schemas/market-data/snp500.input.v1.json"
 output_schema_ref = "schemas/market-data/snp500.output.v1.json"

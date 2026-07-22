@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Hosted MCP discovery:** bound overlong valid tool descriptions at the
+  generic MCP boundary instead of rejecting the provider's entire catalog.
+- **Channel delivery:** keep live source-route observers attached for normal
+  long-running turns so every channel receives the durable final reply.
+- **Automation delivery:** honor each trigger's creator-selected outbound
+  target at fire time instead of silently falling back to the user-wide
+  default.
+- **Channel removal:** revoke caller-owned OAuth or proof-code pairing state
+  through the shared lifecycle before deleting any channel installation, so
+  removing Telegram, Slack, or a future channel unpairs it on every surface.
+
+### Removed
+
+- **Slack compatibility route:** retire the one-release
+  `/webhooks/slack/events` forwarding alias. Slack Event Subscriptions must use
+  `/webhooks/extensions/slack/events`; generic product-auth OAuth callbacks are
+  unchanged.
+
 ## [1.0.0-rc.1] - 2026-07-20
 
 First release candidate of the rearchitected IronClaw, internally called

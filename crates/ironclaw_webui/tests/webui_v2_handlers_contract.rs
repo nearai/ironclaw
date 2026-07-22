@@ -4943,6 +4943,153 @@ fn url_encode(value: &str) -> String {
     out
 }
 
+// A browser tab reuses one connection_id while navigating between threads.
+// The replacement must cancel the prior response even when a proxy has not
+// propagated the browser's close yet; otherwise stale streams consume the
+// per-caller cap and the new thread remains disconnected until refresh.
+#[tokio::test]
+async fn stream_events_same_connection_id_supersedes_stale_stream() {
+    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut first = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("first tcp");
+    first
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-a/events?connection_id=browser-tab&connection_generation=1 HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("first request");
+    let mut first_headers = [0_u8; 512];
+    let first_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        first.read(&mut first_headers),
+    )
+    .await
+    .expect("first headers within timeout")
+    .expect("first headers");
+    assert!(
+        std::str::from_utf8(&first_headers[..first_read])
+            .expect("first headers utf8")
+            .starts_with("HTTP/1.1 200"),
+        "first stream must be admitted"
+    );
+
+    let mut replacement = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("replacement tcp");
+    replacement
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-b/events?connection_id=browser-tab&connection_generation=2 HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("replacement request");
+    let mut replacement_headers = [0_u8; 512];
+    let replacement_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        replacement.read(&mut replacement_headers),
+    )
+    .await
+    .expect("replacement headers within timeout")
+    .expect("replacement headers");
+    assert!(
+        std::str::from_utf8(&replacement_headers[..replacement_read])
+            .expect("replacement headers utf8")
+            .starts_with("HTTP/1.1 200"),
+        "same-tab replacement must bypass its own stale slot"
+    );
+
+    let first_closed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut buffer = [0_u8; 512];
+        loop {
+            if first.read(&mut buffer).await.expect("read first stream") == 0 {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(
+        first_closed.is_ok(),
+        "superseded stream must close promptly instead of retaining a slot"
+    );
+
+    let mut late_stale = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("late stale tcp");
+    late_stale
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-a/events?connection_id=browser-tab&connection_generation=1 HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("late stale request");
+    let mut stale_headers = [0_u8; 512];
+    let stale_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        late_stale.read(&mut stale_headers),
+    )
+    .await
+    .expect("stale response within timeout")
+    .expect("stale response");
+    assert!(
+        std::str::from_utf8(&stale_headers[..stale_read])
+            .expect("stale response utf8")
+            .starts_with("HTTP/1.1 204"),
+        "a delayed older route request must stop without replacing the current stream"
+    );
+
+    let mut different_tab = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("different-tab tcp");
+    different_tab
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-c/events?connection_id=other-tab HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: close\r\n\
+              \r\n",
+        )
+        .await
+        .expect("different-tab request");
+    let mut rejected_headers = [0_u8; 512];
+    let rejected_read = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        different_tab.read(&mut rejected_headers),
+    )
+    .await
+    .expect("rejection headers within timeout")
+    .expect("rejection headers");
+    assert!(
+        std::str::from_utf8(&rejected_headers[..rejected_read])
+            .expect("rejection headers utf8")
+            .starts_with("HTTP/1.1 429"),
+        "a distinct tab must still respect the per-caller cap"
+    );
+
+    drop(replacement);
+    serve_handle.abort();
+}
+
 // Regression for the WS-shares-SSE-pool review (Medium): the WS
 // transport must draw from the same `SseCapacity` pool as the SSE
 // transport for the same `(tenant, user)`. If they kept independent
@@ -5648,21 +5795,23 @@ async fn stream_events_uses_subscription_when_facade_supports_it() {
 
     let mut body = response.into_body();
     let bytes = collect_sse_until(&mut body, Duration::from_millis(750), |buf| {
-        parse_sse_events(buf).len() >= 2
+        parse_sse_events(buf).len() >= 3
     })
     .await;
     drop(body);
 
     let events = parse_sse_events(&bytes);
     assert!(
-        events.len() >= 2,
+        events.len() >= 3,
         "subscription events must reach SSE without facade polling; got {events:?}; raw: {}",
         String::from_utf8_lossy(&bytes)
     );
     let cursor_a_json =
         serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
-    assert_eq!(events[0].event.as_deref(), Some("projection_update"));
-    assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
+    assert_eq!(events[0].event.as_deref(), Some("keep_alive"));
+    assert_eq!(events[0].data.as_deref(), Some(r#"{"type":"keep_alive"}"#));
+    assert_eq!(events[1].event.as_deref(), Some("projection_update"));
+    assert_eq!(events[1].id.as_deref(), Some(cursor_a_json.as_str()));
 
     assert_eq!(
         services.stream_events_calls.lock().expect("lock").len(),
@@ -6115,7 +6264,7 @@ async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
 
     let mut text_frames: Vec<String> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline && text_frames.len() < 2 {
+    while std::time::Instant::now() < deadline && text_frames.len() < 3 {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
         match tokio::time::timeout(remaining, ws.next()).await {
             Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
@@ -6129,19 +6278,22 @@ async fn stream_events_ws_uses_subscription_when_facade_supports_it() {
     serve_handle.abort();
 
     assert!(
-        text_frames.len() >= 2,
-        "expected subscription projection frames; got {} text frame(s): {:?}",
+        text_frames.len() >= 3,
+        "expected readiness + subscription projection frames; got {} text frame(s): {:?}",
         text_frames.len(),
         text_frames,
     );
 
-    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
+    let ready_json: Value = serde_json::from_str(&text_frames[0]).expect("ready frame parses");
+    assert_eq!(ready_json, serde_json::json!({ "type": "keep_alive" }));
+
+    let envelope_a_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope a parses");
     let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
     assert_eq!(
         envelope_a_json, expected_a,
-        "first WS frame must carry the first subscription envelope",
+        "first projection WS frame must carry the first subscription envelope",
     );
-    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
+    let envelope_b_json: Value = serde_json::from_str(&text_frames[2]).expect("envelope b parses");
     let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
     assert_eq!(
         envelope_b_json, expected_b,

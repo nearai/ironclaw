@@ -1111,6 +1111,8 @@ registerPack("de", {
   "admin.users.member": "Mitglied",
   "admin.users.admin": "Admin",
   "admin.users.suspend": "Suspendieren",
+  "admin.users.actionFailed": "Aktion fehlgeschlagen: {message}",
+  "admin.users.lastAdminRequired": "Mindestens ein aktiver Administrator ist erforderlich. Fügen Sie einen weiteren Administrator hinzu oder aktivieren Sie ihn, bevor Sie diesen Benutzer ändern.",
   "admin.users.activate": "Aktivieren",
   "admin.users.promote": "Befördern",
   "admin.users.demote": "Zurückstufen",
@@ -1253,6 +1255,13 @@ registerPack("de", {
   "extensions.removeFailed": "Entfernen fehlgeschlagen",
   "extensions.openingAuth": "Authentifizierung wird geöffnet...",
   "extensions.configurationRequired": "Konfiguration erforderlich",
+  "extensions.setupFailed": "Einrichtung fehlgeschlagen",
+  "extensions.oauthSetupFailed": "OAuth-Einrichtung fehlgeschlagen",
+  "extensions.oauthInvalidAuthorizationUrl": "Die Autorisierungs-URL muss HTTPS verwenden.",
+  "extensions.oauthFailed": "Autorisierung fehlgeschlagen. Versuche erneut, eine Verbindung herzustellen.",
+  "extensions.oauthExpired": "Autorisierung abgelaufen. Versuche erneut, eine Verbindung herzustellen.",
+  "extensions.oauthCanceled": "Autorisierung wurde abgebrochen. Versuche erneut, eine Verbindung herzustellen.",
+  "extensions.oauthTimedOut": "Zeitüberschreitung bei der Autorisierung. Versuche erneut, eine Verbindung herzustellen.",
   "extensions.getCredentials": "Anmeldedaten abrufen",
   "extensions.keepSecretPlaceholder": "••••••• (leer lassen, um beizubehalten)",
   "extensions.runtime.wasm": "WASM-Tool",
@@ -1361,6 +1370,10 @@ registerPack("de", {
 
 registerPack("de", {
   "app.checkingSession": "Sitzung wird geprüft...",
+  "app.sessionCheckFailedTitle": "Sitzung konnte nicht überprüft werden",
+  "app.sessionCheckFailedDescription":
+    "Ihre Sitzung konnte gerade nicht überprüft werden. Ihre Anmeldung bleibt gespeichert. Versuchen Sie es in Kürze erneut.",
+  "app.retrySession": "Erneut versuchen",
   "common.close": "Schließen",
   "common.download": "Herunterladen",
   "common.copy": "Kopieren",

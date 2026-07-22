@@ -139,12 +139,26 @@ jobs:
       - name: Install Node.js for WebUI bundle build
         uses: actions/setup-node@60edb5dd545a775178f52524783378180af0d1f8 # v4
         with:
-          node-version: "22"
+          node-version: "24"
           cache: "pnpm"
           cache-dependency-path: crates/ironclaw_webui/frontend/pnpm-lock.yaml
 
       - name: Enable pnpm
         run: corepack enable pnpm
+
+      - name: Checkout pinned Emulate fork
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: serrrfirat/emulate
+          ref: 92bd9c2157a74613c47549eb5cfcccc7c0740adf
+          path: .emulate
+          persist-credentials: false
+
+      - name: Build pinned Emulate fork
+        working-directory: .emulate
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec turbo build --filter=emulate...
 
       - name: Check Reborn Responses API E2E inventory
         run: python3 scripts/ci/check-reborn-responses-e2e-manifest.py
@@ -190,6 +204,17 @@ jobs:
 
       - name: Run Reborn WebUI v2 smoke
         run: pytest tests/e2e/scenarios/test_reborn_webui_v2_smoke.py -v --timeout=120
+
+      - name: Run harvested QA replay and provider contracts with Emulate
+        env:
+          IRONCLAW_EMULATE_CLI: ${{ github.workspace }}/.emulate/packages/emulate/dist/index.js
+        run: >-
+          pytest
+          tests/e2e/scenarios/test_emulate_reborn_provider_contracts.py
+          tests/e2e/scenarios/test_reborn_qa_trace_replay.py
+          tests/e2e/scenarios/test_reborn_qa_trace_full_path.py
+          -v
+          --timeout=120
 
       - name: Run Reborn Responses API E2E
         run: |

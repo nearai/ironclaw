@@ -1,13 +1,12 @@
 //! Generic per-user channel connection facade (extension-runtime §6.4).
 //!
 //! One vendor-blind [`ChannelConnectionFacade`] replaces the per-vendor
-//! facades: for every installed extension whose manifest declares a channel
-//! surface and an auth vendor, the caller's connection state is derived from
-//! the identity-binding store — connected iff the caller holds a binding for
-//! the extension's vendor under the extension's current installation-scoped
-//! prefix. Disconnect runs the fixed order: revoke the caller's personal
-//! vendor credential → per-extension vendor cleanup (lane-supplied residue,
-//! e.g. personal delivery targets) → delete the caller's identity bindings.
+//! facades: every installed extension whose manifest declares a channel
+//! surface is discovered. OAuth connection state is derived from the
+//! identity-binding store; proof-code connection state comes from the generic
+//! pairing registry. Disconnect runs the owner-specific cleanup before the
+//! installation disappears: revoke any personal vendor credential → pairing
+//! or per-extension residue cleanup → delete the caller's identity bindings.
 //! The binding is the "connected" signal and deletes last (commit point);
 //! the credential revokes first so a mid-sequence failure leaves the caller
 //! visibly connected with every step retryable.
@@ -1087,6 +1086,115 @@ team_id = "/team/id"
                 Some("install-alpha:".to_string())
             )],
             "bindings delete last, prefix-scoped to the installation"
+        );
+    }
+
+    /// Proof-code channels have no auth vendor, but the connection facade
+    /// still has to discover them so its pairing registry can own status and
+    /// disconnect. This mirrors Telegram's manifest shape without naming a
+    /// provider in production code.
+    #[tokio::test]
+    async fn connection_discovery_includes_channel_without_auth_vendor() {
+        use ironclaw_extensions::{
+            ExtensionActivationState, ExtensionInstallation, ExtensionInstallationId,
+            ExtensionManifestRecord, ExtensionManifestRef, ManifestSource,
+        };
+
+        const PAIRING_CHANNEL_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "pairchat"
+name = "PairChat"
+version = "0.1.0"
+description = "proof-code channel discovery fixture"
+trust = "first_party_requested"
+
+[runtime]
+kind = "first_party"
+service = "pairchat.extension/v1"
+
+[channel]
+id = "messages"
+display_name = "PairChat messages"
+inbound = true
+outbound = true
+conversation_model = "continuous"
+
+[channel.ingress]
+route_suffix = "updates"
+method = "post"
+body_limit_bytes = 1048576
+
+[channel.ingress.verification]
+kind = "shared_secret_header"
+secret_handle = "pairchat_webhook_secret"
+header = "X-PairChat-Secret"
+
+[channel.config]
+fields = [
+  { handle = "pairchat_bot_token", label = "Bot token", secret = true },
+  { handle = "pairchat_webhook_secret", label = "Webhook secret", secret = true },
+]
+
+[[channel.egress]]
+scheme = "https"
+host = "api.pairchat.example"
+methods = ["post"]
+credential_handle = "pairchat_bot_token"
+injection = { type = "header", name = "authorization", prefix = "Bearer " }
+"#;
+
+        let installation_store =
+            Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
+        let record = ExtensionManifestRecord::from_toml(
+            PAIRING_CHANNEL_MANIFEST,
+            ManifestSource::HostBundled,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("catalog"),
+            None,
+            &product_extension_host_api_contract_registry().expect("contracts"),
+        )
+        .expect("pairing channel manifest parses");
+        let extension_id = ExtensionId::new("pairchat").expect("extension id");
+        installation_store
+            .upsert_manifest_and_installation(
+                record,
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new("pairchat-install").expect("installation id"),
+                    extension_id.clone(),
+                    ExtensionActivationState::Enabled,
+                    ExtensionManifestRef::new(extension_id, None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    ironclaw_extensions::InstallationOwner::Tenant,
+                )
+                .expect("installation"),
+            )
+            .await
+            .expect("persist install");
+
+        let identity_store = bound_identity_store("pairchat-install");
+        let facade = GenericChannelConnectionFacade::new(
+            tenant(),
+            Vec::new(),
+            Some(installation_store as Arc<dyn ExtensionInstallationStore>),
+            identity_store.clone(),
+            identity_store,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let entries = facade
+            .connection_entries()
+            .await
+            .expect("discover channels");
+        let pairchat = entries
+            .iter()
+            .find(|entry| entry.extension_id == "pairchat")
+            .expect("channel-only extension is discoverable");
+        assert!(
+            pairchat.providers.is_empty(),
+            "proof-code pairing does not invent an OAuth vendor"
         );
     }
 
