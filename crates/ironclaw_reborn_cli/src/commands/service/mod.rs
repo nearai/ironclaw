@@ -171,16 +171,13 @@ impl ServicePlatform {
     /// trusts an external restart policy to relaunch it — no signal
     /// observable from inside the container (not `/.dockerenv`, not a
     /// cgroup, not any other ambient marker) can actually prove that policy
-    /// exists; only the party that configured the deployment knows. So this
-    /// is not auto-detected: it must be explicitly declared, matching this
-    /// same script's existing opt-in convention (`IRONCLAW_REBORN_ALLOW_EPHEMERAL_RAILWAY`,
-    /// `IRONCLAW_REBORN_CONFIRM_HOST_ACCESS`). `docker/reborn/entrypoint.sh`
-    /// sets it automatically for the platform this PR targets (Railway,
-    /// already detected there for other purposes); anyone else opts in
-    /// deliberately. When it isn't declared, fall back to `Linux`: that host
-    /// gets the old systemd-manager path, which fails loud (a plain
-    /// `systemctl` ENOENT) rather than guessing and taking a destructive
-    /// action with no recovery guarantee.
+    /// exists. The one platform-specific exception is Railway: its
+    /// deployment markers identify a platform which provides the restart
+    /// policy, matching `docker/reborn/entrypoint.sh`. Elsewhere, the policy
+    /// must be declared explicitly. When neither applies, fall back to
+    /// `Linux`: that host gets the old systemd-manager path, which fails loud
+    /// (a plain `systemctl` ENOENT) rather than guessing and taking a
+    /// destructive action with no recovery guarantee.
     fn linux_platform(systemd_booted: bool, container_supervised_declared: bool) -> Self {
         if systemd_booted {
             Self::Linux
@@ -268,10 +265,21 @@ impl ServicePlatform {
 
     /// Runner-injectable `restart` — see [`Self::start_with_runner`].
     fn restart_with_runner(&self, runner: &mut dyn ServiceCommandRunner) -> Result<()> {
+        self.restart_with_runner_at_proc_root(runner, Path::new(PROC_ROOT))
+    }
+
+    /// Testable restart dispatch with an injectable procfs root. Production
+    /// uses [`PROC_ROOT`]; tests use a fake process table to prove the
+    /// `Container` arm reaches the same signal command as a real restart.
+    fn restart_with_runner_at_proc_root(
+        &self,
+        runner: &mut dyn ServiceCommandRunner,
+        proc_root: &Path,
+    ) -> Result<()> {
         match self {
             Self::MacOs => launchd::restart_with_runner(runner),
             Self::Linux => systemd::restart_with_runner(runner),
-            Self::Container => container::restart_with_runner(runner, Path::new(PROC_ROOT)),
+            Self::Container => container::restart_with_runner(runner, proc_root),
         }
     }
 
@@ -336,22 +344,53 @@ fn systemd_booted_under(root: &Path) -> bool {
 }
 
 /// Env var a deployment sets to explicitly declare "I run under a managed
-/// restart policy" — see [`ServicePlatform::linux_platform`]'s doc for why
-/// this must be an explicit opt-in rather than inferred from the
-/// environment. `docker/reborn/entrypoint.sh` sets it automatically on
-/// Railway; anyone else opts in deliberately.
+/// restart policy". An explicit value always wins; otherwise Railway's
+/// deployment markers imply its managed restart policy, matching
+/// `docker/reborn/entrypoint.sh`.
 const CONTAINER_SUPERVISED_ENV_VAR: &str = "IRONCLAW_REBORN_CONTAINER_SUPERVISED";
+const RAILWAY_ENVIRONMENT_ENV_VAR: &str = "RAILWAY_ENVIRONMENT";
+const RAILWAY_PROJECT_ID_ENV_VAR: &str = "RAILWAY_PROJECT_ID";
+const RAILWAY_SERVICE_ID_ENV_VAR: &str = "RAILWAY_SERVICE_ID";
 
-/// Whether [`CONTAINER_SUPERVISED_ENV_VAR`] is set. Combined with
+/// Whether a deployment declares a managed restart policy. Combined with
 /// [`systemd_booted`] absence, this is [`ServicePlatform::linux_platform`]'s
 /// second signal for `Container` mode.
 fn container_supervised_declared() -> bool {
-    is_truthy_env(std::env::var(CONTAINER_SUPERVISED_ENV_VAR).ok().as_deref())
+    container_supervised_declared_from_signals(
+        std::env::var_os(CONTAINER_SUPERVISED_ENV_VAR).as_deref(),
+        railway_runtime_detected(),
+    )
 }
 
-/// `container_supervised_declared`'s actual check, parameterized on the raw
-/// value so tests don't need to touch real process env vars — mirrors
-/// [`systemd_booted_under`]'s injectable-root pattern for the same reason.
+/// Matches `docker/reborn/entrypoint.sh`'s `railway_runtime_detected()`.
+fn railway_runtime_detected() -> bool {
+    railway_runtime_detected_from_signals([
+        std::env::var_os(RAILWAY_ENVIRONMENT_ENV_VAR).as_deref(),
+        std::env::var_os(RAILWAY_PROJECT_ID_ENV_VAR).as_deref(),
+        std::env::var_os(RAILWAY_SERVICE_ID_ENV_VAR).as_deref(),
+    ])
+}
+
+fn railway_runtime_detected_from_signals(signals: [Option<&std::ffi::OsStr>; 3]) -> bool {
+    signals
+        .into_iter()
+        .any(|signal| signal.is_some_and(|value| !value.is_empty()))
+}
+
+/// The actual supervision decision, parameterized so tests do not mutate the
+/// process environment. Explicit supervision settings, including explicit
+/// false values, override Railway's ambient deployment markers.
+fn container_supervised_declared_from_signals(
+    explicit_supervision: Option<&std::ffi::OsStr>,
+    railway_detected: bool,
+) -> bool {
+    match explicit_supervision {
+        Some(value) => is_truthy_env(value.to_str()),
+        None => railway_detected,
+    }
+}
+
+/// `container_supervised_declared_from_signals`' explicit-value check.
 /// Matches `docker/reborn/entrypoint.sh`'s `is_truthy()` shell helper
 /// exactly, so a value that's truthy in the entrypoint script is truthy
 /// here too.
@@ -717,6 +756,30 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RecordingServiceCommandRunner {
+        commands: Vec<(String, String, Vec<String>)>,
+    }
+
+    impl ServiceCommandRunner for RecordingServiceCommandRunner {
+        fn run_checked(&mut self, label: &str, command: &mut Command) -> Result<()> {
+            self.commands.push((
+                label.to_string(),
+                command.get_program().to_string_lossy().into_owned(),
+                command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().into_owned())
+                    .collect(),
+            ));
+            Ok(())
+        }
+
+        fn run_capture_checked(&mut self, label: &str, command: &mut Command) -> Result<String> {
+            self.run_checked(label, command)?;
+            Ok(String::new())
+        }
+    }
+
     #[test]
     fn status_label_covers_running_stopped_and_not_installed() {
         assert_eq!(status_label(false, false), "not installed");
@@ -774,6 +837,76 @@ mod tests {
         assert_eq!(
             ServicePlatform::linux_platform(false, false),
             ServicePlatform::Linux
+        );
+    }
+
+    #[test]
+    fn railway_markers_select_container_when_supervision_is_not_explicitly_set() {
+        let railway_detected = railway_runtime_detected_from_signals([
+            Some(std::ffi::OsStr::new("production")),
+            None,
+            None,
+        ]);
+        assert!(railway_detected);
+        assert!(container_supervised_declared_from_signals(
+            None,
+            railway_detected,
+        ));
+        assert_eq!(
+            ServicePlatform::linux_platform(
+                false,
+                container_supervised_declared_from_signals(None, railway_detected),
+            ),
+            ServicePlatform::Container
+        );
+    }
+
+    #[test]
+    fn explicit_false_supervision_overrides_railway_markers() {
+        let railway_detected = railway_runtime_detected_from_signals([
+            None,
+            Some(std::ffi::OsStr::new("project-id")),
+            None,
+        ]);
+        assert!(!container_supervised_declared_from_signals(
+            Some(std::ffi::OsStr::new("false")),
+            railway_detected,
+        ));
+        assert_eq!(
+            ServicePlatform::linux_platform(
+                false,
+                container_supervised_declared_from_signals(
+                    Some(std::ffi::OsStr::new("false")),
+                    railway_detected,
+                ),
+            ),
+            ServicePlatform::Linux
+        );
+    }
+
+    #[test]
+    fn container_restart_dispatches_the_serve_signal_through_the_runner() {
+        let proc = tempfile::tempdir().expect("tempdir");
+        let serve_dir = proc.path().join("71");
+        std::fs::create_dir_all(&serve_dir).expect("create fake proc entry");
+        std::fs::write(
+            serve_dir.join("cmdline"),
+            b"/usr/local/bin/ironclaw\0serve\0--host\0",
+        )
+        .expect("write fake serve command line");
+        let mut runner = RecordingServiceCommandRunner::default();
+
+        ServicePlatform::Container
+            .restart_with_runner_at_proc_root(&mut runner, proc.path())
+            .expect("container restart must dispatch through the runner");
+
+        assert_eq!(
+            runner.commands,
+            vec![(
+                "terminate serve process".to_string(),
+                "sh".to_string(),
+                vec!["-c".to_string(), "kill -TERM 71".to_string()],
+            )]
         );
     }
 
