@@ -4175,12 +4175,45 @@ async fn operator_config_routes_require_operator_capability() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
     let response = router
+        .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/webchat/v2/operator/setup")
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"provider_id":"openai"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    // The extension admin-configuration routes are gated by the same
+    // load-bearing `require_operator_webui_config` operator check: a
+    // non-operator caller is rejected before the deployment-owned admin values
+    // are read or any replacement capability is dispatched.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/operator/extension-configuration")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/webchat/v2/operator/extension-configuration/extension.slack")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"values":[],"expected_revision":0,"idempotency_key":"non-operator"}"#,
+                ))
                 .expect("request"),
         )
         .await
