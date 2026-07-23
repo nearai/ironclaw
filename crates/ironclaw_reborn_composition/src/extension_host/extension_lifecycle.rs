@@ -2157,6 +2157,19 @@ impl ExtensionManagementPort {
             .without_member(caller)
             .map_err(map_extension_installation_error)?
         {
+            // Evidence tripwire (`tool-evidence.md`): a leave that changed
+            // nothing means the caller was never a member of this row. The
+            // authorization gate above must have rejected that caller, so
+            // reaching here is an internal invariant violation — never report
+            // `removed: true` for a mutation that did not mutate.
+            if &remaining == installation.owner() {
+                return Err(ProductWorkflowError::Transient {
+                    reason: format!(
+                        "extension {} removal changed no membership for an authorized caller",
+                        extension_id.as_str()
+                    ),
+                });
+            }
             let remaining_installation = installation.clone().with_owner(remaining);
             self.installation_store
                 .upsert_installation(remaining_installation)

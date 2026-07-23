@@ -4640,7 +4640,41 @@ async fn build_backend_production(
                     "channel pairing completion startup reconciliation failed: {error}"
                 ),
             })?;
-        channel_pairing_registry = Some(channel_pairing_registry_built);
+        channel_pairing_registry = Some(Arc::clone(&channel_pairing_registry_built));
+        // Fill the late-bound channel-connection facade slot here, where the
+        // pairing registry and every store it disconnects through already
+        // exist. `ExtensionManagementPort::remove` fails closed on an empty
+        // slot for channel extensions, so a factory-tier composition that can
+        // install a channel extension must also be able to remove it —
+        // runtime-backed builds previously filled this in
+        // `build_reborn_runtime` only, leaving factory-tier removal
+        // permanently unavailable. First write wins by `OnceLock` contract;
+        // the runtime's later fill of an equivalent facade (same stores) is a
+        // deliberate no-op.
+        let _ = channel_disconnect_slot.set(Arc::new(
+            crate::extension_host::channel_connection::GenericChannelConnectionFacade::new(
+                channel_egress_scope.tenant_id.clone(),
+                Vec::new(),
+                Some(extension_management.installation_store_handle()),
+                Arc::clone(&channel_identity_store)
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
+                Arc::clone(&channel_identity_store)
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityBindingDeleteStore>,
+                Some(Arc::clone(&product_auth_services)
+                    as Arc<
+                        dyn crate::extension_host::channel_connection::ChannelCredentialCleanup,
+                    >),
+                Some(Arc::clone(&product_auth_services)
+                    as Arc<
+                        dyn crate::extension_host::channel_connection::ChannelAccountStatusReader,
+                    >),
+                Some(Arc::clone(&channel_dm_target_store)),
+                Arc::new(ironclaw_product::ChannelWorkflowStateService::new(
+                    Arc::clone(&fold_filesystem),
+                )),
+                Some(channel_pairing_registry_built),
+            ),
+        ));
         let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
             Some(transport) => {
                 let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> = Arc::new(
