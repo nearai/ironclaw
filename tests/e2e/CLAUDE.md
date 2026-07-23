@@ -39,7 +39,7 @@ pip install -e .
 playwright install chromium
 ```
 
-Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js. CI installs Node 24, builds `serrrfirat/emulate` at commit `7f0175ad65a884ad86b3897c527cc40336e1391b`, and passes its CLI through `IRONCLAW_EMULATE_CLI`. Without that override, unrelated local Emulate tests retain the `emulate@0.7.0` fallback.
+Dependencies: `pytest`, `pytest-asyncio`, `pytest-playwright`, `pytest-timeout`, `playwright`, `aiohttp`, `httpx`. Optional: `anthropic` (vision extras). Requires Python >= 3.11. Emulate-backed provider tests also require Node.js. CI installs Node 24, builds the `serrrfirat/emulate` commit pinned by [the Reborn E2E workflow](../../.github/workflows/reborn-e2e.yml), and passes its CLI through `IRONCLAW_EMULATE_CLI`. Without that override, unrelated local Emulate tests retain the `emulate@0.7.0` fallback.
 
 ## Running Tests
 
@@ -140,12 +140,12 @@ All fixtures are defined in `tests/e2e/conftest.py`. Running `pytest scenarios/`
 | `reborn_v2_server` | Starts `ironclaw serve` (v2 SPA at `/`, `local-dev` profile) against `mock_llm_server`; config written via `_write_config_toml` (selects the `openai` provider pointed at the mock). Waits for `/api/health`; SIGINT teardown. (Module-scoped, defined in `test_reborn_webui_v2_smoke.py`.) |
 | `reborn_v2_browser` | Chromium instance for the v2 scenarios, independent of the legacy `browser` fixture (generous launch timeout + retry). |
 | `mock_llm_server` | Starts `mock_llm.py --port 0`, reads the assigned port from stdout, waits for `/v1/models` to return 200. Yields the base URL. Serves canned responses including delayed ones (e.g. `"editable composer slow response"` → ~5s) so tests can act while a run is in flight. |
-| `emulate_google_server` | Starts the Emulate CLI selected by `IRONCLAW_EMULATE_CLI`, or the `emulate@0.7.0` fallback, with `fixtures/emulate/google_gmail.yaml`; waits for the Gmail messages endpoint; and yields the base URL for HTTP rewrite maps. The pinned CI fork covers Gmail, Calendar, Drive, Docs, and Sheets. Local runs skip if neither the selected CLI nor `npx` is available; CI fails. |
+| `emulate_google_server` | Starts the Emulate CLI selected by `IRONCLAW_EMULATE_CLI`, or the `emulate@0.7.0` fallback, with `fixtures/emulate/google_gmail.yaml`; waits for the Gmail messages endpoint; and yields the base URL for HTTP rewrite maps. The pinned CI fork covers Gmail, Calendar, Drive, Docs, Sheets, and Slides. Local runs skip if neither the selected CLI nor `npx` is available; CI fails. |
 | `emulate_slack_server` | Starts the selected Emulate CLI with `fixtures/emulate/slack.yaml`, waits for seeded token auth to pass `auth.test`, and yields the base URL for Slack provider-contract assertions, including `search.messages` with the pinned CI fork. |
 | `emulate_github_server` | Starts the selected Emulate CLI with `fixtures/emulate/github.yaml`, waits for `/user` to return the seeded actor, and yields the base URL for GitHub provider-contract assertions. |
 | `ironclaw_server` | Starts the ironclaw binary with a minimal env (see below), waits for `/api/health` (timeout 60s). Yields the base URL. On teardown sends **SIGINT** (not SIGTERM) so the tokio ctrl_c handler triggers a graceful shutdown and LLVM coverage data is flushed. |
 | `hosted_oauth_refresh_server` | Starts a second ironclaw instance with a dedicated libSQL DB and `GOOGLE_OAUTH_CLIENT_ID=hosted-google-client-id`, while still pointing `IRONCLAW_OAUTH_EXCHANGE_URL` at `mock_llm.py`. Yields a dict with `base_url`, `db_path`, and `mock_llm_url` for hosted refresh scenarios that do not need provider API calls. |
-| `hosted_google_emulate_server` | Starts the same hosted OAuth fixture shape, but sets `IRONCLAW_TEST_HTTP_REWRITE_MAP` so Google WASM HTTP calls to `gmail.googleapis.com` and `www.googleapis.com` hit `emulate_google_server`. Yields `emulate_google_url` in addition to the hosted OAuth server fields. |
+| `hosted_google_emulate_server` | Starts the same hosted OAuth fixture shape, but sets `IRONCLAW_TEST_HTTP_REWRITE_MAP` so Google WASM HTTP calls to `gmail.googleapis.com`, `www.googleapis.com`, and `slides.googleapis.com` hit `emulate_google_server`. Yields `emulate_google_url` in addition to the hosted OAuth server fields. |
 | `hosted_google_oauth_refresh_server` | Compatibility alias for `hosted_google_emulate_server`, retained for hosted Gmail OAuth refresh regression tests. |
 | `extension_cleanup_server` | Starts an isolated ironclaw instance with its own temp DB/home/WASM dirs, `SECRETS_MASTER_KEY`, and hosted-style OAuth env so uninstall-cleanup scenarios can inspect the `secrets` table without interfering with the shared E2E server state. |
 | `managed_gateway_server` | Function-scoped restartable gateway instance for SSE/connectivity scenarios; preserves port/DB/home across explicit stop/start calls so tests can simulate server restarts. |
@@ -165,14 +165,17 @@ The function-scoped `page` fixture means **each test gets a clean browser contex
 ### Emulate provider coverage
 
 Use Emulate for provider APIs that map directly to Reborn features already in
-this repo: Google Gmail/Calendar/Drive/Docs/Sheets, Slack delivery/search/reactions/user lookup,
-and GitHub repository, issue, pull request, search, branch, release, fork, Git
-object, and Actions route workflows. The current provider contract covers
+this repo: Google Gmail/Calendar/Drive/Docs/Sheets/Slides, Slack
+delivery/search/reactions/user lookup, and GitHub repository, issue, pull
+request, review thread, contents, search, branch, release, fork, Git object,
+and Actions workflows. The current provider contract covers
 seeded reads plus stateful writes for Gmail send, Calendar event create/delete,
 Drive upload/readback, Slack channel/thread/DM delivery/reactions, GitHub repo
 create/list, release create/list/latest, issue create/read/comment/search, PR
 create/read/list/files/review/comment/merge, branch/ref creation, Git
-blob/tree/commit read/write, fork create/list, and empty Actions route readback.
+blob/tree/commit read/write, contents create/read/delete, fork create/list,
+review-thread resolution, Actions dispatch/readback/reruns, and Slides
+presentation/slide/text/shape/image mutation.
 
 Direct provider-contract tests prove the Emulate fixture layer itself. Full-path
 recorded-trace tests load harvested `LlmTrace` JSON through `mock_llm.py`'s
@@ -208,16 +211,16 @@ gates, and read provider state back from Emulate. This is the contract tier to
 use when the behavior being protected is extension install/auth, model-to-tool
 routing, tool execution, and provider mutation together.
 
-The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive, and
-Sheets operations and Slack `search.messages` used by the provider contract
-catalog. Google Slides remains outside the provider fixture because Emulate has
-no Slides routes. Manual QA rows that mention Telegram, Twitter/X, or HN/web
-search are likewise model-replay-only unless paired with a separate
-fake/provider fixture. GitHub `/contents` file create/update/delete, GraphQL
-review threads, and workflow dispatch remain outside direct Emulate coverage:
-the emulator exposes Git data APIs but no `/contents` or GraphQL routes, and it
-exposes Actions routes but does not let fixture seeds define workflows to
-dispatch.
+The pinned `serrrfirat/emulate` fork adds the Google Calendar, Docs, Drive,
+Sheets, and Slides operations; Slack `search.messages`; and GitHub Contents,
+GraphQL review threads, and seeded Actions workflows used by the provider
+contract catalog. Of 123 shipped static provider capabilities, 119 now have
+full-path Emulate-backed evidence. The remaining four are intentionally outside
+this runner: `github.handle_webhook` is local ingress normalization, while
+`nearai.web_search`, `web-access.get_content`, and `web-access.search` need a
+separate hermetic web-search/content double. Manual QA rows that mention
+Telegram or Twitter/X also remain model-replay-only unless paired with their own
+provider fixture.
 
 ### Environment passed to ironclaw in tests
 
