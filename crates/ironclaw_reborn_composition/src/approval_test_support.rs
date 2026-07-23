@@ -69,9 +69,9 @@ impl LocalDevApprovalHarness for RebornRuntimeStores {
 
 /// Turn the global auto-approve switch off for `context`'s actor scope.
 /// Global auto-approve defaults ON, so any test exercising the per-tool approval
-/// gate must flip it off first. Shared by every `src` `#[cfg(test)]` site;
-/// integration-test and root-crate binaries keep their own copies (they cannot
-/// see this crate-internal helper).
+/// gate must flip it off first. Shared by every crate-internal `#[cfg(test)]`
+/// site; integration-test and root-crate binaries keep their own copies (they
+/// cannot see this helper).
 pub(crate) async fn disable_global_auto_approve(
     runtime: &impl LocalDevApprovalHarness,
     context: &ExecutionContext,
