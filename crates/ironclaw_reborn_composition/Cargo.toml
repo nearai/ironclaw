@@ -84,6 +84,10 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # `ironclaw_webui`; no longer a composition dependency.
 libsql = { version = "0.9", default-features = false, features = ["core", "replication", "remote", "tls"] }
 libc = "0.2"
+ironclaw_attested_runtime = { path = "../ironclaw_attested_runtime" }
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
 # axum + tower middleware stack used by the `webui_serve` module. Each
 # entry is feature-gated so non-beta builds carry no HTTP surface code.
 axum = { version = "0.8" }
@@ -109,6 +113,14 @@ url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+
+# Attested-signing composition e2e test (real RebornAttestedComposition): derive
+# a bound EVM signer + proof. alloy/k256 are already in-tree via chain_signing.
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
+alloy-consensus = "1"
+alloy-primitives = "1"
+k256 = { version = "0.13", features = ["ecdsa"] }
 ironclaw_extension_host = { path = "../ironclaw_extension_host", features = ["test-support"] }
 async-trait = "0.1"
 chrono = "0.4"
@@ -172,6 +184,9 @@ name = "resource_governor_libsql_contract"
 [build-dependencies]
 ironclaw_skills = { path = "../ironclaw_skills" }
 serde_json = "1"
+ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
 
 [lints]
 workspace = true

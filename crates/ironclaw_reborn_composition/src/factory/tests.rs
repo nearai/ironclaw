@@ -67,7 +67,7 @@ async fn production_turn_state_store_uses_row_layout() {
     // layout" is now a compile-time guarantee. This exercises the factory
     // end-to-end and confirms the constructed store answers reads.
     let store =
-        production_turn_state_store(filesystem, ironclaw_turns::TurnStateStoreLimits::default());
+        production_turn_state_store(filesystem, ironclaw_turns::TurnStateStoreLimits::default(), None);
 
     let snapshot = store.persistence_snapshot().await.expect("read snapshot");
     assert!(snapshot.runs.is_empty());

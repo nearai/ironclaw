@@ -1,0 +1,53 @@
+[package]
+name = "ironclaw_attested_runtime"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Composition-layer runtime glue for the IronClaw attested-signing substrate: AttestedResumePort impl, signer-continuation driver, and the custodial-mainnet ship-gate (attested-signing PR10)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+async-trait = "0.1"
+# Structured diagnostics for the broadcast-failure recovery path (a non-benign
+# ledger error must surface in release builds, not be swallowed by debug_assert).
+tracing = "0.1"
+
+# Crypto-free turn-coordination contract (the AttestedResumePort trait lives here).
+ironclaw_turns = { path = "../ironclaw_turns" }
+
+# Attested-signing substrate stack (PR1-PR9).
+ironclaw_signing_provider = { path = "../ironclaw_signing_provider" }
+ironclaw_attestation = { path = "../ironclaw_attestation" }
+ironclaw_chain_signing = { path = "../ironclaw_chain_signing" }
+ironclaw_wallet_external = { path = "../ironclaw_wallet_external" }
+# ResourceScope is the authoritative custodial keystore/AAD owner carried on the
+# gate binding (host-api is already in the chain-signing dependency closure).
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+# The driver reconstructs the EVM signable from the authoritative decoded
+# binding (byte-drift defense), signing only the approved bytes.
+alloy-consensus = "1"
+alloy-primitives = "1"
+alloy-eips = "1"
+
+[dev-dependencies]
+async-trait = "0.1"
+chrono = "0.4"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+hex = "0.4"
+ed25519-dalek = "2"
+# Already a normal dependency of `ironclaw_chain_signing` (in-tree); used here
+# only to derive the EVM address from a fixed test private key, mirroring the
+# `ironclaw_chain_signing` custodial tests. `evm::signing_key_from_bytes` became
+# crate-private, so the test constructs the `SigningKey` directly. Adds no new
+# transitive deps to the workspace tree.
+k256 = { version = "0.13", features = ["ecdsa"] }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+secrecy = "0.10"

@@ -1213,6 +1213,16 @@ fn approval_turn_locator_unavailable() -> ironclaw_product_workflow::ProductWork
 impl RebornRuntime {
     /// Snapshot of the substrate facades produced by `build_reborn_services`.
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
+    /// The attested-signing signer-continuation composition (PR10), when this
+    /// runtime composed one (local-dev does; production is `None` until the
+    /// durable backends land in PR12). The gate/resolve ingress (PR11) reaches
+    /// the assembled driver and the authoritative binding store through this.
+    pub fn attested_signing(
+        &self,
+    ) -> Option<&Arc<crate::attested::RebornAttestedComposition>> {
+        self.services.attested_signing.as_ref()
+    }
+
     pub fn services(&self) -> &RebornServices {
         &self.services
     }
