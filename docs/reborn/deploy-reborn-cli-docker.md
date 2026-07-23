@@ -1,15 +1,16 @@
 # Reborn CLI Docker Deployment
 
 `Dockerfile.reborn` builds the standalone `ironclaw` binary with the
-WebUI v2 and Slack host-beta features enabled. The image defaults to:
+WebUI v2 and Slack host-beta features enabled. The entrypoint defaults to:
 
 ```text
 ironclaw serve --host ${IRONCLAW_SERVE_HOST:-127.0.0.1} --port ${PORT:-3000}
 ```
 
-Railway supplies `PORT`; set `IRONCLAW_SERVE_HOST=0.0.0.0` for
-Railway/public deployments. Local Docker runs can keep the loopback default and
-set `IRONCLAW_SERVE_PORT=3000`.
+Railway supplies `PORT`; when a `RAILWAY_*` runtime marker is present and no
+serve host is explicitly configured, the entrypoint binds `0.0.0.0`
+automatically. Local Docker runs keep the loopback default and can set
+`IRONCLAW_SERVE_PORT=3000`.
 
 ## Build
 
@@ -75,8 +76,9 @@ https://<public-host>/auth/callback/google
 ## Railway
 
 Set the service Dockerfile path to `Dockerfile.reborn`. Railway sets `PORT`;
-keep `IRONCLAW_SERVE_HOST=0.0.0.0`. The Reborn WebUI service serves
-`/api/health` for Railway's healthcheck.
+leave `IRONCLAW_SERVE_HOST` unset to let the entrypoint select `0.0.0.0`
+automatically, or set it explicitly to `0.0.0.0`. The Reborn WebUI service
+serves `/api/health` for Railway's healthcheck.
 
 Leave Railway's Start Command empty for the Docker image. The image entrypoint
 builds the `ironclaw serve` arguments from `PORT` and

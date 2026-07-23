@@ -161,8 +161,9 @@ fn reborn_dockerfile_keeps_bundled_skills_in_build_context() {
 }
 
 #[test]
-fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
+fn reborn_dockerfile_uses_feature_matched_cache_without_baking_serve_host() {
     let dockerfile = read_repo_file("Dockerfile");
+    let entrypoint = read_repo_file("docker/reborn/entrypoint.sh");
 
     assert!(
         dockerfile.contains(
@@ -171,8 +172,13 @@ fn reborn_dockerfile_uses_feature_matched_cache_and_loopback_default() {
         "cargo chef cook must target the Reborn CLI package"
     );
     assert!(
-        dockerfile.contains("IRONCLAW_SERVE_HOST=127.0.0.1"),
-        "image default serve host must stay loopback; Railway should override to 0.0.0.0"
+        !dockerfile.contains("IRONCLAW_SERVE_HOST="),
+        "the image must not make the local loopback default look explicit and block Railway auto-detection"
+    );
+    assert!(
+        entrypoint.contains("elif railway_runtime_detected; then\n  host=\"0.0.0.0\"")
+            && entrypoint.contains("else\n  host=\"127.0.0.1\"\nfi"),
+        "the entrypoint must own platform-sensitive serve-host defaults"
     );
     assert!(
         dockerfile.contains("config.hosted-single-tenant.toml"),
@@ -365,6 +371,65 @@ fn reborn_entrypoint_accepts_legacy_deployment_variable_aliases() {
     assert_eq!(
         std::fs::read_to_string(&fake.args_file).expect("captured args"),
         "serve\n--host\n0.0.0.0\n--port\n4321\n--confirm-host-access\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn reborn_entrypoint_preserves_legacy_home_for_image_downgrade() {
+    // A deployment that keeps the retired variable and home path must be able
+    // to run this image without moving state. That leaves the same environment
+    // and path consumable by the previous image during a rollback.
+    let fake = setup_fake_entrypoint();
+    let legacy_home = fake._temp.path().join("legacy-home");
+    let user_home = fake._temp.path().join("user-home");
+    let recorded_home = fake._temp.path().join("recorded-home.txt");
+    let state_path = legacy_home.join("state.db");
+    std::fs::create_dir_all(&legacy_home).expect("legacy home");
+    std::fs::write(
+        legacy_home.join("config.toml"),
+        "api_version = \"legacy.volume/v1\"\n",
+    )
+    .expect("legacy config");
+    std::fs::write(&state_path, b"pre-upgrade-state").expect("legacy state");
+    write_executable(
+        &fake.bin_dir.join("ironclaw"),
+        "#!/bin/sh\nprintf '%s\\n' \"$IRONCLAW_HOME\" > \"$IRONCLAW_TEST_HOME_FILE\"\nprintf '%s\\n' \"$@\" > \"$IRONCLAW_TEST_ARGS_FILE\"\n",
+    );
+
+    let output = Command::new("sh")
+        .arg(repo_file("docker/reborn/entrypoint.sh"))
+        .args(["serve", "--help"])
+        .env_clear()
+        .env("PATH", fake.path_env())
+        .env("HOME", &user_home)
+        .env("IRONCLAW_REBORN_HOME", &legacy_home)
+        .env("IRONCLAW_REBORN_DEFAULT_CONFIG", &fake.default_config)
+        .env("IRONCLAW_TEST_HOME_FILE", &recorded_home)
+        .env("IRONCLAW_TEST_ARGS_FILE", &fake.args_file)
+        .output()
+        .expect("entrypoint should run with the rollback-compatible home");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&recorded_home).expect("recorded home"),
+        format!("{}\n", legacy_home.display())
+    );
+    assert_eq!(
+        std::fs::read_to_string(legacy_home.join("config.toml")).expect("legacy config"),
+        "api_version = \"legacy.volume/v1\"\n"
+    );
+    assert_eq!(
+        std::fs::read(&state_path).expect("legacy state"),
+        b"pre-upgrade-state"
+    );
+    assert!(
+        !user_home.join(".ironclaw").exists(),
+        "the canonical default home must not be created beside rollback-compatible state"
     );
 }
 

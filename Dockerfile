@@ -7,8 +7,9 @@
 #   docker run --rm --env-file .env.reborn -p 127.0.0.1:3000:3000 ironclaw-reborn:latest
 #
 # Railway:
-#   Set Dockerfile path to Dockerfile.reborn and IRONCLAW_SERVE_HOST=0.0.0.0.
-#   Railway supplies PORT. Set IRONCLAW_PROFILE=hosted-single-tenant for
+#   Set Dockerfile path to Dockerfile.reborn. Railway supplies PORT, and the
+#   entrypoint binds 0.0.0.0 when it detects the Railway runtime. Set
+#   IRONCLAW_PROFILE=hosted-single-tenant for
 #   Postgres-backed hosted storage, or hosted-single-tenant-volume for a
 #   Railway volume-backed single-tenant preview.
 
@@ -99,8 +100,7 @@ COPY docker/reborn/config.production.toml /opt/ironclaw/reborn/config.production
 COPY docker/reborn/entrypoint.sh /usr/local/bin/ironclaw-reborn-entrypoint
 
 ENV HOME=/home/ironclaw \
-    IRONCLAW_LOG=info \
-    IRONCLAW_SERVE_HOST=127.0.0.1
+    IRONCLAW_LOG=info
 
 RUN useradd -m -d /home/ironclaw -u 1000 ironclaw \
     && mkdir -p /data/ironclaw-reborn /workspace \
