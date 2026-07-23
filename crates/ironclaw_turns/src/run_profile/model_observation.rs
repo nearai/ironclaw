@@ -2,7 +2,6 @@ use ironclaw_host_api::{DispatchInputIssueCode, HostRemediation};
 use serde::{Deserialize, Serialize};
 
 use super::host::CapabilityFailureKind;
-
 const MODEL_OBSERVATION_SUMMARY_MAX_BYTES: usize = 512;
 const MODEL_OBSERVATION_ARTIFACTS_MAX: usize = 16;
 const MODEL_OBSERVATION_REPAIRS_MAX: usize = 16;

@@ -85,6 +85,7 @@ mod operator_config_views;
 mod outbound_delivery_capability_surface;
 mod outbound_preferences;
 mod outbound_views;
+mod product_operations;
 mod project_fs;
 mod projects;
 mod run_artifact;
@@ -217,9 +218,9 @@ pub use types::{
     RebornTraceHoldAuthorizeProductRequest, RebornVendorAuthAccounts,
 };
 pub use views::{
-    ProductSurfaceCommand, ProductView, RebornCommandId, RebornCommandRequest,
-    RebornCommandResponse, RebornViewDescriptor, RebornViewPage, RebornViewProvider,
-    RebornViewQuery, UnavailableRebornViewProvider,
+    ProductOperation, ProductOperationId, ProductOperationRequest, ProductOperationResponse,
+    ProductView, RebornViewDescriptor, RebornViewPage, RebornViewProvider, RebornViewQuery,
+    UnavailableRebornViewProvider,
 };
 
 type SkillActivationRecorder =
@@ -315,70 +316,86 @@ pub const AUTOMATION_RENAME_CAPABILITY: ProductCapabilityDescriptor =
 pub const AUTOMATION_DELETE_CAPABILITY_ID: &str = "builtin.automation_delete";
 pub const AUTOMATION_DELETE_CAPABILITY: ProductCapabilityDescriptor =
     ProductCapabilityDescriptor::api_only(AUTOMATION_DELETE_CAPABILITY_ID);
-pub const CREATE_THREAD_COMMAND: ProductSurfaceCommand<
+pub const CREATE_THREAD_OPERATION: ProductOperation<
     WebUiCreateThreadRequest,
     RebornCreateThreadResponse,
-> = ProductSurfaceCommand::new(RebornCommandId::CreateThread);
-pub const SUBMIT_TURN_COMMAND: ProductSurfaceCommand<
+> = ProductOperation::new(ProductOperationId::CreateThread);
+pub const SUBMIT_TURN_OPERATION: ProductOperation<
     WebUiSendMessageRequest,
     RebornSubmitTurnResponse,
-> = ProductSurfaceCommand::new(RebornCommandId::SubmitTurn);
-pub const CANCEL_RUN_COMMAND: ProductSurfaceCommand<
-    WebUiCancelRunRequest,
-    RebornCancelRunResponse,
-> = ProductSurfaceCommand::new(RebornCommandId::CancelRun);
-pub const RESOLVE_GATE_COMMAND: ProductSurfaceCommand<
+> = ProductOperation::new(ProductOperationId::SubmitTurn);
+pub const CANCEL_RUN_OPERATION: ProductOperation<WebUiCancelRunRequest, RebornCancelRunResponse> =
+    ProductOperation::new(ProductOperationId::CancelRun);
+pub const RESOLVE_GATE_OPERATION: ProductOperation<
     WebUiResolveGateRequest,
     RebornResolveGateResponse,
-> = ProductSurfaceCommand::new(RebornCommandId::ResolveGate);
-pub const RETRY_RUN_COMMAND: ProductSurfaceCommand<WebUiRetryRunRequest, RebornRetryRunResponse> =
-    ProductSurfaceCommand::new(RebornCommandId::RetryRun);
-pub const PROJECT_CREATE_COMMAND: ProductSurfaceCommand<
+> = ProductOperation::new(ProductOperationId::ResolveGate);
+pub const RETRY_RUN_OPERATION: ProductOperation<WebUiRetryRunRequest, RebornRetryRunResponse> =
+    ProductOperation::new(ProductOperationId::RetryRun);
+pub const PROJECT_CREATE_OPERATION: ProductOperation<
     RebornCreateProjectRequest,
     RebornProjectResponse,
-> = ProductSurfaceCommand::new(RebornCommandId::ProjectCreate);
-pub const PROJECT_FS_READ_COMMAND: ProductSurfaceCommand<
-    RebornProjectFsReadRequest,
-    ProjectFsFile,
-> = ProductSurfaceCommand::new(RebornCommandId::ProjectFsRead);
-pub const FS_READ_COMMAND: ProductSurfaceCommand<RebornFsReadRequest, ProjectFsFile> =
-    ProductSurfaceCommand::new(RebornCommandId::FsRead);
-pub const ATTACHMENT_READ_COMMAND: ProductSurfaceCommand<
+> = ProductOperation::new(ProductOperationId::ProjectCreate);
+pub const PROJECT_FS_READ_OPERATION: ProductOperation<RebornProjectFsReadRequest, ProjectFsFile> =
+    ProductOperation::new(ProductOperationId::ProjectFsRead);
+pub const FS_READ_OPERATION: ProductOperation<RebornFsReadRequest, ProjectFsFile> =
+    ProductOperation::new(ProductOperationId::FsRead);
+pub const ATTACHMENT_READ_OPERATION: ProductOperation<
     RebornAttachmentRequest,
     RebornAttachmentBytes,
-> = ProductSurfaceCommand::new(RebornCommandId::AttachmentRead);
-pub const TRACE_ACCOUNT_LOGIN_LINK_COMMAND: ProductSurfaceCommand<
+> = ProductOperation::new(ProductOperationId::AttachmentRead);
+pub const TRACE_ACCOUNT_LOGIN_LINK_OPERATION: ProductOperation<
     serde_json::Value,
     RebornAccountLoginLinkResponse,
-> = ProductSurfaceCommand::new(RebornCommandId::TraceAccountLoginLink);
-pub const TRACE_HOLD_AUTHORIZE_COMMAND: ProductSurfaceCommand<
+> = ProductOperation::new(ProductOperationId::TraceAccountLoginLink);
+pub const TRACE_HOLD_AUTHORIZE_OPERATION: ProductOperation<
     RebornTraceHoldAuthorizeProductRequest,
     RebornTraceHoldAuthorizeResponse,
-> = ProductSurfaceCommand::new(RebornCommandId::TraceHoldAuthorize);
-pub const OPERATOR_CONFIG_SET_KEY_COMMAND: ProductSurfaceCommand<
+> = ProductOperation::new(ProductOperationId::TraceHoldAuthorize);
+pub const OPERATOR_CONFIG_SET_KEY_OPERATION: ProductOperation<
     RebornOperatorConfigSetProductRequest,
     RebornOperatorConfigGetResponse,
-> = ProductSurfaceCommand::new(RebornCommandId::OperatorConfigSetKey);
-pub const OPERATOR_SERVICE_LIFECYCLE_COMMAND: ProductSurfaceCommand<
+> = ProductOperation::new(ProductOperationId::OperatorConfigSetKey);
+pub const OPERATOR_SERVICE_LIFECYCLE_OPERATION: ProductOperation<
     RebornOperatorServiceLifecycleRequest,
     RebornOperatorCommandPlaneResponse,
-> = ProductSurfaceCommand::new(RebornCommandId::OperatorServiceLifecycle);
-pub const LLM_TEST_CONNECTION_COMMAND: ProductSurfaceCommand<serde_json::Value, LlmProbeResult> =
-    ProductSurfaceCommand::new(RebornCommandId::LlmTestConnection);
-pub const LLM_LIST_MODELS_COMMAND: ProductSurfaceCommand<serde_json::Value, LlmModelsResult> =
-    ProductSurfaceCommand::new(RebornCommandId::LlmListModels);
-pub const LLM_NEARAI_LOGIN_COMMAND: ProductSurfaceCommand<serde_json::Value, NearAiLoginStart> =
-    ProductSurfaceCommand::new(RebornCommandId::LlmNearAiLogin);
-pub const LLM_NEARAI_WALLET_LOGIN_COMMAND: ProductSurfaceCommand<
+> = ProductOperation::new(ProductOperationId::OperatorServiceLifecycle);
+pub const LLM_TEST_CONNECTION_OPERATION: ProductOperation<serde_json::Value, LlmProbeResult> =
+    ProductOperation::new(ProductOperationId::LlmTestConnection);
+pub const LLM_LIST_MODELS_OPERATION: ProductOperation<serde_json::Value, LlmModelsResult> =
+    ProductOperation::new(ProductOperationId::LlmListModels);
+pub const LLM_NEARAI_LOGIN_OPERATION: ProductOperation<serde_json::Value, NearAiLoginStart> =
+    ProductOperation::new(ProductOperationId::LlmNearAiLogin);
+pub const LLM_NEARAI_WALLET_LOGIN_OPERATION: ProductOperation<
     serde_json::Value,
     NearAiWalletLoginResult,
-> = ProductSurfaceCommand::new(RebornCommandId::LlmNearAiWalletLogin);
-pub const LLM_CODEX_LOGIN_COMMAND: ProductSurfaceCommand<serde_json::Value, CodexLoginStart> =
-    ProductSurfaceCommand::new(RebornCommandId::LlmCodexLogin);
-pub const ADMIN_USER_CREATE_COMMAND: ProductSurfaceCommand<
+> = ProductOperation::new(ProductOperationId::LlmNearAiWalletLogin);
+pub const LLM_CODEX_LOGIN_OPERATION: ProductOperation<serde_json::Value, CodexLoginStart> =
+    ProductOperation::new(ProductOperationId::LlmCodexLogin);
+pub const ADMIN_USER_CREATE_OPERATION: ProductOperation<
     RebornAdminCreateUserRequest,
     RebornAdminUserCreatedResponse,
-> = ProductSurfaceCommand::new(RebornCommandId::AdminUserCreate);
+> = ProductOperation::new(ProductOperationId::AdminUserCreate);
+pub const ADMIN_USER_DELETE_SECRET_OPERATION: ProductOperation<
+    RebornAdminDeleteSecretProductRequest,
+    RebornAdminSecretDeletedResponse,
+> = ProductOperation::new(ProductOperationId::AdminUserDeleteSecret);
+pub const AUTOMATION_PAUSE_OPERATION: ProductOperation<
+    RebornAutomationRequest,
+    RebornAutomationMutationResponse,
+> = ProductOperation::new(ProductOperationId::AutomationPause);
+pub const AUTOMATION_RESUME_OPERATION: ProductOperation<
+    RebornAutomationRequest,
+    RebornAutomationMutationResponse,
+> = ProductOperation::new(ProductOperationId::AutomationResume);
+pub const AUTOMATION_RENAME_OPERATION: ProductOperation<
+    RebornRenameAutomationProductRequest,
+    RebornAutomationMutationResponse,
+> = ProductOperation::new(ProductOperationId::AutomationRename);
+pub const AUTOMATION_DELETE_OPERATION: ProductOperation<
+    RebornAutomationRequest,
+    RebornAutomationMutationResponse,
+> = ProductOperation::new(ProductOperationId::AutomationDelete);
 pub const THREADS_VIEW: ProductView<WebUiListThreadsRequest, RebornListThreadsResponse> =
     ProductView::paginated("threads");
 pub const TIMELINE_VIEW: ProductView<RebornTimelineRequest, RebornTimelineResponse> =
@@ -1803,7 +1820,10 @@ fn validate_llm_base_url(base_url: Option<&str>) -> Result<(), RebornServicesErr
     if trimmed.is_empty() || trimmed.len() > LLM_BASE_URL_MAX_BYTES {
         return Err(operator_setup_validation_error("base_url"));
     }
-    let parsed = Url::parse(trimmed).map_err(|_| operator_setup_validation_error("base_url"))?;
+    let parsed = Url::parse(trimmed).map_err(|error| {
+        tracing::debug!(%error, "failed to parse operator setup base URL");
+        operator_setup_validation_error("base_url")
+    })?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(operator_setup_validation_error("base_url"));
     }
@@ -2069,36 +2089,6 @@ fn operator_diagnostics_surface_status(
 
 #[async_trait]
 pub trait ProductSurface: Send + Sync {
-    async fn delete_thread(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn get_timeline(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Return the effective global auto-approve toggle for the authenticated
-    /// caller. This is a narrow session-bootstrap read, not the operator
-    /// config key/value surface; implementations must derive scope from the
-    /// trusted caller. The default returns `Ok(false)` for compositions that
-    /// have not wired the approval settings surface.
-    async fn global_auto_approve_enabled(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<bool, RebornServicesError> {
-        Ok(false)
-    }
-
     /// Invoke one descriptor-declared product capability through the generic
     /// mutation conduit targeted by architecture simplification §5.2.
     ///
@@ -2166,300 +2156,17 @@ pub trait ProductSurface: Send + Sync {
         Err(RebornServicesError::service_unavailable(false))
     }
 
-    /// List a directory under the thread's project workspace.
-    ///
-    /// Read-only navigation surface over the same `/workspace` mount the agent's
-    /// file tools and inbound-attachment landing use. Default body reports the
-    /// service unavailable so implementors without a wired project filesystem
-    /// (and existing fakes) compile untouched.
-    async fn list_project_dir(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornProjectFsListRequest,
-    ) -> Result<RebornProjectFsListResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Stat a path under the thread's project workspace.
-    async fn stat_project_path(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornProjectFsStatRequest,
-    ) -> Result<RebornProjectFsStatResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// List the mounts the standalone read-only filesystem viewer can browse
-    /// (memory, workspace files, skills). The set is composition-determined; a
-    /// runtime without a wired browse reader reports an empty list rather than
-    /// erroring, so the UI can render an empty/disabled state.
-    async fn list_fs_mounts(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
-        let _ = caller;
-        Ok(RebornFsMountsResponse { mounts: Vec::new() })
-    }
-
-    /// List a directory on a browsable mount. Read-only navigation over the
-    /// caller-scoped internal filesystem; `path` is mount-relative. Default
-    /// body reports the service unavailable so implementors without a wired
-    /// browse reader (and existing fakes) compile untouched.
-    async fn browse_fs_dir(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornFsListRequest,
-    ) -> Result<RebornFsListResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// List the projects the caller can access (owner or active member).
-    ///
-    /// Default body reports the service unavailable so implementors without a
-    /// wired project service (and existing fakes) compile untouched.
-    async fn list_projects(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornListProjectsRequest,
-    ) -> Result<RebornListProjectsResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Stat a path on a browsable mount.
-    async fn stat_fs_path(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornFsStatRequest,
-    ) -> Result<RebornFsStatResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Fetch a single project the caller can access.
-    async fn get_project(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornGetProjectRequest,
-    ) -> Result<RebornProjectResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Update a project (editor or owner access required).
-    async fn update_project(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornUpdateProjectRequest,
-    ) -> Result<RebornProjectResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Delete a project (owner access required).
-    async fn delete_project(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteProjectRequest,
-    ) -> Result<(), RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// List a project's membership grants (viewer access required).
-    async fn list_project_members(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornListMembersRequest,
-    ) -> Result<RebornListMembersResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Grant a user a role on a project (owner access required).
-    async fn add_project_member(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornAddMemberRequest,
-    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Change a member's role (owner access required).
-    async fn update_project_member_role(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornUpdateMemberRoleRequest,
-    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    /// Revoke a member (owner access required).
-    async fn remove_project_member(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornRemoveMemberRequest,
-    ) -> Result<(), RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn pause_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        let _ = (caller, automation_id);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn resume_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        let _ = (caller, automation_id);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn rename_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-        request: WebUiRenameAutomationRequest,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        let _ = (caller, automation_id, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn delete_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        let _ = (caller, automation_id);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn run_operator_setup(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornOperatorSetupRequest,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        let _ = (caller, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    // --- Admin user management -----------------------------------------------
-    //
-    // Each method authorizes the caller (admin/owner role, or env-bearer
-    // operator) and enforces last-admin protection in the implementation.
-    // Default bodies report the service unavailable so implementors without a
-    // wired admin service (and existing fakes) compile untouched.
-
-    async fn list_admin_users(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornAdminUserListQuery,
-    ) -> Result<RebornAdminUserListResponse, RebornServicesError> {
-        let _ = (caller, query);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn get_admin_user(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
-        let _ = (caller, user_id);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn update_admin_user(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-        request: RebornAdminUpdateUserRequest,
-    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
-        let _ = (caller, user_id, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn set_admin_user_status(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-        request: RebornAdminSetStatusRequest,
-    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
-        let _ = (caller, user_id, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn set_admin_user_role(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-        request: RebornAdminSetRoleRequest,
-    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
-        let _ = (caller, user_id, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn delete_admin_user(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-    ) -> Result<RebornAdminUserDeletedResponse, RebornServicesError> {
-        let _ = (caller, user_id);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn list_admin_user_secrets(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-    ) -> Result<RebornAdminUserSecretsListResponse, RebornServicesError> {
-        let _ = (caller, user_id);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn put_admin_user_secret(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-        handle: SecretHandle,
-        request: RebornAdminPutSecretRequest,
-    ) -> Result<RebornAdminSecretResponse, RebornServicesError> {
-        let _ = (caller, user_id, handle, request);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
-    async fn delete_admin_user_secret(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-        handle: SecretHandle,
-    ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
-        let _ = (caller, user_id, handle);
-        Err(RebornServicesError::service_unavailable(false))
-    }
-
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
         let _ = (caller, request);
         Err(RebornServicesError::service_unavailable(false))
     }
 }
 
-impl<Params, Output> ProductSurfaceCommand<Params, Output>
+impl<Params, Output> ProductOperation<Params, Output>
 where
     Params: Serialize,
     Output: DeserializeOwned,
@@ -2480,7 +2187,7 @@ where
     }
 }
 
-impl<Params> ProductSurfaceCommand<Params, ProjectFsFile>
+impl<Params> ProductOperation<Params, ProjectFsFile>
 where
     Params: Serialize,
 {
@@ -2500,7 +2207,7 @@ where
     }
 }
 
-impl<Params> ProductSurfaceCommand<Params, RebornAttachmentBytes>
+impl<Params> ProductOperation<Params, RebornAttachmentBytes>
 where
     Params: Serialize,
 {
@@ -2520,7 +2227,7 @@ where
     }
 }
 
-/// Input carried by the generic ProductSurface command conduit.
+/// Input carried by the generic ProductSurface operation conduit.
 ///
 /// Most capabilities are ordinary JSON payloads. Secret-bearing ProductSurface
 /// requests use typed variants so they do not cross the WebUI/product boundary
@@ -2549,19 +2256,24 @@ impl ProductCapabilityInput {
     }
 }
 
-/// ProductSurface command descriptor.
+/// ProductSurface operation descriptor.
 ///
 /// Capability declarations stay as one stable id plus origin/policy metadata
-/// elsewhere; inputs remain ordinary serializable values so simple API-only
-/// mappings do not require one request struct per capability.
+/// elsewhere. Product-workflow-owned ids are backed by the
+/// [`product_operations`] registry; runtime-backed ids delegate to the wired
+/// first-party capability invoker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProductCapabilityDescriptor {
     pub id: &'static str,
 }
 
 impl ProductCapabilityDescriptor {
-    pub const fn api_only(id: &'static str) -> Self {
+    pub const fn product_operation(id: &'static str) -> Self {
         Self { id }
+    }
+
+    pub const fn api_only(id: &'static str) -> Self {
+        Self::product_operation(id)
     }
 
     pub fn capability_id(&self) -> Result<CapabilityId, RebornServicesError> {
@@ -2951,8 +2663,14 @@ where
         input: serde_json::Value,
     ) -> Result<(), RebornServicesError> {
         let request: RebornOperatorSetupRequest =
-            serde_json::from_value(input).map_err(|_| operator_setup_validation_error("input"))?;
-        self.apply_operator_setup_request(caller, request).await
+            serde_json::from_value(input).map_err(|error| {
+                tracing::debug!(?error, "failed to decode operator setup input");
+                operator_setup_validation_error("input")
+            })?;
+        self.apply_operator_setup_request(caller.clone(), request)
+            .await?;
+        self.build_operator_setup_view(caller).await?;
+        Ok(())
     }
 
     async fn apply_operator_setup_request(
@@ -3310,66 +3028,66 @@ where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
 {
-    async fn execute_product_surface_command(
+    async fn execute_product_surface_operation(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
-        let command_id = RebornCommandId::parse(request.command_id.as_str())
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
             .ok_or_else(|| RebornServicesError::service_unavailable(false))?;
-        match command_id {
-            RebornCommandId::CreateThread => RebornCommandResponse::json(
+        match operation_id {
+            ProductOperationId::CreateThread => ProductOperationResponse::json(
                 self.create_thread(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::SubmitTurn => RebornCommandResponse::json(
+            ProductOperationId::SubmitTurn => ProductOperationResponse::json(
                 self.submit_turn(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::CancelRun => RebornCommandResponse::json(
+            ProductOperationId::CancelRun => ProductOperationResponse::json(
                 self.cancel_run(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::ResolveGate => RebornCommandResponse::json(
+            ProductOperationId::ResolveGate => ProductOperationResponse::json(
                 self.resolve_gate(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::RetryRun => RebornCommandResponse::json(
+            ProductOperationId::RetryRun => ProductOperationResponse::json(
                 self.retry_run(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::ProjectCreate => RebornCommandResponse::json(
+            ProductOperationId::ProjectCreate => ProductOperationResponse::json(
                 self.create_project(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::ProjectFsRead => Ok(RebornCommandResponse::project_file(
+            ProductOperationId::ProjectFsRead => Ok(ProductOperationResponse::project_file(
                 self.read_project_file(caller, product_command_input(request.input)?)
                     .await?,
             )),
-            RebornCommandId::FsRead => Ok(RebornCommandResponse::project_file(
+            ProductOperationId::FsRead => Ok(ProductOperationResponse::project_file(
                 self.read_fs_file(caller, product_command_input(request.input)?)
                     .await?,
             )),
-            RebornCommandId::AttachmentRead => Ok(RebornCommandResponse::attachment(
+            ProductOperationId::AttachmentRead => Ok(ProductOperationResponse::attachment(
                 self.read_attachment(caller, product_command_input(request.input)?)
                     .await?,
             )),
-            RebornCommandId::TraceAccountLoginLink => {
+            ProductOperationId::TraceAccountLoginLink => {
                 views::parse_empty_view_params(request.input)?;
-                RebornCommandResponse::json(self.trace_account_login_link(caller).await?)
+                ProductOperationResponse::json(self.trace_account_login_link(caller).await?)
             }
-            RebornCommandId::TraceHoldAuthorize => {
+            ProductOperationId::TraceHoldAuthorize => {
                 let request: RebornTraceHoldAuthorizeProductRequest =
                     product_command_input(request.input)?;
-                RebornCommandResponse::json(
+                ProductOperationResponse::json(
                     self.authorize_trace_hold(caller, request.submission_id)
                         .await?,
                 )
             }
-            RebornCommandId::OperatorConfigSetKey => {
+            ProductOperationId::OperatorConfigSetKey => {
                 let request: RebornOperatorConfigSetProductRequest =
                     product_command_input(request.input)?;
-                RebornCommandResponse::json(
+                ProductOperationResponse::json(
                     self.set_operator_config_key(
                         caller,
                         request.key,
@@ -3380,34 +3098,75 @@ where
                     .await?,
                 )
             }
-            RebornCommandId::OperatorServiceLifecycle => RebornCommandResponse::json(
+            ProductOperationId::OperatorServiceLifecycle => ProductOperationResponse::json(
                 self.run_operator_service_lifecycle(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::LlmTestConnection => RebornCommandResponse::json(
+            ProductOperationId::LlmTestConnection => ProductOperationResponse::json(
                 self.test_llm_connection(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::LlmListModels => RebornCommandResponse::json(
+            ProductOperationId::LlmListModels => ProductOperationResponse::json(
                 self.list_llm_models(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::LlmNearAiLogin => RebornCommandResponse::json(
+            ProductOperationId::LlmNearAiLogin => ProductOperationResponse::json(
                 self.start_nearai_login(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::LlmNearAiWalletLogin => RebornCommandResponse::json(
+            ProductOperationId::LlmNearAiWalletLogin => ProductOperationResponse::json(
                 self.complete_nearai_wallet_login(caller, product_command_input(request.input)?)
                     .await?,
             ),
-            RebornCommandId::LlmCodexLogin => {
+            ProductOperationId::LlmCodexLogin => {
                 views::parse_empty_view_params(request.input)?;
-                RebornCommandResponse::json(self.start_codex_login(caller).await?)
+                ProductOperationResponse::json(self.start_codex_login(caller).await?)
             }
-            RebornCommandId::AdminUserCreate => RebornCommandResponse::json(
+            ProductOperationId::AdminUserCreate => ProductOperationResponse::json(
                 self.create_admin_user(caller, product_command_input(request.input)?)
                     .await?,
             ),
+            ProductOperationId::AdminUserDeleteSecret => {
+                let request: RebornAdminDeleteSecretProductRequest =
+                    product_command_input(request.input)?;
+                let handle = product_secret_handle(request.handle)?;
+                ProductOperationResponse::json(
+                    self.delete_admin_user_secret(caller, request.user_id, handle)
+                        .await?,
+                )
+            }
+            ProductOperationId::AutomationPause => {
+                let request: RebornAutomationRequest = product_command_input(request.input)?;
+                ProductOperationResponse::json(
+                    self.pause_automation(caller, request.automation_id).await?,
+                )
+            }
+            ProductOperationId::AutomationResume => {
+                let request: RebornAutomationRequest = product_command_input(request.input)?;
+                ProductOperationResponse::json(
+                    self.resume_automation(caller, request.automation_id)
+                        .await?,
+                )
+            }
+            ProductOperationId::AutomationRename => {
+                let request: RebornRenameAutomationProductRequest =
+                    product_command_input(request.input)?;
+                ProductOperationResponse::json(
+                    self.rename_automation(
+                        caller,
+                        request.automation_id,
+                        WebUiRenameAutomationRequest { name: request.name },
+                    )
+                    .await?,
+                )
+            }
+            ProductOperationId::AutomationDelete => {
+                let request: RebornAutomationRequest = product_command_input(request.input)?;
+                ProductOperationResponse::json(
+                    self.delete_automation(caller, request.automation_id)
+                        .await?,
+                )
+            }
         }
     }
 
@@ -3456,191 +3215,17 @@ where
         input: ProductCapabilityInput,
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
-        if capability.as_str() == OPERATOR_SETUP_RUN_CAPABILITY_ID {
-            self.invoke_operator_setup_run(caller, input.into_json()?)
-                .await?;
-            return self.api_capability_success(activity_id, "operator setup updated");
-        }
-        if capability.as_str() == LLM_PROVIDER_UPSERT_CAPABILITY_ID {
-            let ProductCapabilityInput::LlmProviderUpsert(request) = input else {
-                return Err(RebornServicesError::validation(
-                    WebUiInboundValidationError::new(
-                        "input",
-                        WebUiInboundValidationCode::InvalidValue,
-                    ),
-                ));
-            };
-            self.invoke_llm_provider_upsert(caller, request).await?;
-            return self.api_capability_success(activity_id, "llm provider updated");
-        }
-
-        let input = input.into_json()?;
-        if capability.as_str() == LLM_PROVIDER_DELETE_CAPABILITY_ID {
-            self.invoke_llm_provider_delete(caller, input).await?;
-            return self.api_capability_success(activity_id, "llm provider deleted");
-        }
-        if capability.as_str() == LLM_ACTIVE_SET_CAPABILITY_ID {
-            self.invoke_llm_active_set(caller, input).await?;
-            return self.api_capability_success(activity_id, "llm active provider updated");
-        }
-        if capability.as_str() == EXTENSION_IMPORT_CAPABILITY_ID {
-            extensions::import_extension_capability(self.lifecycle_facade.as_ref(), caller, input)
-                .await?;
-            return self.api_capability_success(activity_id, "extension imported");
-        }
-        if capability.as_str() == EXTENSION_SETUP_SUBMIT_CAPABILITY_ID {
-            lifecycle_setup::submit_extension_setup_capability(
-                self.lifecycle_facade.as_ref(),
-                self.extension_credentials.as_deref(),
-                self.channel_config_facade.as_deref(),
-                caller,
-                input,
-            )
-            .await?;
-            return self.api_capability_success(activity_id, "extension setup updated");
-        }
-        if capability.as_str() == PROJECT_UPDATE_CAPABILITY_ID {
-            let request = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.update_project(caller, request).await?;
-            return self.api_capability_success(activity_id, "project updated");
-        }
-        if capability.as_str() == PROJECT_DELETE_CAPABILITY_ID {
-            let request = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.delete_project(caller, request).await?;
-            return self.api_capability_success(activity_id, "project deleted");
-        }
-        if capability.as_str() == PROJECT_MEMBER_ADD_CAPABILITY_ID {
-            let request = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.add_project_member(caller, request).await?;
-            return self.api_capability_success(activity_id, "project member added");
-        }
-        if capability.as_str() == PROJECT_MEMBER_UPDATE_CAPABILITY_ID {
-            let request = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.update_project_member_role(caller, request).await?;
-            return self.api_capability_success(activity_id, "project member updated");
-        }
-        if capability.as_str() == PROJECT_MEMBER_REMOVE_CAPABILITY_ID {
-            let request = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.remove_project_member(caller, request).await?;
-            return self.api_capability_success(activity_id, "project member removed");
-        }
-        if capability.as_str() == THREAD_DELETE_CAPABILITY_ID {
-            let request = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.delete_thread(caller, request).await?;
-            return self.api_capability_success(activity_id, "thread deleted");
-        }
-        if capability.as_str() == AUTOMATION_PAUSE_CAPABILITY_ID {
-            let request: RebornAutomationRequest = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.pause_automation(caller, request.automation_id).await?;
-            return self.api_capability_success(activity_id, "automation paused");
-        }
-        if capability.as_str() == AUTOMATION_RESUME_CAPABILITY_ID {
-            let request: RebornAutomationRequest = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.resume_automation(caller, request.automation_id)
-                .await?;
-            return self.api_capability_success(activity_id, "automation resumed");
-        }
-        if capability.as_str() == AUTOMATION_RENAME_CAPABILITY_ID {
-            let request: RebornRenameAutomationProductRequest = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.rename_automation(
-                caller,
-                request.automation_id,
-                WebUiRenameAutomationRequest { name: request.name },
-            )
-            .await?;
-            return self.api_capability_success(activity_id, "automation renamed");
-        }
-        if capability.as_str() == AUTOMATION_DELETE_CAPABILITY_ID {
-            let request: RebornAutomationRequest = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.delete_automation(caller, request.automation_id)
-                .await?;
-            return self.api_capability_success(activity_id, "automation deleted");
-        }
-        if capability.as_str() == ADMIN_USER_UPDATE_CAPABILITY_ID {
-            let request: RebornAdminUpdateUserProductRequest = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.update_admin_user(
-                caller,
-                request.user_id,
-                RebornAdminUpdateUserRequest {
-                    display_name: request.display_name,
-                    metadata: request.metadata,
-                },
-            )
-            .await?;
-            return self.api_capability_success(activity_id, "admin user updated");
-        }
-        if capability.as_str() == ADMIN_USER_SET_STATUS_CAPABILITY_ID {
-            let request: RebornAdminSetStatusProductRequest = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.set_admin_user_status(
-                caller,
-                request.user_id,
-                RebornAdminSetStatusRequest {
-                    status: request.status,
-                },
-            )
-            .await?;
-            return self.api_capability_success(activity_id, "admin user status updated");
-        }
-        if capability.as_str() == ADMIN_USER_SET_ROLE_CAPABILITY_ID {
-            let request: RebornAdminSetRoleProductRequest = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.set_admin_user_role(
-                caller,
-                request.user_id,
-                RebornAdminSetRoleRequest { role: request.role },
-            )
-            .await?;
-            return self.api_capability_success(activity_id, "admin user role updated");
-        }
-        if capability.as_str() == ADMIN_USER_DELETE_CAPABILITY_ID {
-            let request: RebornAdminUserRequest = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            self.delete_admin_user(caller, request.user_id).await?;
-            return self.api_capability_success(activity_id, "admin user deleted");
-        }
-        if capability.as_str() == ADMIN_USER_PUT_SECRET_CAPABILITY_ID {
-            let request: RebornAdminPutSecretProductRequest = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            let handle = SecretHandle::new(request.handle)
-                .map_err(|_| product_capability_input_error("handle"))?;
-            self.put_admin_user_secret(
-                caller,
-                request.user_id,
-                handle,
-                RebornAdminPutSecretRequest {
-                    value: request.value,
-                },
-            )
-            .await?;
-            return self.api_capability_success(activity_id, "admin user protected value updated");
-        }
-        if capability.as_str() == ADMIN_USER_DELETE_SECRET_CAPABILITY_ID {
-            let request: RebornAdminDeleteSecretProductRequest = serde_json::from_value(input)
-                .map_err(|_| product_capability_input_error("input"))?;
-            let handle = SecretHandle::new(request.handle)
-                .map_err(|_| product_capability_input_error("handle"))?;
-            self.delete_admin_user_secret(caller, request.user_id, handle)
-                .await?;
-            return self.api_capability_success(activity_id, "admin user protected value deleted");
+        if let Some(operation) = product_operations::ProductOperationHandler::parse(&capability) {
+            let summary = operation.success_summary();
+            operation.invoke(self, caller, input).await?;
+            return self.api_capability_success(activity_id, summary);
         }
         self.product_capability_invoker
-            .invoke(caller, capability, input, activity_id)
+            .invoke(caller, capability, input.into_json()?, activity_id)
             .await
     }
 
-    async fn list_admin_users(
+    pub async fn list_admin_users(
         &self,
         caller: WebUiAuthenticatedCaller,
         query: RebornAdminUserListQuery,
@@ -3677,7 +3262,7 @@ where
         Ok(RebornAdminUserListResponse { users, next_cursor })
     }
 
-    async fn get_admin_user(
+    pub async fn get_admin_user(
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
@@ -3715,7 +3300,7 @@ where
         })
     }
 
-    async fn update_admin_user(
+    pub async fn update_admin_user(
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
@@ -3738,7 +3323,7 @@ where
         Ok(RebornAdminUserResponse { user })
     }
 
-    async fn set_admin_user_status(
+    pub async fn set_admin_user_status(
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
@@ -3763,7 +3348,7 @@ where
         Ok(RebornAdminUserResponse { user })
     }
 
-    async fn set_admin_user_role(
+    pub async fn set_admin_user_role(
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
@@ -3787,7 +3372,7 @@ where
         Ok(RebornAdminUserResponse { user })
     }
 
-    async fn delete_admin_user(
+    pub async fn delete_admin_user(
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
@@ -3812,7 +3397,7 @@ where
         })
     }
 
-    async fn list_admin_user_secrets(
+    pub async fn list_admin_user_secrets(
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
@@ -3828,7 +3413,7 @@ where
         Ok(RebornAdminUserSecretsListResponse { secrets })
     }
 
-    async fn put_admin_user_secret(
+    pub async fn put_admin_user_secret(
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
@@ -3851,7 +3436,7 @@ where
         Ok(RebornAdminSecretResponse { secret })
     }
 
-    async fn delete_admin_user_secret(
+    pub async fn delete_admin_user_secret(
         &self,
         caller: WebUiAuthenticatedCaller,
         user_id: UserId,
@@ -3873,7 +3458,7 @@ where
         })
     }
 
-    async fn global_auto_approve_enabled(
+    pub async fn global_auto_approve_enabled(
         &self,
         caller: WebUiAuthenticatedCaller,
     ) -> Result<bool, RebornServicesError> {
@@ -3897,7 +3482,7 @@ where
             })
     }
 
-    async fn run_operator_setup(
+    pub async fn run_operator_setup(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornOperatorSetupRequest,
@@ -4250,7 +3835,7 @@ where
         }
     }
 
-    async fn delete_thread(
+    pub async fn delete_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornDeleteThreadRequest,
@@ -4271,7 +3856,7 @@ where
         })
     }
 
-    async fn get_timeline(
+    pub async fn get_timeline(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornTimelineRequest,
@@ -4611,7 +4196,7 @@ where
         Ok(RebornFsMountsResponse { mounts })
     }
 
-    async fn browse_fs_dir(
+    pub async fn browse_fs_dir(
         &self,
         caller: WebUiAuthenticatedCaller,
         request: RebornFsListRequest,
@@ -5364,29 +4949,6 @@ where
     I: ProductCapabilityInvoker + Clone + 'static,
     V: RebornViewProvider + Clone + 'static,
 {
-    async fn delete_thread(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        RebornServices::delete_thread(self, caller, request).await
-    }
-
-    async fn get_timeline(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        RebornServices::get_timeline(self, caller, request).await
-    }
-
-    async fn global_auto_approve_enabled(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<bool, RebornServicesError> {
-        RebornServices::global_auto_approve_enabled(self, caller).await
-    }
-
     async fn invoke(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -5433,234 +4995,13 @@ where
         RebornServices::get_run_state(self, caller, request).await
     }
 
-    async fn list_project_dir(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornProjectFsListRequest,
-    ) -> Result<RebornProjectFsListResponse, RebornServicesError> {
-        RebornServices::list_project_dir(self, caller, request).await
-    }
-
-    async fn stat_project_path(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornProjectFsStatRequest,
-    ) -> Result<RebornProjectFsStatResponse, RebornServicesError> {
-        RebornServices::stat_project_path(self, caller, request).await
-    }
-
-    async fn list_fs_mounts(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
-        RebornServices::list_fs_mounts(self, caller).await
-    }
-
-    async fn browse_fs_dir(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornFsListRequest,
-    ) -> Result<RebornFsListResponse, RebornServicesError> {
-        RebornServices::browse_fs_dir(self, caller, request).await
-    }
-
-    async fn list_projects(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornListProjectsRequest,
-    ) -> Result<RebornListProjectsResponse, RebornServicesError> {
-        RebornServices::list_projects(self, caller, request).await
-    }
-
-    async fn stat_fs_path(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornFsStatRequest,
-    ) -> Result<RebornFsStatResponse, RebornServicesError> {
-        RebornServices::stat_fs_path(self, caller, request).await
-    }
-
-    async fn get_project(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornGetProjectRequest,
-    ) -> Result<RebornProjectResponse, RebornServicesError> {
-        RebornServices::get_project(self, caller, request).await
-    }
-
-    async fn update_project(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornUpdateProjectRequest,
-    ) -> Result<RebornProjectResponse, RebornServicesError> {
-        RebornServices::update_project(self, caller, request).await
-    }
-
-    async fn delete_project(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteProjectRequest,
-    ) -> Result<(), RebornServicesError> {
-        RebornServices::delete_project(self, caller, request).await
-    }
-
-    async fn list_project_members(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornListMembersRequest,
-    ) -> Result<RebornListMembersResponse, RebornServicesError> {
-        RebornServices::list_project_members(self, caller, request).await
-    }
-
-    async fn add_project_member(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornAddMemberRequest,
-    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
-        RebornServices::add_project_member(self, caller, request).await
-    }
-
-    async fn update_project_member_role(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornUpdateMemberRoleRequest,
-    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
-        RebornServices::update_project_member_role(self, caller, request).await
-    }
-
-    async fn remove_project_member(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornRemoveMemberRequest,
-    ) -> Result<(), RebornServicesError> {
-        RebornServices::remove_project_member(self, caller, request).await
-    }
-
-    async fn pause_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        RebornServices::pause_automation(self, caller, automation_id).await
-    }
-
-    async fn resume_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        RebornServices::resume_automation(self, caller, automation_id).await
-    }
-
-    async fn rename_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-        request: WebUiRenameAutomationRequest,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        RebornServices::rename_automation(self, caller, automation_id, request).await
-    }
-
-    async fn delete_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        RebornServices::delete_automation(self, caller, automation_id).await
-    }
-
-    async fn run_operator_setup(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornOperatorSetupRequest,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        RebornServices::run_operator_setup(self, caller, request).await
-    }
-
-    async fn list_admin_users(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        query: RebornAdminUserListQuery,
-    ) -> Result<RebornAdminUserListResponse, RebornServicesError> {
-        RebornServices::list_admin_users(self, caller, query).await
-    }
-
-    async fn get_admin_user(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
-        RebornServices::get_admin_user(self, caller, user_id).await
-    }
-
-    async fn update_admin_user(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-        request: RebornAdminUpdateUserRequest,
-    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
-        RebornServices::update_admin_user(self, caller, user_id, request).await
-    }
-
-    async fn set_admin_user_status(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-        request: RebornAdminSetStatusRequest,
-    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
-        RebornServices::set_admin_user_status(self, caller, user_id, request).await
-    }
-
-    async fn set_admin_user_role(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-        request: RebornAdminSetRoleRequest,
-    ) -> Result<RebornAdminUserResponse, RebornServicesError> {
-        RebornServices::set_admin_user_role(self, caller, user_id, request).await
-    }
-
-    async fn delete_admin_user(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-    ) -> Result<RebornAdminUserDeletedResponse, RebornServicesError> {
-        RebornServices::delete_admin_user(self, caller, user_id).await
-    }
-
-    async fn list_admin_user_secrets(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-    ) -> Result<RebornAdminUserSecretsListResponse, RebornServicesError> {
-        RebornServices::list_admin_user_secrets(self, caller, user_id).await
-    }
-
-    async fn put_admin_user_secret(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-        handle: SecretHandle,
-        request: RebornAdminPutSecretRequest,
-    ) -> Result<RebornAdminSecretResponse, RebornServicesError> {
-        RebornServices::put_admin_user_secret(self, caller, user_id, handle, request).await
-    }
-
-    async fn delete_admin_user_secret(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        user_id: UserId,
-        handle: SecretHandle,
-    ) -> Result<RebornAdminSecretDeletedResponse, RebornServicesError> {
-        RebornServices::delete_admin_user_secret(self, caller, user_id, handle).await
-    }
-
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
-        self.execute_product_surface_command(caller, request).await
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        self.execute_product_surface_operation(caller, request)
+            .await
     }
 }
 
@@ -6906,7 +6247,17 @@ fn product_command_input<T>(input: serde_json::Value) -> Result<T, RebornService
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(input).map_err(|_| product_capability_input_error("input"))
+    serde_json::from_value(input).map_err(|error| {
+        tracing::debug!(?error, "failed to decode product command input");
+        product_capability_input_error("input")
+    })
+}
+
+fn product_secret_handle(handle: String) -> Result<SecretHandle, RebornServicesError> {
+    SecretHandle::new(handle).map_err(|error| {
+        tracing::debug!(%error, "admin user secret handle validation failed");
+        product_capability_input_error("handle")
+    })
 }
 
 fn map_project_service_error(error: ProjectServiceError) -> RebornServicesError {

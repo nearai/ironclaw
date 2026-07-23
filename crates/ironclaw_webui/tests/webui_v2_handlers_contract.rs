@@ -9,6 +9,9 @@
 
 // arch-exempt: large_file, WebUI ProductSurface route contracts stay in the caller-level handler suite until the WebUI route split lands, plan #5985
 
+#[path = "support/product_surface.rs"]
+mod programmable_surface;
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,12 +35,9 @@ use ironclaw_product_adapters::{
     ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_DELETE_SECRET_CAPABILITY_ID,
-    ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
+    ADMIN_USER_DELETE_CAPABILITY_ID, ADMIN_USER_PUT_SECRET_CAPABILITY_ID, ADMIN_USER_SECRETS_VIEW,
     ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
-    ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW,
-    AUTOMATION_DELETE_CAPABILITY_ID, AUTOMATION_PAUSE_CAPABILITY_ID,
-    AUTOMATION_RENAME_CAPABILITY_ID, AUTOMATION_RESUME_CAPABILITY_ID, AUTOMATIONS_VIEW,
+    ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus, CodexLoginStart,
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
@@ -54,33 +54,32 @@ use ironclaw_product_workflow::{
     OUTBOUND_PREFERENCES_VIEW, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
     PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
-    PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityInput, ProductSurface, ProjectFsEntry,
+    PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityInput, ProductOperationId,
+    ProductOperationRequest, ProductOperationResponse, ProductSurface, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsFile, ProjectFsStat, RUN_ARTIFACT_SCHEMA, RUN_ARTIFACT_VIEW,
-    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAddMemberRequest,
-    RebornAdminCreateUserRequest, RebornAdminSetRoleProductRequest,
-    RebornAdminSetStatusProductRequest, RebornAdminUpdateUserProductRequest,
-    RebornAdminUserCreatedResponse, RebornAdminUserListQuery, RebornAdminUserListResponse,
-    RebornAdminUserRequest, RebornAdminUserResponse, RebornAdminUserSecretsListResponse,
-    RebornAttachmentBytes, RebornAttachmentRequest, RebornAutomationInfo,
-    RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
-    RebornAutomationRecentRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornCancelRunResponse, RebornCommandId, RebornCommandRequest, RebornCommandResponse,
-    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionInfo,
-    RebornExtensionListResponse, RebornExtensionRegistryResponse, RebornFsListRequest,
-    RebornFsListResponse, RebornFsMountInfo, RebornFsMountsResponse, RebornFsReadRequest,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
-    RebornListAutomationsResponse, RebornListMembersResponse, RebornListProjectsResponse,
-    RebornListThreadsResponse, RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
+    RebornAccountLoginLinkResponse, RebornAccountTracesResponse, RebornAdminCreateUserRequest,
+    RebornAdminDeleteSecretProductRequest, RebornAdminSecretDeletedResponse,
+    RebornAdminSetRoleProductRequest, RebornAdminSetStatusProductRequest,
+    RebornAdminUpdateUserProductRequest, RebornAdminUserCreatedResponse, RebornAdminUserListQuery,
+    RebornAdminUserListResponse, RebornAdminUserRequest, RebornAdminUserResponse,
+    RebornAdminUserSecretsListResponse, RebornAttachmentBytes, RebornAttachmentRequest,
+    RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
+    RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationSource,
+    RebornAutomationState, RebornCancelRunResponse, RebornCreateProjectRequest,
+    RebornCreateThreadResponse, RebornExtensionInfo, RebornExtensionListResponse,
+    RebornExtensionRegistryResponse, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
+    RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest, RebornFsStatResponse,
+    RebornGetProjectRequest, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
+    RebornListMembersResponse, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogQueryRequest, RebornLogQueryResponse, RebornOperatorArea,
     RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
     RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
     RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
-    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupRequest, RebornOperatorSetupResponse,
-    RebornOperatorSetupStatus, RebornOperatorSetupStep, RebornOperatorSetupStepStatus,
+    RebornOperatorServiceLifecycleRequest, RebornOperatorSetupResponse, RebornOperatorSetupStatus,
     RebornOperatorSurfaceStatus, RebornOutboundDeliveryTargetCapabilities,
     RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
     RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
@@ -88,21 +87,20 @@ use ironclaw_product_workflow::{
     RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsReadRequest,
     RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
     RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
-    RebornProjectState, RebornRemoveMemberRequest, RebornResolveGateResponse,
+    RebornProjectState, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornRetryRunResponse, RebornRunArtifact, RebornRunArtifactRequest,
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetupExtensionResponse, RebornSkillContentResponse, RebornSkillListResponse,
     RebornSkillSearchResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornStreamEventsSubscription, RebornSubmitTurnResponse, RebornTimelineRequest,
     RebornTimelineResponse, RebornTraceCreditsResponse, RebornTraceHoldAuthorizeProductRequest,
-    RebornTraceHoldAuthorizeResponse, RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest,
-    RebornViewPage, RebornViewQuery, RunArtifactLogs, RunArtifactRedaction,
-    SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID, SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID,
-    SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW,
-    SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW,
-    TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiListAutomationsRequest, WebUiListThreadsRequest, WebUiRenameAutomationRequest,
+    RebornTraceHoldAuthorizeResponse, RebornViewPage, RebornViewQuery, RunArtifactLogs,
+    RunArtifactRedaction, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY_ID,
+    SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY_ID,
+    SKILL_REMOVE_CAPABILITY_ID, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY_ID, SKILLS_VIEW,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListAutomationsRequest, WebUiListThreadsRequest,
     WebUiResolveGateRequest, WebUiRetryRunRequest, WebUiSendMessageRequest,
     rejecting_reborn_services_error,
 };
@@ -118,6 +116,8 @@ use ironclaw_webui::webui_v2::{
 use serde_json::Value;
 use tokio::sync::{Notify, mpsc};
 use tower::ServiceExt;
+
+use programmable_surface::ProgrammableProductSurface;
 
 fn caller() -> WebUiAuthenticatedCaller {
     caller_for_user("user-alpha")
@@ -195,7 +195,6 @@ fn successful_resolution(activity_id: ActivityId) -> Resolution {
     })
 }
 
-type OperatorSetupCall = (Option<String>, Option<String>, bool, bool);
 type OperatorConfigSetCall = (String, Value);
 type LlmUpsertCall = (String, bool);
 type LlmActiveCall = (String, Option<String>);
@@ -301,7 +300,6 @@ fn operator_config_diagnostic_command_plane_response(
 #[derive(Default)]
 struct StubServices {
     create_thread_calls: Mutex<Vec<WebUiCreateThreadRequest>>,
-    delete_thread_calls: Mutex<Vec<RebornDeleteThreadRequest>>,
     submit_turn_calls: Mutex<Vec<WebUiSendMessageRequest>>,
     get_timeline_calls: Mutex<Vec<RebornTimelineRequest>>,
     browse_fs_calls: Mutex<Vec<RebornFsListRequest>>,
@@ -311,6 +309,8 @@ struct StubServices {
     next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
     view_queries: Mutex<Vec<RebornViewQuery>>,
     invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
+    operation_calls: Mutex<Vec<ProductOperationRequest>>,
+    next_operation_response: Mutex<Option<Result<ProductOperationResponse, RebornServicesError>>>,
     next_invoke_response: Mutex<Option<Result<Resolution, RebornServicesError>>>,
     read_attachment_calls: Mutex<Vec<RebornAttachmentRequest>>,
     read_attachment_response: Mutex<Option<RebornAttachmentBytes>>,
@@ -320,10 +320,6 @@ struct StubServices {
     retry_run_calls: Mutex<Vec<WebUiRetryRunRequest>>,
     list_threads_calls: Mutex<Vec<WebUiListThreadsRequest>>,
     list_automations_calls: Mutex<Vec<WebUiListAutomationsRequest>>,
-    pause_automation_calls: Mutex<Vec<String>>,
-    resume_automation_calls: Mutex<Vec<String>>,
-    rename_automation_calls: Mutex<Vec<(String, WebUiRenameAutomationRequest)>>,
-    delete_automation_calls: Mutex<Vec<String>>,
     /// Captures the authenticated caller's user id for each
     /// `trace_account_traces` call, so the contract test can assert the handler
     /// forwards the caller (the route is caller-scoped).
@@ -331,11 +327,8 @@ struct StubServices {
     /// Forwarded caller user-ids for each `trace_account_login_link` call.
     trace_account_login_link_callers: Mutex<Vec<String>>,
     next_list_automations_error: Mutex<Option<RebornServicesError>>,
-    next_rename_automation_error: Mutex<Option<RebornServicesError>>,
-    next_delete_automation_error: Mutex<Option<RebornServicesError>>,
     get_outbound_preferences_calls: Mutex<usize>,
     list_outbound_delivery_targets_calls: Mutex<usize>,
-    run_operator_setup_calls: Mutex<Vec<OperatorSetupCall>>,
     list_operator_config_calls: Mutex<usize>,
     operator_config_entries: Mutex<Vec<RebornOperatorConfigEntry>>,
     get_operator_config_key_calls: Mutex<Vec<String>>,
@@ -365,13 +358,6 @@ struct StubServices {
     /// Queued response for the next `submit_turn` call. When `Some`, the value
     /// is taken and returned instead of the default `Submitted` response.
     next_submit_response: Mutex<Option<RebornSubmitTurnResponse>>,
-    // Project routes — recorded requests so path-param-override behavior can be
-    // asserted (the path id must win over any body value).
-    update_project_calls: Mutex<Vec<RebornUpdateProjectRequest>>,
-    delete_project_calls: Mutex<Vec<RebornDeleteProjectRequest>>,
-    add_project_member_calls: Mutex<Vec<RebornAddMemberRequest>>,
-    update_project_member_calls: Mutex<Vec<RebornUpdateMemberRoleRequest>>,
-    remove_project_member_calls: Mutex<Vec<RebornRemoveMemberRequest>>,
 }
 
 impl StubServices {
@@ -391,6 +377,13 @@ impl StubServices {
 
     fn enqueue_invoke_response(&self, response: Result<Resolution, RebornServicesError>) {
         *self.next_invoke_response.lock().expect("lock") = Some(response);
+    }
+
+    fn enqueue_operation_response(
+        &self,
+        response: Result<ProductOperationResponse, RebornServicesError>,
+    ) {
+        *self.next_operation_response.lock().expect("lock") = Some(response);
     }
 
     fn fail_set_operator_config_key(&self, error: RebornServicesError) {
@@ -506,68 +499,6 @@ impl StubServices {
         })
     }
 
-    async fn update_project(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornUpdateProjectRequest,
-    ) -> Result<RebornProjectResponse, RebornServicesError> {
-        self.update_project_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(RebornProjectResponse {
-            project: sample_project_info(&request.project_id),
-        })
-    }
-
-    async fn delete_project(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteProjectRequest,
-    ) -> Result<(), RebornServicesError> {
-        self.delete_project_calls
-            .lock()
-            .expect("lock")
-            .push(request);
-        Ok(())
-    }
-
-    async fn add_project_member(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornAddMemberRequest,
-    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
-        self.add_project_member_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(sample_member_info(&request.user_id))
-    }
-
-    async fn update_project_member_role(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornUpdateMemberRoleRequest,
-    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
-        self.update_project_member_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(sample_member_info(&request.user_id))
-    }
-
-    async fn remove_project_member(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornRemoveMemberRequest,
-    ) -> Result<(), RebornServicesError> {
-        self.remove_project_member_calls
-            .lock()
-            .expect("lock")
-            .push(request);
-        Ok(())
-    }
-
     async fn submit_turn(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -592,21 +523,6 @@ impl StubServices {
             resolved_run_profile_id: RunProfileId::default_profile().as_str().to_string(),
             resolved_run_profile_version: RunProfileVersion::new(1).as_u64(),
             event_cursor: EventCursor(1),
-        })
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        self.delete_thread_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(RebornDeleteThreadResponse {
-            thread_id: ThreadId::new(request.thread_id).expect("thread id"),
-            deleted: true,
         })
     }
 
@@ -1205,59 +1121,6 @@ impl StubServices {
         }
     }
 
-    async fn list_fs_mounts(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
-        Ok(RebornFsMountsResponse {
-            mounts: vec![
-                RebornFsMountInfo {
-                    mount: FsMount::Memory,
-                    label: "Memory".to_string(),
-                },
-                RebornFsMountInfo {
-                    mount: FsMount::Workspace,
-                    label: "Workspace files".to_string(),
-                },
-            ],
-        })
-    }
-
-    async fn browse_fs_dir(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornFsListRequest,
-    ) -> Result<RebornFsListResponse, RebornServicesError> {
-        self.browse_fs_calls
-            .lock()
-            .expect("lock")
-            .push(request.clone());
-        Ok(RebornFsListResponse {
-            mount: request.mount,
-            path: request.path,
-            entries: vec![ProjectFsEntry {
-                name: "today.md".to_string(),
-                path: "daily/today.md".to_string(),
-                kind: ProjectFsEntryKind::File,
-            }],
-        })
-    }
-
-    async fn stat_fs_path(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornFsStatRequest,
-    ) -> Result<RebornFsStatResponse, RebornServicesError> {
-        Ok(RebornFsStatResponse {
-            stat: ProjectFsStat {
-                path: request.path,
-                kind: ProjectFsEntryKind::File,
-                size_bytes: 7,
-                mime_type: "text/markdown".to_string(),
-            },
-        })
-    }
-
     async fn read_fs_file(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1404,128 +1267,6 @@ impl StubServices {
             .expect("retry_run test stub called without queued response")
     }
 
-    async fn pause_automation(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        self.pause_automation_calls
-            .lock()
-            .expect("lock")
-            .push(automation_id);
-        Ok(RebornAutomationMutationResponse {
-            updated: true,
-            automation: Some(automation_info(
-                "automation-paused",
-                "Daily status",
-                "0 9 * * *",
-            )),
-        })
-    }
-
-    async fn resume_automation(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        self.resume_automation_calls
-            .lock()
-            .expect("lock")
-            .push(automation_id);
-        Ok(RebornAutomationMutationResponse {
-            updated: true,
-            automation: Some(automation_info(
-                "automation-resumed",
-                "Daily status",
-                "0 9 * * *",
-            )),
-        })
-    }
-
-    async fn rename_automation(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-        request: WebUiRenameAutomationRequest,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        self.rename_automation_calls
-            .lock()
-            .expect("lock")
-            .push((automation_id, request));
-        if let Some(error) = self
-            .next_rename_automation_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(error);
-        }
-        Ok(RebornAutomationMutationResponse {
-            updated: true,
-            automation: Some(automation_info(
-                "automation-renamed",
-                "Renamed status",
-                "0 9 * * *",
-            )),
-        })
-    }
-
-    async fn delete_automation(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        self.delete_automation_calls
-            .lock()
-            .expect("lock")
-            .push(automation_id);
-        if let Some(error) = self
-            .next_delete_automation_error
-            .lock()
-            .expect("lock")
-            .take()
-        {
-            return Err(error);
-        }
-        Ok(RebornAutomationMutationResponse {
-            updated: true,
-            automation: None,
-        })
-    }
-
-    async fn run_operator_setup(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornOperatorSetupRequest,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        self.run_operator_setup_calls.lock().expect("lock").push((
-            request.provider_id.clone(),
-            request.model.clone(),
-            request.api_key.is_some(),
-            request.webui_access_token.is_some(),
-        ));
-        Ok(RebornOperatorSetupResponse {
-            area: RebornOperatorArea::Setup,
-            status: RebornOperatorSetupStatus::Incomplete,
-            message: "provider setup accepted".to_string(),
-            active_provider_id: request.provider_id,
-            active_model: request.model,
-            steps: vec![
-                RebornOperatorSetupStep {
-                    name: "provider".to_string(),
-                    status: RebornOperatorSetupStepStatus::Complete,
-                    message: "provider accepted".to_string(),
-                },
-                RebornOperatorSetupStep {
-                    name: "profile".to_string(),
-                    status: RebornOperatorSetupStepStatus::Unsupported,
-                    message: "profile setup is not wired".to_string(),
-                },
-            ],
-            diagnostics: Vec::new(),
-        })
-    }
-
     async fn set_operator_config_key(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -1620,29 +1361,6 @@ impl StubServices {
 
 #[async_trait]
 impl ProductSurface for StubServices {
-    async fn global_auto_approve_enabled(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<bool, RebornServicesError> {
-        StubServices::global_auto_approve_enabled(self, caller).await
-    }
-
-    async fn delete_thread(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        StubServices::delete_thread(self, caller, request).await
-    }
-
-    async fn get_timeline(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        StubServices::get_timeline(self, caller, request).await
-    }
-
     async fn invoke(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -1659,29 +1377,6 @@ impl ProductSurface for StubServices {
         query: RebornViewQuery,
     ) -> Result<RebornViewPage, RebornServicesError> {
         StubServices::query(self, caller, query).await
-    }
-
-    async fn list_fs_mounts(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornFsMountsResponse, RebornServicesError> {
-        StubServices::list_fs_mounts(self, caller).await
-    }
-
-    async fn browse_fs_dir(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornFsListRequest,
-    ) -> Result<RebornFsListResponse, RebornServicesError> {
-        StubServices::browse_fs_dir(self, caller, request).await
-    }
-
-    async fn stat_fs_path(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornFsStatRequest,
-    ) -> Result<RebornFsStatResponse, RebornServicesError> {
-        StubServices::stat_fs_path(self, caller, request).await
     }
 
     async fn stream_events(
@@ -1712,141 +1407,67 @@ impl ProductSurface for StubServices {
         StubServices::get_run_state(self, caller, request).await
     }
 
-    async fn update_project(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornUpdateProjectRequest,
-    ) -> Result<RebornProjectResponse, RebornServicesError> {
-        StubServices::update_project(self, caller, request).await
-    }
-
-    async fn delete_project(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteProjectRequest,
-    ) -> Result<(), RebornServicesError> {
-        StubServices::delete_project(self, caller, request).await
-    }
-
-    async fn add_project_member(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornAddMemberRequest,
-    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
-        StubServices::add_project_member(self, caller, request).await
-    }
-
-    async fn update_project_member_role(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornUpdateMemberRoleRequest,
-    ) -> Result<RebornProjectMemberInfo, RebornServicesError> {
-        StubServices::update_project_member_role(self, caller, request).await
-    }
-
-    async fn remove_project_member(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornRemoveMemberRequest,
-    ) -> Result<(), RebornServicesError> {
-        StubServices::remove_project_member(self, caller, request).await
-    }
-
-    async fn pause_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        StubServices::pause_automation(self, caller, automation_id).await
-    }
-
-    async fn resume_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        StubServices::resume_automation(self, caller, automation_id).await
-    }
-
-    async fn rename_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-        request: WebUiRenameAutomationRequest,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        StubServices::rename_automation(self, caller, automation_id, request).await
-    }
-
-    async fn delete_automation(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
-        StubServices::delete_automation(self, caller, automation_id).await
-    }
-
-    async fn run_operator_setup(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: RebornOperatorSetupRequest,
-    ) -> Result<RebornOperatorSetupResponse, RebornServicesError> {
-        StubServices::run_operator_setup(self, caller, request).await
-    }
-
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
-        let command_id = RebornCommandId::parse(request.command_id.as_str())
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        self.operation_calls
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        if let Some(response) = self.next_operation_response.lock().expect("lock").take() {
+            return response;
+        }
+        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
             .ok_or_else(|| service_unavailable_error(false))?;
-        match command_id {
-            RebornCommandId::CreateThread => RebornCommandResponse::json(
+        match operation_id {
+            ProductOperationId::CreateThread => ProductOperationResponse::json(
                 self.create_thread(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            RebornCommandId::SubmitTurn => RebornCommandResponse::json(
+            ProductOperationId::SubmitTurn => ProductOperationResponse::json(
                 self.submit_turn(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            RebornCommandId::CancelRun => RebornCommandResponse::json(
+            ProductOperationId::CancelRun => ProductOperationResponse::json(
                 self.cancel_run(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            RebornCommandId::ResolveGate => RebornCommandResponse::json(
+            ProductOperationId::ResolveGate => ProductOperationResponse::json(
                 self.resolve_gate(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            RebornCommandId::RetryRun => RebornCommandResponse::json(
+            ProductOperationId::RetryRun => ProductOperationResponse::json(
                 self.retry_run(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            RebornCommandId::ProjectCreate => {
+            ProductOperationId::ProjectCreate => {
                 let _: RebornCreateProjectRequest =
                     serde_json::from_value(request.input).expect("input");
-                RebornCommandResponse::json(RebornProjectResponse {
+                ProductOperationResponse::json(RebornProjectResponse {
                     project: sample_project_info("project-created"),
                 })
             }
-            RebornCommandId::ProjectFsRead => {
+            ProductOperationId::ProjectFsRead => {
                 let request: RebornProjectFsReadRequest =
                     serde_json::from_value(request.input).expect("input");
-                Ok(RebornCommandResponse::project_file(ProjectFsFile {
+                Ok(ProductOperationResponse::project_file(ProjectFsFile {
                     path: request.path,
                     filename: Some("report.md".to_string()),
                     mime_type: "text/markdown".to_string(),
@@ -1854,32 +1475,34 @@ impl ProductSurface for StubServices {
                     bytes: b"# notes".to_vec(),
                 }))
             }
-            RebornCommandId::FsRead => Ok(RebornCommandResponse::project_file(
+            ProductOperationId::FsRead => Ok(ProductOperationResponse::project_file(
                 self.read_fs_file(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             )),
-            RebornCommandId::AttachmentRead => Ok(RebornCommandResponse::attachment(
+            ProductOperationId::AttachmentRead => Ok(ProductOperationResponse::attachment(
                 self.read_attachment(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             )),
-            RebornCommandId::TraceAccountLoginLink => {
-                RebornCommandResponse::json(self.trace_account_login_link(caller).await?)
+            ProductOperationId::TraceAccountLoginLink => {
+                ProductOperationResponse::json(self.trace_account_login_link(caller).await?)
             }
-            RebornCommandId::TraceHoldAuthorize => {
+            ProductOperationId::TraceHoldAuthorize => {
                 let _: RebornTraceHoldAuthorizeProductRequest =
                     serde_json::from_value(request.input).expect("input");
-                RebornCommandResponse::json(RebornTraceHoldAuthorizeResponse { authorized: true })
+                ProductOperationResponse::json(RebornTraceHoldAuthorizeResponse {
+                    authorized: true,
+                })
             }
-            RebornCommandId::OperatorConfigSetKey => {
+            ProductOperationId::OperatorConfigSetKey => {
                 let request: RebornOperatorConfigSetProductRequest =
                     serde_json::from_value(request.input).expect("input");
-                RebornCommandResponse::json(
+                ProductOperationResponse::json(
                     self.set_operator_config_key(
                         caller,
                         request.key,
@@ -1890,48 +1513,100 @@ impl ProductSurface for StubServices {
                     .await?,
                 )
             }
-            RebornCommandId::OperatorServiceLifecycle => RebornCommandResponse::json(
+            ProductOperationId::OperatorServiceLifecycle => ProductOperationResponse::json(
                 self.run_operator_service_lifecycle(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            RebornCommandId::LlmTestConnection => RebornCommandResponse::json(
+            ProductOperationId::LlmTestConnection => ProductOperationResponse::json(
                 self.test_llm_connection(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            RebornCommandId::LlmListModels => RebornCommandResponse::json(
+            ProductOperationId::LlmListModels => ProductOperationResponse::json(
                 self.list_llm_models(
                     caller,
                     serde_json::from_value(request.input).expect("input"),
                 )
                 .await?,
             ),
-            RebornCommandId::LlmNearAiLogin => {
+            ProductOperationId::LlmNearAiLogin => {
                 let _: NearAiLoginRequest = serde_json::from_value(request.input).expect("input");
-                RebornCommandResponse::json(NearAiLoginStart {
+                ProductOperationResponse::json(NearAiLoginStart {
                     auth_url: "https://near.ai/login".to_string(),
                 })
             }
-            RebornCommandId::LlmNearAiWalletLogin => {
+            ProductOperationId::LlmNearAiWalletLogin => {
                 let _: NearAiWalletLoginRequest =
                     serde_json::from_value(request.input).expect("input");
-                RebornCommandResponse::json(NearAiWalletLoginResult { active: true })
+                ProductOperationResponse::json(NearAiWalletLoginResult { active: true })
             }
-            RebornCommandId::LlmCodexLogin => RebornCommandResponse::json(CodexLoginStart {
+            ProductOperationId::LlmCodexLogin => ProductOperationResponse::json(CodexLoginStart {
                 user_code: "TEST-CODE".to_string(),
                 verification_uri: "https://openai.com/device".to_string(),
             }),
-            RebornCommandId::AdminUserCreate => {
+            ProductOperationId::AdminUserCreate => {
                 let request: RebornAdminCreateUserRequest =
                     serde_json::from_value(request.input).expect("input");
-                RebornCommandResponse::json(RebornAdminUserCreatedResponse {
+                ProductOperationResponse::json(RebornAdminUserCreatedResponse {
                     user: sample_admin_user(request.email.as_deref().unwrap_or("user-admin")),
                     api_token: "token-test".to_string(),
+                })
+            }
+            ProductOperationId::AdminUserDeleteSecret => {
+                let request: RebornAdminDeleteSecretProductRequest =
+                    serde_json::from_value(request.input).expect("input");
+                ProductOperationResponse::json(RebornAdminSecretDeletedResponse {
+                    handle: request.handle,
+                    deleted: true,
+                })
+            }
+            ProductOperationId::AutomationPause => {
+                let request: RebornAutomationRequest =
+                    serde_json::from_value(request.input).expect("input");
+                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                    updated: true,
+                    automation: Some(automation_info(
+                        request.automation_id.as_str(),
+                        "Paused status",
+                        "*/5 * * * *",
+                    )),
+                })
+            }
+            ProductOperationId::AutomationResume => {
+                let request: RebornAutomationRequest =
+                    serde_json::from_value(request.input).expect("input");
+                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                    updated: true,
+                    automation: Some(automation_info(
+                        request.automation_id.as_str(),
+                        "Resumed status",
+                        "*/5 * * * *",
+                    )),
+                })
+            }
+            ProductOperationId::AutomationRename => {
+                let request: RebornRenameAutomationProductRequest =
+                    serde_json::from_value(request.input).expect("input");
+                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                    updated: true,
+                    automation: Some(automation_info(
+                        request.automation_id.as_str(),
+                        request.name.as_deref().unwrap_or("Renamed status"),
+                        "*/5 * * * *",
+                    )),
+                })
+            }
+            ProductOperationId::AutomationDelete => {
+                let _: RebornAutomationRequest =
+                    serde_json::from_value(request.input).expect("input");
+                ProductOperationResponse::json(RebornAutomationMutationResponse {
+                    updated: true,
+                    automation: None,
                 })
             }
         }
@@ -2932,7 +2607,6 @@ async fn list_automations_omits_limits_and_forwards_none() {
 async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
-    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
 
     let pause_response = router
         .clone()
@@ -2953,7 +2627,6 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
         "automation-alpha"
     );
 
-    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let resume_response = router
         .oneshot(
             Request::builder()
@@ -2972,22 +2645,22 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
         "automation-alpha"
     );
 
-    let calls = services.invoke_calls.lock().expect("lock").clone();
+    let calls = services.operation_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 2);
     assert_eq!(
-        calls[0].0,
-        CapabilityId::new(AUTOMATION_PAUSE_CAPABILITY_ID).expect("capability id")
+        calls[0].operation_id,
+        ProductOperationId::AutomationPause.as_str()
     );
     assert_eq!(
-        calls[0].1,
+        calls[0].input,
         serde_json::json!({ "automation_id": "automation-alpha" })
     );
     assert_eq!(
-        calls[1].0,
-        CapabilityId::new(AUTOMATION_RESUME_CAPABILITY_ID).expect("capability id")
+        calls[1].operation_id,
+        ProductOperationId::AutomationResume.as_str()
     );
     assert_eq!(
-        calls[1].1,
+        calls[1].input,
         serde_json::json!({ "automation_id": "automation-alpha" })
     );
 }
@@ -2996,7 +2669,6 @@ async fn pause_and_resume_automation_dispatch_path_id_to_facade() {
 async fn rename_automation_dispatches_path_id_and_body_to_facade() {
     let services = Arc::new(StubServices::default());
     let router = router_with(services.clone());
-    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
 
     let response = router
         .oneshot(
@@ -3016,14 +2688,14 @@ async fn rename_automation_dispatches_path_id_and_body_to_facade() {
     assert_eq!(body["automation"]["automation_id"], "automation-alpha");
     assert_eq!(body["automation"]["name"], "Renamed status");
 
-    let calls = services.invoke_calls.lock().expect("lock").clone();
+    let calls = services.operation_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].0,
-        CapabilityId::new(AUTOMATION_RENAME_CAPABILITY_ID).expect("capability id")
+        calls[0].operation_id,
+        ProductOperationId::AutomationRename.as_str()
     );
     assert_eq!(
-        calls[0].1,
+        calls[0].input,
         serde_json::json!({
             "automation_id": "automation-alpha",
             "name": "Renamed status"
@@ -3064,7 +2736,7 @@ async fn rename_automation_error_maps_to_http_status() {
         ),
     ] {
         let services = Arc::new(StubServices::default());
-        services.enqueue_invoke_response(Err(error));
+        services.enqueue_operation_response(Err(error));
         let router = router_with(services.clone());
 
         let response = router
@@ -3084,11 +2756,11 @@ async fn rename_automation_error_maps_to_http_status() {
         assert_eq!(body["error"], expected_code);
         assert_eq!(body["kind"], expected_kind);
         assert_eq!(body["retryable"], expected_retryable);
-        let calls = services.invoke_calls.lock().expect("lock").clone();
+        let calls = services.operation_calls.lock().expect("lock").clone();
         assert_eq!(calls.len(), 1);
         assert_eq!(
-            calls[0].0,
-            CapabilityId::new(AUTOMATION_RENAME_CAPABILITY_ID).expect("capability id")
+            calls[0].operation_id,
+            ProductOperationId::AutomationRename.as_str()
         );
     }
 }
@@ -3277,14 +2949,14 @@ async fn delete_automation_dispatches_path_id_to_facade() {
     let body = read_json(response).await;
     assert_eq!(body["updated"], true);
     assert!(body.get("automation").is_none() || body["automation"].is_null());
-    let calls = services.invoke_calls.lock().expect("lock").clone();
+    let calls = services.operation_calls.lock().expect("lock").clone();
     assert_eq!(calls.len(), 1);
     assert_eq!(
-        calls[0].0,
-        CapabilityId::new(AUTOMATION_DELETE_CAPABILITY_ID).expect("capability id")
+        calls[0].operation_id,
+        ProductOperationId::AutomationDelete.as_str()
     );
     assert_eq!(
-        calls[0].1,
+        calls[0].input,
         serde_json::json!({ "automation_id": "automation-alpha" })
     );
 }
@@ -3322,7 +2994,7 @@ async fn delete_automation_error_maps_to_http_status() {
         ),
     ] {
         let services = Arc::new(StubServices::default());
-        services.enqueue_invoke_response(Err(error));
+        services.enqueue_operation_response(Err(error));
         let router = router_with(services.clone());
 
         let response = router
@@ -3341,11 +3013,11 @@ async fn delete_automation_error_maps_to_http_status() {
         assert_eq!(body["error"], expected_code);
         assert_eq!(body["kind"], expected_kind);
         assert_eq!(body["retryable"], expected_retryable);
-        let calls = services.invoke_calls.lock().expect("lock").clone();
+        let calls = services.operation_calls.lock().expect("lock").clone();
         assert_eq!(calls.len(), 1);
         assert_eq!(
-            calls[0].0,
-            CapabilityId::new(AUTOMATION_DELETE_CAPABILITY_ID).expect("capability id")
+            calls[0].operation_id,
+            ProductOperationId::AutomationDelete.as_str()
         );
     }
 }
@@ -4248,7 +3920,7 @@ async fn admin_user_secret_mutations_invoke_product_capabilities() {
     assert_eq!(body["deleted"], true);
 
     let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
-    assert_eq!(invoke_calls.len(), 2);
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
         invoke_calls[0].0,
         CapabilityId::new(ADMIN_USER_PUT_SECRET_CAPABILITY_ID).expect("capability id")
@@ -4261,12 +3933,15 @@ async fn admin_user_secret_mutations_invoke_product_capabilities() {
             "value": "sk-test"
         })
     );
+
+    let operation_calls = services.operation_calls.lock().expect("lock").clone();
+    assert_eq!(operation_calls.len(), 1);
     assert_eq!(
-        invoke_calls[1].0,
-        CapabilityId::new(ADMIN_USER_DELETE_SECRET_CAPABILITY_ID).expect("capability id")
+        operation_calls[0].operation_id,
+        ProductOperationId::AdminUserDeleteSecret.as_str()
     );
     assert_eq!(
-        invoke_calls[1].1,
+        operation_calls[0].input,
         serde_json::json!({
             "user_id": "user-admin",
             "handle": "openai_api_key"
@@ -6309,47 +5984,11 @@ async fn stream_events_caps_concurrent_streams_per_caller() {
 // stream actually terminates and the slot is reusable for a new connection.
 #[tokio::test(start_paused = true)]
 async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime() {
-    /// Facade whose `stream_events` never returns; all other methods are
-    /// unreachable for this regression.
-    #[derive(Default)]
-    struct StallingServices;
-
-    #[async_trait]
-    impl ProductSurface for StallingServices {
-        async fn delete_thread(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: RebornDeleteThreadRequest,
-        ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn get_timeline(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: RebornTimelineRequest,
-        ) -> Result<RebornTimelineResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-        async fn stream_events(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: RebornStreamEventsRequest,
-        ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-            // Never resolves — simulates a wedged projection stream.
-            std::future::pending().await
-        }
-        async fn get_run_state(
-            &self,
-            _caller: WebUiAuthenticatedCaller,
-            _request: RebornGetRunStateRequest,
-        ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-            unreachable!("not exercised by this test")
-        }
-    }
-
     // Cap of 1 so we can observe slot release directly: a second open
     // returns 429 while the first is held, and 200 once it's released.
-    let services: Arc<dyn ProductSurface> = Arc::new(StallingServices);
+    let services = Arc::new(ProgrammableProductSurface::default());
+    services.stall_stream_events();
+    let services: Arc<dyn ProductSurface> = services;
     let router = webui_v2_router(WebUiV2State::new(services, 1)).layer(axum::Extension(caller()));
 
     let open_stream = || {

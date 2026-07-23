@@ -10,12 +10,13 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, LlmError, LlmProvider, ToolCompletionRequest,
-    ToolCompletionResponse,
+    CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
 use rust_decimal::Decimal;
 use tokio::sync::oneshot;
@@ -182,6 +183,202 @@ impl LlmProvider for ParkingLlm {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         self.gate.park().await;
+        self.inner.complete_with_tools(request).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recoverable model failures (E-GATEWAY seam) — model recovery coverage.
+// ---------------------------------------------------------------------------
+
+/// Distinctive provider-detail value used to prove context-overflow diagnostics
+/// do not get copied into the model-visible recovery observation.
+pub const CONTEXT_OVERFLOW_USED_TOKENS: usize = 987_654;
+
+#[derive(Debug, Clone, Copy)]
+pub enum RecoverableModelFailure {
+    ContextOverflow,
+    ContentFiltered,
+    InvalidOutput,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RecoverableModelFailureScript {
+    pub failure: RecoverableModelFailure,
+    pub successful_calls_before_failures: usize,
+    pub failures: usize,
+}
+
+impl RecoverableModelFailureScript {
+    pub fn new(failure: RecoverableModelFailure, failures: usize) -> Self {
+        Self {
+            failure,
+            successful_calls_before_failures: 0,
+            failures,
+        }
+    }
+
+    pub fn after_successful_calls(mut self, calls: usize) -> Self {
+        self.successful_calls_before_failures = calls;
+        self
+    }
+}
+
+#[derive(Default)]
+struct ModelProviderCallRecords {
+    interactive_requests: Vec<Vec<String>>,
+    text_requests: Vec<Vec<String>>,
+}
+
+#[derive(Clone, Default)]
+pub struct ModelProviderCallProbe(Arc<Mutex<ModelProviderCallRecords>>);
+
+impl ModelProviderCallProbe {
+    fn record(&self, messages: &[ironclaw_llm::ChatMessage], interactive: bool) {
+        let contents = messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect();
+        let mut records = lock(&self.0);
+        if interactive {
+            records.interactive_requests.push(contents);
+        } else {
+            records.text_requests.push(contents);
+        }
+    }
+
+    pub fn interactive_calls(&self) -> usize {
+        lock(&self.0).interactive_requests.len()
+    }
+
+    pub fn text_calls(&self) -> usize {
+        lock(&self.0).text_requests.len()
+    }
+
+    pub fn message_content_occurrences(&self, needle: &str) -> usize {
+        let records = lock(&self.0);
+        records
+            .interactive_requests
+            .iter()
+            .chain(&records.text_requests)
+            .flatten()
+            .map(|content| content.matches(needle).count())
+            .sum()
+    }
+
+    pub fn message_content_contains(&self, needle: &str) -> bool {
+        let records = lock(&self.0);
+        records
+            .interactive_requests
+            .iter()
+            .chain(&records.text_requests)
+            .flatten()
+            .any(|content| content.contains(needle))
+    }
+}
+
+/// A raw provider that reports a configured failure for interactive,
+/// tool-capable calls a bounded number of times, then delegates to the scripted
+/// provider. Text-only system inference still delegates normally so context
+/// compaction can execute. The wrapper remains at the vendor-SDK seam so the
+/// real decorator chain, model gateway, loop host, recovery strategy,
+/// checkpointing, and prompt renderer all stay in the path.
+pub struct RecoverableFailureLlm {
+    inner: Arc<TraceLlm>,
+    failure: RecoverableModelFailure,
+    successful_calls_remaining: AtomicUsize,
+    failures_remaining: AtomicUsize,
+    calls: ModelProviderCallProbe,
+}
+
+pub fn recoverable_failure_trace_llm(
+    failure: RecoverableModelFailure,
+    successful_calls_before_failures: usize,
+    failures: usize,
+    inner: Arc<TraceLlm>,
+) -> (RecoverableFailureLlm, ModelProviderCallProbe) {
+    let calls = ModelProviderCallProbe::default();
+    (
+        RecoverableFailureLlm {
+            inner,
+            failure,
+            successful_calls_remaining: AtomicUsize::new(successful_calls_before_failures),
+            failures_remaining: AtomicUsize::new(failures),
+            calls: calls.clone(),
+        },
+        calls,
+    )
+}
+
+impl RecoverableFailureLlm {
+    fn consume_scheduled_failure(&self) -> bool {
+        if self
+            .successful_calls_remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return false;
+        }
+        self.failures_remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+    }
+}
+
+#[async_trait]
+impl LlmProvider for RecoverableFailureLlm {
+    fn model_name(&self) -> &str {
+        self.inner.model_name()
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        self.inner.cost_per_token()
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.calls.record(&request.messages, false);
+        self.inner.complete(request).await
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.calls.record(&request.messages, true);
+        if self.consume_scheduled_failure() {
+            return match self.failure {
+                RecoverableModelFailure::ContextOverflow => Err(LlmError::ContextLengthExceeded {
+                    used: CONTEXT_OVERFLOW_USED_TOKENS,
+                    limit: 1,
+                }),
+                RecoverableModelFailure::ContentFiltered => Ok(ToolCompletionResponse {
+                    content: None,
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::ContentFilter,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    reasoning: None,
+                    reasoning_details: None,
+                }),
+                RecoverableModelFailure::InvalidOutput => Ok(ToolCompletionResponse {
+                    content: Some(String::new()),
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    reasoning: None,
+                    reasoning_details: None,
+                }),
+            };
+        }
         self.inner.complete_with_tools(request).await
     }
 }

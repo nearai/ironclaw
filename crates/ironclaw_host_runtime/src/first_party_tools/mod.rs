@@ -34,8 +34,8 @@ use ironclaw_first_party_extensions::coding::{
 };
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
-    OriginGateMatrix, PermissionMode, ProcessBackendKind, RequestedTrustClass, ResourceCeiling,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
+    OriginGateMatrix, OriginGatePolicy, PermissionMode, ProcessBackendKind, RequestedTrustClass,
+    ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgressError, RuntimeHttpEgressResponse, TrustClass, VirtualPath,
 };
 
@@ -478,12 +478,22 @@ fn first_party_capability_manifest(
         runtime_credentials: Vec::new(),
         network_targets: Vec::new(),
         resource_profile,
-        // §5.3 S3 (behavior-neutral): the per-origin gate matrix mirrors today's
-        // effect gate for `LoopRun` (Ungated iff id is in the reviewed
-        // `UNGATED_LOOP_RUN_CAPABILITIES` allowlist), Product/Automation
-        // deny-by-default. Nothing reads this yet (fold is S4).
-        origin_gate_matrix: Some(OriginGateMatrix::builtin_loop_run_seed(id)),
+        origin_gate_matrix: Some(first_party_origin_gate_matrix(id)),
     })
+}
+
+fn first_party_origin_gate_matrix(id: &str) -> OriginGateMatrix {
+    let mut matrix = OriginGateMatrix::builtin_loop_run_seed(id);
+    if matches!(
+        id,
+        SKILL_INSTALL_CAPABILITY_ID
+            | SKILL_UPDATE_CAPABILITY_ID
+            | SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID
+            | SKILL_REMOVE_CAPABILITY_ID
+    ) {
+        matrix.product = OriginGatePolicy::ConsentSufficient;
+    }
+    matrix
 }
 
 #[derive(Debug, Default)]

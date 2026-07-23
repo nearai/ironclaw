@@ -26,8 +26,8 @@ use ironclaw_host_api::{
     UserId,
 };
 use ironclaw_product_workflow::{
-    EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, ProductSurface,
-    RebornCommandRequest, RebornCommandResponse, RebornExtensionInfo, RebornExtensionListResponse,
+    EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, ProductOperationRequest,
+    ProductOperationResponse, ProductSurface, RebornExtensionInfo, RebornExtensionListResponse,
     RebornServicesError, RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
     rejecting_reborn_services_error,
 };
@@ -298,8 +298,8 @@ impl ProductSurface for UnusedServices {
     async fn execute_command(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
+        _request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 }

@@ -89,16 +89,16 @@ impl ProductSurface for RecordingServices {
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
-        let command_id = RebornCommandId::parse(request.command_id.as_str())
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
             .ok_or_else(service_unavailable_error)?;
-        match command_id {
-            RebornCommandId::OperatorConfigSetKey => {
+        match operation_id {
+            ProductOperationId::OperatorConfigSetKey => {
                 let request: RebornOperatorConfigSetProductRequest =
                     serde_json::from_value(request.input)
                         .map_err(RebornServicesError::internal_from)?;
-                RebornCommandResponse::json(
+                ProductOperationResponse::json(
                     self.set_operator_config_key(
                         caller,
                         request.key,

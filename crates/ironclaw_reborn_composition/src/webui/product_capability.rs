@@ -10,12 +10,12 @@ use ironclaw_filesystem::{
 };
 use ironclaw_host_api::{
     ActivityId, Blocked, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, CapabilityId,
-    CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, ExecutionContext, ExtensionId,
-    FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId, InvocationOrigin,
-    MountView, NetworkPolicy, Outcome, OutcomeRefs, Principal, ProcessRef, ProcessWaypoint,
-    ProductKind, Resolution, ResourceEstimate, ResourceScope, ResultPreviewMeta, ResultProgress,
-    ResultRef, ResumeToken, RuntimeKind, SafeSummary, ScopedPath, Suspension, TerminateHint,
-    ToolVerdict, TrustClass,
+    CapabilitySet, CorrelationId, Denial, DenyReason, DenyRef, EffectKind, ExecutionContext,
+    ExtensionId, FailureKind, GateRef, GateWaypoint, GrantConstraints, InvocationId,
+    InvocationOrigin, MountView, NetworkPolicy, Outcome, OutcomeRefs, Principal, ProcessRef,
+    ProcessWaypoint, ProductKind, Resolution, ResourceEstimate, ResourceScope, ResultPreviewMeta,
+    ResultProgress, ResultRef, ResumeToken, RuntimeKind, SafeSummary, ScopedPath, Suspension,
+    TerminateHint, ToolVerdict, TrustClass,
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
 use ironclaw_product_workflow::{
@@ -205,23 +205,23 @@ fn product_gesture_grant(
             network_targets.push(credential.audience.clone());
         }
     }
-    let network =
-        if descriptor.id.as_str() == SKILL_INSTALL_CAPABILITY_ID && network_targets.is_empty() {
-            crate::builtin_capability_policy::dev_wildcard_network_policy()
-        } else {
-            let has_network_targets = !network_targets.is_empty();
-            NetworkPolicy {
-                allowed_targets: network_targets,
-                // An empty policy must remain unconstrained. Marking it as
-                // private-range constrained would synthesize an `ApplyNetworkPolicy`
-                // obligation for a capability that has no network surface, and fail
-                // before dispatch when no network-policy store is composed.
-                // Networked capabilities retain the private-IP guard on their
-                // manifest allowlist.
-                deny_private_ip_ranges: has_network_targets,
-                max_egress_bytes: None,
-            }
-        };
+    let network = if descriptor.effects.contains(&EffectKind::Network) && network_targets.is_empty()
+    {
+        crate::builtin_capability_policy::dev_wildcard_network_policy()
+    } else {
+        let has_network_targets = !network_targets.is_empty();
+        NetworkPolicy {
+            allowed_targets: network_targets,
+            // An empty policy must remain unconstrained. Marking it as
+            // private-range constrained would synthesize an `ApplyNetworkPolicy`
+            // obligation for a capability that has no network surface, and fail
+            // before dispatch when no network-policy store is composed.
+            // Networked capabilities retain the private-IP guard on their
+            // manifest allowlist.
+            deny_private_ip_ranges: has_network_targets,
+            max_egress_bytes: None,
+        }
+    };
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: descriptor.id.clone(),
@@ -507,6 +507,23 @@ mod tests {
         );
 
         assert_eq!(grant.constraints.network, NetworkPolicy::default());
+    }
+
+    #[test]
+    fn product_gesture_grant_uses_dev_wildcard_for_networked_gesture_without_targets() {
+        let mut descriptor = descriptor_with_network(Vec::new(), Vec::new());
+        descriptor.effects.push(EffectKind::Network);
+
+        let grant = product_gesture_grant(
+            &descriptor,
+            &ExtensionId::new(PRODUCT_INGRESS_EXTENSION_ID).unwrap(),
+            MountView::default(),
+        );
+
+        assert_eq!(
+            grant.constraints.network,
+            crate::builtin_capability_policy::dev_wildcard_network_policy()
+        );
     }
 
     #[test]

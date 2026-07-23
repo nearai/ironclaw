@@ -21,11 +21,9 @@ use ironclaw_auth::{
 use ironclaw_auth::{AuthProviderId, CredentialAccountId, CredentialAccountService};
 use ironclaw_host_api::{AgentId, InvocationId, ProjectId, ResourceScope, TenantId, UserId};
 use ironclaw_product_workflow::{
-    ProductSurface, RebornCommandRequest, RebornCommandResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornServicesError, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller,
-    rejecting_reborn_services_error,
+    ProductOperationRequest, ProductOperationResponse, ProductSurface, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornServicesError, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, WebUiAuthenticatedCaller, rejecting_reborn_services_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
@@ -76,22 +74,6 @@ struct UnusedServices;
 
 #[async_trait]
 impl ProductSurface for UnusedServices {
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
-    }
-
     async fn stream_events(
         &self,
         _caller: WebUiAuthenticatedCaller,
@@ -110,8 +92,8 @@ impl ProductSurface for UnusedServices {
     async fn execute_command(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        _request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
+        _request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
         Err(rejecting_reborn_services_error())
     }
 }

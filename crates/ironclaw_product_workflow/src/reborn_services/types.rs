@@ -379,7 +379,7 @@ pub struct RebornAttachmentRequest {
 }
 
 /// Raw bytes of one landed attachment plus the metadata a browser needs to
-/// render or download it. Returned by [`super::ATTACHMENT_READ_COMMAND`].
+/// render or download it. Returned by [`super::ATTACHMENT_READ_OPERATION`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RebornAttachmentBytes {
     pub mime_type: String,

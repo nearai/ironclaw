@@ -292,3 +292,220 @@ def test_fixture_catalog_has_no_unowned_cases_or_provider_operations():
     assert observed_provider_tools == (
         EMULATE_SUPPORTED_TOOLS | EMULATE_UNSUPPORTED_TOOLS
     )
+
+
+async def test_trace_replay_binds_fresh_provider_ids_into_follow_up_calls(
+    mock_llm_server,
+):
+    """A created resource ID can drive the next real recorded tool call."""
+    trace = {
+        "steps": [
+            {"response": {"type": "user_input", "content": "create and read"}},
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {"name": "google-docs__create_document", "arguments": {}}
+                    ],
+                }
+            },
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [
+                        {
+                            "name": "google-docs__read_content",
+                            "arguments": {
+                                "document_id": {
+                                    "$trace_result": {
+                                        "tool": "google-docs__create_document",
+                                        "fields": ["documentId", "document_id", "id"],
+                                    }
+                                }
+                            },
+                        }
+                    ],
+                }
+            },
+            {"response": {"type": "text", "content": "done"}},
+        ]
+    }
+    tools = _tool_definitions(trace)
+    messages = [{"role": "user", "content": "create and read"}]
+
+    await _install_trace(mock_llm_server, "binding-contract", trace)
+    async with httpx.AsyncClient() as client:
+        created = await client.post(
+            f"{mock_llm_server}/v1/chat/completions",
+            json={"model": "mock-model", "messages": messages, "tools": tools},
+            timeout=15,
+        )
+        created.raise_for_status()
+        created_message = created.json()["choices"][0]["message"]
+        messages.extend(
+            [
+                created_message,
+                {
+                    "role": "tool",
+                    "tool_call_id": created_message["tool_calls"][0]["id"],
+                    "content": json.dumps(
+                        {"document": {"documentId": "doc-created-locally"}}
+                    ),
+                },
+            ]
+        )
+
+        read = await client.post(
+            f"{mock_llm_server}/v1/chat/completions",
+            json={"model": "mock-model", "messages": messages, "tools": tools},
+            timeout=15,
+        )
+        read.raise_for_status()
+
+    arguments = json.loads(
+        read.json()["choices"][0]["message"]["tool_calls"][0]["function"][
+            "arguments"
+        ]
+    )
+    assert arguments == {"document_id": "doc-created-locally"}
+
+
+async def test_trace_replay_accepts_direct_calls_from_deferred_tool_catalog(
+    mock_llm_server,
+):
+    """Deferred tools are callable even though only tool_search is advertised."""
+    trace = {
+        "steps": [
+            {"response": {"type": "user_input", "content": "inspect Slack"}},
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [{"name": "slack__whoami", "arguments": {}}],
+                }
+            },
+        ]
+    }
+    await _install_trace(mock_llm_server, "deferred-catalog", trace)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "builtin__tool_search",
+                "description": "On-demand tools:\n- slack.whoami",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{mock_llm_server}/v1/chat/completions",
+            json={
+                "model": "mock-model",
+                "messages": [{"role": "user", "content": "inspect Slack"}],
+                "tools": tools,
+            },
+            timeout=15,
+        )
+    response.raise_for_status()
+    call = response.json()["choices"][0]["message"]["tool_calls"][0]
+    assert call["function"]["name"] == "slack__whoami"
+
+
+async def test_trace_replay_stops_after_failed_capability_result(mock_llm_server):
+    trace = {
+        "steps": [
+            {"response": {"type": "user_input", "content": "inspect Slack"}},
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [{"name": "slack__whoami", "arguments": {}}],
+                }
+            },
+            {"response": {"type": "text", "content": "done"}},
+        ]
+    }
+    await _install_trace(mock_llm_server, "failed-result", trace)
+    tools = _tool_definitions(trace)
+    messages = [{"role": "user", "content": "inspect Slack"}]
+
+    async with httpx.AsyncClient() as client:
+        first = await client.post(
+            f"{mock_llm_server}/v1/chat/completions",
+            json={"model": "mock-model", "messages": messages, "tools": tools},
+            timeout=15,
+        )
+        first.raise_for_status()
+        assistant = first.json()["choices"][0]["message"]
+        messages.extend(
+            [
+                assistant,
+                {
+                    "role": "tool",
+                    "name": "slack__whoami",
+                    "tool_call_id": assistant["tool_calls"][0]["id"],
+                    "content": json.dumps({"status": "failed"}),
+                },
+            ]
+        )
+        failed = await client.post(
+            f"{mock_llm_server}/v1/chat/completions",
+            json={"model": "mock-model", "messages": messages, "tools": tools},
+            timeout=15,
+        )
+
+    assert failed.status_code == 409
+    assert "failed capability result" in failed.text
+
+
+async def test_trace_replay_accepts_exact_expected_capability_failure(mock_llm_server):
+    trace = {
+        "steps": [
+            {"response": {"type": "user_input", "content": "inspect Slack"}},
+            {
+                "response": {
+                    "type": "tool_calls",
+                    "tool_calls": [{"name": "slack__whoami", "arguments": {}}],
+                }
+            },
+            {
+                "request_hint": {
+                    "expected_failed_tool_result_contains": "channel_not_found"
+                },
+                "response": {"type": "text", "content": "reported honestly"},
+            },
+        ]
+    }
+    await _install_trace(mock_llm_server, "expected-failed-result", trace)
+    tools = _tool_definitions(trace)
+    messages = [{"role": "user", "content": "inspect Slack"}]
+
+    async with httpx.AsyncClient() as client:
+        first = await client.post(
+            f"{mock_llm_server}/v1/chat/completions",
+            json={"model": "mock-model", "messages": messages, "tools": tools},
+            timeout=15,
+        )
+        first.raise_for_status()
+        assistant = first.json()["choices"][0]["message"]
+        messages.extend(
+            [
+                assistant,
+                {
+                    "role": "tool",
+                    "name": "slack__whoami",
+                    "tool_call_id": assistant["tool_calls"][0]["id"],
+                    "content": json.dumps(
+                        {"status": "error", "error": "channel_not_found"}
+                    ),
+                },
+            ]
+        )
+        final = await client.post(
+            f"{mock_llm_server}/v1/chat/completions",
+            json={"model": "mock-model", "messages": messages, "tools": tools},
+            timeout=15,
+        )
+
+    final.raise_for_status()
+    assert final.json()["choices"][0]["message"]["content"] == "reported honestly"
