@@ -265,6 +265,10 @@ pub struct RebornScopedSandboxCommandTransport {
     config: RebornSandboxConfig,
     activity: Arc<SandboxActivityRegistry>,
     background_jobs: Arc<BackgroundJobRegistry>,
+    /// Gates the egress network's idempotent-but-not-free create attempt
+    /// (see `exec_transport::ensure_egress_network_once`) to once per
+    /// process instead of once per command dispatch.
+    network_ready: Arc<tokio::sync::OnceCell<()>>,
 }
 
 impl std::fmt::Debug for RebornScopedSandboxCommandTransport {
@@ -293,6 +297,7 @@ impl RebornScopedSandboxCommandTransport {
             config,
             activity: Arc::new(SandboxActivityRegistry::new()),
             background_jobs: Arc::new(BackgroundJobRegistry::new()),
+            network_ready: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -450,6 +455,7 @@ impl SandboxCommandTransport for RebornScopedSandboxCommandTransport {
             &request.scope.tenant_id,
             &request.scope.user_id,
             &workspace,
+            &self.network_ready,
         )
         .await?;
 

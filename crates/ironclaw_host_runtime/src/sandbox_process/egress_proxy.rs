@@ -26,7 +26,33 @@ use async_trait::async_trait;
 use ironclaw_host_api::NetworkPolicy;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
+
+/// Hard ceiling on concurrent client connections the proxy will service at
+/// once. The proxy binds `0.0.0.0` on the internal egress network and is
+/// reachable from *inside* the sandboxed container — treat that container as
+/// potentially adversarial (prompt injection or hostile code running there
+/// is in-scope for this design) and never let it force unbounded task/socket
+/// growth on the host by opening connections faster than they drain.
+/// Deliberately generous for legitimate concurrent tool use (parallel
+/// `curl`s, package installs, etc.) while still being a real ceiling.
+const MAX_CONCURRENT_CONNECTIONS: usize = 128;
+
+/// Hard ceiling on a single request-line/header line's byte length. Real
+/// HTTP headers are a few hundred bytes at most; this only exists to stop an
+/// adversarial or buggy client inside the sandbox from making
+/// [`read_request_head`] buffer an unbounded line.
+const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
+
+/// Hard ceiling on the sum of header bytes (request line plus every header
+/// line) for one request — bounds total allocation even across many lines
+/// that each individually stay under [`MAX_HEADER_LINE_BYTES`].
+const MAX_TOTAL_HEADER_BYTES: usize = 32 * 1024;
+
+/// Hard ceiling on header line COUNT — bounds allocation (one `String` per
+/// line, in [`RequestHead::header_lines`]) from many small lines that would
+/// each individually pass both byte caps above.
+const MAX_HEADER_LINES: usize = 200;
 
 /// Resolver seam for the dial-time private-IP guard (E2 hardening 1): the
 /// production impl below does real DNS; tests inject a fixed-address
@@ -65,6 +91,8 @@ fn denied_ip_reason(ip: IpAddr) -> Option<&'static str> {
             }
             if v6.is_loopback() {
                 Some("loopback (::1)")
+            } else if v6.segments()[0] & 0xffc0 == 0xfe80 {
+                Some("link-local (fe80::/10)")
             } else if v6.segments()[0] >> 8 == 0xfd {
                 Some("unique-local (fd00::/8)")
             } else {
@@ -141,6 +169,10 @@ pub struct EgressAllowlistProxy {
     /// origin without tripping the SSRF guard. See
     /// `connect_to_allowed_host_tunnels_bytes`.
     deny_private_ips: bool,
+    /// Always [`MAX_CONCURRENT_CONNECTIONS`] in production (`new`); tests
+    /// override it to a small value so the connection-cap test doesn't need
+    /// to actually open 128+ sockets.
+    max_connections: usize,
 }
 
 impl EgressAllowlistProxy {
@@ -149,6 +181,7 @@ impl EgressAllowlistProxy {
             policy,
             resolver: Arc::new(DnsResolver),
             deny_private_ips: true,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
         }
     }
 
@@ -172,6 +205,7 @@ impl EgressAllowlistProxy {
             policy: Arc::new(self.policy),
             resolver: self.resolver,
             deny_private_ips: self.deny_private_ips,
+            max_connections: self.max_connections,
         })
     }
 }
@@ -182,6 +216,7 @@ pub struct BoundEgressAllowlistProxy {
     policy: Arc<NetworkPolicy>,
     resolver: Arc<dyn HostResolver>,
     deny_private_ips: bool,
+    max_connections: usize,
 }
 
 impl BoundEgressAllowlistProxy {
@@ -194,10 +229,14 @@ impl BoundEgressAllowlistProxy {
             .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)))
     }
 
-    /// Accept loop; spawns one task per connection. Returns once `shutdown`
-    /// signals `true` — in-flight connections are left to finish on their
-    /// own, no new ones are accepted after that point.
+    /// Accept loop; spawns one task per connection, capped at
+    /// [`Self::max_connections`] concurrently in flight — a connection
+    /// accepted beyond the cap is closed immediately rather than queued or
+    /// given an unbounded task (see [`MAX_CONCURRENT_CONNECTIONS`]). Returns
+    /// once `shutdown` signals `true` — in-flight connections are left to
+    /// finish on their own, no new ones are accepted after that point.
     pub async fn serve(self, mut shutdown: watch::Receiver<bool>) {
+        let connection_slots = Arc::new(Semaphore::new(self.max_connections));
         loop {
             tokio::select! {
                 biased;
@@ -211,10 +250,21 @@ impl BoundEgressAllowlistProxy {
                 accepted = self.listener.accept() => {
                     match accepted {
                         Ok((stream, _peer_addr)) => {
+                            let Ok(permit) = Arc::clone(&connection_slots).try_acquire_owned()
+                            else {
+                                tracing::debug!(
+                                    limit = self.max_connections,
+                                    "egress proxy: connection rejected, concurrent connection cap reached"
+                                );
+                                // `stream` drops here, closing it immediately
+                                // instead of queueing behind the held slots.
+                                continue;
+                            };
                             let policy = Arc::clone(&self.policy);
                             let resolver = Arc::clone(&self.resolver);
                             let deny_private_ips = self.deny_private_ips;
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 if let Err(error) =
                                     handle_connection(stream, policy, resolver, deny_private_ips)
                                         .await
@@ -261,15 +311,59 @@ struct RequestHead {
     header_lines: Vec<String>,
 }
 
+/// `read_line`-alike that never buffers more than `max_bytes` for a single
+/// line before giving up: an adversarial or buggy client that sends bytes
+/// without a trailing `\n` cannot make this grow the line unboundedly the
+/// way plain `AsyncBufReadExt::read_line` would (it loops internally with no
+/// length check of its own). Reads via `fill_buf`/`consume` directly so the
+/// cap is enforced between each underlying-socket read rather than after
+/// the whole (potentially huge) line has already been assembled. Returns
+/// `Ok(String::new())` on a clean EOF before any bytes arrive.
+async fn read_capped_line<R>(reader: &mut R, max_bytes: usize) -> std::io::Result<String>
+where
+    R: AsyncBufReadExt + Unpin,
+{
+    let mut line = String::new();
+    loop {
+        let buf = reader.fill_buf().await?;
+        if buf.is_empty() {
+            break; // EOF
+        }
+        let (chunk, found_newline, consumed) = match buf.iter().position(|&b| b == b'\n') {
+            Some(pos) => (&buf[..=pos], true, pos + 1),
+            None => (buf, false, buf.len()),
+        };
+        if line.len() + chunk.len() > max_bytes {
+            reader.consume(consumed);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "egress proxy: request header line exceeded the size cap",
+            ));
+        }
+        line.push_str(&String::from_utf8_lossy(chunk));
+        reader.consume(consumed);
+        if found_newline {
+            break;
+        }
+    }
+    Ok(line)
+}
+
 /// Reads a request line and its headers (up to the blank-line terminator)
-/// from `reader`. Returns `Ok(None)` on a clean EOF before any bytes arrive
-/// (the client closed without sending a request).
+/// from `reader`, enforcing [`MAX_HEADER_LINE_BYTES`], [`MAX_TOTAL_HEADER_BYTES`],
+/// and [`MAX_HEADER_LINES`] — the proxy binds on the internal egress network
+/// and is reachable from inside the (potentially adversarial) sandboxed
+/// container, so it never allocates unboundedly off a client's say-so. A cap
+/// violation surfaces as `Err` with [`std::io::ErrorKind::InvalidData`],
+/// which [`handle_connection`] turns into a `413` before closing. Returns
+/// `Ok(None)` on a clean EOF before any bytes arrive (the client closed
+/// without sending a request).
 async fn read_request_head<R>(reader: &mut R) -> std::io::Result<Option<RequestHead>>
 where
     R: AsyncBufReadExt + Unpin,
 {
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).await? == 0 {
+    let request_line = read_capped_line(reader, MAX_HEADER_LINE_BYTES).await?;
+    if request_line.is_empty() {
         return Ok(None);
     }
     let mut parts = request_line.trim_end().splitn(3, ' ');
@@ -277,11 +371,24 @@ where
     let target = parts.next().unwrap_or("").to_string();
 
     let mut header_lines = Vec::new();
+    let mut total_bytes = request_line.len();
     loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 || line.trim_end_matches(['\r', '\n']).is_empty() {
+        if header_lines.len() >= MAX_HEADER_LINES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "egress proxy: too many request header lines",
+            ));
+        }
+        let line = read_capped_line(reader, MAX_HEADER_LINE_BYTES).await?;
+        if line.is_empty() || line.trim_end_matches(['\r', '\n']).is_empty() {
             break;
+        }
+        total_bytes += line.len();
+        if total_bytes > MAX_TOTAL_HEADER_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "egress proxy: total request header size exceeded the cap",
+            ));
         }
         header_lines.push(line);
     }
@@ -316,8 +423,23 @@ async fn handle_connection(
     deny_private_ips: bool,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream);
-    let Some(head) = read_request_head(&mut reader).await? else {
-        return Ok(());
+    let head = match read_request_head(&mut reader).await {
+        Ok(Some(head)) => head,
+        Ok(None) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            // Oversized/too-numerous request headers — reply with a clean
+            // status instead of silently dropping, then close (the egress
+            // proxy treats the sandboxed container as untrusted).
+            let body = "egress proxy: request header too large";
+            let response = format!(
+                "HTTP/1.1 413 Payload Too Large\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = reader.write_all(response.as_bytes()).await;
+            let _ = reader.flush().await;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
     };
 
     if head.method.eq_ignore_ascii_case("CONNECT") {
@@ -431,7 +553,17 @@ async fn handle_connect(
         .await?;
     client.flush().await?;
 
+    // `BufReader::into_inner()` drops whatever is still sitting in its read
+    // buffer. A client that doesn't wait for the `200` before sending its
+    // TLS ClientHello (pipelining, or bytes that just land in the same TCP
+    // segment as the CONNECT request) leaves those bytes buffered here —
+    // forward them to the origin before handing off to the raw
+    // bidirectional copy, or they're silently lost.
+    let leftover = client.buffer().to_vec();
     let mut client = client.into_inner();
+    if !leftover.is_empty() {
+        origin.write_all(&leftover).await?;
+    }
     copy_bidirectional(&mut client, &mut origin).await?;
     Ok(())
 }
@@ -511,7 +643,16 @@ async fn handle_plain_http(
     request_head.push_str("\r\n");
     origin.write_all(request_head.as_bytes()).await?;
 
+    // As in `handle_connect`: a request body sent in the same TCP segment
+    // as the headers ends up buffered inside `client` (the `BufReader`),
+    // and `into_inner()` would silently drop it. Forward whatever is
+    // buffered — the start of the body, in order — before streaming the
+    // rest via the raw bidirectional copy.
+    let leftover = client.buffer().to_vec();
     let mut client = client.into_inner();
+    if !leftover.is_empty() {
+        origin.write_all(&leftover).await?;
+    }
     copy_bidirectional(&mut client, &mut origin).await?;
     Ok(())
 }
@@ -520,6 +661,7 @@ async fn handle_plain_http(
 mod tests {
     use super::*;
     use ironclaw_host_api::NetworkTargetPattern;
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener as TokioTcpListener;
 
@@ -597,6 +739,7 @@ mod tests {
             policy: policy_allowing(&["127.0.0.1"]),
             resolver: Arc::new(FixedAddrResolver(echo_addr)),
             deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -687,6 +830,7 @@ mod tests {
                 443,
             )))),
             deny_private_ips: true,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
         };
         let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
         let proxy_addr = bound.local_addr();
@@ -784,6 +928,11 @@ mod tests {
                 "unique-local upper bound",
             ),
             ("::ffff:169.254.169.254", "IPv4-mapped cloud metadata"),
+            ("fe80::1", "unicast link-local lower bound"),
+            (
+                "febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+                "unicast link-local upper bound",
+            ),
         ];
         for (ip, label) in denied_v6 {
             let ip: IpAddr = ip.parse().expect("valid literal");
@@ -838,6 +987,337 @@ mod tests {
             "expected 403 Forbidden, got: {response}"
         );
 
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// Regression for `into_inner()` dropping buffered bytes (finding 2,
+    /// `handle_plain_http`): the request headers AND the start of the body
+    /// are written to the proxy in ONE write, so they land in the same TCP
+    /// segment and end up sitting in the `BufReader`'s internal buffer
+    /// together after the header-parsing `read_line`s consume just the
+    /// header portion. Before the fix, `into_inner()` silently dropped that
+    /// buffered body prefix instead of forwarding it to the origin.
+    #[tokio::test]
+    async fn plain_http_forwards_body_bytes_buffered_alongside_the_headers() {
+        let body = b"field=value&more=stuff";
+        let request_head = format!(
+            "POST http://example.com/submit HTTP/1.1\r\nHost: example.com\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        // The proxy forwards the head and the buffered leftover as two
+        // separate writes; read in a loop up to this total so the
+        // assertion doesn't depend on both landing in a single `read()`.
+        let expected_len = request_head.len() + body.len();
+
+        let origin_listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("origin listener binds");
+        let origin_addr = origin_listener.local_addr().unwrap();
+        let (origin_tx, origin_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = origin_listener.accept().await {
+                let mut received = Vec::new();
+                let mut buf = [0u8; 4096];
+                while received.len() < expected_len {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => received.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = origin_tx.send(received);
+            }
+        });
+
+        let proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&["example.com"]),
+            resolver: Arc::new(FixedAddrResolver(origin_addr)),
+            deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
+        };
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        let mut payload = request_head.into_bytes();
+        payload.extend_from_slice(body);
+        // A single write: the proxy's BufReader buffers whatever arrives in
+        // this one read past the header terminator, which is exactly the
+        // body.
+        client
+            .write_all(&payload)
+            .await
+            .expect("single write of headers + body");
+
+        let received = tokio::time::timeout(Duration::from_secs(5), origin_rx)
+            .await
+            .expect("origin must receive forwarded bytes before the timeout")
+            .expect("origin sender not dropped");
+        let received = String::from_utf8_lossy(&received);
+        assert!(
+            received.ends_with(std::str::from_utf8(body).unwrap()),
+            "expected the body bytes buffered alongside the headers to reach the origin, got: {received:?}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// Same regression as above but for `handle_connect`: a client that
+    /// doesn't wait for the `200 Connection Established` reply before
+    /// sending its first tunneled bytes (fast/pipelining clients) can have
+    /// those bytes land in the same TCP segment as the CONNECT request and
+    /// headers, buffered inside the `BufReader` before `into_inner()` runs.
+    #[tokio::test]
+    async fn connect_forwards_bytes_buffered_alongside_the_connect_request() {
+        let eager_bytes: &[u8] = b"eager-client-hello-bytes";
+        let expected_len = eager_bytes.len();
+
+        let origin_listener = TokioTcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("origin listener binds");
+        let origin_addr = origin_listener.local_addr().unwrap();
+        let (origin_tx, origin_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = origin_listener.accept().await {
+                let mut received = Vec::new();
+                let mut buf = [0u8; 4096];
+                while received.len() < expected_len {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => received.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let _ = origin_tx.send(received);
+            }
+        });
+
+        let proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&["127.0.0.1"]),
+            resolver: Arc::new(FixedAddrResolver(origin_addr)),
+            deny_private_ips: false,
+            max_connections: MAX_CONCURRENT_CONNECTIONS,
+        };
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        let mut payload = b"CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\n".to_vec();
+        payload.extend_from_slice(eager_bytes);
+        // A single write: the client doesn't wait for the 200 before
+        // sending, so these bytes are buffered alongside the CONNECT
+        // request/headers in the same read.
+        client
+            .write_all(&payload)
+            .await
+            .expect("single write of CONNECT request + eager bytes");
+
+        let received = tokio::time::timeout(Duration::from_secs(5), origin_rx)
+            .await
+            .expect("origin must receive forwarded bytes before the timeout")
+            .expect("origin sender not dropped");
+        assert_eq!(
+            received, eager_bytes,
+            "expected the eager bytes buffered alongside the CONNECT request to reach the origin"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// Finding 4 (header caps): a single header line that exceeds
+    /// `MAX_HEADER_LINE_BYTES` must be rejected with a clean `413` and the
+    /// connection closed, rather than buffered without bound.
+    #[tokio::test]
+    async fn oversized_single_header_line_is_rejected_with_413() {
+        let proxy = EgressAllowlistProxy::new(policy_allowing(&["example.com"]));
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        let oversized_value = "x".repeat(MAX_HEADER_LINE_BYTES + 1);
+        let request =
+            format!("GET http://example.com/ HTTP/1.1\r\nX-Big: {oversized_value}\r\n\r\n");
+        client
+            .write_all(request.as_bytes())
+            .await
+            .expect("write succeeds");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("reads the full response then EOF");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 413"),
+            "expected 413 for an oversized header line, got: {response}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// Finding 4 (header caps): more header lines than `MAX_HEADER_LINES`
+    /// must be rejected with a `413`, distinct from the per-line and
+    /// total-byte caps (each line here is small, and the running total
+    /// stays under `MAX_TOTAL_HEADER_BYTES` until the count cap fires).
+    #[tokio::test]
+    async fn too_many_header_lines_is_rejected_with_413() {
+        let proxy = EgressAllowlistProxy::new(policy_allowing(&["example.com"]));
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        let mut request = String::from("GET http://example.com/ HTTP/1.1\r\n");
+        for i in 0..=MAX_HEADER_LINES {
+            request.push_str(&format!("X-Header-{i}: v\r\n"));
+        }
+        request.push_str("\r\n");
+        client
+            .write_all(request.as_bytes())
+            .await
+            .expect("write succeeds");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("reads the full response then EOF");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 413"),
+            "expected 413 for too many header lines, got: {response}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// Finding 4 (header caps): many individually-small header lines whose
+    /// SUM crosses `MAX_TOTAL_HEADER_BYTES` must be rejected too — pins the
+    /// total-byte cap specifically, distinct from the per-line and
+    /// line-count caps (this request stays under both of those).
+    #[tokio::test]
+    async fn oversized_total_header_bytes_is_rejected_with_413() {
+        let proxy = EgressAllowlistProxy::new(policy_allowing(&["example.com"]));
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        let mut client = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        // Stop appending as soon as the running total crosses the cap
+        // (rather than sending many multiples of it): the server has to
+        // read every line to detect the overrun, so a request that's only
+        // marginally over the cap leaves ~nothing unread when it closes the
+        // connection after the 413 — sending a payload many times the cap
+        // size instead leaves a large unread remainder in the kernel's
+        // receive buffer at close time, which triggers a TCP RST (a test
+        // harness artifact, not the behavior under test) instead of a
+        // clean response + EOF.
+        let mut request = String::from("GET http://example.com/ HTTP/1.1\r\n");
+        let mut total = request.len();
+        let line_value = "x".repeat(500);
+        let mut i = 0;
+        while total <= MAX_TOTAL_HEADER_BYTES {
+            let line = format!("X-Header-{i}: {line_value}\r\n");
+            total += line.len();
+            request.push_str(&line);
+            i += 1;
+        }
+        assert!(
+            i < MAX_HEADER_LINES,
+            "test setup must cross the total-byte cap before the line-count cap, got {i} lines"
+        );
+        client
+            .write_all(request.as_bytes())
+            .await
+            .expect("write succeeds");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("reads the full response then EOF");
+        let response = String::from_utf8_lossy(&response);
+        assert!(
+            response.starts_with("HTTP/1.1 413"),
+            "expected 413 for oversized total header bytes, got: {response}"
+        );
+
+        let _ = shutdown_tx.send(true);
+        let _ = serve_handle.await;
+    }
+
+    /// Finding 4 (connection cap): a connection accepted beyond
+    /// `max_connections` must be closed immediately (no response, no
+    /// hanging) rather than queued behind the connections holding the
+    /// available slots. Uses a small test-only `max_connections` so the
+    /// test doesn't need to open 128+ real sockets to exercise the real
+    /// production constant.
+    #[tokio::test]
+    async fn connection_beyond_the_cap_is_closed_immediately() {
+        let max_connections = 2;
+        let proxy = EgressAllowlistProxy {
+            policy: policy_allowing(&["example.com"]),
+            resolver: Arc::new(DnsResolver),
+            deny_private_ips: true,
+            max_connections,
+        };
+        let bound = proxy.bind("127.0.0.1:0").await.expect("proxy binds");
+        let proxy_addr = bound.local_addr();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let serve_handle = tokio::spawn(bound.serve(shutdown_rx));
+
+        // Open `max_connections` sockets and never send a request: each
+        // connection's task blocks inside `read_request_head` waiting for
+        // bytes, holding its permit for the duration of this test.
+        let mut held = Vec::new();
+        for _ in 0..max_connections {
+            held.push(
+                TcpStream::connect(proxy_addr)
+                    .await
+                    .expect("client connects to the proxy"),
+            );
+        }
+        // Give the accept loop a moment to actually spawn+acquire for each
+        // of the held connections before probing the cap.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut rejected = TcpStream::connect(proxy_addr)
+            .await
+            .expect("client connects to the proxy");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), rejected.read_to_end(&mut response))
+            .await
+            .expect("a connection beyond the cap must close promptly, not hang queued")
+            .expect("reading to EOF succeeds");
+        assert!(
+            response.is_empty(),
+            "a connection beyond the cap must be closed without any proxy response, got: {:?}",
+            String::from_utf8_lossy(&response)
+        );
+
+        drop(held);
         let _ = shutdown_tx.send(true);
         let _ = serve_handle.await;
     }

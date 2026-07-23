@@ -49,8 +49,9 @@ pub(super) async fn ensure_container(
     tenant_id: &TenantId,
     user_id: &UserId,
     workspace: &Path,
+    network_ready: &tokio::sync::OnceCell<()>,
 ) -> Result<String, RuntimeProcessError> {
-    ensure_egress_network(docker, config).await?;
+    ensure_egress_network_once(docker, config, network_ready).await?;
     let filters = user_container_label_filter(LABEL_PREFIX, tenant_id, user_id);
     let found = docker
         .list_containers(Some(ListContainersOptions {
@@ -141,6 +142,26 @@ async fn ensure_egress_network(
             "sandbox egress network ensure failed: {error}"
         ))),
     }
+}
+
+/// Gates [`ensure_egress_network`] behind `network_ready` so the (already
+/// idempotent, per [`is_network_already_exists_error`]) create attempt only
+/// actually rounds-trips to Docker once per process instead of on every
+/// [`ensure_container`] call — `ensure_container` runs once per command
+/// dispatch, so without this every command after the first pays a wasted
+/// create-network round trip that Docker always 409s. `OnceCell` keeps this
+/// correct under a race: concurrent callers before the first success share
+/// the same in-flight attempt, and a failed attempt leaves the cell
+/// uninitialized so the next call retries rather than wedging forever.
+async fn ensure_egress_network_once(
+    docker: &Docker,
+    config: &RebornSandboxConfig,
+    network_ready: &tokio::sync::OnceCell<()>,
+) -> Result<(), RuntimeProcessError> {
+    network_ready
+        .get_or_try_init(|| ensure_egress_network(docker, config))
+        .await
+        .map(|_| ())
 }
 
 /// Pure builder for the `internal: true`, pinned-subnet network Docker
@@ -381,6 +402,37 @@ pub(super) struct BackgroundLaunch {
     pub(super) log_path: String,
 }
 
+/// Directory (inside the container) background job logs are written under.
+const BACKGROUND_LOG_DIR: &str = "/workspace/.ironclaw";
+
+/// Builds the launch script for a detached (`background: true`) command,
+/// pure so the pid-agreement invariant below is unit-testable without a
+/// Docker daemon.
+///
+/// The log filename must be derived from the exact same pid `$!` reports
+/// back to the launching (outer) shell — but in POSIX sh, `$$` evaluated
+/// *inside* a backgrounded compound command still expands to the INVOKING
+/// shell's pid, not the forked job's; only `$!`, read by the shell that did
+/// the forking, names the actual child. Redirecting via `>>bg-$$.log`
+/// *outside* the wrapped command (as this used to) therefore wrote to a
+/// different file than the one `$!` names, so the reported `log_path` never
+/// matched the file the job actually wrote.
+///
+/// Fix: fold the redirect INSIDE the `setsid`-wrapped inner `sh -c` instead.
+/// That inner shell is reached only through a chain of `exec`s (never a bare
+/// fork) starting from the process `$!` names, and `exec` never changes a
+/// process's pid — so by the time this inner shell starts up fresh and reads
+/// its own `$$`, that value is the real pid of the process `$!` already
+/// reported, and the two agree.
+fn background_launch_script(command: &str) -> String {
+    let logging_command =
+        format!("exec >>{BACKGROUND_LOG_DIR}/bg-$$.log 2>&1; {command}");
+    format!(
+        "mkdir -p {BACKGROUND_LOG_DIR} && {} & echo $!",
+        wrap_command_for_pgid_isolation(&logging_command),
+    )
+}
+
 /// Launches `command` detached inside the container (`setsid ... &`),
 /// redirecting its output to a per-pid log under `/workspace/.ironclaw/`,
 /// and returns immediately with the launched pid instead of waiting for
@@ -392,10 +444,7 @@ pub(super) async fn exec_background_in_container(
     env: Vec<String>,
     command: String,
 ) -> Result<BackgroundLaunch, RuntimeProcessError> {
-    let launch_script = format!(
-        "mkdir -p /workspace/.ironclaw && {} >>/workspace/.ironclaw/bg-$$.log 2>&1 & echo $!",
-        wrap_command_for_pgid_isolation(&command),
-    );
+    let launch_script = background_launch_script(&command);
     let exec = docker
         .create_exec(
             container_id,
@@ -444,7 +493,7 @@ pub(super) async fn exec_background_in_container(
     })?;
     Ok(BackgroundLaunch {
         pid,
-        log_path: format!("/workspace/.ironclaw/bg-{pid}.log"),
+        log_path: format!("{BACKGROUND_LOG_DIR}/bg-{pid}.log"),
     })
 }
 
@@ -576,6 +625,41 @@ mod tests {
         assert_eq!(wrapped, "exec setsid sh -c 'echo hi && sleep 1'");
     }
 
+    /// Pins the pid-agreement invariant `background_launch_script` exists
+    /// for: the `bg-$$.log` redirect must live strictly inside the
+    /// single-quoted, freshly-`exec`'d inner `sh -c` — not in the outer,
+    /// unquoted portion of the script — because only there does `$$` share
+    /// its value with the `$!` the outer shell reports back to Rust. Before
+    /// the fix, the redirect sat outside the wrap (`{wrapped} >>bg-$$.log`),
+    /// so `$$` resolved to the wrong (invoking) shell's pid.
+    #[test]
+    fn background_launch_script_puts_the_dollar_dollar_log_redirect_inside_the_inner_shell() {
+        let script = background_launch_script("echo hi");
+        assert_eq!(
+            script,
+            "mkdir -p /workspace/.ironclaw && exec setsid sh -c 'exec >>/workspace/.ironclaw/bg-$$.log 2>&1; echo hi' & echo $!"
+        );
+
+        let inner_quote_start = script.find("sh -c '").unwrap() + "sh -c '".len();
+        let redirect_pos = script
+            .find("bg-$$.log")
+            .expect("script must still redirect via a $$-derived filename");
+        assert!(
+            redirect_pos > inner_quote_start,
+            "the bg-$$.log redirect must be inside the inner sh -c's quoted body, \
+             where $$ agrees with the $! the outer shell reports: {script}"
+        );
+
+        // The final `echo $!` — read by Rust to build `BackgroundLaunch.pid`
+        // and therefore `log_path` — must stay in the OUTER, unquoted part
+        // of the script (it reports the outer shell's view of the forked
+        // job, which is what the inner shell's own pid actually equals).
+        assert!(
+            script.ends_with("& echo $!"),
+            "the outer shell must still report the launched job's pid via $!: {script}"
+        );
+    }
+
     #[tokio::test]
     async fn user_container_launch_config_uses_persistent_cmd_and_user_labels() {
         let temp = tempfile::tempdir().unwrap();
@@ -696,6 +780,62 @@ mod tests {
             .await
             .expect("no-net config must skip the network API entirely");
     }
+
+    /// Once `network_ready` is initialized (as a prior `ensure_container`
+    /// call would have left it after a successful ensure), a second call
+    /// must short-circuit past `ensure_egress_network` entirely — proven
+    /// here by pointing at an unreachable Docker transport with a config
+    /// that *does* require the egress network: if the gate failed to
+    /// short-circuit, this would try to reach Docker and return `Err`.
+    #[tokio::test]
+    async fn ensure_egress_network_once_short_circuits_once_already_initialized() {
+        let docker =
+            Docker::connect_with_http("http://127.0.0.1:0", 120, bollard::API_DEFAULT_VERSION)
+                .expect("HTTP-transport client construction performs no I/O");
+        let temp = tempfile::tempdir().unwrap();
+        let egress_config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+            .with_network_broker_proxy_url("http://broker.internal:8181")
+            .expect("valid proxy url");
+        assert_eq!(
+            egress_config.container_network_mode(),
+            Some(SANDBOX_EGRESS_NETWORK_NAME.to_string()),
+            "test config must actually require the egress network for this test to be meaningful"
+        );
+
+        let network_ready = tokio::sync::OnceCell::new();
+        network_ready
+            .set(())
+            .expect("freshly constructed OnceCell always accepts the first set");
+
+        ensure_egress_network_once(&docker, &egress_config, &network_ready)
+            .await
+            .expect(
+                "an already-initialized gate must short-circuit past the unreachable docker call",
+            );
+    }
+
+    /// Sanity check paired with the short-circuit test above: an
+    /// UNinitialized gate must still actually attempt the ensure (and thus
+    /// surface the unreachable-Docker error) — otherwise the short-circuit
+    /// test would pass vacuously regardless of whether gating works.
+    #[tokio::test]
+    async fn ensure_egress_network_once_attempts_the_ensure_when_not_yet_initialized() {
+        let docker =
+            Docker::connect_with_http("http://127.0.0.1:0", 120, bollard::API_DEFAULT_VERSION)
+                .expect("HTTP-transport client construction performs no I/O");
+        let temp = tempfile::tempdir().unwrap();
+        let egress_config = RebornSandboxConfig::new(temp.path().join("workspaces"))
+            .with_network_broker_proxy_url("http://broker.internal:8181")
+            .expect("valid proxy url");
+
+        let network_ready = tokio::sync::OnceCell::new();
+        let result = ensure_egress_network_once(&docker, &egress_config, &network_ready).await;
+        assert!(
+            result.is_err(),
+            "a not-yet-initialized gate must still attempt the ensure and surface the \
+             unreachable-docker failure, not silently succeed"
+        );
+    }
 }
 
 // `#[path]` resolution for a module declared inline inside another inline
@@ -776,9 +916,18 @@ mod docker_tests {
         let workspace = key.workspace_path(temp.path());
         std::fs::create_dir_all(&workspace).unwrap();
 
-        let container_id = ensure_container(&docker, &config, &key, &tenant, &user, &workspace)
-            .await
-            .expect("ensure_container succeeds");
+        let network_ready = tokio::sync::OnceCell::new();
+        let container_id = ensure_container(
+            &docker,
+            &config,
+            &key,
+            &tenant,
+            &user,
+            &workspace,
+            &network_ready,
+        )
+        .await
+        .expect("ensure_container succeeds");
 
         let inspected = docker
             .inspect_container(&container_id, None::<InspectContainerOptions>)
