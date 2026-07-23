@@ -179,6 +179,21 @@ export function Chat({
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
+  // Identifies which "empty-thread cycle" may navigate away from the
+  // landing view. It's bumped on every truthy->falsy transition of
+  // activeThreadId (a genuine new cycle, e.g. "+ New") and by whichever
+  // send wins the navigation for the current cycle -- so a captured id
+  // only matches while its cycle is still current and unclaimed. That one
+  // comparison is enough to stop every stale closure from a batch of
+  // concurrent landing-composer sends from re-navigating, whether its
+  // cycle was already claimed by an earlier winner or superseded by a
+  // "+ New" before it settled.
+  const previousActiveThreadIdRef = React.useRef(activeThreadId);
+  const emptyThreadCycleIdRef = React.useRef(0);
+  if (previousActiveThreadIdRef.current && !activeThreadId) {
+    emptyThreadCycleIdRef.current += 1;
+  }
+  previousActiveThreadIdRef.current = activeThreadId;
   const composerStatusText =
     approvalSubmitWarning ||
     (cooldownSeconds > 0 ? t("chat.retryIn", { seconds: cooldownSeconds }) : undefined);
@@ -203,6 +218,7 @@ export function Chat({
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
+      const sendCycleId = emptyThreadCycleIdRef.current;
       const response = await send(content, {
         images,
         attachments,
@@ -210,7 +226,13 @@ export function Chat({
         threadId: activeThreadId,
       });
       const responseThreadId = response?.thread_id || activeThreadId;
-      if (!activeThreadId && responseThreadId && onSelectThread) {
+      if (
+        !activeThreadId &&
+        responseThreadId &&
+        onSelectThread &&
+        emptyThreadCycleIdRef.current === sendCycleId
+      ) {
+        emptyThreadCycleIdRef.current += 1;
         onSelectThread(responseThreadId, { replace: true });
       }
       return response;
