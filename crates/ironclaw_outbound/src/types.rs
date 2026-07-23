@@ -343,3 +343,15 @@ pub struct ClaimDeliveryAttemptForSendRequest {
     pub delivery_id: OutboundDeliveryId,
     pub scope: TurnScope,
 }
+
+/// Guarded crash-recovery transition for an interrupted send. The store
+/// re-reads the attempt inside its own CAS and transitions `Sending -> Unknown`
+/// only when it is still `Sending`. A stale recovery snapshot therefore cannot
+/// overwrite a terminal result (`Delivered`/`Failed`) that a different worker
+/// wrote after completing egress. Mirrors the `Prepared`-guard on
+/// [`ClaimDeliveryAttemptForSendRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoverInterruptedDeliveryRequest {
+    pub delivery_id: OutboundDeliveryId,
+    pub scope: TurnScope,
+}

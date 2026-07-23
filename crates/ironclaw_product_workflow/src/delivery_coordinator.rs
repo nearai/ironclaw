@@ -30,7 +30,8 @@ use ironclaw_outbound::{
     ClaimDeliveryAttemptForSendRequest, CommunicationPreferenceRepository, DeliveryFailureKind,
     OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryStatus,
     OutboundPolicyService, OutboundPushCandidate, OutboundPushKind, OutboundStateStore,
-    PrepareCommunicationDeliveryRequest, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    PrepareCommunicationDeliveryRequest, RecoverInterruptedDeliveryRequest,
+    UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };
 use ironclaw_product_adapters::{
     ChannelAdapter, ExternalConversationRef, OutboundEnvelope, OutboundPart, OutboundTarget,
@@ -324,19 +325,24 @@ impl DeliveryCoordinator {
         let attempts = self.store.list_delivery_attempts(scope.clone()).await?;
         let mut recovered = 0usize;
         for attempt in attempts {
+            // The list is a point-in-time snapshot; between reading it and
+            // acting, another worker may have completed egress and written a
+            // terminal result. The guarded store transition re-verifies
+            // `Sending` under CAS and no-ops otherwise, so a stale snapshot can
+            // never clobber a durable `Delivered`/`Failed` back to `Unknown`.
             if attempt.status != OutboundDeliveryStatus::Sending {
                 continue;
             }
-            self.store
-                .update_delivery_status(UpdateDeliveryStatusRequest {
+            if self
+                .store
+                .recover_interrupted_delivery_attempt(RecoverInterruptedDeliveryRequest {
                     delivery_id: attempt.delivery_id,
                     scope: scope.clone(),
-                    status: OutboundDeliveryStatus::Unknown,
-                    updated_at: chrono::Utc::now(),
-                    failure_kind: None,
                 })
-                .await?;
-            recovered += 1;
+                .await?
+            {
+                recovered += 1;
+            }
         }
         if recovered > 0 {
             debug!(

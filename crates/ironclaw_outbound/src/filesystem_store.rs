@@ -943,6 +943,52 @@ where
         Err(OutboundError::Backend)
     }
 
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: crate::RecoverInterruptedDeliveryRequest,
+    ) -> Result<bool, OutboundError> {
+        let path = delivery_path(&request.delivery_id)?;
+        let resource_scope = request.scope.to_resource_scope();
+        for _ in 0..MAX_CAS_RETRIES {
+            let Some((mut attempt, versioned)) = self
+                .get_versioned_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+                .await?
+            else {
+                return Err(OutboundError::DeliveryNotFound);
+            };
+            if attempt.scope != request.scope {
+                return Err(OutboundError::SubscriptionScopeMismatch);
+            }
+            // Re-verify `Sending` inside the same CAS read the write commits
+            // against. A stale recovery list snapshot must never overwrite a
+            // terminal result (`Delivered`/`Failed`) that a different worker
+            // wrote after completing egress, so recovery no-ops for any attempt
+            // that already advanced past `Sending`.
+            if attempt.status != OutboundDeliveryStatus::Sending {
+                return Ok(false);
+            }
+            attempt.status = OutboundDeliveryStatus::Unknown;
+            attempt.failure_kind = None;
+            let entry = delivery_attempt_entry(&attempt)?;
+            match self
+                .filesystem
+                .put(
+                    &resource_scope,
+                    &path,
+                    entry,
+                    CasExpectation::Version(versioned.version),
+                )
+                .await
+                .map_err(map_fs_error)
+            {
+                Ok(_) => return Ok(true),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OutboundError::Backend)
+    }
+
     async fn update_delivery_status(
         &self,
         request: UpdateDeliveryStatusRequest,

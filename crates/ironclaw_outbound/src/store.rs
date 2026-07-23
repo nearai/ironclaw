@@ -8,9 +8,9 @@ use crate::{
     AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
     LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPushCandidate,
     OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest, ProjectionSubscriptionRecord,
-    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord,
-    RunFinalReplyTargetRecord, RunFinalReplyTargetRequest, ThreadNotificationPolicy,
-    UpdateDeliveryStatusRequest,
+    RecoverInterruptedDeliveryRequest, RunDeliveryCleanupRecord, RunDeliveryCleanupRequest,
+    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
+    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
 
 #[async_trait]
@@ -146,6 +146,20 @@ pub trait OutboundStateStore: Send + Sync {
     async fn claim_delivery_attempt_for_send(
         &self,
         request: ClaimDeliveryAttemptForSendRequest,
+    ) -> Result<bool, OutboundError>;
+
+    /// Crash recovery for an interrupted send. Re-reads the attempt inside the
+    /// store's CAS and transitions `Sending -> Unknown` only when it is still
+    /// `Sending`. Returns `Ok(true)` only for the caller that persisted that
+    /// transition and `Ok(false)` when the attempt already advanced past
+    /// `Sending`, so a stale recovery list snapshot can never overwrite a
+    /// terminal `Delivered`/`Failed` result a different worker wrote after
+    /// completing egress. Unlike [`Self::update_delivery_status`] (an
+    /// unconditional setter used for forward egress-result writes), this
+    /// transition re-verifies the source state under the same CAS read.
+    async fn recover_interrupted_delivery_attempt(
+        &self,
+        request: RecoverInterruptedDeliveryRequest,
     ) -> Result<bool, OutboundError>;
 
     async fn update_delivery_status(

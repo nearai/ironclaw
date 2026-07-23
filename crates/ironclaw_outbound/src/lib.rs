@@ -76,8 +76,8 @@ pub use types::{
     LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundDeliveryDecision,
     OutboundDeliveryStatus, OutboundPushCandidate, OutboundPushKind, OutboundPushPlan,
     OutboundPushTargetRequest, PrepareCommunicationDeliveryRequest, PrepareOutboundDeliveryRequest,
-    ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, ReplyTargetBindingClaim,
-    ReplyTargetValidationRequest, ThreadNotificationPolicy, ThreadNotificationTarget,
-    ThreadProjectionAccessClaim, ThreadProjectionAccessGrant, ThreadProjectionAccessRequest,
-    UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
+    ProjectionSubscriptionRecord, ProjectionSubscriptionRequest, RecoverInterruptedDeliveryRequest,
+    ReplyTargetBindingClaim, ReplyTargetValidationRequest, ThreadNotificationPolicy,
+    ThreadNotificationTarget, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
+    ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };

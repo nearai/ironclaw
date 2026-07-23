@@ -88,6 +88,7 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     subscription_cursor_rejects_backward_advancement(&store).await;
     delivery_status_rejects_inconsistent_failure_kind(&store).await;
     coordinator_delivery_lifecycle_round_trips(&store).await;
+    recovery_transition_never_clobbers_delivered(&store).await;
     notification_policy_rejects_excessive_targets(&store).await;
 }
 
@@ -1447,6 +1448,125 @@ async fn coordinator_delivery_lifecycle_round_trips(store: &impl OutboundStateSt
         .find(|attempt| attempt.delivery_id == delivery_id)
         .expect("attempt persisted");
     assert_eq!(attempt.status, OutboundDeliveryStatus::Unknown);
+}
+
+async fn recovery_transition_never_clobbers_delivered(store: &impl OutboundStateStore) {
+    let scope = turn_scope();
+    let candidate = |marker: &str| OutboundPushCandidate {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        thread_id: scope.thread_id.clone(),
+        turn_run_id: Some(TurnRunId::new()),
+        target: reply_ref(marker),
+        kind: OutboundPushKind::FinalReply,
+        projection_ref: ProjectionUpdateRef::new(format!(
+            "projection:{marker}:{}",
+            TurnRunId::new()
+        ))
+        .unwrap(),
+        requires_reply_target_revalidation: true,
+    };
+
+    // A genuinely-interrupted send is still `Sending`: recovery re-verifies
+    // that under CAS and transitions it to `Unknown`, reporting the conversion.
+    let interrupted = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id: interrupted,
+            scope: scope.clone(),
+            candidate: candidate("reply-recovery-interrupted"),
+            status: OutboundDeliveryStatus::Prepared,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: interrupted,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        store
+            .recover_interrupted_delivery_attempt(RecoverInterruptedDeliveryRequest {
+                delivery_id: interrupted,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap(),
+        "a still-Sending attempt is recovered to Unknown"
+    );
+    let attempts = store.list_delivery_attempts(scope.clone()).await.unwrap();
+    assert_eq!(
+        attempts
+            .iter()
+            .find(|attempt| attempt.delivery_id == interrupted)
+            .expect("interrupted attempt persisted")
+            .status,
+        OutboundDeliveryStatus::Unknown
+    );
+
+    // The crash-recovery race: another worker completed egress and durably
+    // wrote `Delivered`, while a stale recovery list snapshot still believes
+    // the attempt is `Sending`. Re-verifying `Sending` inside the same CAS read
+    // must no-op instead of clobbering the successful delivery to `Unknown`.
+    let delivered = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id: delivered,
+            scope: scope.clone(),
+            candidate: candidate("reply-recovery-delivered"),
+            status: OutboundDeliveryStatus::Prepared,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        store
+            .claim_delivery_attempt_for_send(ClaimDeliveryAttemptForSendRequest {
+                delivery_id: delivered,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    store
+        .update_delivery_status(UpdateDeliveryStatusRequest {
+            delivery_id: delivered,
+            scope: scope.clone(),
+            status: OutboundDeliveryStatus::Delivered,
+            updated_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        !store
+            .recover_interrupted_delivery_attempt(RecoverInterruptedDeliveryRequest {
+                delivery_id: delivered,
+                scope: scope.clone(),
+            })
+            .await
+            .unwrap(),
+        "recovery must not claim an attempt that already advanced past Sending"
+    );
+    let attempts = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        attempts
+            .iter()
+            .find(|attempt| attempt.delivery_id == delivered)
+            .expect("delivered attempt persisted")
+            .status,
+        OutboundDeliveryStatus::Delivered,
+        "a successful delivery must never be clobbered back to Unknown by stale recovery"
+    );
 }
 
 async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl OutboundStateStore) {
