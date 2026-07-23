@@ -39,6 +39,11 @@ pub use input::{
     ChannelExtensionBinding, OAuthClientConfig, RebornHostBindings, RebornRuntimeProcessBinding,
 };
 pub use ironclaw_auth::OAuthRedirectUri;
+#[cfg(any(test, feature = "test-support"))]
+pub use ironclaw_auth::{
+    AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountStatus, CredentialOwnership, Timestamp,
+};
 pub use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
 pub use ironclaw_host_api::{
     CapabilityId, HostApiError, NetworkScheme, NetworkTargetPattern, RuntimeCredentialRequirement,

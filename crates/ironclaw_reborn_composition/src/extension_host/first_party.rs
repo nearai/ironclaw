@@ -191,12 +191,12 @@ pub(crate) mod test_support {
     use async_trait::async_trait;
     use ironclaw_auth::{CredentialAccount, CredentialAccountSelectionRequest};
     use ironclaw_first_party_extensions::{
+        FIRST_PARTY_WEB_GET_CONTENT_CAPABILITY_ID, FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID,
+        FirstPartyWebDispatchError, FirstPartyWebDispatchRequest, FirstPartyWebExecutor,
         GOOGLE_PROVIDER_ID, GsuiteCapabilitySpec, GsuiteCredentialDispatchReason,
         GsuiteCredentialStageError, GsuiteCredentialStageRequest, GsuiteCredentialStager,
         GsuiteDispatchError, GsuiteDispatchRequest, GsuiteExecutor, GsuitePackageSpec,
-        WEB_GET_CONTENT_CAPABILITY_ID, WEB_SEARCH_CAPABILITY_ID, WebAccessDispatchError,
-        WebAccessDispatchRequest, WebAccessExecutor, find_gsuite_capability,
-        gsuite_google_account_visible_to_requester, gsuite_package_specs,
+        find_gsuite_capability, gsuite_google_account_visible_to_requester, gsuite_package_specs,
     };
     use ironclaw_host_api::{
         CapabilityId, ExtensionId, HostApiError, NetworkScheme, NetworkTargetPattern,
@@ -217,7 +217,7 @@ pub(crate) mod test_support {
     pub(crate) fn bundled_first_party_registrars() -> Vec<Arc<dyn FirstPartyHandlerRegistrar>> {
         vec![
             Arc::new(GsuiteFirstPartyRegistrar),
-            Arc::new(WebAccessFirstPartyRegistrar),
+            Arc::new(WebToolFirstPartyRegistrar),
         ]
     }
 
@@ -433,54 +433,54 @@ pub(crate) mod test_support {
         }
     }
 
-    struct WebAccessFirstPartyRegistrar;
+    struct WebToolFirstPartyRegistrar;
 
-    impl FirstPartyHandlerRegistrar for WebAccessFirstPartyRegistrar {
+    impl FirstPartyHandlerRegistrar for WebToolFirstPartyRegistrar {
         fn register(
             &self,
             registry: &mut FirstPartyCapabilityRegistry,
             _context: &FirstPartyRegistrarContext,
         ) -> Result<(), HostApiError> {
-            let handler = Arc::new(WebAccessFirstPartyHandler {
-                executor: WebAccessExecutor::default(),
+            let handler = Arc::new(WebToolFirstPartyHandler {
+                executor: FirstPartyWebExecutor::default(),
             });
             registry.insert_handler(
-                CapabilityId::new(WEB_SEARCH_CAPABILITY_ID)?,
+                CapabilityId::new(FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID)?,
                 Arc::clone(&handler),
             );
             registry.insert_handler(
-                CapabilityId::new(WEB_GET_CONTENT_CAPABILITY_ID)?,
+                CapabilityId::new(FIRST_PARTY_WEB_GET_CONTENT_CAPABILITY_ID)?,
                 Arc::clone(&handler),
             );
             Ok(())
         }
     }
 
-    struct WebAccessFirstPartyHandler {
-        executor: WebAccessExecutor,
+    struct WebToolFirstPartyHandler {
+        executor: FirstPartyWebExecutor,
     }
 
     #[async_trait]
-    impl FirstPartyCapabilityHandler for WebAccessFirstPartyHandler {
+    impl FirstPartyCapabilityHandler for WebToolFirstPartyHandler {
         async fn dispatch(
             &self,
             request: FirstPartyCapabilityRequest,
         ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
             let result = self
                 .executor
-                .dispatch(WebAccessDispatchRequest {
+                .dispatch(FirstPartyWebDispatchRequest {
                     capability_id: &request.capability_id,
                     scope: &request.scope,
                     input: &request.input,
                     runtime_http_egress: request.services.runtime_http_egress.clone(),
                 })
                 .await
-                .map_err(web_access_error)?;
+                .map_err(web_tool_error)?;
             Ok(FirstPartyCapabilityResult::new(result.output, result.usage))
         }
     }
 
-    fn web_access_error(error: WebAccessDispatchError) -> FirstPartyCapabilityError {
+    fn web_tool_error(error: FirstPartyWebDispatchError) -> FirstPartyCapabilityError {
         let mapped = FirstPartyCapabilityError::new(error.kind());
         if let Some(usage) = error.usage().cloned() {
             mapped.with_usage(usage)

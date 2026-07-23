@@ -38,3 +38,10 @@ pub use web_access::{
     WEB_SEARCH_CAPABILITY_ID, WebAccessDispatchError, WebAccessDispatchRequest,
     WebAccessDispatchResult, WebAccessExecutor,
 };
+pub use web_access::{
+    WEB_GET_CONTENT_CAPABILITY_ID as FIRST_PARTY_WEB_GET_CONTENT_CAPABILITY_ID,
+    WEB_SEARCH_CAPABILITY_ID as FIRST_PARTY_WEB_SEARCH_CAPABILITY_ID,
+    WebAccessDispatchError as FirstPartyWebDispatchError,
+    WebAccessDispatchRequest as FirstPartyWebDispatchRequest,
+    WebAccessExecutor as FirstPartyWebExecutor,
+};
