@@ -7,31 +7,15 @@ regression lanes:
 - `scrub-artifacts.sh` scans artifacts before upload
 - `upgrade-canary.sh` checks previous-release DB compatibility
 
-The former auth-focused Python runners remain temporarily as migration input
-for #6561:
-
-- `scripts/auth_canary/run_canary.py` — mock-backed pytest matrix (fresh-machine)
-- `scripts/auth_live_canary/run_live_canary.py` — live-provider runner with two
-  modes: `--mode seeded` (token persistence and refresh) and `--mode browser`
-  (OAuth consent in Playwright)
-
-They are no longer selectable through `run.sh` or the GitHub workflow. Their
-replacement coverage is recorded in [MIGRATION.md](MIGRATION.md), and #6562
-removes the obsolete infrastructure after the retained scenarios migrate.
-
-Their shared setup, provider registry, and runtime helpers live in:
-
-- `scripts/live_canary/common.py`
-- `scripts/live_canary/auth_registry.py`
-- `scripts/live_canary/auth_runtime.py`
+The deleted auth and workflow runners are mapped to their replacement
+serve-backed coverage in [MIGRATION.md](MIGRATION.md). Do not add a standalone
+Python live-runner shape; extend the retained WebUI v2 QA launcher or an owned
+Rust integration lane.
 
 Note on naming: `live-canary/` (this directory, hyphen) is the shell dispatcher
 and operator-facing entrypoint; `live_canary/` (sibling, underscore) is the
 Python package. The hyphen/underscore split follows Python's package-naming
 convention — Python imports cannot contain hyphens.
-
-Future auth providers should be added through the shared registry and account
-guide, not by creating a new standalone runner shape.
 
 Run commands from the repository root.
 
@@ -131,17 +115,12 @@ a trusted runtime template after normalizing only the repository-owned
 `cloud-api.near.ai` and `private.near.ai` MCP endpoints. Changed or unrecognized
 manifests remain subject to the fail-closed scanner.
 
-## Secrets And Account Material
+## Secrets
 
 Public live LLM lane secrets and variables are documented in
 [docs/internal/live-canary.md](../../docs/internal/live-canary.md).
 
-Seeded auth live-provider credentials:
-
-- [scripts/live-canary/ACCOUNTS.md](ACCOUNTS.md)
-
 ## GitHub Workflow
 
 GitHub Actions uses `.github/workflows/live-canary.yml` as the single scheduled
-and manual entrypoint. Retired legacy-gateway jobs are statically disabled
-until #6562 removes their definitions.
+and manual entrypoint. Retired jobs are absent from the dispatcher and workflow.

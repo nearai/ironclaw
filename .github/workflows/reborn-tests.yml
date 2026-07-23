@@ -135,9 +135,8 @@ jobs:
                         # integration-coverage / group jobs — never as a
                         # per-crate bucket, where `--all-targets` would
                         # redundantly (and, for env-sensitive integration
-                        # suites, incorrectly) re-run them. Pre-Tier-B this was
-                        # implicit: the host package was `ironclaw_legacy`,
-                        # which never matched the allowlist.
+                        # suites, incorrectly) re-run them. Before Tier B the
+                        # integration-test host never matched this allowlist.
                         and (.name != "ironclaw_reborn_integration_tests")
                       )
                     | .name

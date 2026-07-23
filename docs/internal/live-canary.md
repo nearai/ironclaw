@@ -1,12 +1,12 @@
 # Live Canary Regression Lanes
 
-IronClaw now has two complementary regression systems:
+IronClaw has two complementary regression systems:
 
 - deterministic CI, which replays committed tests and traces without depending
   on real third-party providers for the main blocking path;
-- live canaries, which use real providers, real browser consent flows, or
-  selected real LLM lanes to catch provider drift, refresh failures, release
-  upgrade problems, and auth regressions that mocks will miss.
+- live canaries, which use selected real providers and LLM lanes to catch
+  provider drift, refresh failures, release upgrade problems, and regressions
+  that mocks will miss.
 
 The implementation lives in:
 
@@ -16,37 +16,23 @@ The implementation lives in:
 - `scripts/live-canary/scrub-artifacts.sh` for artifact scanning;
 - `scripts/live-canary/upgrade-canary.sh` for previous-release upgrade checks.
 
-The auth-specific executors used by the unified live-canary wrapper are:
-
-- `scripts/auth_canary/run_canary.py`
-- `scripts/auth_live_canary/run_live_canary.py` (both seeded and browser-consent
-  flows; selected with `--mode {seeded,browser}`)
-
-Their shared auth-lane framework lives in:
-
-- `scripts/live_canary/common.py`
-- `scripts/live_canary/auth_registry.py`
-- `scripts/live_canary/auth_runtime.py`
-
-Future auth canaries should extend that shared framework and the canonical
-account guide rather than introducing another bespoke runner layout.
+Retired auth and workflow runner coverage is preserved by
+`scripts/live-canary/MIGRATION.md`. New live product-auth checks belong in the
+Reborn WebUI v2 QA lane; deterministic product contracts belong in the
+serve-backed Python E2E inventory.
 
 ## Lane Summary
 
 | Lane | Scope | Runner | Trigger | Blocking |
 | --- | --- | --- | --- | --- |
-| `deterministic-replay` | Retired under Tier B — its `tests/e2e_live*.rs` fixtures and the `test.yml` workflow were deleted with the v1 monolith. Reborn recorded-fixture replay is the `Reborn QA recorded fixtures` gate in `reborn-tests.yml`. (Live-canary lane rewire tracked in #6369.) | — | — | — |
+| `deterministic-replay` | Deterministic Rust integration replay | GitHub-hosted | Manual | No |
 | `public-smoke` | Real LLM plus public tools such as `zizmor_scan` and mission digest | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
 | `persona-rotating` | Real LLM multi-turn persona workflow, one persona per day | GitHub-hosted | Daily and manual | Opens issue on scheduled failure |
 | `private-oauth` | Google Drive auth gate and transparent refresh against a dedicated test account | Self-hosted `ironclaw-live` runner | Manual; scheduled only when enabled | Opens issue on scheduled failure |
 | `provider-matrix` | Same live behavior against multiple provider adapters | GitHub-hosted | Weekly and manual | Opens issue on scheduled failure |
 | `release-public-full` | Full public live suite for release candidates | GitHub-hosted | Manual | Release checklist gate |
 | `upgrade-canary` | Previous release DB opened by current checkout | GitHub-hosted | Manual | Release checklist gate |
-| `auth-smoke` | Fresh-machine mock-backed auth smoke: hosted OAuth, MCP OAuth, and multi-user MCP isolation | GitHub-hosted | Hourly and manual | No |
-| `auth-full` | Larger mock-backed auth matrix including failure and refresh cases | GitHub-hosted | Manual | No |
-| `auth-channels` | WASM channel auth diagnostic lane | GitHub-hosted | Manual | No |
-| `auth-live-seeded` | Real-provider runtime checks using seeded tokens against a clean DB | GitHub-hosted | Hourly and manual | No |
-| `auth-browser-consent` | Real browser-consent OAuth using Playwright against provider login UIs | GitHub-hosted | Nightly and manual | No |
+| `reborn-webui-v2-live-qa` | Shipping serve binary against selected real product integrations | GitHub-hosted or approved live environment | Scheduled, PR-gated, and manual | Environment-gated for PRs |
 
 ## Required Repository Configuration
 
@@ -63,28 +49,6 @@ Variables:
 - `LIVE_ANTHROPIC_MODEL`
 - `LIVE_OPENAI_COMPATIBLE_MODEL`
 - `LIVE_CANARY_PRIVATE_OAUTH_ENABLED`
-
-### Auth live-seeded lane
-
-Secrets and dedicated account material are documented in
-[scripts/live-canary/ACCOUNTS.md](../../scripts/live-canary/ACCOUNTS.md).
-
-Current provider material includes:
-
-- Google OAuth client credentials and seeded access/refresh tokens
-- GitHub seeded token plus a stable issue fixture
-- Notion seeded access token and a stable query fixture
-
-### Auth browser-consent lane
-
-Secrets and browser session material are documented in
-[scripts/live-canary/ACCOUNTS.md](../../scripts/live-canary/ACCOUNTS.md).
-
-Current provider material includes:
-
-- Google OAuth app credentials plus browser storage state
-- GitHub OAuth app credentials plus browser storage state and issue fixture
-- Notion browser storage state
 
 ### Reborn WebUI v2 Slack lane
 
@@ -166,6 +130,5 @@ Before upload, the workflow runs `scripts/live-canary/scrub-artifacts.sh`.
 That script is a guardrail against uploading obvious token-shaped strings from
 logs or result files.
 
-Private OAuth lanes should continue to avoid uploading raw OAuth logs. The
-auth-browser-consent and auth-live-seeded lanes may capture screenshots and JSON
-results, but should not upload long-lived credential material.
+Private OAuth and product-auth lanes must not upload raw OAuth logs or
+long-lived credential material.
