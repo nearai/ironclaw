@@ -945,7 +945,16 @@ mod tests {
     #[tokio::test]
     async fn run_command_rejects_any_scoped_mount_grant_before_container_touch() {
         let temp = tempfile::tempdir().unwrap();
-        let docker = Docker::connect_with_local_defaults().unwrap();
+        // `run_command` must reject a scoped `MountView` grant as a pure
+        // precondition, before any Docker client use — so this test must
+        // not require a live daemon either. `connect_with_local_defaults`
+        // stats the Unix socket at construction and fails immediately
+        // without one; the HTTP-transport client performs no I/O until a
+        // request is sent (see `ensure_egress_network_is_a_no_op_for_none_
+        // network_configs` in `exec_transport.rs` for the same pattern).
+        let docker =
+            Docker::connect_with_http("http://127.0.0.1:0", 120, bollard::API_DEFAULT_VERSION)
+                .expect("HTTP-transport client construction performs no I/O");
         let transport = RebornScopedSandboxCommandTransport::new(
             docker,
             RebornSandboxConfig::new(temp.path().join("workspaces")),

@@ -569,20 +569,33 @@ fn expires_at_unix_secs() -> u64 {
 /// sandboxed shell's `output_limit`, clamped by
 /// `sandbox_process::shell_limits`), as well as by callers that truncate to
 /// the fixed [`COMMAND_MAX_OUTPUT_SIZE`] default.
+///
+/// `s.len() <= limit` is a hard invariant of the result: the head/tail
+/// window is sized from a budget that has the marker's own byte length
+/// reserved out of it *first*, rather than splitting `limit` in half and
+/// appending the marker on top — the naive approach can push the result
+/// past `limit` (and, at small limits, even past `s.len()`, making
+/// "truncation" produce something longer than the input) once the marker
+/// text is counted.
 pub(crate) fn truncate_output_to(s: &str, limit: usize) -> String {
     if s.len() <= limit {
-        s.to_string()
-    } else {
-        let half = limit / 2;
-        let head_end = floor_char_boundary(s, half);
-        let tail_start = floor_char_boundary(s, s.len() - half);
-        format!(
-            "{}\n\n... [truncated {} bytes] ...\n\n{}",
-            &s[..head_end],
-            s.len() - limit,
-            &s[tail_start..]
-        )
+        return s.to_string();
     }
+    let dropped = s.len() - limit;
+    let marker = format!("\n\n... [truncated {dropped} bytes] ...\n\n");
+    if marker.len() >= limit {
+        // Degenerate case: the limit can't even fit the marker text itself.
+        // Fall back to a plain byte-limited (char-boundary-safe) slice with
+        // no marker overhead rather than returning something over `limit`.
+        let end = floor_char_boundary(s, limit);
+        return s[..end].to_string();
+    }
+    let budget = limit - marker.len();
+    let head_budget = budget / 2;
+    let tail_budget = budget - head_budget;
+    let head_end = floor_char_boundary(s, head_budget);
+    let tail_start = floor_char_boundary(s, s.len() - tail_budget);
+    format!("{}{marker}{}", &s[..head_end], &s[tail_start..])
 }
 
 fn floor_char_boundary(s: &str, pos: usize) -> usize {
@@ -642,19 +655,37 @@ mod tests {
 
     #[test]
     fn truncate_output_respects_utf8_boundaries() {
-        let output = format!(
-            "{}{}{}",
-            "a".repeat(COMMAND_MAX_OUTPUT_SIZE / 2 - 1),
-            "é",
-            "b".repeat(COMMAND_MAX_OUTPUT_SIZE)
-        );
+        // The reserved-budget split (see `truncate_output_to`) lands
+        // `marker.len() / 2` bytes earlier than a naive `limit / 2` half,
+        // since the marker's own byte length is reserved out of the
+        // head/tail budget first. The overall dropped-byte count (and so
+        // the marker length) only depends on the total a/é/b byte counts
+        // below, not on exactly where `é` sits within them — so compute the
+        // real split point first, then place the 2-byte `é` exactly on top
+        // of it, to prove the split steps back over a straddling
+        // multi-byte character instead of slicing through it.
+        let total_len = (COMMAND_MAX_OUTPUT_SIZE / 2 - 1) + 2 + COMMAND_MAX_OUTPUT_SIZE;
+        let dropped = total_len - COMMAND_MAX_OUTPUT_SIZE;
+        let marker_len = format!("\n\n... [truncated {dropped} bytes] ...\n\n").len();
+        let budget = COMMAND_MAX_OUTPUT_SIZE - marker_len;
+        let head_budget = budget / 2;
+        let tail_budget = budget - head_budget;
+        // `é` straddles `head_budget`: it starts one byte before it.
+        let a_len = head_budget - 1;
+        let b_len = total_len - a_len - 2;
+        let output = format!("{}{}{}", "a".repeat(a_len), "é", "b".repeat(b_len));
 
         let truncated = truncate_output_to(&output, COMMAND_MAX_OUTPUT_SIZE);
 
-        assert!(truncated.is_char_boundary(COMMAND_MAX_OUTPUT_SIZE / 2 - 1));
+        assert!(truncated.len() <= COMMAND_MAX_OUTPUT_SIZE);
+        assert!(truncated.is_char_boundary(a_len));
         assert!(truncated.contains("... [truncated "));
-        assert!(truncated.starts_with(&"a".repeat(COMMAND_MAX_OUTPUT_SIZE / 2 - 1)));
-        assert!(truncated.ends_with(&"b".repeat(COMMAND_MAX_OUTPUT_SIZE / 2)));
+        assert!(
+            !truncated.contains('é'),
+            "straddling é must be fully dropped, not sliced"
+        );
+        assert!(truncated.starts_with(&"a".repeat(a_len)));
+        assert!(truncated.ends_with(&"b".repeat(tail_budget)));
     }
 
     #[tokio::test]
