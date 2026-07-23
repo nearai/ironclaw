@@ -29,7 +29,7 @@
     "react-dom": "19.1.0",
     "react-hook-form": "7.62.0",
     "react-hot-toast": "2.6.0",
-    "react-router": "7.15.1"
+    "react-router": "7.18.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.2",
