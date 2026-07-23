@@ -12,23 +12,34 @@ DRIVE_FOLDER_MARKER = "REBORN_PROVIDER_CASE_CREATED_FOLDER"
 DRIVE_UPLOAD_CONTENT = "Uploaded through the reusable provider operation runner."
 DRIVE_UPLOAD_MARKER = "REBORN_PROVIDER_CASE_UPLOADED_FILE.txt"
 GMAIL_REPLY_MARKER = "REBORN_PROVIDER_CASE_REPLY"
+SEEDED_GMAIL_MESSAGE_ID = "<msg_emulate_unread@ironclaw.test>"
+SEEDED_GMAIL_SUBJECT = "Emulate seeded unread"
 SEEDED_GMAIL_THREAD_ID = "thr_emulate_unread"
 
 
-async def _drive_file(emulate_url: str, file_id: str) -> dict:
+async def _get(
+    emulate_url: str,
+    path: str,
+    *,
+    params: dict[str, str | int] | None = None,
+) -> httpx.Response:
     async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
-        response = await client.get(f"{emulate_url}/drive/v3/files/{file_id}")
+        response = await client.get(f"{emulate_url}{path}", params=params)
     response.raise_for_status()
+    return response
+
+
+async def _drive_file(emulate_url: str, file_id: str) -> dict:
+    response = await _get(emulate_url, f"/drive/v3/files/{file_id}")
     return response.json()
 
 
 async def _drive_files_named(emulate_url: str, name: str) -> list[dict]:
-    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
-        response = await client.get(
-            f"{emulate_url}/drive/v3/files",
-            params={"q": f"name = '{name}' and trashed = false", "pageSize": 100},
-        )
-    response.raise_for_status()
+    response = await _get(
+        emulate_url,
+        "/drive/v3/files",
+        params={"q": f"name = '{name}' and trashed = false", "pageSize": 100},
+    )
     return response.json().get("files", [])
 
 
@@ -76,23 +87,21 @@ async def _assert_drive_upload_outcome(emulate_url: str, preview: dict) -> None:
     assert uploaded["parents"] == ["root"], uploaded
     assert uploaded["size"] == str(len(DRIVE_UPLOAD_CONTENT.encode())), uploaded
 
-    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
-        response = await client.get(
-            f"{emulate_url}/drive/v3/files/{uploaded['id']}",
-            params={"alt": "media"},
-        )
-    response.raise_for_status()
+    response = await _get(
+        emulate_url,
+        f"/drive/v3/files/{uploaded['id']}",
+        params={"alt": "media"},
+    )
     assert response.text == DRIVE_UPLOAD_CONTENT
     assert DRIVE_UPLOAD_MARKER in json.dumps(preview), preview
 
 
 async def _drafts(emulate_url: str) -> list[dict]:
-    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
-        response = await client.get(
-            f"{emulate_url}/gmail/v1/users/me/drafts",
-            params={"maxResults": 100},
-        )
-    response.raise_for_status()
+    response = await _get(
+        emulate_url,
+        "/gmail/v1/users/me/drafts",
+        params={"maxResults": 100},
+    )
     return response.json().get("drafts", [])
 
 
@@ -103,39 +112,36 @@ async def _assert_gmail_draft_baseline(emulate_url: str) -> None:
 async def _assert_gmail_draft_outcome(emulate_url: str, preview: dict) -> None:
     drafts = await _drafts(emulate_url)
     assert len(drafts) == 1, drafts
-    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
-        response = await client.get(
-            f"{emulate_url}/gmail/v1/users/me/drafts/{drafts[0]['id']}",
-            params={"format": "full"},
-        )
-    response.raise_for_status()
+    response = await _get(
+        emulate_url,
+        f"/gmail/v1/users/me/drafts/{drafts[0]['id']}",
+        params={"format": "full"},
+    )
     draft = response.json()
     assert gmail_header(draft["message"], "Subject") == "REBORN_PROVIDER_CASE_DRAFT"
     assert "REBORN_PROVIDER_CASE_DRAFT" in json.dumps(preview), preview
 
 
 async def _gmail_message(emulate_url: str, message_id: str) -> dict:
-    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
-        response = await client.get(
-            f"{emulate_url}/gmail/v1/users/me/messages/{message_id}",
-            params={"format": "full"},
-        )
-    response.raise_for_status()
+    response = await _get(
+        emulate_url,
+        f"/gmail/v1/users/me/messages/{message_id}",
+        params={"format": "full"},
+    )
     return response.json()
 
 
-async def _gmail_messages_with_subject(emulate_url: str, subject: str) -> list[dict]:
-    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
-        response = await client.get(
-            f"{emulate_url}/gmail/v1/users/me/messages",
-            params={
-                "q": f"subject:{subject}",
-                "includeSpamTrash": "true",
-                "maxResults": 100,
-            },
-        )
-    response.raise_for_status()
-    messages = response.json().get("messages", [])
+async def _gmail_thread_messages(emulate_url: str, thread_id: str) -> list[dict]:
+    response = await _get(
+        emulate_url,
+        "/gmail/v1/users/me/messages",
+        params={"includeSpamTrash": "true", "maxResults": 100},
+    )
+    messages = [
+        message
+        for message in response.json().get("messages", [])
+        if message["threadId"] == thread_id
+    ]
     return [
         await _gmail_message(emulate_url, message["id"]) for message in messages
     ]
@@ -144,16 +150,30 @@ async def _gmail_messages_with_subject(emulate_url: str, subject: str) -> list[d
 async def _assert_gmail_reply_baseline(emulate_url: str) -> None:
     seeded = await _gmail_message(emulate_url, "msg_emulate_unread")
     assert seeded["threadId"] == SEEDED_GMAIL_THREAD_ID, seeded
-    assert not await _gmail_messages_with_subject(emulate_url, GMAIL_REPLY_MARKER)
+    assert gmail_header(seeded, "Message-ID") == SEEDED_GMAIL_MESSAGE_ID, seeded
+    assert gmail_header(seeded, "Subject") == SEEDED_GMAIL_SUBJECT, seeded
+    thread_messages = await _gmail_thread_messages(
+        emulate_url, SEEDED_GMAIL_THREAD_ID
+    )
+    assert [message["id"] for message in thread_messages] == [
+        "msg_emulate_unread"
+    ], thread_messages
 
 
 async def _assert_gmail_reply_outcome(emulate_url: str, preview: dict) -> None:
-    matches = await _gmail_messages_with_subject(emulate_url, GMAIL_REPLY_MARKER)
-    assert len(matches) == 1, matches
-    reply = matches[0]
+    thread_messages = await _gmail_thread_messages(
+        emulate_url, SEEDED_GMAIL_THREAD_ID
+    )
+    replies = [
+        message for message in thread_messages if "SENT" in message["labelIds"]
+    ]
+    assert len(replies) == 1, thread_messages
+    reply = replies[0]
     assert reply["threadId"] == SEEDED_GMAIL_THREAD_ID, reply
-    assert "SENT" in reply["labelIds"], reply
     assert gmail_header(reply, "To") == "qa-sender@example.com", reply
+    assert gmail_header(reply, "Subject") == SEEDED_GMAIL_SUBJECT, reply
+    assert gmail_header(reply, "In-Reply-To") == SEEDED_GMAIL_MESSAGE_ID, reply
+    assert gmail_header(reply, "References") == SEEDED_GMAIL_MESSAGE_ID, reply
     assert GMAIL_REPLY_MARKER in json.dumps(preview), preview
 
 
@@ -169,15 +189,14 @@ async def _assert_gmail_trash_outcome(emulate_url: str, preview: dict) -> None:
 
 
 async def _calendar_events(emulate_url: str, query: str | None = None) -> list[dict]:
-    params = {"maxResults": 100}
+    params: dict[str, str | int] = {"maxResults": 100}
     if query is not None:
         params["q"] = query
-    async with httpx.AsyncClient(headers=google_headers(), timeout=15) as client:
-        response = await client.get(
-            f"{emulate_url}/calendar/v3/calendars/primary/events",
-            params=params,
-        )
-    response.raise_for_status()
+    response = await _get(
+        emulate_url,
+        "/calendar/v3/calendars/primary/events",
+        params=params,
+    )
     return response.json().get("items", [])
 
 
@@ -268,8 +287,13 @@ GOOGLE_PROVIDER_OPERATION_CASES = (
             "message": {
                 "raw": raw_mime(
                     to="qa-sender@example.com",
-                    subject=GMAIL_REPLY_MARKER,
-                    body="Reply sent through the reusable provider operation runner.",
+                    subject=SEEDED_GMAIL_SUBJECT,
+                    body=(
+                        f"{GMAIL_REPLY_MARKER}: Reply sent through the reusable "
+                        "provider operation runner."
+                    ),
+                    in_reply_to=SEEDED_GMAIL_MESSAGE_ID,
+                    references=SEEDED_GMAIL_MESSAGE_ID,
                 ),
                 "threadId": SEEDED_GMAIL_THREAD_ID,
             }
