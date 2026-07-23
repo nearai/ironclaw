@@ -225,8 +225,9 @@ impl InstalledExtensionLookup {
                         },
                     )
                     .await?;
-                let inventory: RebornExtensionListResponse = serde_json::from_value(page.payload)
-                    .map_err(RebornServicesError::internal_from)?;
+                let inventory: RebornExtensionListResponse =
+                    serde_json::from_value(page.payload)
+                        .map_err(RebornServicesError::internal_from)?;
                 Ok(inventory.extensions.iter().any(|extension| {
                     extension.package_ref.kind == LifecyclePackageKind::Extension
                         && extension.package_ref.id.as_str() == extension_id.as_str()
@@ -1699,9 +1700,10 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::{Method, Request, header};
     use ironclaw_auth::{
-        AuthFlowManager, AuthInteractionService, AuthProviderClient,
+        AuthChallenge, AuthFlowKind, AuthFlowManager, AuthInteractionService, AuthProviderClient,
         CredentialAccountLookupRequest, CredentialAccountService, CredentialAccountStatus,
-        CredentialSetupService, SecretCleanupService,
+        CredentialSetupService, NewAuthFlow, OAuthCallbackInput, OAuthProviderExchange,
+        ProviderCallbackOutcome, SecretCleanupService,
     };
     use ironclaw_host_api::{
         NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
@@ -1789,6 +1791,210 @@ mod tests {
             }
         ));
         assert_eq!(policy.cors(), CorsPolicy::SameOriginOnly);
+    }
+
+    async fn completed_reconcile_flow(
+        services: &ironclaw_auth::InMemoryAuthProductServices,
+        scope: &AuthProductScope,
+        tag: &str,
+    ) -> ironclaw_auth::AuthFlowRecord {
+        let provider = AuthProviderId::new(format!("route-reconcile-{tag}")).expect("provider");
+        let state_hash = opaque_state_hash(&format!("state-{tag}")).expect("state hash");
+        let verifier_hash = pkce_verifier_hash(&format!("verifier-{tag}")).expect("PKCE hash");
+        let flow = services
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: provider.clone(),
+                challenge: AuthChallenge::SetupRequired {
+                    provider: provider.clone(),
+                    message: "route reconciliation test".to_string(),
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: Some(state_hash.clone()),
+                pkce_verifier_hash: Some(verifier_hash.clone()),
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+            })
+            .await
+            .expect("create flow");
+        services
+            .complete_oauth_callback(
+                scope,
+                OAuthCallbackInput {
+                    flow_id: flow.id,
+                    opaque_state_hash: state_hash,
+                    outcome: ProviderCallbackOutcome::Authorized {
+                        exchange: Box::new(OAuthProviderExchange {
+                            provider,
+                            account_label: CredentialAccountLabel::new(format!("account-{tag}"))
+                                .expect("account label"),
+                            authorization_code_hash: AuthorizationCodeHash::new(sha256_hex(
+                                &format!("code-{tag}"),
+                            ))
+                            .expect("authorization code hash"),
+                            pkce_verifier_hash: verifier_hash,
+                            access_secret: SecretHandle::new(format!("access-{tag}"))
+                                .expect("access handle"),
+                            refresh_secret: None,
+                            scopes: Vec::new(),
+                            account_id: None,
+                            provider_identity: None,
+                        }),
+                    },
+                },
+            )
+            .await
+            .expect("complete flow")
+    }
+
+    fn reconcile_route_state(
+        shared: &Arc<ironclaw_auth::InMemoryAuthProductServices>,
+        dispatcher: Arc<RecordingDispatcher>,
+    ) -> ProductAuthRouteState {
+        let flow_manager: Arc<dyn AuthFlowManager> = shared.clone();
+        let interaction_service: Arc<dyn AuthInteractionService> = shared.clone();
+        let credential_setup_service: Arc<dyn CredentialSetupService> = shared.clone();
+        let credential_account_service: Arc<dyn CredentialAccountService> = shared.clone();
+        let provider_client: Arc<dyn AuthProviderClient> = shared.clone();
+        let cleanup_service: Arc<dyn SecretCleanupService> = shared.clone();
+        ProductAuthRouteState::new(
+            Arc::new(RebornProductAuthServices::new(
+                flow_manager,
+                interaction_service,
+                credential_setup_service,
+                credential_account_service,
+                provider_client,
+                cleanup_service,
+                dispatcher,
+            )),
+            TenantId::new("tenant-alpha").expect("tenant"),
+            None,
+            None,
+        )
+    }
+
+    fn reconcile_uri(flow: &ironclaw_auth::AuthFlowRecord) -> String {
+        format!(
+            "/api/reborn/product-auth/oauth/flow/{}/reconcile?invocation_id={}",
+            flow.id, flow.scope.resource.invocation_id
+        )
+    }
+
+    #[tokio::test]
+    async fn flow_reconcile_route_dispatches_only_one_unfenced_completed_continuation() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let state = reconcile_route_state(&shared, dispatcher.clone());
+        let mut resource = test_resource_scope();
+        resource.invocation_id = InvocationId::new();
+        let scope = AuthProductScope::new(resource, AuthSurface::Callback);
+        let flow = completed_reconcile_flow(shared.as_ref(), &scope, "once").await;
+        let app = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(test_caller()));
+
+        for _ in 0..2 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(reconcile_uri(&flow))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("route response");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        assert_eq!(dispatcher.events().len(), 1);
+        let stored = shared
+            .get_flow(&scope, flow.id)
+            .await
+            .expect("flow lookup")
+            .expect("flow");
+        assert!(stored.continuation_emitted_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn flow_reconcile_route_does_not_dispatch_fenced_terminal_or_foreign_flows() {
+        let shared = Arc::new(ironclaw_auth::InMemoryAuthProductServices::new());
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let state = reconcile_route_state(&shared, dispatcher.clone());
+        let mut resource = test_resource_scope();
+        resource.invocation_id = InvocationId::new();
+        let scope = AuthProductScope::new(resource, AuthSurface::Callback);
+
+        let fenced = completed_reconcile_flow(shared.as_ref(), &scope, "fenced").await;
+        shared
+            .mark_continuation_dispatched(&scope, fenced.id, Utc::now())
+            .await
+            .expect("fence flow");
+        let terminal = shared
+            .create_flow(NewAuthFlow {
+                id: None,
+                scope: scope.clone(),
+                kind: AuthFlowKind::IntegrationCredential,
+                provider: AuthProviderId::new("route-reconcile-terminal").expect("provider"),
+                challenge: AuthChallenge::SetupRequired {
+                    provider: AuthProviderId::new("route-reconcile-terminal").expect("provider"),
+                    message: "terminal route reconciliation test".to_string(),
+                },
+                continuation: AuthContinuationRef::SetupOnly,
+                update_binding: None,
+                opaque_state_hash: None,
+                pkce_verifier_hash: None,
+                expires_at: Utc::now() + ChronoDuration::minutes(5),
+            })
+            .await
+            .expect("create terminal flow");
+        let terminal = shared
+            .cancel_flow(&scope, terminal.id)
+            .await
+            .expect("cancel flow");
+
+        let owner_app = product_auth_route_mount(state.clone())
+            .protected
+            .layer(axum::Extension(test_caller()));
+        for flow in [&fenced, &terminal] {
+            let response = owner_app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(reconcile_uri(flow))
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("route response");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let foreign = completed_reconcile_flow(shared.as_ref(), &scope, "foreign").await;
+        let foreign_caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("tenant-alpha").expect("tenant"),
+            UserId::new("user-beta").expect("user"),
+            None,
+            None,
+        );
+        let response = product_auth_route_mount(state)
+            .protected
+            .layer(axum::Extension(foreign_caller))
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(reconcile_uri(&foreign))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("route response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(dispatcher.events().is_empty());
     }
 
     struct NoopDispatcher;

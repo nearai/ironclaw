@@ -106,8 +106,8 @@ use crate::factory::{ComposedTurnStateStore, builtin_extension_registry};
 use crate::outbound::OutboundDeliveryTargetRegistrationOutcome;
 #[cfg(any(test, feature = "test-support"))]
 use crate::outbound::{
-    DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetId,
-    OutboundDeliveryTargetOwner, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
+    DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+    OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
 };
 use crate::outbound::{
     MutableOutboundDeliveryTargetRegistry, OUTBOUND_DELIVERY_TARGET_SET_CAPABILITY_ID,
@@ -141,7 +141,9 @@ impl OutboundDeliveryTargetProvider for StaticOutboundDeliveryTargetProvider {
         Ok(vec![OutboundDeliveryTargetEntry {
             summary: self.summary.clone(),
             capabilities: self.capabilities.clone(),
-            reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            destination: ironclaw_outbound::RunFinalReplyDestination::External {
+                reply_target_binding_ref: self.reply_target_binding_ref.clone(),
+            },
             owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
@@ -412,6 +414,7 @@ mod auth_interaction_tests;
 #[cfg(test)]
 #[path = "runtime/tests/default_system_prompt.rs"]
 mod default_system_prompt_tests;
+mod extension_surface;
 mod latency;
 mod local_dev;
 #[cfg(test)]
@@ -657,12 +660,14 @@ impl RegistryPersistentApprovalGranteeResolver {
 /// behavior is unchanged by the seam below.
 pub(crate) fn build_approval_interaction_service(
     local_runtime: &crate::factory::RebornRuntimeSubstrate,
+    lifecycle_facade: Option<Arc<crate::extension_host::lifecycle::RebornLocalLifecycleFacade>>,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
 ) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
     build_approval_interaction_service_with_turn_run_source(
         local_runtime,
+        lifecycle_facade,
         builtin_capability_policy,
         turn_coordinator,
         audit_sink,
@@ -682,6 +687,7 @@ pub(crate) fn build_approval_interaction_service(
 /// unchanged.
 pub(crate) fn build_approval_interaction_service_with_turn_run_source(
     local_runtime: &crate::factory::RebornRuntimeSubstrate,
+    lifecycle_facade: Option<Arc<crate::extension_host::lifecycle::RebornLocalLifecycleFacade>>,
     builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     audit_sink: Option<Arc<dyn ironclaw_events::AuditSink>>,
@@ -711,9 +717,7 @@ pub(crate) fn build_approval_interaction_service_with_turn_run_source(
                 local_runtime.skill_mounts.clone(),
                 local_runtime.memory_mounts.clone(),
                 local_runtime.system_extensions_lifecycle_mounts.clone(),
-                local_dev::extension_surface::ExtensionCapabilitySurfaceSource::new(
-                    local_runtime.extension_management.clone(),
-                ),
+                extension_surface::ExtensionCapabilitySurfaceSource::new(lifecycle_facade),
             )),
             approval_resolver,
             turn_coordinator,
@@ -724,6 +728,40 @@ pub(crate) fn build_approval_interaction_service_with_turn_run_source(
         )?))
         .with_tool_permission_override_store(local_runtime.tool_permission_overrides.clone()),
     ))
+}
+
+/// Assemble the concrete caller-scoped lifecycle authority consumed by runtime
+/// capability and approval surfaces.
+pub(crate) fn local_lifecycle_facade(
+    services: &RebornServices,
+) -> Option<Arc<crate::extension_host::lifecycle::RebornLocalLifecycleFacade>> {
+    let local_runtime = services.local_runtime.as_ref()?;
+    let extension_management = local_runtime.extension_management.as_ref()?;
+    let admin_configuration_resolver = local_runtime.admin_configuration_resolver.as_ref()?;
+    let runtime_http_egress = local_runtime.runtime_http_egress.as_ref()?;
+    let product_auth = services.product_auth.as_ref()?;
+    Some(Arc::new(
+        crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+            &local_runtime.skill_management,
+        ))
+        .with_extension_management(Arc::clone(extension_management))
+        .with_admin_configuration_resolver(Arc::clone(admin_configuration_resolver))
+        .with_runtime_http_egress(Arc::clone(runtime_http_egress))
+        .with_runtime_credential_accounts(
+            product_auth.runtime_credential_account_selection_service(),
+        ),
+    ))
+}
+
+/// Erase the concrete lifecycle authority only at the product-workflow
+/// boundary. Runtime capability surfaces retain the concrete source so they do
+/// not derive execution authority through an `ExtensionList` DTO.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn local_lifecycle_product_facade(
+    services: &RebornServices,
+) -> Option<Arc<dyn ironclaw_product_workflow::LifecycleProductFacade>> {
+    local_lifecycle_facade(services)
+        .map(|facade| facade as Arc<dyn ironclaw_product_workflow::LifecycleProductFacade>)
 }
 
 pub(crate) type ComposedSelectableSkillContextSource =
@@ -1063,6 +1101,9 @@ pub(crate) async fn create_refreshing_capability_port_for_test(
 > {
     local_dev::create_refreshing_capability_port_for_test(parts).await
 }
+
+#[cfg(feature = "test-support")]
+pub(crate) use extension_surface::ExtensionCapabilitySurfaceSource;
 
 /// Test-support forwarder exposing production's real `StagedCapabilityIo`
 /// wiring (`local_dev.rs`'s `staged_capability_io_for_test`, which mirrors
@@ -1690,6 +1731,11 @@ impl RebornRuntime {
             services
                 as Arc<dyn crate::extension_host::channel_connection::ChannelAccountStatusReader>
         });
+        let workflow_filesystem: Arc<dyn RootFilesystem> =
+            local_runtime.extension_filesystem.clone();
+        let workflow_state = Arc::new(ironclaw_product_workflow::ChannelWorkflowStateService::new(
+            workflow_filesystem,
+        ));
         Some(Arc::new(
             crate::extension_host::channel_connection::GenericChannelConnectionFacade::new(
                 self.thread_scope.tenant_id.clone(),
@@ -1702,6 +1748,7 @@ impl RebornRuntime {
                 credential_cleanup,
                 account_status_reader,
                 local_runtime.channel_dm_target_store.clone(),
+                workflow_state,
                 self.services.channel_pairing.clone(),
             ),
         ))
@@ -1760,11 +1807,6 @@ impl RebornRuntime {
         description: Option<&str>,
         reply_target_binding_ref: ReplyTargetBindingRef,
     ) -> Result<(), RebornRuntimeError> {
-        let target_id = OutboundDeliveryTargetId::new(target_id.as_str()).map_err(|error| {
-            RebornRuntimeError::InvalidArgument {
-                reason: format!("invalid outbound delivery target id: {error}"),
-            }
-        })?;
         let summary = OutboundDeliveryTargetSummary::new(
             target_id,
             channel,
@@ -3404,6 +3446,14 @@ pub async fn build_reborn_runtime(
                 .as_ref()
                 .map(crate::factory::RebornProductionRuntimeServices::outbound_delivery_targets)
         });
+    let current_delivery_target_resolver = local_runtime
+        .map(|local_runtime| Arc::clone(&local_runtime.current_delivery_targets))
+        .or_else(|| {
+            services
+                .production_runtime
+                .as_ref()
+                .map(crate::factory::RebornProductionRuntimeServices::current_delivery_targets)
+        });
     let outbound_preferences_facade: Option<Arc<dyn OutboundPreferencesProductFacade>> =
         match (local_runtime, &outbound_delivery_target_registry) {
             (Some(local_runtime), Some(registry)) => {
@@ -3831,6 +3881,7 @@ pub async fn build_reborn_runtime(
         {
             build_approval_interaction_service(
                 local_runtime,
+                local_lifecycle_facade(&services),
                 builtin_capability_policy,
                 Arc::clone(&planned_turn_coordinator),
                 Some(approval_audit_sink.clone()),
@@ -3859,7 +3910,7 @@ pub async fn build_reborn_runtime(
     // product-auth; host-issued pairing delegates to the canonical pairing
     // service and reuses its live code/deep-link/expiry presentation.
     let auth_challenges =
-        crate::extension_host::run_delivery_ports::RecipeAuthChallengeProvider::new(
+        crate::extension_host::run_delivery_ports::RecipeAuthChallengeProvider::compose(
             services
                 .product_auth
                 .as_ref()
@@ -3915,19 +3966,29 @@ pub async fn build_reborn_runtime(
         })
     };
 
+    if let (Some(resolver), Some(assembly)) = (
+        current_delivery_target_resolver.as_ref(),
+        channel_host_assembly.as_ref(),
+    ) {
+        resolver.attach_assembly(assembly).map_err(|error| {
+            RebornRuntimeError::InvalidArgument {
+                reason: format!("current delivery target resolver could not attach: {error}"),
+            }
+        })?;
+    }
+
     // The binary-assembled channel-extension extras (extension-runtime
-    // DEL-7): gate-reply classifiers + preference-target codecs registered
-    // on the assembly for every supplied channel binding.
+    // DEL-7): preference-target codecs registered on the assembly for every
+    // supplied channel binding. In-chat gate grammar is host-generic and
+    // applied by the shared inbound sink.
     if let Some(assembly) = channel_host_assembly.as_ref() {
         for binding in &services.channel_extension_bindings {
             assembly
                 .register_extras(
                     &binding.extension_id,
                     crate::extension_host::channel_host::ChannelExtras {
-                        classifier: binding.inbound_payload_classifier.clone(),
                         preference_target_codec: binding.preference_target_codec.clone(),
                         subject_route_resolver: None,
-                        storage_roots: None,
                     },
                 )
                 .await;
@@ -3942,9 +4003,10 @@ pub async fn build_reborn_runtime(
         outbound_delivery_target_registry.as_ref(),
         channel_host_assembly.as_ref(),
         local_runtime,
-    ) && let (Some(admin_configuration_resolver), Some(dm_targets)) = (
+    ) && let (Some(admin_configuration_resolver), Some(dm_targets), Some(extension_management)) = (
         local_runtime.admin_configuration_resolver.clone(),
         local_runtime.channel_dm_target_store.clone(),
+        local_runtime.extension_management.as_ref(),
     ) {
         crate::extension_host::channel_outbound_targets::register_generic_channel_outbound_targets(
             registry,
@@ -3952,6 +4014,7 @@ pub async fn build_reborn_runtime(
                 watch: assembly.snapshot_watch(),
                 assembly: Arc::clone(assembly),
                 admin_configuration_resolver,
+                installation_store: extension_management.installation_store_handle(),
                 dm_targets,
                 identity:
                     crate::extension_host::channel_outbound_targets::ChannelOutboundTargetIdentity {
@@ -4130,7 +4193,8 @@ pub async fn build_reborn_runtime(
         runtime_post_submit_hook_slot.as_ref(),
         channel_host_assembly.as_ref(),
         local_runtime,
-    ) {
+    ) && let Some(current_targets) = current_delivery_target_resolver.as_ref()
+    {
         let generic_trigger_hook: Arc<
             dyn crate::automation::trigger_poller::PostSubmitDeliveryHook,
         > = Arc::new(
@@ -4138,7 +4202,8 @@ pub async fn build_reborn_runtime(
                 Arc::clone(assembly),
                 Arc::clone(&local_runtime.triggered_run_delivery),
                 Arc::clone(&local_runtime.outbound_preferences),
-                Arc::clone(&local_runtime.outbound_delivery_targets),
+                Arc::clone(current_targets)
+                    as Arc<dyn ironclaw_product_workflow::CurrentDeliveryTargetResolver>,
                 Arc::clone(&channel_run_delivery_events),
             ),
         );

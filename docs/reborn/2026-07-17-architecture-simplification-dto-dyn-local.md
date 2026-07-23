@@ -113,6 +113,12 @@ annotations and `.claude/rules/architecture.md` cite them; additions get
   separate channel-specific envelope. Slack gate/auth interaction classifiers
   now return the channel-classification DTO consumed by ProductSurface
   admission.
+- **r13** 2026-07-23 — status-only correction for the unified extension
+  lifecycle. The public product surface no longer exposes a distinct extension
+  activation action. Install establishes per-user membership; the manifest
+  auth recipe and durable credential/pairing readiness derive either
+  `setup_needed` or `active`; remove deletes that membership. This supersedes
+  the activation-specific status wording in r9 and refreshes mutable §14.
 
 This note proposes a **fundamental** simplification of the Reborn host/runtime
 internals. The goal is to remove three recurring costs without weakening any
@@ -2475,10 +2481,11 @@ loop-facing capability result and every result mirror is deleted.
   master switch uses `builtin.skill_auto_activate_learned_set`, an API-only
   product capability over the runtime selector flag. Extension install/remove
   routes now invoke `builtin.extension_install` and `builtin.extension_remove`
-  directly from the WebUI ProductSurface path; activation now invokes
-  `builtin.extension_activate`, reads back `EXTENSIONS_VIEW` for active state
-  after success, and maps auth-blocked outcomes onto the existing extension
-  onboarding response shape. Extension setup read now flows through the
+  directly from the WebUI ProductSurface path. Install establishes per-user
+  membership and returns the manifest-driven onboarding or blocked-auth result;
+  after auth completes, `EXTENSIONS_VIEW` derives `setup_needed` or `active`
+  from durable readiness. There is no separate public extension activation
+  capability or lifecycle transition. Extension setup read now flows through the
   descriptor-backed `extension_setup` view, and setup submit now invokes
   `builtin.extension_setup_submit` before reading back that view. Zip import now
   invokes `builtin.extension_import` with upload bytes encoded into an

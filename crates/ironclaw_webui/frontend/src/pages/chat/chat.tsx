@@ -89,8 +89,6 @@ export function Chat({
     loadMore,
     setSuggestions,
     submitAuthToken,
-    submitOnboardingPairing,
-    submitChannelConnectionPairing,
     startOnboardingOAuth,
     dismissOnboardingPairing,
   } = useChat(activeThreadId);
@@ -110,8 +108,8 @@ export function Chat({
   const activeThreadHasGate = Boolean(activeThreadId) && Boolean(pendingGate);
   // A channel connection gate is identified only by its manifest-derived
   // `connection` context. Provider names never select presentation behavior.
-  // Manual-token connections redeem a pasted proof; pairing connections
-  // complete externally through the rendered deep-link/QR flow.
+  // Web-generated pairing completes externally through the rendered
+  // deep-link/QR flow.
   const channelConnectionGate =
     pendingGate?.kind === "auth_required" &&
     pendingGate?.connection
@@ -350,8 +348,11 @@ export function Chat({
             (
               <OnboardingPairingCard
                 onboarding={pendingOnboarding}
-                onSubmit={submitOnboardingPairing}
-                onConfigure={startOnboardingOAuth}
+                onConfigure={
+                  pendingOnboarding?.strategy === "oauth"
+                    ? startOnboardingOAuth
+                    : undefined
+                }
                 onCancel={dismissOnboardingPairing}
               />
             )}
@@ -366,22 +367,14 @@ export function Chat({
                   />
                 )
                 : pendingGate.challengeKind === "manual_token"
-                  ? (channelConnectionGate
-                    ? (
-                  <OnboardingPairingCard
-                    onboarding={gateConnectionOnboarding}
-                    onSubmit={submitChannelConnectionPairing}
-                    onCancel={handleCancelRun}
-                  />
-                )
-                    : (
+                  ? (
                   <AuthTokenCard
                     gate={pendingGate}
                     onSubmit={submitAuthToken}
                     onCancel={() =>
                       approve(pendingGate.requestId, "cancel", pendingGate.kind)}
                   />
-                ))
+                )
                   : pendingGate.challengeKind === "pairing" && channelConnectionGate
                   ? (
                   // External completion uses the same manifest-derived panel

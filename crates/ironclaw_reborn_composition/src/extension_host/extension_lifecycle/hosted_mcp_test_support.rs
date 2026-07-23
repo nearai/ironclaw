@@ -259,6 +259,10 @@ impl ironclaw_network::NetworkHttpEgress for HostedMcpDiscoveryNetworkScript {
                     .collect::<Vec<_>>();
                 serde_json::json!({ "tools": tools })
             }
+            "tools/call" => serde_json::json!({
+                "content": [{"type": "text", "text": "scripted hosted MCP result"}],
+                "isError": false
+            }),
             _ => return Err(invalid("unexpected_json_rpc_method")),
         };
         let response_body = serde_json::to_vec(&serde_json::json!({

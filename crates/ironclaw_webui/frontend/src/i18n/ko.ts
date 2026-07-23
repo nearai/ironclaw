@@ -1419,7 +1419,6 @@ registerPack("ko", {
   "pairing.connectFromExtensions": "계속하려면 확장 페이지에서 {name}을 연결하세요.",
   "pairing.checkCodeAndRetry": "페어링에 실패했습니다. 코드를 확인하고 다시 시도하세요.",
   "pairing.resumeFailed": "{name}이 연결되었지만 이 채팅을 계속할 수 없습니다. 계속하려면 페이지를 새로고침하세요.",
-  "extensions.channelInstalledSetup": "{name}이 설치되었습니다. 아래 설정 패널에서 계정을 연결하세요.",
   "extensions.authUrlHttpsRequired": "인증 URL은 HTTPS를 사용해야 합니다.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "구성됨; 유지하려면 비워두세요",

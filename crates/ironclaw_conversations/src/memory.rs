@@ -276,6 +276,52 @@ impl InMemoryConversationServices {
         Ok(ConditionalUnpairOutcome::Unpaired)
     }
 
+    /// Remove every external actor pairing owned by `user_id` for one
+    /// adapter, optionally narrowed to a specific adapter installation.
+    ///
+    /// Channel lifecycle removal does not always retain the provider's actor
+    /// id, but it still has host-trusted tenant, adapter, installation, and
+    /// user scope. Keeping this bulk operation in the conversation store lets
+    /// removal revoke the same direct conversation routes as actor-specific
+    /// unpairing without parsing provider identity strings in composition.
+    pub async fn unpair_external_actors_owned_by(
+        &self,
+        tenant_id: &TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: Option<&AdapterInstallationId>,
+        user_id: &UserId,
+    ) -> Result<usize, InboundTurnError> {
+        let _mutation = self.mutation_lock.lock().await;
+        self.refresh_state_from_repository().await?;
+        let old_state = self.lock_state()?.clone();
+        let (snapshot, removed_count) = {
+            let mut state = self.lock_state()?;
+            let actor_keys = state
+                .pairings
+                .iter()
+                .filter(|(actor_key, paired_user_id)| {
+                    actor_key.tenant_id == *tenant_id
+                        && actor_key.adapter_kind == *adapter_kind
+                        && adapter_installation_id
+                            .is_none_or(|expected| actor_key.adapter_installation_id == *expected)
+                        && *paired_user_id == user_id
+                })
+                .map(|(actor_key, _)| actor_key.clone())
+                .collect::<Vec<_>>();
+            for actor_key in &actor_keys {
+                state.pairings.remove(actor_key);
+                state.pairing_epochs.remove(actor_key);
+                state.revoke_direct_bindings_for_actor(actor_key);
+            }
+            (state.clone(), actor_keys.len())
+        };
+        if removed_count == 0 {
+            return Ok(0);
+        }
+        self.persist_state(old_state, snapshot).await?;
+        Ok(removed_count)
+    }
+
     pub async fn add_thread_participant(
         &self,
         tenant_id: &TenantId,

@@ -16,6 +16,7 @@ pub mod activation_transaction;
 pub mod active;
 mod admin_configuration_service;
 mod admin_configuration_store;
+mod capability_projection;
 pub mod deployment_channels;
 pub mod egress;
 pub mod entrypoint;
@@ -38,6 +39,7 @@ pub use active::{
 pub use admin_configuration_service::{
     AdminConfigurationFieldState, AdminConfigurationGroupState, AdminConfigurationService,
     AdminConfigurationServiceError, AdminConfigurationSubmittedValue,
+    reconcile_admin_configuration_consumers,
 };
 pub use admin_configuration_store::{
     AdminConfigurationCommit, AdminConfigurationIdempotencyKey, AdminConfigurationRecord,
@@ -45,6 +47,7 @@ pub use admin_configuration_store::{
     AdminConfigurationReserveOutcome, AdminConfigurationStoreError, AdminConfigurationValueRef,
     FilesystemAdminConfigurationStore,
 };
+pub use capability_projection::{CapabilityProjectionError, project_capability_ids};
 pub use deployment_channels::{
     DeploymentChannelBinding, DeploymentChannelRegistry, DeploymentChannelRegistryError,
 };

@@ -517,6 +517,25 @@ impl RebornFilesystemConversationServices {
             )
             .await
     }
+
+    /// Remove all pairings and direct conversation routes owned by one user
+    /// for an adapter, optionally narrowed to one installation.
+    pub async fn unpair_external_actors_owned_by(
+        &self,
+        tenant_id: &ironclaw_host_api::TenantId,
+        adapter_kind: &AdapterKind,
+        adapter_installation_id: Option<&AdapterInstallationId>,
+        user_id: &UserId,
+    ) -> Result<usize, InboundTurnError> {
+        self.inner
+            .unpair_external_actors_owned_by(
+                tenant_id,
+                adapter_kind,
+                adapter_installation_id,
+                user_id,
+            )
+            .await
+    }
 }
 
 #[async_trait]

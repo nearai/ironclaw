@@ -7,19 +7,17 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_product_workflow::{
-    AutomationProductFacade, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetSummary, RebornServicesError,
-    WebUiAuthenticatedCaller,
+use ironclaw_outbound::{
+    DeliveryTargetCapabilities, OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner,
+    OutboundDeliveryTargetProvider, OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary,
+    OutboundError,
 };
+use ironclaw_product_workflow::{AutomationProductFacade, RebornOutboundDeliveryTargetId};
 use ironclaw_triggers::{TriggerActiveRunLookup, TriggerRepository};
 use ironclaw_turns::{FilesystemTurnStateRowStore, ReplyTargetBindingRef, TurnStateStore};
 
 use crate::RebornServices;
 use crate::automation::trigger_poller::SnapshotActiveRunLookup;
-use crate::outbound::outbound_preferences::{
-    OutboundDeliveryTargetEntry, OutboundDeliveryTargetOwner, OutboundDeliveryTargetProvider,
-};
 use crate::turn_run_snapshot::TurnRunSnapshotSource;
 
 /// Build the production `RebornAutomationProductFacade` over
@@ -91,7 +89,7 @@ where
 }
 
 struct StaticSourceDeliveryTargetProvider {
-    summary: RebornOutboundDeliveryTargetSummary,
+    summary: OutboundDeliveryTargetSummary,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
@@ -99,20 +97,21 @@ struct StaticSourceDeliveryTargetProvider {
 impl OutboundDeliveryTargetProvider for StaticSourceDeliveryTargetProvider {
     async fn list_outbound_delivery_targets(
         &self,
-        caller: &WebUiAuthenticatedCaller,
-    ) -> Result<Vec<OutboundDeliveryTargetEntry>, RebornServicesError> {
+        caller: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
         Ok(vec![OutboundDeliveryTargetEntry {
             summary: self.summary.clone(),
-            capabilities: RebornOutboundDeliveryTargetCapabilities {
+            capabilities: DeliveryTargetCapabilities {
                 final_replies: true,
+                progress: false,
                 gate_prompts: false,
                 auth_prompts: false,
+                modalities: Vec::new(),
             },
             destination: ironclaw_outbound::RunFinalReplyDestination::External {
                 reply_target_binding_ref: self.reply_target_binding_ref.clone(),
             },
-            current_target: None,
-            owner: OutboundDeliveryTargetOwner::for_caller(caller),
+            owner: OutboundDeliveryTargetOwner::for_scope(caller),
         }])
     }
 }
@@ -132,7 +131,7 @@ pub fn register_static_source_delivery_target_for_test(
         .local_runtime
         .as_ref()
         .ok_or_else(|| "local runtime unavailable".to_string())?;
-    let summary = RebornOutboundDeliveryTargetSummary::new(
+    let summary = OutboundDeliveryTargetSummary::new(
         target_id,
         "test-channel",
         "Source conversation",

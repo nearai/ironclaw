@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::InstallationState;
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, ProductAdapterError, ProductAdapterId,
@@ -15,9 +14,9 @@ use ironclaw_product_workflow::{
     ActionDispatchKind, DefaultProductSurface, FakeConversationBindingService,
     FakeIdempotencyLedger, FakeInboundTurnService, LifecyclePackageKind, LifecyclePackageRef,
     LifecycleProductAction, LifecycleProductCommandService, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductResponse, ProductCommand, ProductCommandAdmission,
-    ProductCommandAdmissionService, ProductCommandContext, ProductCommandService,
-    ProductModelCommand, ProductWorkflowError,
+    LifecycleProductFacade, LifecycleProductResponse, LifecyclePublicState, ProductCommand,
+    ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
+    ProductCommandService, ProductModelCommand, ProductWorkflowError,
 };
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
@@ -122,7 +121,7 @@ impl LifecycleProductFacade for RecordingLifecycleProductFacade {
         self.commands.lock().expect("lock").push(action.clone());
         Ok(LifecycleProductResponse::projection(
             action.package_ref().cloned(),
-            InstallationState::Installed,
+            LifecyclePublicState::SetupNeeded,
             vec![],
         ))
     }
@@ -134,7 +133,7 @@ impl LifecycleProductFacade for RecordingLifecycleProductFacade {
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         Ok(LifecycleProductResponse::projection(
             Some(package_ref),
-            InstallationState::Unsupported,
+            LifecyclePublicState::SetupNeeded,
             vec![],
         ))
     }

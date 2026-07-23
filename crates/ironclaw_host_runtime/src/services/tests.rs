@@ -192,6 +192,68 @@ async fn product_auth_ports_stage_secret_from_source_scope_into_target_scope() {
 }
 
 #[tokio::test]
+async fn product_auth_staged_handoff_guard_discards_policy_and_secrets_on_drop() {
+    let secret_store = Arc::new(FilesystemSecretStore::ephemeral());
+    let services = test_services()
+        .with_secret_store(Arc::clone(&secret_store))
+        .try_with_host_http_egress(RecordingNetwork::ok())
+        .expect("host HTTP egress should wire with graph secret store");
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("discovery-token").unwrap();
+    secret_store
+        .put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("discovery-material"),
+            None,
+        )
+        .await
+        .expect("test secret should store");
+    let ports = services
+        .product_auth_provider_runtime_ports()
+        .expect("runtime ports should be configured");
+
+    let guard = ports.staged_handoff_guard(scope.clone(), capability_id.clone());
+    ports.stage_network_policy_once(&scope, &capability_id, staged_policy());
+    ports
+        .stage_secret_once(&scope, &capability_id, &handle)
+        .await
+        .expect("discovery credential should stage");
+    assert!(
+        services
+            .network_policy_store
+            .get(&scope, &capability_id)
+            .is_some()
+    );
+    assert!(
+        services
+            .secret_injection_store
+            .clone_material(&scope, &capability_id, &handle)
+            .expect("staged secret lookup")
+            .is_some()
+    );
+
+    drop(guard);
+
+    assert!(
+        services
+            .network_policy_store
+            .get(&scope, &capability_id)
+            .is_none(),
+        "dropping discovery authority must revoke its network policy"
+    );
+    assert!(
+        services
+            .secret_injection_store
+            .clone_material(&scope, &capability_id, &handle)
+            .expect("staged secret lookup")
+            .is_none(),
+        "dropping discovery authority must erase every staged credential"
+    );
+}
+
+#[tokio::test]
 async fn runtime_secret_material_stager_stages_secret_material_into_target_scope() {
     let services = test_services()
         .with_secret_store(Arc::new(FilesystemSecretStore::ephemeral()))

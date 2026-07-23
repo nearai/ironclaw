@@ -30,7 +30,7 @@ use ironclaw_product_workflow::{
     ChannelConnectionFacade, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     ExtensionAccountSetupError, ExtensionAccountSetupRegistry, LifecycleBlockerRef,
     LifecycleExtensionSummary, LifecycleInstalledExtensionSummary, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse,
+    LifecyclePackageRef, LifecycleProductPayload, LifecycleProductResponse, LifecyclePublicState,
     LifecycleReadinessBlocker, LifecycleSearchExtensionSummary, ProductWorkflowError,
     RebornServicesError, WebUiAuthenticatedCaller,
 };
@@ -96,6 +96,7 @@ use crate::extension_host::lifecycle::response_with_payload;
 use crate::extension_host::mcp_discovery::{
     HostedMcpDiscoveryError, discover_hosted_mcp_package, is_hosted_http_mcp_package,
 };
+use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 pub(crate) use active_publication::ActiveExtensionPublisher;
 #[cfg(test)]
@@ -152,12 +153,6 @@ pub(crate) struct RebornLocalExtensionManagementPort {
     /// per-request cap into N x 64 MiB of pressure before any lifecycle lock
     /// applies (#5499 review finding #3).
     import_decode_semaphore: Arc<Semaphore>,
-    /// Test fixture identity used by legacy helper methods and restore tests.
-    /// Production install/remove never derive ownership from operator status:
-    /// an admin's personal membership is caller-scoped just like every other
-    /// user's. Tenant configuration is a separate axis.
-    #[cfg(test)]
-    tenant_operator_user_id: UserId,
     removal_cleanup: Arc<ExtensionRemovalCleanupRegistry>,
     /// Late-binding slot for the generic per-user channel-connection facade
     /// (extension-runtime §6.4), shared with
@@ -388,7 +383,6 @@ impl RebornLocalExtensionManagementPort {
         lifecycle_service: Arc<Mutex<ExtensionLifecycleService>>,
         active_extensions: ActiveExtensionPublisher,
         credential_cleanup: Option<Arc<dyn ExtensionCredentialCleanup>>,
-        _tenant_operator_user_id: UserId,
     ) -> Self {
         Self {
             filesystem,
@@ -402,8 +396,6 @@ impl RebornLocalExtensionManagementPort {
             admin_configuration: std::sync::OnceLock::new(),
             discovery_runtime_ports: std::sync::OnceLock::new(),
             import_decode_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORT_DECODES)),
-            #[cfg(test)]
-            tenant_operator_user_id: _tenant_operator_user_id,
             removal_cleanup: Arc::new(ExtensionRemovalCleanupRegistry::empty()),
             account_setups: ExtensionAccountSetupRegistry::default(),
             channel_disconnect_slot: Arc::new(std::sync::OnceLock::new()),
@@ -425,21 +417,18 @@ impl RebornLocalExtensionManagementPort {
     /// leaves discovery to fail transient and readiness stays incomplete. A
     /// successful stage lets live `tools/list` run with the same injected
     /// authority a dispatched invocation would carry. Bundled declarations
-    /// are never substituted for a failed live catalog.
+    /// are never substituted for a failed live catalog. The returned guard
+    /// revokes every staged handoff on success, error, or cancellation.
     async fn stage_hosted_mcp_discovery_authority(
         &self,
         scope: &ResourceScope,
         package: &ExtensionPackage,
-    ) {
-        let Some(ports) = self.discovery_runtime_ports.get() else {
-            return;
-        };
-        let Some(descriptor) = package.capabilities.first() else {
-            return;
-        };
-        if let Some(policy) = hosted_mcp_discovery_network_policy(package) {
-            ports.stage_network_policy_once(scope, &descriptor.id, policy);
-        }
+        network_policy: ironclaw_host_api::NetworkPolicy,
+    ) -> Option<ironclaw_host_runtime::ProductAuthRuntimeHandoffGuard> {
+        let ports = self.discovery_runtime_ports.get()?;
+        let descriptor = package.capabilities.first()?;
+        let authority = ports.staged_handoff_guard(scope.clone(), descriptor.id.clone());
+        ports.stage_network_policy_once(scope, &descriptor.id, network_policy);
         for requirement in &descriptor.runtime_credentials {
             if let Err(error) = ports
                 .stage_credential_requirement_once(scope, &descriptor.id, requirement, &package.id)
@@ -454,6 +443,7 @@ impl RebornLocalExtensionManagementPort {
                 );
             }
         }
+        Some(authority)
     }
 
     /// The durable installation store handle (the generic host hydrates its
@@ -753,15 +743,6 @@ impl RebornLocalExtensionManagementPort {
         &self.active_extensions
     }
 
-    /// Test-support view of the wired tenant-operator identity (#5459 P1), so
-    /// tests can act "as the operator" without re-deriving the id the runtime
-    /// or fixture was built with. Mirrors the production owner wiring in
-    /// `build_local_runtime`. Tests only — zero bytes in production builds.
-    #[cfg(test)]
-    pub(crate) fn tenant_operator_user_id_for_test(&self) -> &UserId {
-        &self.tenant_operator_user_id
-    }
-
     pub(crate) async fn search(
         &self,
         query: &str,
@@ -866,17 +847,19 @@ impl RebornLocalExtensionManagementPort {
         let install_scope = installation
             .as_ref()
             .map(|installation| install_scope_for_owner(installation.owner()));
-        let summary = {
+        let available = {
             let catalog = self.catalog.read().await;
-            catalog.resolve(&package_ref)?.summary()
+            catalog.resolve(&package_ref)?
         };
+        let summary = self.summary_for_phase(&available, phase)?;
+        let public_phase = LifecyclePublicState::from_host_checkpoint(phase);
         Ok(response_with_payload(
             Some(package_ref),
             phase,
             LifecycleProductPayload::ExtensionList {
                 extensions: vec![LifecycleInstalledExtensionSummary {
                     summary,
-                    phase,
+                    phase: public_phase,
                     install_scope,
                 }],
                 count: 1,
@@ -910,6 +893,58 @@ impl RebornLocalExtensionManagementPort {
                     .then(|| ActiveExtensionCapability::from_descriptor(descriptor, owner.clone()))
             })
             .collect())
+    }
+
+    /// Resolve the exact extension ids callable by this caller.
+    ///
+    /// This is the authority-side projection used by capability surfaces. It
+    /// deliberately reuses [`Self::caller_installation_phase`] rather than
+    /// deriving readiness from membership or the provider-global active
+    /// registry alone: personal account setup, runtime credentials, recorded
+    /// activation failure, and runtime publication must all agree.
+    pub(crate) async fn caller_active_extension_ids(
+        &self,
+        caller: &UserId,
+        credential_gate: Option<&RuntimeExtensionActivationCredentialGate>,
+    ) -> Result<BTreeSet<ExtensionId>, ProductWorkflowError> {
+        let installations = self
+            .installation_store
+            .list_installations()
+            .await
+            .map_err(map_extension_installation_error)?;
+        let activation_errors = self.installation_activation_errors().await?;
+        let mut active = BTreeSet::new();
+        for installation in installations {
+            if !installation.owner().visible_to(caller) {
+                continue;
+            }
+            let Ok(package_ref) = LifecyclePackageRef::new(
+                LifecyclePackageKind::Extension,
+                installation.extension_id().as_str(),
+            ) else {
+                continue;
+            };
+            let available = {
+                let catalog = self.catalog.read().await;
+                let Ok(available) = catalog.resolve(&package_ref) else {
+                    continue;
+                };
+                available
+            };
+            let phase = self
+                .caller_installation_phase(
+                    &available,
+                    &installation,
+                    credential_gate,
+                    caller,
+                    activation_errors.contains_key(installation.extension_id().as_str()),
+                )
+                .await?;
+            if phase == InstallationState::Active {
+                active.insert(installation.extension_id().clone());
+            }
+        }
+        Ok(active)
     }
 
     /// Membership of every installation, keyed by extension id. The
@@ -1039,8 +1074,8 @@ impl RebornLocalExtensionManagementPort {
                 )
                 .await?;
             summaries.push(LifecycleInstalledExtensionSummary {
-                summary: available.summary(),
-                phase,
+                summary: self.summary_for_phase(&available, phase)?,
+                phase: LifecyclePublicState::from_host_checkpoint(phase),
                 install_scope: Some(install_scope_for_owner(installation.owner())),
             });
         }
@@ -1078,10 +1113,38 @@ impl RebornLocalExtensionManagementPort {
                 has_last_error,
             )
             .await?;
+        summary = self.summary_for_phase(extension, phase)?;
+        suppress_search_credential_onboarding(&mut summary);
         Ok(LifecycleSearchExtensionSummary {
             summary,
-            installation_phase: Some(phase),
+            installation_phase: Some(LifecyclePublicState::from_host_checkpoint(phase)),
         })
+    }
+
+    /// Project capability metadata from the same effective package the host
+    /// published for execution. Static catalog metadata remains authoritative
+    /// until this caller is active; hosted-MCP discovery replaces that
+    /// pre-discovery ceiling with the live tool contract atomically.
+    fn summary_for_phase(
+        &self,
+        extension: &AvailableExtensionPackage,
+        phase: InstallationState,
+    ) -> Result<LifecycleExtensionSummary, ProductWorkflowError> {
+        let mut summary = extension.summary();
+        let active = self.active_extensions.snapshot();
+        let (visible, visible_read_only) = ironclaw_extension_host::project_capability_ids(
+            active.as_ref(),
+            &extension.package.id,
+            phase,
+            &summary.visible_capability_ids,
+            &summary.visible_read_only_capability_ids,
+        )
+        .map_err(|error| ProductWorkflowError::Transient {
+            reason: error.to_string(),
+        })?;
+        summary.visible_capability_ids = visible;
+        summary.visible_read_only_capability_ids = visible_read_only;
+        Ok(summary)
     }
 
     /// Derive the caller-visible lifecycle state from the only durable user
@@ -1390,16 +1453,91 @@ impl RebornLocalExtensionManagementPort {
             .await
     }
 
+    /// Rebuild non-durable hosted-MCP tool contracts after the runtime host and
+    /// product-auth ports have been attached.
+    ///
+    /// Installation membership is durable, but a hosted server's live
+    /// `tools/list` contract is intentionally not. Each installed package is
+    /// therefore rediscovered through the same credential-gated activation
+    /// transaction used by an ordinary install. Members are tried
+    /// independently: one credential-ready member is sufficient to publish the
+    /// shared schema, while missing credentials or a failed provider must not
+    /// prevent unrelated packages from restoring.
+    pub(crate) async fn reconcile_hosted_mcp_runtime_after_restore(
+        &self,
+        scope_template: &ResourceScope,
+        credential_accounts: Arc<dyn RuntimeCredentialAccountSelectionService>,
+        runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+    ) -> Result<(), ProductWorkflowError> {
+        let installations = self
+            .installation_store
+            .list_installations()
+            .await
+            .map_err(map_extension_installation_error)?;
+        for installation in installations {
+            let package_ref = LifecyclePackageRef::new(
+                LifecyclePackageKind::Extension,
+                installation.extension_id().as_str(),
+            )?;
+            if !self
+                .package_requires_hosted_mcp_discovery(&package_ref)
+                .await?
+            {
+                continue;
+            }
+            let Some(members) = installation.owner().members() else {
+                tracing::warn!(
+                    extension_id = installation.extension_id().as_str(),
+                    "skipping hosted MCP restart reconciliation for a non-canonical owner"
+                );
+                continue;
+            };
+            for member in members {
+                let mut scope = scope_template.clone();
+                scope.user_id = member.clone();
+                scope.invocation_id = ironclaw_host_api::InvocationId::new();
+                let credential_gate = RuntimeExtensionActivationCredentialGate::new(
+                    scope.clone(),
+                    Arc::clone(&credential_accounts),
+                );
+                let mode = ExtensionActivationMode::HostedMcpDiscovery {
+                    scope,
+                    runtime_http_egress: Arc::clone(&runtime_http_egress),
+                };
+                match self
+                    .activate_with_credential_gate(
+                        package_ref.clone(),
+                        mode,
+                        credential_gate,
+                        member,
+                    )
+                    .await
+                {
+                    Ok(response) if response.phase == LifecyclePublicState::Active => break,
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            extension_id = installation.extension_id().as_str(),
+                            %error,
+                            "hosted MCP restart reconciliation failed for one installed member"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) async fn activate_with_prechecked_credentials_for_test(
         &self,
         package_ref: LifecyclePackageRef,
         mode: ExtensionActivationMode,
+        caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let credential_gate =
             crate::extension_host::extension_activation_credentials::PrecheckedExtensionActivationCredentialGate;
-        let caller = self.tenant_operator_user_id.clone();
-        self.activate_via_owner_transaction(package_ref, mode, &credential_gate, &caller)
+        self.activate_via_owner_transaction(package_ref, mode, &credential_gate, caller)
             .await
     }
 
@@ -1411,19 +1549,15 @@ impl RebornLocalExtensionManagementPort {
         caller: &UserId,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         let (extension_id, installation_id) = extension_ids_from_package_ref(&package_ref)?;
-        let operations = ComposedExtensionActivationOperations {
-            management: self,
-            credential_gate,
-        };
-        match run_extension_activation(
-            self.operation_lock.as_ref(),
-            &operations,
-            &extension_id,
-            &installation_id,
-            caller,
-            mode,
-        )
-        .await?
+        match self
+            .run_activation_transaction(
+                &extension_id,
+                &installation_id,
+                mode,
+                credential_gate,
+                caller,
+            )
+            .await?
         {
             ExtensionActivationTransactionResult::CredentialsMissing(missing) => {
                 activation_credentials_incomplete_response(package_ref, missing)
@@ -1436,6 +1570,29 @@ impl RebornLocalExtensionManagementPort {
                 ))
             }
         }
+    }
+
+    async fn run_activation_transaction(
+        &self,
+        extension_id: &ExtensionId,
+        installation_id: &ExtensionInstallationId,
+        mode: ExtensionActivationMode,
+        credential_gate: &dyn ExtensionActivationCredentialGate,
+        caller: &UserId,
+    ) -> Result<ExtensionActivationTransactionResult, ProductWorkflowError> {
+        let operations = ComposedExtensionActivationOperations {
+            management: self,
+            credential_gate,
+        };
+        run_extension_activation(
+            self.operation_lock.as_ref(),
+            &operations,
+            extension_id,
+            installation_id,
+            caller,
+            mode,
+        )
+        .await
     }
 
     pub(crate) async fn package_requires_hosted_mcp_discovery(
@@ -2330,7 +2487,7 @@ pub(crate) fn complete_install_response(
     mut install: LifecycleProductResponse,
     activation: LifecycleProductResponse,
 ) -> LifecycleProductResponse {
-    let is_active = activation.phase == InstallationState::Active;
+    let is_active = activation.phase == LifecyclePublicState::Active;
     let (visible_capability_ids, connection_required) = match activation.payload.as_ref() {
         Some(LifecycleProductPayload::ExtensionInstall {
             visible_capability_ids,
@@ -2375,6 +2532,8 @@ struct ComposedExtensionActivationOperations<'a> {
 #[async_trait]
 impl ExtensionActivationOperations for ComposedExtensionActivationOperations<'_> {
     type Error = ProductWorkflowError;
+    type HostedMcpDiscoveryAuthority =
+        Option<ironclaw_host_runtime::ProductAuthRuntimeHandoffGuard>;
 
     async fn load_installation(
         &self,
@@ -2441,10 +2600,11 @@ impl ExtensionActivationOperations for ComposedExtensionActivationOperations<'_>
         &self,
         scope: &ResourceScope,
         package: &ExtensionPackage,
-    ) {
+        network_policy: ironclaw_host_api::NetworkPolicy,
+    ) -> Self::HostedMcpDiscoveryAuthority {
         self.management
-            .stage_hosted_mcp_discovery_authority(scope, package)
-            .await;
+            .stage_hosted_mcp_discovery_authority(scope, package, network_policy)
+            .await
     }
 
     async fn discover_hosted_mcp_package(
@@ -2784,32 +2944,6 @@ fn projected_channel_connection_requirement(
     account_setup.map(|setup| setup.connection_requirement.clone())
 }
 
-// A proof-code account-setup descriptor is already resolved from the
-// manifest. No absent declaration is converted into a fallback recipe here.
-/// The discovery call's network authority: the declared hosted-MCP server
-/// host only (the same ceiling the dispatch pipeline derives for the
-/// connection-template capability).
-fn hosted_mcp_discovery_network_policy(
-    package: &ExtensionPackage,
-) -> Option<ironclaw_host_api::NetworkPolicy> {
-    let ironclaw_extensions::ExtensionRuntime::Mcp { url: Some(url), .. } =
-        &package.manifest.runtime
-    else {
-        return None;
-    };
-    let parsed = url::Url::parse(url).ok()?;
-    let host = parsed.host_str()?;
-    Some(ironclaw_host_api::NetworkPolicy {
-        allowed_targets: vec![ironclaw_host_api::NetworkTargetPattern {
-            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
-            host_pattern: host.to_string(),
-            port: parsed.port(),
-        }],
-        deny_private_ip_ranges: true,
-        max_egress_bytes: None,
-    })
-}
-
 fn generic_host_error(error: ironclaw_extension_host::LifecycleError) -> ProductWorkflowError {
     ProductWorkflowError::InvalidBindingRequest {
         reason: format!("generic extension host rejected the activation: {error}"),
@@ -2861,7 +2995,7 @@ fn extension_search_has_ready_result(payload: Option<&LifecycleProductPayload>) 
     extensions.iter().any(|extension| {
         matches!(
             extension.installation_phase,
-            Some(InstallationState::Active)
+            Some(LifecyclePublicState::Active)
         ) && !extension
             .summary
             .surface_kinds
@@ -2878,17 +3012,11 @@ fn extension_search_has_inactive_installed_result(
         return false;
     };
     extensions.iter().any(|extension| {
-        matches!(
-            extension.installation_phase,
-            Some(
-                InstallationState::Installed
-                    | InstallationState::Configured
-                    | InstallationState::Disabled
-            )
-        ) && !extension
-            .summary
-            .surface_kinds
-            .contains(&CapabilitySurfaceKind::Channel)
+        extension.installation_phase == Some(LifecyclePublicState::SetupNeeded)
+            && !extension
+                .summary
+                .surface_kinds
+                .contains(&CapabilitySurfaceKind::Channel)
             && extension.summary.credential_requirements.is_empty()
             && extension.summary.onboarding.is_none()
     })
@@ -2903,11 +3031,7 @@ fn extension_search_has_installed_external_channel_result(
     extensions.iter().any(|extension| {
         matches!(
             extension.installation_phase,
-            Some(
-                InstallationState::Installed
-                    | InstallationState::Configured
-                    | InstallationState::Active
-            )
+            Some(LifecyclePublicState::SetupNeeded | LifecyclePublicState::Active)
         ) && extension
             .summary
             .surface_kinds
@@ -3233,7 +3357,7 @@ mod tests {
                     credential_requirements: Vec::new(),
                     onboarding: None,
                 },
-                installation_phase: Some(InstallationState::Installed),
+                installation_phase: Some(LifecyclePublicState::SetupNeeded),
             }],
             count: 1,
         };
@@ -3318,7 +3442,7 @@ mod tests {
             )
             .await
             .expect("search extensions");
-        assert_eq!(search.phase, InstallationState::Installed);
+        assert_eq!(search.phase, LifecyclePublicState::SetupNeeded);
         let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
             search.payload.as_ref()
         else {
@@ -3341,7 +3465,7 @@ mod tests {
             )
             .await
             .expect("install extension");
-        assert_eq!(install.phase, InstallationState::Active);
+        assert_eq!(install.phase, LifecyclePublicState::Active);
         assert!(
             storage_root
                 .join("system/extensions/fixture/manifest.toml")
@@ -3376,7 +3500,7 @@ mod tests {
             )
             .await
             .expect("remove extension");
-        assert_eq!(remove.phase, InstallationState::Removed);
+        assert_eq!(remove.phase, LifecyclePublicState::Uninstalled);
         assert!(
             active_registry
                 .snapshot()
@@ -3446,7 +3570,7 @@ mod tests {
             .await
             .expect("install external channel");
 
-        assert_eq!(install.phase, InstallationState::Active);
+        assert_eq!(install.phase, LifecyclePublicState::Active);
         let message = install.message.as_deref().expect("install message");
         assert!(
             message.contains("Signal is installed as a channel surface")
@@ -3549,7 +3673,7 @@ mod tests {
             .await
             .expect("cleanup-free extension removal needs no actor");
 
-        assert_eq!(remove.phase, InstallationState::Removed);
+        assert_eq!(remove.phase, LifecyclePublicState::Uninstalled);
         assert!(
             !storage_root.join("system/extensions/telegram").exists(),
             "package files must be deleted"
@@ -4296,7 +4420,7 @@ supports_threads = true
             .await
             .expect("declared cleanup and removal succeed");
 
-        assert_eq!(remove.phase, InstallationState::Removed);
+        assert_eq!(remove.phase, LifecyclePublicState::Uninstalled);
         let calls = matching.calls();
         assert_eq!(calls.len(), 1, "matching adapter runs exactly once");
         assert!(
@@ -4632,7 +4756,6 @@ supports_threads = true
             ))),
             installed_port.active_extensions.clone(),
             None,
-            lifecycle_owner(),
         )
         .with_removal_cleanup_registry(registry);
         let scope = hosted_mcp_scope("lifecycle-owner");
@@ -4724,7 +4847,10 @@ supports_threads = true
             .iter()
             .find(|extension| extension.summary.package_ref.id.as_str() == "example_bot")
             .expect("example search result");
-        assert_eq!(example.installation_phase, Some(InstallationState::Active));
+        assert_eq!(
+            example.installation_phase,
+            Some(LifecyclePublicState::Active)
+        );
     }
 
     #[tokio::test]
@@ -4792,6 +4918,7 @@ supports_threads = true
         port.activate_with_prechecked_credentials_for_test(
             slack_ref,
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate Slack tools extension");
@@ -4884,6 +5011,7 @@ supports_threads = true
         port.activate_with_prechecked_credentials_for_test(
             slack_ref.clone(),
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate Slack and internal user tools");
@@ -4938,6 +5066,7 @@ supports_threads = true
         port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate fixture extension");
@@ -5040,6 +5169,7 @@ supports_threads = true
                 .unwrap(),
                 runtime_http_egress: egress.clone(),
             },
+            &lifecycle_owner(),
         )
         .await
         .expect("activate with discovery");
@@ -5112,7 +5242,7 @@ supports_threads = true
             .expect("failed initial discovery remains projectable");
         assert_eq!(
             projection.phase,
-            InstallationState::Installed,
+            LifecyclePublicState::SetupNeeded,
             "without a successful catalog the caller remains setup-needed"
         );
         let snapshot = active_registry.snapshot();
@@ -5161,7 +5291,7 @@ supports_threads = true
             .project_package(lifecycle_surface_context(), package_ref)
             .await
             .expect("malformed initial discovery remains projectable");
-        assert_eq!(projection.phase, InstallationState::Installed);
+        assert_eq!(projection.phase, LifecyclePublicState::SetupNeeded);
         assert!(
             active_registry
                 .snapshot()
@@ -5193,6 +5323,7 @@ supports_threads = true
                     scope: hosted_mcp_scope("hosted-mcp-no-static-fallback"),
                     runtime_http_egress: Arc::new(EmptyToolsHostedMcpEgress),
                 },
+                &lifecycle_owner(),
             )
             .await
             .expect_err("live hosted-MCP discovery is authoritative");
@@ -5335,6 +5466,7 @@ supports_threads = true
                         scope: hosted_mcp_scope("hosted-mcp-remove-race"),
                         runtime_http_egress: egress,
                     },
+                    &lifecycle_owner(),
                 )
                 .await
             }
@@ -5386,6 +5518,7 @@ supports_threads = true
                         scope: hosted_mcp_scope("hosted-mcp-manifest-race"),
                         runtime_http_egress: egress,
                     },
+                    &lifecycle_owner(),
                 )
                 .await
             }
@@ -5491,6 +5624,7 @@ supports_threads = true
                     "search-one",
                 )),
             },
+            &lifecycle_owner(),
         )
         .await
         .expect("initial discovery activation");
@@ -5511,6 +5645,7 @@ supports_threads = true
                     "search-two",
                 )),
             },
+            &lifecycle_owner(),
         )
         .await
         .expect("re-discovery activation");
@@ -5557,6 +5692,7 @@ supports_threads = true
                     "search-one",
                 )),
             },
+            &lifecycle_owner(),
         )
         .await
         .expect("initial discovery activation");
@@ -5621,7 +5757,7 @@ supports_threads = true
             )
             .await
             .expect("initial discovery publishes a catalog");
-        assert_eq!(first.phase, InstallationState::Active);
+        assert_eq!(first.phase, LifecyclePublicState::Active);
 
         let refresh_error = facade
             .execute(
@@ -5643,7 +5779,7 @@ supports_threads = true
             .expect("prior active projection remains readable");
         assert_eq!(
             projection.phase,
-            InstallationState::Active,
+            LifecyclePublicState::Active,
             "a failed refresh must not demote a previously published catalog"
         );
         assert!(
@@ -5694,7 +5830,7 @@ supports_threads = true
                 )
                 .await
                 .expect("initial discovery publishes a catalog");
-            assert_eq!(first.phase, InstallationState::Active);
+            assert_eq!(first.phase, LifecyclePublicState::Active);
 
             let error = facade
                 .execute(
@@ -5720,7 +5856,7 @@ supports_threads = true
                 .expect("the prior active projection remains readable");
             assert_eq!(
                 projection.phase,
-                InstallationState::Active,
+                LifecyclePublicState::Active,
                 "the {label} refresh must not demote the prior catalog"
             );
             assert!(
@@ -5760,6 +5896,7 @@ supports_threads = true
         port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate fixture extension");
@@ -5850,10 +5987,11 @@ supports_threads = true
                 .activate_with_prechecked_credentials_for_test(
                     package_ref.clone(),
                     ExtensionActivationMode::Static,
+                    &lifecycle_owner(),
                 )
                 .await
                 .unwrap_or_else(|error| panic!("activation attempt {attempt} failed: {error}"));
-            assert_eq!(response.phase, InstallationState::Active);
+            assert_eq!(response.phase, LifecyclePublicState::Active);
         }
         assert!(
             active_registry
@@ -5919,6 +6057,7 @@ supports_threads = true
         port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate fixture extension");
@@ -5957,6 +6096,7 @@ supports_threads = true
         port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate fixture extension");
@@ -5981,7 +6121,7 @@ supports_threads = true
             &installation_store,
             &restored_lifecycle,
             &restored_active_extensions,
-            &port.tenant_operator_user_id,
+            &lifecycle_owner(),
         )
         .await
         .expect("restore enabled extension lifecycle state");
@@ -6134,6 +6274,7 @@ output_schema_ref = "schemas/search.output.json"
         port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate fixture extension");
@@ -6184,7 +6325,7 @@ output_schema_ref = "schemas/search.output.json"
             &installation_store,
             &restored_lifecycle,
             &restored_active_extensions,
-            &port.tenant_operator_user_id,
+            &lifecycle_owner(),
         )
         .await
         .expect("restore succeeds by skipping the orphan installation");
@@ -6228,6 +6369,7 @@ output_schema_ref = "schemas/search.output.json"
         port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate fixture extension");
@@ -6253,7 +6395,7 @@ output_schema_ref = "schemas/search.output.json"
             &installation_store,
             &restored_lifecycle,
             &restored_active_extensions,
-            &port.tenant_operator_user_id,
+            &lifecycle_owner(),
         )
         .await
         .expect("restore extension lifecycle state");
@@ -6279,6 +6421,7 @@ output_schema_ref = "schemas/search.output.json"
         port.activate_with_prechecked_credentials_for_test(
             package_ref,
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate fixture extension");
@@ -6307,7 +6450,7 @@ output_schema_ref = "schemas/search.output.json"
             &installation_store,
             &restored_lifecycle,
             &restored_active_extensions,
-            &port.tenant_operator_user_id,
+            &lifecycle_owner(),
         )
         .await
         .expect("host-bundled manifest hash mismatch migrates");
@@ -6428,7 +6571,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("search extensions");
-        assert_eq!(search.phase, InstallationState::Installed);
+        assert_eq!(search.phase, LifecyclePublicState::SetupNeeded);
         let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
             search.payload.as_ref()
         else {
@@ -6468,7 +6611,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("install extension");
-        assert_eq!(install.phase, InstallationState::Active);
+        assert_eq!(install.phase, LifecyclePublicState::Active);
         assert!(
             storage_root
                 .join("system/extensions/github/manifest.toml")
@@ -6504,7 +6647,10 @@ output_schema_ref = "schemas/search.output.json"
             .iter()
             .find(|extension| extension.summary.package_ref.id.as_str() == "github")
             .expect("github search result");
-        assert_eq!(github.installation_phase, Some(InstallationState::Active));
+        assert_eq!(
+            github.installation_phase,
+            Some(LifecyclePublicState::Active)
+        );
         assert!(
             github.summary.credential_requirements.is_empty(),
             "active GitHub search results must not expose satisfied PAT requirements"
@@ -6552,7 +6698,10 @@ output_schema_ref = "schemas/search.output.json"
             .iter()
             .find(|extension| extension.summary.package_ref.id.as_str() == "github")
             .expect("github search result");
-        assert_eq!(github.installation_phase, Some(InstallationState::Active));
+        assert_eq!(
+            github.installation_phase,
+            Some(LifecyclePublicState::Active)
+        );
         assert!(
             github.summary.credential_requirements.is_empty(),
             "active GitHub search results must not expose satisfied PAT requirements"
@@ -6569,7 +6718,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("remove extension");
-        assert_eq!(remove.phase, InstallationState::Removed);
+        assert_eq!(remove.phase, LifecyclePublicState::Uninstalled);
         assert!(
             active_registry
                 .snapshot()
@@ -6628,7 +6777,7 @@ output_schema_ref = "schemas/search.output.json"
             .await
             .expect("missing product-auth account is a typed readiness outcome");
 
-        assert_eq!(response.phase, InstallationState::Installed);
+        assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
         assert!(matches!(
             response.payload,
             Some(LifecycleProductPayload::ExtensionInstall {
@@ -6678,6 +6827,56 @@ output_schema_ref = "schemas/search.output.json"
     }
 
     #[tokio::test]
+    async fn setup_needed_search_projects_catalog_capability_metadata() {
+        let (_dir, _storage_root, facade, _active_registry, _installation_store) =
+            github_extension_lifecycle_fixture();
+
+        let search = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionSearch {
+                    query: "google calendar".to_string(),
+                },
+            )
+            .await
+            .expect("search setup-needed extension");
+
+        assert_eq!(search.phase, LifecyclePublicState::SetupNeeded);
+        let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) = search.payload
+        else {
+            panic!("expected extension search payload");
+        };
+        let calendar = extensions
+            .into_iter()
+            .find(|extension| extension.summary.package_ref.id.as_str() == "google-calendar")
+            .expect("google-calendar catalog result");
+        assert!(
+            calendar
+                .summary
+                .visible_capability_ids
+                .iter()
+                .any(|capability_id| capability_id == "google-calendar.create_event"),
+            "setup-needed projection must retain catalog-visible write capabilities"
+        );
+        assert!(
+            calendar
+                .summary
+                .visible_read_only_capability_ids
+                .iter()
+                .any(|capability_id| capability_id == "google-calendar.list_events"),
+            "setup-needed projection must retain catalog read-only metadata"
+        );
+        assert!(
+            !calendar
+                .summary
+                .visible_read_only_capability_ids
+                .iter()
+                .any(|capability_id| capability_id == "google-calendar.create_event"),
+            "catalog read-only projection must not include write capabilities"
+        );
+    }
+
+    #[tokio::test]
     async fn lifecycle_facade_installs_hosted_mcp_with_runtime_egress() {
         let (_dir, _storage_root, facade, active_registry, _installation_store) =
             extension_lifecycle_fixture_with_catalog_and_service(
@@ -6698,12 +6897,33 @@ output_schema_ref = "schemas/search.output.json"
             .await
             .expect("hosted MCP install should use discovery egress");
 
-        assert_eq!(install.phase, InstallationState::Active);
+        assert_eq!(install.phase, LifecyclePublicState::Active);
         assert!(
             active_registry
                 .snapshot()
                 .get_capability(&CapabilityId::new("notion.live-search").unwrap())
                 .is_some()
+        );
+
+        let listed = facade
+            .execute(
+                lifecycle_surface_context(),
+                LifecycleProductAction::ExtensionList,
+            )
+            .await
+            .expect("list active hosted MCP extension");
+        let Some(LifecycleProductPayload::ExtensionList { extensions, .. }) = listed.payload else {
+            panic!("expected extension list payload");
+        };
+        let notion = extensions
+            .into_iter()
+            .find(|extension| extension.summary.package_ref.id.as_str() == "notion")
+            .expect("installed Notion extension");
+        assert_eq!(notion.phase, LifecyclePublicState::Active);
+        assert_eq!(
+            notion.summary.visible_capability_ids,
+            vec!["notion.live-search"],
+            "active hosted MCP projections must expose the discovered runtime contract"
         );
     }
 
@@ -6723,7 +6943,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("search extensions");
-        assert_eq!(search.phase, InstallationState::Installed);
+        assert_eq!(search.phase, LifecyclePublicState::SetupNeeded);
         let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
             search.payload.as_ref()
         else {
@@ -6780,7 +7000,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("search Gmail extension");
-        assert_eq!(search.phase, InstallationState::Installed);
+        assert_eq!(search.phase, LifecyclePublicState::SetupNeeded);
         let Some(LifecycleProductPayload::ExtensionSearch { extensions, .. }) =
             search.payload.as_ref()
         else {
@@ -6819,7 +7039,7 @@ output_schema_ref = "schemas/search.output.json"
                 )
                 .await
                 .expect("install extension");
-            assert_eq!(install.phase, InstallationState::Active);
+            assert_eq!(install.phase, LifecyclePublicState::Active);
         }
         for path in [
             "system/extensions/google-calendar/manifest.toml",
@@ -6861,7 +7081,7 @@ output_schema_ref = "schemas/search.output.json"
                 )
                 .await
                 .expect("remove extension");
-            assert_eq!(remove.phase, InstallationState::Removed);
+            assert_eq!(remove.phase, LifecyclePublicState::Uninstalled);
         }
         assert!(
             active_registry
@@ -6930,7 +7150,7 @@ output_schema_ref = "schemas/search.output.json"
             .await
             .expect("same-member install retry is idempotent");
 
-        assert_eq!(retry.phase, InstallationState::Active);
+        assert_eq!(retry.phase, LifecyclePublicState::Active);
         assert_eq!(
             std::fs::read(wasm_path).expect("installed module remains"),
             b"existing-live-module"
@@ -6971,7 +7191,6 @@ output_schema_ref = "schemas/search.output.json"
                 test_extension_trust_policy(),
             ),
             None,
-            lifecycle_owner(),
         );
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "fixture")
             .expect("valid ref");
@@ -7149,6 +7368,7 @@ output_schema_ref = "schemas/search.output.json"
         port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate extension");
@@ -7209,6 +7429,7 @@ output_schema_ref = "schemas/search.output.json"
         port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate extension");
@@ -7274,6 +7495,7 @@ output_schema_ref = "schemas/search.output.json"
         port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate extension");
@@ -7309,13 +7531,13 @@ output_schema_ref = "schemas/search.output.json"
             .await
             .expect("extension projection");
 
-        assert_eq!(response.phase, InstallationState::Removed);
+        assert_eq!(response.phase, LifecyclePublicState::Uninstalled);
         let Some(LifecycleProductPayload::ExtensionList { extensions, count }) = response.payload
         else {
             panic!("expected extension list projection");
         };
         assert_eq!(count, 1);
-        assert_eq!(extensions[0].phase, InstallationState::Removed);
+        assert_eq!(extensions[0].phase, LifecyclePublicState::Uninstalled);
         assert_eq!(extensions[0].summary.package_ref.id.as_str(), "fixture");
     }
 
@@ -7512,7 +7734,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("remove github via the WebUI facade");
-        assert_eq!(remove.phase, InstallationState::Removed);
+        assert_eq!(remove.phase, LifecyclePublicState::Uninstalled);
         let retry = facade
             .execute(
                 lifecycle_surface_context(),
@@ -7520,7 +7742,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("retry removal after github is absent");
-        assert_eq!(retry.phase, InstallationState::Removed);
+        assert_eq!(retry.phase, LifecyclePublicState::Uninstalled);
         assert!(matches!(
             retry.payload,
             Some(LifecycleProductPayload::ExtensionRemove { removed: false })
@@ -7615,7 +7837,6 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&installed_port.lifecycle_service),
             installed_port.active_extensions.clone(),
             Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
-            lifecycle_owner(),
         );
         let removal_scope = hosted_mcp_scope("lifecycle-owner");
         let response = port
@@ -7670,7 +7891,6 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&installed_port.lifecycle_service),
             installed_port.active_extensions.clone(),
             Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
-            lifecycle_owner(),
         );
         let error = port
             .remove(
@@ -7766,7 +7986,6 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&base_port.lifecycle_service),
             base_port.active_extensions.clone(),
             Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
-            lifecycle_owner(),
         );
         repair_port
             .remove(
@@ -7793,7 +8012,6 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&base_port.lifecycle_service),
             base_port.active_extensions.clone(),
             Some(cleanup.clone() as Arc<dyn ExtensionCredentialCleanup>),
-            lifecycle_owner(),
         );
         no_catalog_port
             .remove(
@@ -7832,6 +8050,7 @@ output_schema_ref = "schemas/search.output.json"
         port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate github");
@@ -7849,7 +8068,6 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&port.lifecycle_service),
             port.active_extensions.clone(),
             Some(cleanup as Arc<dyn ExtensionCredentialCleanup>),
-            lifecycle_owner(),
         );
         let removal_scope = hosted_mcp_scope("lifecycle-owner");
         retry_port
@@ -7902,6 +8120,7 @@ output_schema_ref = "schemas/search.output.json"
         port.activate_with_prechecked_credentials_for_test(
             package_ref.clone(),
             ExtensionActivationMode::Static,
+            &lifecycle_owner(),
         )
         .await
         .expect("activate github");
@@ -7924,7 +8143,6 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&port.lifecycle_service),
             port.active_extensions.clone(),
             None,
-            lifecycle_owner(),
         );
         let removal_scope = hosted_mcp_scope("lifecycle-owner");
         repair_port
@@ -7988,7 +8206,6 @@ output_schema_ref = "schemas/search.output.json"
             Arc::clone(&port.lifecycle_service),
             port.active_extensions.clone(),
             None,
-            lifecycle_owner(),
         );
         let removal_scope = hosted_mcp_scope("lifecycle-owner");
         repair_port
@@ -8037,7 +8254,7 @@ output_schema_ref = "schemas/search.output.json"
             )
             .await
             .expect("remove gmail via the WebUI facade");
-        assert_eq!(remove.phase, InstallationState::Removed);
+        assert_eq!(remove.phase, LifecyclePublicState::Uninstalled);
 
         let requests = cleanup.requests.lock().expect("cleanup lock");
         assert!(
@@ -8122,7 +8339,6 @@ output_schema_ref = "schemas/search.output.json"
                     test_extension_trust_policy(),
                 ),
                 None,
-                lifecycle_owner(),
             )
             .with_removal_cleanup_registry(removal_cleanup),
         );
@@ -8170,7 +8386,6 @@ output_schema_ref = "schemas/search.output.json"
                 test_extension_trust_policy(),
             ),
             Some(credential_cleanup),
-            lifecycle_owner(),
         ));
         (dir, extension_management)
     }
@@ -8373,7 +8588,6 @@ output_schema_ref = "schemas/search.output.json"
                 Arc::clone(&trust_policy),
             ),
             None,
-            lifecycle_owner(),
         ));
         (
             dir,
@@ -8434,7 +8648,6 @@ output_schema_ref = "schemas/search.output.json"
                     test_extension_trust_policy(),
                 ),
                 None,
-                lifecycle_owner(),
             )
             .with_provider_instance_readiness(provider_instance_readiness),
         );
@@ -8586,7 +8799,6 @@ output_schema_ref = "schemas/search.output.json"
                 test_extension_trust_policy(),
             ),
             credential_cleanup,
-            lifecycle_owner(),
         )
         .with_removal_cleanup_registry(removal_cleanup);
         if let Some(slot) = channel_connection_slot {
@@ -8694,7 +8906,6 @@ output_schema_ref = "schemas/search.output.json"
                 Arc::clone(&trust_policy),
             ),
             None,
-            lifecycle_owner(),
         );
         (dir, port, active_registry, failing_store, trust_policy)
     }
@@ -8743,7 +8954,6 @@ output_schema_ref = "schemas/search.output.json"
                 Arc::clone(&trust_policy),
             ),
             None,
-            lifecycle_owner(),
         );
         (dir, port, active_registry, installation_store, trust_policy)
     }
@@ -9308,7 +9518,7 @@ output_schema_ref = "schemas/search.output.json"
             scope: ironclaw_auth::AuthProductScope::new(
                 ResourceScope::local_default(
                     UserId::new("credential-user").expect("valid user"),
-                    InvocationId::new(),
+                    InvocationId::from_uuid(uuid::Uuid::nil()),
                 )
                 .expect("valid scope"),
                 ironclaw_auth::AuthSurface::Api,

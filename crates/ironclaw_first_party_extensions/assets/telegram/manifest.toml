@@ -36,7 +36,7 @@ conversation_model = "continuous"
 [channel.connection]
 provider = "telegram"
 strategy = "web_generated_code"
-instructions = "Pair your Telegram account from the IronClaw pairing panel by opening its link, scanning its QR code, or sending the displayed code to the bot."
+instructions = "Pair your Telegram account from the IronClaw pairing panel by opening its link, scanning its QR code, or sending /start followed by the displayed code to the bot."
 input_placeholder = ""
 submit_label = "Open pairing"
 error_message = "Telegram pairing failed. Get a fresh code and try again."

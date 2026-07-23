@@ -91,9 +91,9 @@ pub struct CurrentDeliveryTarget {
 /// Product-owned routing plan for a trigger's authoritative final-reply
 /// destination.
 ///
-/// Composition resolves the opaque registry id to
-/// [`RunFinalReplyDestination`] and delegates that typed value here. This is
-/// the one place that defines WebApp as history-only: it must never be
+/// The product-owned trigger router resolves the opaque registry id through
+/// [`CurrentDeliveryTargetResolver`] and delegates the typed destination here.
+/// This is the one place that defines WebApp as history-only: it must never be
 /// collapsed into an absent external target, because absence means the
 /// creator's communication preference should be consulted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,7 +207,12 @@ enum TriggeredDeliveryStage {
 struct TriggeredEventLedger {
     active: HashSet<TriggeredDeliveryStage>,
     delivered: HashSet<TriggeredDeliveryStage>,
-    cleanup: Vec<DeliveredChannelMessage>,
+    cleanup: Vec<PendingTriggeredCleanup>,
+}
+
+struct PendingTriggeredCleanup {
+    message: DeliveredChannelMessage,
+    attempt_ordinal: u32,
 }
 
 /// Event-driven owner for one settled trigger fire. It retains routing
@@ -244,6 +249,35 @@ impl TriggeredRunDeliveryEventHandler {
         &self,
         event: &TurnLifecycleEvent,
     ) -> Result<bool, RunDeliveryError> {
+        match self.handle_event_inner(event).await {
+            Err(error)
+                if matches!(
+                    event.kind,
+                    TurnEventKind::Completed | TurnEventKind::Failed | TurnEventKind::Cancelled
+                ) =>
+            {
+                tracing::warn!(
+                    target = "ironclaw::reborn::run_delivery",
+                    run_id = %event.run_id,
+                    %error,
+                    "triggered terminal delivery failed; recording a terminal failed outcome"
+                );
+                record_triggered_run_outcome_strict(
+                    self.delivery_store.as_ref(),
+                    event.run_id,
+                    TriggeredRunDeliveryOutcomeKind::Failed,
+                )
+                .await?;
+                Ok(self.retract_cleanup(&event.scope, event.run_id).await)
+            }
+            result => result,
+        }
+    }
+
+    async fn handle_event_inner(
+        &self,
+        event: &TurnLifecycleEvent,
+    ) -> Result<bool, RunDeliveryError> {
         if event.run_id != self.request.run_id || event.scope != self.request.scope {
             return Ok(false);
         }
@@ -263,14 +297,14 @@ impl TriggeredRunDeliveryEventHandler {
             return Ok(false);
         }
         if matches!(state.status, TurnStatus::Failed | TurnStatus::Cancelled) {
-            self.retract_cleanup(&state.scope, state.run_id).await;
+            let cleanup_settled = self.retract_cleanup(&state.scope, state.run_id).await;
             record_triggered_run_outcome(
                 self.delivery_store.as_ref(),
                 state.run_id,
                 TriggeredRunDeliveryOutcomeKind::Failed,
             )
             .await;
-            return Ok(true);
+            return Ok(cleanup_settled);
         }
         if !matches!(
             state.status,
@@ -297,6 +331,9 @@ impl TriggeredRunDeliveryEventHandler {
             TurnStatus::Completed => TriggeredDeliveryStage::Final,
             _ => return Ok(false),
         };
+        if stage == TriggeredDeliveryStage::Final && self.stage_was_delivered(&stage) {
+            return Ok(self.retract_cleanup(&state.scope, state.run_id).await);
+        }
         if !self.claim(&stage) {
             return Ok(false);
         }
@@ -335,7 +372,7 @@ impl TriggeredRunDeliveryEventHandler {
                         TriggeredRunDeliveryOutcomeKind::Skipped,
                     )
                     .await;
-                    return Ok(true);
+                    return Ok(self.retract_cleanup(&state.scope, state.run_id).await);
                 }
                 return Ok(false);
             }
@@ -392,30 +429,30 @@ impl TriggeredRunDeliveryEventHandler {
                     .await;
                     return Ok(false);
                 }
-                self.retract_cleanup(&state.scope, state.run_id).await;
+                let cleanup_settled = self.retract_cleanup(&state.scope, state.run_id).await;
                 record_triggered_run_outcome(
                     self.delivery_store.as_ref(),
                     state.run_id,
                     TriggeredRunDeliveryOutcomeKind::Delivered,
                 )
                 .await;
-                Ok(true)
+                Ok(cleanup_settled)
             }
             Err(TriggeredNotificationFailure::OAuthTargetNotDm) => {
-                let outcome = self
+                let (outcome, cleanup_settled) = self
                     .cancel_and_deliver_auth_unavailable(&state, &actor, &context, &trigger_label)
                     .await;
                 self.finish_claim(stage, true);
                 record_triggered_run_outcome(self.delivery_store.as_ref(), state.run_id, outcome)
                     .await;
-                Ok(true)
+                Ok(cleanup_settled)
             }
             Err(failure) => {
                 self.finish_claim(stage, true);
                 let outcome = triggered_failure_outcome(&failure);
                 record_triggered_run_outcome(self.delivery_store.as_ref(), state.run_id, outcome)
                     .await;
-                Ok(true)
+                Ok(self.retract_cleanup(&state.scope, state.run_id).await)
             }
         }
     }
@@ -439,6 +476,14 @@ impl TriggeredRunDeliveryEventHandler {
         }
     }
 
+    fn stage_was_delivered(&self, stage: &TriggeredDeliveryStage) -> bool {
+        self.ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .delivered
+            .contains(stage)
+    }
+
     async fn replace_cleanup(
         &self,
         scope: &TurnScope,
@@ -450,14 +495,33 @@ impl TriggeredRunDeliveryEventHandler {
                 .ledger
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            std::mem::replace(&mut ledger.cleanup, delivered)
+            std::mem::replace(
+                &mut ledger.cleanup,
+                delivered
+                    .into_iter()
+                    .map(|message| PendingTriggeredCleanup {
+                        message,
+                        attempt_ordinal: 0,
+                    })
+                    .collect(),
+            )
         };
+        let mut retry = Vec::new();
         for message in previous {
-            self.retract_if_current(scope, run_id, message).await;
+            if let Some(message) = self.retract_if_current(scope, run_id, message).await {
+                retry.push(message);
+            }
+        }
+        if !retry.is_empty() {
+            self.ledger
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .cleanup
+                .extend(retry);
         }
     }
 
-    async fn retract_cleanup(&self, scope: &TurnScope, run_id: TurnRunId) {
+    async fn retract_cleanup(&self, scope: &TurnScope, run_id: TurnRunId) -> bool {
         let cleanup = {
             let mut ledger = self
                 .ledger
@@ -465,31 +529,84 @@ impl TriggeredRunDeliveryEventHandler {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             std::mem::take(&mut ledger.cleanup)
         };
+        let mut retry = Vec::new();
         for message in cleanup {
-            self.retract_if_current(scope, run_id, message).await;
+            if let Some(message) = self.retract_if_current(scope, run_id, message).await {
+                retry.push(message);
+            }
         }
+        let settled = retry.is_empty();
+        if !settled {
+            self.ledger
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .cleanup
+                .extend(retry);
+        }
+        settled
     }
 
     async fn retract_if_current(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-        message: DeliveredChannelMessage,
-    ) {
+        pending: PendingTriggeredCleanup,
+    ) -> Option<PendingTriggeredCleanup> {
+        let message = &pending.message;
         let actor = TurnActor::new(self.request.creator_user_id.clone());
-        let Ok(Some(target)) = self
+        let target = match self
             .current_target_resolver
             .resolve_current_target(scope, &actor, &message.reply_target_binding_ref)
             .await
-        else {
-            return;
+        {
+            Ok(Some(target)) => target,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::run_delivery",
+                    run_id = %run_id,
+                    %error,
+                    "triggered cleanup target resolution failed; retaining cleanup responsibility"
+                );
+                return Some(pending);
+            }
         };
         if target.external_conversation_ref != message.conversation {
-            return;
+            return None;
         }
-        self.services
-            .retract_message(scope.clone(), Some(run_id), message)
-            .await;
+        match self
+            .services
+            .retract_message_outcome(
+                scope.clone(),
+                Some(run_id),
+                pending.message.clone(),
+                pending.attempt_ordinal,
+            )
+            .await
+        {
+            Ok(CoordinatedDeliveryOutcome::Delivered { .. }) => None,
+            Ok(
+                CoordinatedDeliveryOutcome::NoDelivery
+                | CoordinatedDeliveryOutcome::Rejected { .. }
+                | CoordinatedDeliveryOutcome::DuplicateSuppressed { .. }
+                | CoordinatedDeliveryOutcome::Failed { .. },
+            ) => Some(PendingTriggeredCleanup {
+                message: pending.message,
+                attempt_ordinal: pending.attempt_ordinal.saturating_add(1),
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::run_delivery",
+                    run_id = %run_id,
+                    %error,
+                    "triggered cleanup delivery failed; retaining cleanup responsibility"
+                );
+                Some(PendingTriggeredCleanup {
+                    message: pending.message,
+                    attempt_ordinal: pending.attempt_ordinal.saturating_add(1),
+                })
+            }
+        }
     }
 
     async fn cancel_and_deliver_auth_unavailable(
@@ -498,7 +615,7 @@ impl TriggeredRunDeliveryEventHandler {
         actor: &TurnActor,
         context: &TriggeredNotificationContext<'_>,
         trigger_label: &str,
-    ) -> TriggeredRunDeliveryOutcomeKind {
+    ) -> (TriggeredRunDeliveryOutcomeKind, bool) {
         if cancel_auth_blocked_run(
             self.services.turn_coordinator.as_ref(),
             self.services.auth_flow_cancel.as_deref(),
@@ -510,7 +627,8 @@ impl TriggeredRunDeliveryEventHandler {
         .await
         .is_err()
         {
-            return TriggeredRunDeliveryOutcomeKind::Failed;
+            let cleanup_settled = self.retract_cleanup(&state.scope, state.run_id).await;
+            return (TriggeredRunDeliveryOutcomeKind::Failed, cleanup_settled);
         }
         let notice = TriggeredNotification {
             event_kind: RunNotificationEventKind::FinalReplyReady,
@@ -527,8 +645,8 @@ impl TriggeredRunDeliveryEventHandler {
             Ok(_) => TriggeredRunDeliveryOutcomeKind::Delivered,
             Err(failure) => triggered_failure_outcome(&failure),
         };
-        self.retract_cleanup(&state.scope, state.run_id).await;
-        outcome
+        let cleanup_settled = self.retract_cleanup(&state.scope, state.run_id).await;
+        (outcome, cleanup_settled)
     }
 }
 
@@ -912,12 +1030,7 @@ async fn record_triggered_run_outcome(
     run_id: TurnRunId,
     outcome: TriggeredRunDeliveryOutcomeKind,
 ) {
-    let record = TriggeredRunDeliveryRecord {
-        run_id,
-        outcome,
-        recorded_at: Utc::now(),
-    };
-    if let Err(error) = store.record_triggered_run_delivery(record).await {
+    if let Err(error) = record_triggered_run_outcome_strict(store, run_id, outcome).await {
         tracing::warn!(
             target = "ironclaw::reborn::run_delivery",
             %run_id,
@@ -925,6 +1038,22 @@ async fn record_triggered_run_outcome(
             "failed to record triggered run delivery outcome (best-effort)"
         );
     }
+}
+
+async fn record_triggered_run_outcome_strict(
+    store: &dyn TriggeredRunDeliveryStore,
+    run_id: TurnRunId,
+    outcome: TriggeredRunDeliveryOutcomeKind,
+) -> Result<(), RunDeliveryError> {
+    let record = TriggeredRunDeliveryRecord {
+        run_id,
+        outcome,
+        recorded_at: Utc::now(),
+    };
+    store
+        .record_triggered_run_delivery(record)
+        .await
+        .map_err(|reason| ProductWorkflowError::Transient { reason }.into())
 }
 
 /// Reply-target authority for triggered-run delivery: trusts the target the

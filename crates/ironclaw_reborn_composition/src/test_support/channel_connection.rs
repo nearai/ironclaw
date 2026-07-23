@@ -10,8 +10,9 @@
 //! `RebornLocalRuntimeServices::channel_disconnect_slot`, the same
 //! slot `build_reborn_runtime` fills in production, so
 //! `builtin.extension_remove` of a channel extension runs the REAL per-caller
-//! disconnect (revoke personal vendor credential → vendor cleanup → delete
-//! identity bindings) instead of skipping it on an empty slot.
+//! disconnect (revoke personal vendor credential → vendor cleanup →
+//! caller-owned conversation cleanup → delete identity bindings) instead of
+//! skipping it on an empty slot.
 //!
 //! [`ChannelConnectionTestBundle::connect_provider_user`] mirrors the
 //! successful OAuth callback's identity-binding write: it drives
@@ -119,6 +120,11 @@ pub fn build_channel_connection_for_test(
         .product_auth
         .clone()
         .map(|auth| auth as Arc<dyn ChannelAccountStatusReader>);
+    let workflow_filesystem: Arc<dyn ironclaw_filesystem::RootFilesystem> =
+        local_runtime.extension_filesystem.clone();
+    let workflow_state = Arc::new(ironclaw_product_workflow::ChannelWorkflowStateService::new(
+        workflow_filesystem,
+    ));
     let facade: Arc<dyn ChannelConnectionFacade> = Arc::new(GenericChannelConnectionFacade::new(
         tenant_id.clone(),
         Vec::new(),
@@ -129,6 +135,7 @@ pub fn build_channel_connection_for_test(
         credential_cleanup,
         account_status_reader,
         local_runtime.channel_dm_target_store.clone(),
+        workflow_state,
         None,
     ));
     if local_runtime

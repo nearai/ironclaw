@@ -29,7 +29,7 @@ pub(crate) struct RecipeAuthChallengeProvider {
 }
 
 impl RecipeAuthChallengeProvider {
-    pub(crate) fn new(
+    pub(crate) fn compose(
         product_auth: Option<Arc<dyn AuthChallengeProvider>>,
         pairing: Option<Arc<ChannelPairingRegistry>>,
     ) -> Option<Arc<dyn AuthChallengeProvider>> {

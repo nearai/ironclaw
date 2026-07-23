@@ -4,11 +4,11 @@ use ironclaw_auth::{
     AuthProductScope, AuthProviderId, AuthSurface, CredentialAccount, CredentialAccountStatus,
     CredentialAccountUpdateBinding,
 };
-use ironclaw_host_api::{ExtensionId, InstallationState, InvocationId, ResourceScope};
+use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope};
 use ironclaw_product_workflow::{
     ExtensionCredentialSetupService, ExtensionCredentialSubmitRequest, LifecyclePackageKind,
-    LifecyclePackageRef, LifecycleProductPayload, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind,
+    LifecyclePackageRef, LifecycleProductPayload, LifecyclePublicState, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind,
 };
 use secrecy::{ExposeSecret, SecretString};
 
@@ -262,13 +262,7 @@ pub(crate) async fn bootstrap_nearai_mcp(
     );
     if installed {
         match phase {
-            InstallationState::Active | InstallationState::Installed => {}
-            InstallationState::Disabled => {
-                tracing::debug!(
-                    "NEAR AI MCP credentials are present, but the extension is disabled; preserving explicit disabled state"
-                );
-                return Ok(NearAiMcpBootstrapOutcome::SkippedDisabled);
-            }
+            LifecyclePublicState::Active | LifecyclePublicState::SetupNeeded => {}
             other => {
                 tracing::debug!(
                     phase = ?other,
@@ -356,7 +350,7 @@ pub(crate) async fn bootstrap_nearai_mcp(
     // A not-installed (just installed above) or an installed-but-inactive
     // extension activates; an already-active one only reports its credential
     // outcome.
-    if !installed || phase == InstallationState::Installed {
+    if !installed || phase == LifecyclePublicState::SetupNeeded {
         extension_management
             .activate_with_credential_gate(
                 package_ref,

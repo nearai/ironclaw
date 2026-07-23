@@ -1419,7 +1419,6 @@ registerPack("pt-BR", {
   "pairing.connectFromExtensions": "Conecte {name} pela página Extensões para continuar.",
   "pairing.checkCodeAndRetry": "Pareamento falhou. Confira o código e tente novamente.",
   "pairing.resumeFailed": "{name} foi conectado, mas este chat não pôde continuar. Recarregue a página para seguir.",
-  "extensions.channelInstalledSetup": "{name} instalado. Conecte a conta usando o painel de configuração abaixo.",
   "extensions.authUrlHttpsRequired": "A URL de autenticação deve usar HTTPS.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "Configurado; deixe em branco para manter",

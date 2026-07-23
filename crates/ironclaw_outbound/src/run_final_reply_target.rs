@@ -1,8 +1,9 @@
 use async_trait::async_trait;
-pub use ironclaw_host_api::OutboundDeliveryTargetId;
 use ironclaw_host_api::{ResourceScope, RunId, UserId};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
+
+use crate::OutboundDeliveryTargetId;
 
 /// Stable id for the host-owned WebApp final-reply destination.
 pub const WEB_APP_OUTBOUND_DELIVERY_TARGET_ID: &str = "builtin:web_app";

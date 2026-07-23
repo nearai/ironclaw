@@ -400,7 +400,8 @@ where
                         revision,
                         expected_revision,
                     );
-                    let retired_revisions = record.retired_revisions.iter().copied().collect();
+                    let retired_revisions: Vec<u64> =
+                        record.retired_revisions.iter().copied().collect();
                     Ok(CasApply::new(
                         record,
                         ReserveCasOutcome {
@@ -587,7 +588,8 @@ where
                     record.values = previous_values.clone();
                     record.replays.remove(&key);
                     record.retired_revisions.insert(failed_revision);
-                    let retired_revisions = record.retired_revisions.iter().copied().collect();
+                    let retired_revisions: Vec<u64> =
+                        record.retired_revisions.iter().copied().collect();
                     Ok(CasApply::new(record, retired_revisions))
                 })();
                 async move { outcome }

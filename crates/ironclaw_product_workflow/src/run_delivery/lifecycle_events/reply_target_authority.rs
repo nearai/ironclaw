@@ -64,9 +64,9 @@ impl ReplyTargetBindingValidator for LiveReplyTargetAuthority {
                         ProductWorkflowError::Transient { .. } => OutboundError::Backend,
                         _ => OutboundError::AccessDenied,
                     })?;
-                if !current
+                if current
                     .as_ref()
-                    .is_some_and(|current| current.extension_id == *expected_extension_id)
+                    .is_none_or(|current| current.extension_id != *expected_extension_id)
                 {
                     return Err(OutboundError::AccessDenied);
                 }

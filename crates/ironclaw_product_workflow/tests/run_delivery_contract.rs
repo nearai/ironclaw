@@ -5,7 +5,7 @@
 //! The channel-level regression net (the vendor e2e scenarios through the
 //! real ingress mount) re-points onto these components at the cutover.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,9 +16,9 @@ use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_outbound::{
     CommunicationModality, CommunicationPreferenceRecord, CommunicationPreferenceRepository,
     DeliveredGateRouteStore, DeliveryDefaultScope, FilesystemOutboundStateStore,
-    OutboundStateStore, RunFinalReplyDestination, TriggerCommunicationContext, TriggerFireSlot,
-    TriggerOriginRef, TriggerSourceKind, TriggeredRunDeliveryOutcomeKind,
-    TriggeredRunDeliveryStore,
+    OutboundStateStore, RunDeliveryCleanupRequest, RunFinalReplyDestination,
+    RunFinalReplyTargetRecord, TriggerCommunicationContext, TriggerFireSlot, TriggerOriginRef,
+    TriggerSourceKind, TriggeredRunDeliveryOutcomeKind, TriggeredRunDeliveryStore,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, AuthPromptChallengeKind, AuthPromptView, AuthRequirement,
@@ -395,6 +395,7 @@ impl BlockedAuthPromptSource for StaticAuthPromptSource {
 }
 
 struct StaticTriggeredTargetResolver {
+    extension_id: String,
     conversation: ExternalConversationRef,
     personal_dm: bool,
     available: AtomicBool,
@@ -418,7 +419,7 @@ impl CurrentDeliveryTargetResolver for StaticTriggeredTargetResolver {
             return Ok(None);
         }
         Ok(Some(CurrentDeliveryTarget {
-            extension_id: EXTENSION_ID.to_string(),
+            extension_id: self.extension_id.clone(),
             external_conversation_ref: self.conversation.clone(),
             personal_direct_message: self.personal_dm,
         }))
@@ -579,6 +580,23 @@ fn build_harness_with_binding(
     auth_url: Option<&str>,
     binding: ironclaw_product_workflow::ResolvedBinding,
 ) -> Harness {
+    let blocked_auth_prompts = auth_url.map(|url| {
+        Arc::new(StaticAuthPromptSource {
+            challenge_kind: AuthPromptChallengeKind::OAuthUrl,
+            authorization_url: Some(url.to_string()),
+            pairing: None,
+            body_override: None,
+        }) as Arc<dyn BlockedAuthPromptSource>
+    });
+    build_harness_with_prompt(states, bind_fails, blocked_auth_prompts, binding)
+}
+
+fn build_harness_with_prompt(
+    states: Vec<ScriptedRunState>,
+    bind_fails: bool,
+    blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
+    binding: ironclaw_product_workflow::ResolvedBinding,
+) -> Harness {
     let adapter = Arc::new(RecordingChannelAdapter::new());
     let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
     let route_store =
@@ -610,14 +628,7 @@ fn build_harness_with_binding(
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
         approval_context: None,
-        blocked_auth_prompts: auth_url.map(|url| {
-            Arc::new(StaticAuthPromptSource {
-                challenge_kind: AuthPromptChallengeKind::OAuthUrl,
-                authorization_url: Some(url.to_string()),
-                pairing: None,
-                body_override: None,
-            }) as Arc<dyn BlockedAuthPromptSource>
-        }),
+        blocked_auth_prompts,
         auth_flow_cancel: None,
     };
     let connection_notices = ChannelConnectionNoticePolicy::generic("Acme");
@@ -985,6 +996,122 @@ async fn observer_busy_hint_deduplicates_per_conversation_event_pair() {
     assert_eq!(harness.adapter.texts().len(), 2, "fresh event, fresh hint");
 }
 
+#[tokio::test]
+async fn observer_busy_hint_reprojects_oauth_challenge_for_direct_channel() {
+    let harness = build_harness(
+        vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("auth:busy-oauth"),
+        )],
+        false,
+        Some("https://provider.example/oauth"),
+    );
+    let active_run = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-busy-oauth"),
+            ProductInboundAck::RejectedBusy {
+                accepted_message_ref: AcceptedMessageRef::new("msg:busy-oauth").expect("ref"),
+                active_run_id: Some(active_run),
+            },
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1);
+    assert!(
+        texts[0].contains("Setup link: https://provider.example/oauth"),
+        "the typed OAuth challenge must remain actionable: {}",
+        texts[0]
+    );
+    assert!(texts[0].contains("auth deny auth:busy-oauth"));
+}
+
+#[tokio::test]
+async fn observer_busy_hint_reprojects_pairing_code_and_deep_link_for_direct_channel() {
+    let harness = build_harness_with_prompt(
+        vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("auth:busy-pairing"),
+        )],
+        false,
+        Some(Arc::new(StaticAuthPromptSource {
+            challenge_kind: AuthPromptChallengeKind::Pairing,
+            authorization_url: None,
+            pairing: Some(PairingPromptView {
+                channel: "fixture".to_string(),
+                display_name: "Fixture Chat".to_string(),
+                instructions: "Open the link or send `/start <code>` to the configured bot."
+                    .to_string(),
+                code: "BUSY42AB".to_string(),
+                deep_link: Some("https://example.test/start=BUSY42AB".to_string()),
+                expires_at: chrono::DateTime::parse_from_rfc3339("2030-01-01T00:00:00Z")
+                    .expect("expiry")
+                    .with_timezone(&Utc),
+            }),
+            body_override: None,
+        })),
+        binding(),
+    );
+    let active_run = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::DirectChat, "evt-busy-pairing"),
+            ProductInboundAck::RejectedBusy {
+                accepted_message_ref: AcceptedMessageRef::new("msg:busy-pairing").expect("ref"),
+                active_run_id: Some(active_run),
+            },
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1);
+    assert!(
+        texts[0].contains("BUSY42AB"),
+        "missing pairing code: {}",
+        texts[0]
+    );
+    assert!(
+        texts[0].contains("https://example.test/start=BUSY42AB"),
+        "missing pairing deep link: {}",
+        texts[0]
+    );
+    assert!(texts[0].contains("`/start <code>`"));
+}
+
+#[tokio::test]
+async fn observer_busy_hint_does_not_expose_auth_authority_in_shared_channel() {
+    let harness = build_harness(
+        vec![scripted_state(
+            TurnStatus::BlockedAuth,
+            Some("auth:busy-shared"),
+        )],
+        false,
+        Some("https://provider.example/private-oauth"),
+    );
+    let active_run = TurnRunId::new();
+
+    harness
+        .observer
+        .observe_ack(
+            user_message_envelope(ProductTriggerReason::BotMention, "evt-busy-shared"),
+            ProductInboundAck::RejectedBusy {
+                accepted_message_ref: AcceptedMessageRef::new("msg:busy-shared").expect("ref"),
+                active_run_id: Some(active_run),
+            },
+        )
+        .await;
+
+    let texts = harness.adapter.texts();
+    assert_eq!(texts.len(), 1);
+    assert!(texts[0].contains("private authorization step"));
+    assert!(!texts[0].contains("private-oauth"));
+}
+
 // ── Triggered rows ─────────────────────────────────────────────────────────
 
 fn trigger_context() -> TriggerCommunicationContext {
@@ -1108,6 +1235,7 @@ fn build_triggered_harness_with_prompt(
         auth_flow_cancel: None,
     };
     let target_resolver = Arc::new(StaticTriggeredTargetResolver {
+        extension_id: EXTENSION_ID.to_string(),
         conversation: ExternalConversationRef::new(Some("space-1"), "dm-creator", None, None)
             .expect("conversation"),
         personal_dm: personal_dm_target,
@@ -1153,6 +1281,7 @@ async fn seed_preference(
 struct EventTurnCoordinator {
     state: Mutex<TurnRunState>,
     cancel_calls: AtomicUsize,
+    fail_next_get_run_state: AtomicBool,
 }
 
 impl EventTurnCoordinator {
@@ -1160,6 +1289,7 @@ impl EventTurnCoordinator {
         Self {
             state: Mutex::new(state),
             cancel_calls: AtomicUsize::new(0),
+            fail_next_get_run_state: AtomicBool::new(false),
         }
     }
 
@@ -1173,6 +1303,10 @@ impl EventTurnCoordinator {
 
     fn cancel_call_count(&self) -> usize {
         self.cancel_calls.load(Ordering::SeqCst)
+    }
+
+    fn fail_next_get_run_state(&self) {
+        self.fail_next_get_run_state.store(true, Ordering::SeqCst);
     }
 }
 
@@ -1219,7 +1353,119 @@ impl TurnCoordinator for EventTurnCoordinator {
     }
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        if self.fail_next_get_run_state.swap(false, Ordering::SeqCst) {
+            return Err(TurnError::Unavailable {
+                reason: "event fixture state is transiently unavailable".to_string(),
+            });
+        }
         Ok(self.state.lock().expect("event state").clone())
+    }
+}
+
+struct RunMapTurnCoordinator {
+    states: HashMap<TurnRunId, TurnRunState>,
+}
+
+#[async_trait]
+impl TurnCoordinator for RunMapTurnCoordinator {
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "run-map fixture does not prepare turns".to_string(),
+        })
+    }
+
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "run-map fixture does not submit turns".to_string(),
+        })
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "run-map fixture does not resume turns".to_string(),
+        })
+    }
+
+    async fn retry_turn(&self, _request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "run-map fixture does not retry turns".to_string(),
+        })
+    }
+
+    async fn cancel_run(&self, _request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "run-map fixture does not cancel turns".to_string(),
+        })
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        self.states
+            .get(&request.run_id)
+            .filter(|state| state.scope == request.scope)
+            .cloned()
+            .ok_or(TurnError::ScopeNotFound)
+    }
+}
+
+struct FailNextGetRunStateCoordinator {
+    inner: Arc<EventTurnCoordinator>,
+    fail_next: AtomicBool,
+}
+
+impl FailNextGetRunStateCoordinator {
+    fn new(inner: Arc<EventTurnCoordinator>) -> Self {
+        Self {
+            inner,
+            fail_next: AtomicBool::new(false),
+        }
+    }
+
+    fn fail_next_get_run_state(&self) {
+        self.fail_next.store(true, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl TurnCoordinator for FailNextGetRunStateCoordinator {
+    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        self.inner.prepare_turn(scope).await
+    }
+
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.inner.submit_turn(request).await
+    }
+
+    async fn resume_turn(
+        &self,
+        request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        self.inner.resume_turn(request).await
+    }
+
+    async fn retry_turn(&self, request: RetryTurnRequest) -> Result<RetryTurnResponse, TurnError> {
+        self.inner.retry_turn(request).await
+    }
+
+    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        self.inner.cancel_run(request).await
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(TurnError::Unavailable {
+                reason: "source owner is transiently unavailable".to_string(),
+            });
+        }
+        self.inner.get_run_state(request).await
     }
 }
 
@@ -1490,6 +1736,34 @@ fn build_event_delivery_handler(
     store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
 ) -> Arc<RunDeliveryEventHandler> {
+    build_event_delivery_handler_for_extension(
+        turns,
+        binding,
+        adapter,
+        threads,
+        store,
+        blocked_auth_prompts,
+        EXTENSION_ID,
+        "install_alpha",
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_event_delivery_handler_for_extension<T>(
+    turns: Arc<T>,
+    binding: Arc<EffectiveMembershipBindingService>,
+    adapter: Arc<RecordingChannelAdapter>,
+    threads: Arc<InMemorySessionThreadService>,
+    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
+    blocked_auth_prompts: Option<Arc<dyn BlockedAuthPromptSource>>,
+    extension_id: &str,
+    installation_id: &str,
+    current_target_resolver: Option<Arc<dyn CurrentDeliveryTargetResolver>>,
+) -> Arc<RunDeliveryEventHandler>
+where
+    T: TurnCoordinator + 'static,
+{
     let coordinator = Arc::new(DeliveryCoordinator::new(
         Arc::clone(&store) as Arc<dyn OutboundStateStore>,
         Arc::new(StaticResolver {
@@ -1510,17 +1784,17 @@ fn build_event_delivery_handler(
         route_store: Arc::clone(&store) as Arc<dyn DeliveredGateRouteStore>,
         communication_preferences: Arc::clone(&store) as Arc<dyn CommunicationPreferenceRepository>,
         coordinator,
-        extension_id: EXTENSION_ID.to_string(),
+        extension_id: extension_id.to_string(),
         fallback_notice_scope: fallback_scope(),
         approval_context: None,
         blocked_auth_prompts,
         auth_flow_cancel: None,
     };
-    Arc::new(RunDeliveryEventHandler::new(
-        services,
-        EXTENSION_ID,
-        "install_alpha",
-    ))
+    let handler = RunDeliveryEventHandler::new(services, extension_id, installation_id);
+    Arc::new(match current_target_resolver {
+        Some(resolver) => handler.with_current_target_resolver(resolver),
+        None => handler,
+    })
 }
 
 impl EventDeliveryHarness {
@@ -1539,6 +1813,7 @@ struct TriggeredLifecycleHarness {
     router: Arc<RunDeliveryEventRouter>,
     turns: Arc<EventTurnCoordinator>,
     adapter: Arc<RecordingChannelAdapter>,
+    store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     delivery_store: Arc<FilesystemOutboundStateStore<ironclaw_filesystem::InMemoryBackend>>,
     threads: Arc<InMemorySessionThreadService>,
     target_resolver: Arc<StaticTriggeredTargetResolver>,
@@ -1585,10 +1860,16 @@ fn build_triggered_lifecycle_harness() -> TriggeredLifecycleHarness {
         extension_id: EXTENSION_ID.to_string(),
         fallback_notice_scope: fallback_scope(),
         approval_context: None,
-        blocked_auth_prompts: None,
+        blocked_auth_prompts: Some(Arc::new(StaticAuthPromptSource {
+            challenge_kind: AuthPromptChallengeKind::OAuthUrl,
+            authorization_url: Some("https://provider.example/trigger-oauth".to_string()),
+            pairing: None,
+            body_override: None,
+        })),
         auth_flow_cancel: None,
     };
     let target_resolver = Arc::new(StaticTriggeredTargetResolver {
+        extension_id: EXTENSION_ID.to_string(),
         conversation: ExternalConversationRef::new(Some("space-1"), "dm-creator", None, None)
             .expect("conversation"),
         personal_dm: true,
@@ -1607,6 +1888,7 @@ fn build_triggered_lifecycle_harness() -> TriggeredLifecycleHarness {
         router,
         turns,
         adapter,
+        store,
         delivery_store,
         threads,
         target_resolver,
@@ -1653,6 +1935,207 @@ async fn triggered_delivery_waits_for_lifecycle_event_without_timeout_and_dedupl
     assert_eq!(
         wait_for_outcome(&harness.delivery_store, harness.run_id).await,
         TriggeredRunDeliveryOutcomeKind::Delivered
+    );
+}
+
+#[tokio::test]
+async fn triggered_terminal_cleanup_retries_without_resending_the_final_reply() {
+    let harness = build_triggered_lifecycle_harness();
+    seed_preference(&harness.store).await;
+    harness.register().await;
+
+    let blocked = harness.turns.transition(
+        TurnStatus::BlockedAuth,
+        Some("gate:auth-trigger-cleanup"),
+        2,
+    );
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.publish(blocked, TurnEventKind::Blocked),
+    )
+    .await
+    .expect("auth prompt delivery completes");
+    let blocked_outcome = harness
+        .delivery_store
+        .load_triggered_run_delivery(harness.run_id)
+        .await
+        .expect("load blocked outcome");
+    assert_eq!(
+        harness.adapter.texts().len(),
+        1,
+        "auth prompt delivered; recorded outcome={blocked_outcome:?}, envelopes={:?}",
+        harness.adapter.envelopes()
+    );
+
+    seed_final_message(&harness.threads, harness.run_id, "scheduled result").await;
+    harness.adapter.reports.lock().expect("reports").extend([
+        DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Sent {
+                vendor_message_ref: Some("final-result-ref".to_string()),
+            }],
+        },
+        DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Retryable {
+                reason: "provider temporarily unavailable".to_string(),
+            }],
+        },
+        DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Retryable {
+                reason: "provider still unavailable".to_string(),
+            }],
+        },
+    ]);
+    let completed = harness.turns.transition(TurnStatus::Completed, None, 3);
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.publish(completed.clone(), TurnEventKind::Completed),
+    )
+    .await
+    .expect("final delivery and bounded cleanup attempt complete");
+
+    assert_eq!(harness.adapter.texts().len(), 2, "final reply sent once");
+    assert_eq!(
+        harness.adapter.retracted_refs().len(),
+        2,
+        "the coordinator exhausted its bounded retry policy"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.publish(completed.clone(), TurnEventKind::Completed),
+    )
+    .await
+    .expect("terminal replay retries retained cleanup");
+    assert_eq!(
+        harness.adapter.texts().len(),
+        2,
+        "cleanup retry must not resend the final reply"
+    );
+    assert_eq!(
+        harness.adapter.retracted_refs().len(),
+        3,
+        "the retained cleanup responsibility is retried on terminal replay"
+    );
+
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        harness.publish(completed, TurnEventKind::Completed),
+    )
+    .await
+    .expect("settled cleanup releases handler");
+    assert_eq!(
+        harness.adapter.retracted_refs().len(),
+        3,
+        "successful cleanup releases the triggered handler"
+    );
+}
+
+#[tokio::test]
+async fn triggered_final_failure_retries_cleanup_without_resending_the_final_reply() {
+    let harness = build_triggered_lifecycle_harness();
+    seed_preference(&harness.store).await;
+    harness.register().await;
+
+    let blocked = harness.turns.transition(
+        TurnStatus::BlockedAuth,
+        Some("gate:auth-trigger-final-failure"),
+        2,
+    );
+    harness.publish(blocked, TurnEventKind::Blocked).await;
+    assert_eq!(harness.adapter.texts().len(), 1, "auth prompt delivered");
+
+    seed_final_message(&harness.threads, harness.run_id, "scheduled result").await;
+    harness.adapter.reports.lock().expect("reports").extend([
+        DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Retryable {
+                reason: "final delivery temporarily unavailable".to_string(),
+            }],
+        },
+        DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Retryable {
+                reason: "final delivery still unavailable".to_string(),
+            }],
+        },
+        DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Retryable {
+                reason: "cleanup temporarily unavailable".to_string(),
+            }],
+        },
+        DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Retryable {
+                reason: "cleanup still unavailable".to_string(),
+            }],
+        },
+    ]);
+    let completed = harness.turns.transition(TurnStatus::Completed, None, 3);
+    harness
+        .publish(completed.clone(), TurnEventKind::Completed)
+        .await;
+
+    assert_eq!(
+        harness.adapter.texts().len(),
+        3,
+        "the final reply uses only its first bounded delivery attempt"
+    );
+    assert_eq!(
+        harness.adapter.retracted_refs().len(),
+        2,
+        "terminal final failure still attempts bounded cleanup"
+    );
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, harness.run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed
+    );
+
+    harness
+        .publish(completed.clone(), TurnEventKind::Completed)
+        .await;
+    assert_eq!(
+        harness.adapter.texts().len(),
+        3,
+        "cleanup replay must not resend the failed final reply"
+    );
+    assert_eq!(
+        harness.adapter.retracted_refs().len(),
+        3,
+        "cleanup responsibility remains registered until delivery succeeds"
+    );
+
+    harness.publish(completed, TurnEventKind::Completed).await;
+    assert_eq!(
+        harness.adapter.retracted_refs().len(),
+        3,
+        "settled cleanup releases the triggered handler"
+    );
+}
+
+#[tokio::test]
+async fn terminal_triggered_event_error_records_failed_and_releases_handler() {
+    let harness = build_triggered_lifecycle_harness();
+    harness.register().await;
+    let completed = harness.turns.transition(TurnStatus::Completed, None, 2);
+    harness.turns.fail_next_get_run_state();
+
+    harness
+        .publish(completed.clone(), TurnEventKind::Completed)
+        .await;
+    assert_eq!(
+        wait_for_outcome(&harness.delivery_store, harness.run_id).await,
+        TriggeredRunDeliveryOutcomeKind::Failed,
+        "a one-shot terminal event error must become a durable failed outcome"
+    );
+
+    seed_final_message(
+        &harness.threads,
+        harness.run_id,
+        "must not deliver after terminal failure",
+    )
+    .await;
+    harness.publish(completed, TurnEventKind::Completed).await;
+
+    assert!(
+        harness.adapter.texts().is_empty(),
+        "the failed terminal handler must be released rather than retained for a duplicate event"
     );
 }
 
@@ -1821,6 +2304,31 @@ async fn post_admission_reconciliation_does_not_duplicate_initial_working_notice
             .count(),
         2,
         "one initial working notice plus one resumed-cycle notice"
+    );
+}
+
+#[tokio::test]
+async fn live_delivery_ledger_keeps_only_latest_stage_and_purges_terminal_run() {
+    let harness = build_event_delivery_harness(None, ProductConversationRouteKind::Direct);
+    let submitted = harness.turns.transition(TurnStatus::Running, None, 1);
+    harness.publish(submitted, TurnEventKind::Submitted).await;
+    for cursor in 2..=8 {
+        let resumed = harness.turns.transition(TurnStatus::Running, None, cursor);
+        harness.publish(resumed, TurnEventKind::Resumed).await;
+    }
+
+    assert_eq!(
+        harness._handler.delivered_claim_count_for_test(),
+        1,
+        "canonical state makes older delivered stages obsolete"
+    );
+
+    let failed = harness.turns.transition(TurnStatus::Failed, None, 9);
+    harness.publish(failed, TurnEventKind::Failed).await;
+    assert_eq!(
+        harness._handler.delivered_claim_count_for_test(),
+        0,
+        "terminal runs must not remain retained in the in-memory ledger"
     );
 }
 
@@ -2001,6 +2509,379 @@ async fn channel_removal_or_unpairing_revokes_delayed_delivery() {
     let completed = second.turns.transition(TurnStatus::Completed, None, 2);
     second.publish(completed, TurnEventKind::Completed).await;
     assert!(second.adapter.texts().is_empty());
+}
+
+#[tokio::test]
+async fn durable_handoff_drain_reaches_later_page_when_first_page_is_deferred() {
+    const HANDOFF_COUNT: u64 = 257;
+
+    let mut states = HashMap::new();
+    let mut events = Vec::new();
+    let mut deliverable_run_id = None;
+    for cursor in 1..=HANDOFF_COUNT {
+        let run_id = TurnRunId::new();
+        let mut state = event_run_state(run_id, ProductConversationRouteKind::Direct);
+        state.status = TurnStatus::Completed;
+        state.event_cursor = EventCursor(cursor);
+        if cursor < HANDOFF_COUNT {
+            state.product_context = None;
+        } else {
+            deliverable_run_id = Some(run_id);
+        }
+        events.push(TurnLifecycleEvent::from_run_state(
+            &state,
+            TurnEventKind::Completed,
+            None,
+        ));
+        states.insert(run_id, state);
+    }
+    let deliverable_run_id = deliverable_run_id.expect("deliverable run");
+    let turns = Arc::new(RunMapTurnCoordinator { states });
+    let binding = Arc::new(EffectiveMembershipBindingService::new(
+        ProductConversationRouteKind::Direct,
+    ));
+    let adapter = Arc::new(RecordingChannelAdapter::new());
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    seed_final_message(&threads, deliverable_run_id, "later page reply").await;
+    let store = Arc::new(ironclaw_outbound::test_support::in_memory_backed_outbound_state_store());
+    let handler = build_event_delivery_handler_for_extension(
+        turns,
+        binding,
+        Arc::clone(&adapter),
+        threads,
+        Arc::clone(&store),
+        None,
+        EXTENSION_ID,
+        "install_alpha",
+        None,
+    );
+    let event_log = Arc::new(StaticDurableTurnEventLog::new(events));
+    let router = RunDeliveryEventRouter::new(
+        event_log as Arc<dyn TurnEventProjectionSource>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+    );
+    router.register(EXTENSION_ID, &handler);
+    router.wait_until_durable_replay_idle().await;
+
+    assert_eq!(
+        adapter.texts(),
+        vec!["later page reply"],
+        "a full first page without progress must not starve a later deliverable handoff"
+    );
+}
+
+#[tokio::test]
+async fn cross_channel_handoff_stays_pending_when_source_cleanup_fails_then_reopen_converges_without_duplicate_destination_send()
+ {
+    const DESTINATION_EXTENSION_ID: &str = "a-destination";
+
+    let run_id = TurnRunId::new();
+    let turns = Arc::new(EventTurnCoordinator::new(event_run_state(
+        run_id,
+        ProductConversationRouteKind::Direct,
+    )));
+    let source_turns = Arc::new(FailNextGetRunStateCoordinator::new(Arc::clone(&turns)));
+    let binding = Arc::new(EffectiveMembershipBindingService::new(
+        ProductConversationRouteKind::Direct,
+    ));
+    let source_adapter = Arc::new(RecordingChannelAdapter::new());
+    let destination_adapter = Arc::new(RecordingChannelAdapter::new());
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let filesystem = ironclaw_outbound::test_support::in_memory_backed_outbound_filesystem();
+    #[allow(clippy::disallowed_methods)]
+    let store = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(&filesystem)));
+    let source_handler = build_event_delivery_handler_for_extension(
+        Arc::clone(&source_turns),
+        Arc::clone(&binding),
+        Arc::clone(&source_adapter),
+        Arc::clone(&threads),
+        Arc::clone(&store),
+        None,
+        EXTENSION_ID,
+        "install_alpha",
+        None,
+    );
+
+    let source_router = RunDeliveryEventRouter::new_ephemeral_for_test();
+    source_router.register(EXTENSION_ID, &source_handler);
+    let running = turns.transition(TurnStatus::Running, None, 1);
+    source_router
+        .publish(TurnLifecycleEvent::from_run_state(
+            &running,
+            TurnEventKind::Submitted,
+            None,
+        ))
+        .await
+        .expect("publish source progress event");
+    source_router.wait_until_run_idle(run_id).await;
+    assert_eq!(
+        source_adapter.texts(),
+        vec!["Ironclaw is thinking..."],
+        "the source owner has a placeholder that completion must retract"
+    );
+
+    let target_ref =
+        ReplyTargetBindingRef::new("reply:test:cross-channel").expect("destination target");
+    let completed = turns.transition(TurnStatus::Completed, None, 2);
+    store
+        .put_run_final_reply_target(RunFinalReplyTargetRecord {
+            run_id,
+            scope: completed.scope.clone(),
+            actor: completed.actor.clone().expect("completed run actor"),
+            destination: RunFinalReplyDestination::External {
+                reply_target_binding_ref: target_ref,
+            },
+        })
+        .await
+        .expect("persist explicit destination");
+    seed_final_message(&threads, run_id, "routed reply").await;
+
+    let destination_resolver = Arc::new(StaticTriggeredTargetResolver {
+        extension_id: DESTINATION_EXTENSION_ID.to_string(),
+        conversation: ExternalConversationRef::new(
+            Some("destination-space"),
+            "destination-conversation",
+            None,
+            None,
+        )
+        .expect("destination conversation"),
+        personal_dm: true,
+        available: AtomicBool::new(true),
+    });
+    let destination_handler = build_event_delivery_handler_for_extension(
+        Arc::clone(&turns),
+        Arc::clone(&binding),
+        Arc::clone(&destination_adapter),
+        Arc::clone(&threads),
+        Arc::clone(&store),
+        None,
+        DESTINATION_EXTENSION_ID,
+        "install_destination",
+        Some(Arc::clone(&destination_resolver) as Arc<dyn CurrentDeliveryTargetResolver>),
+    );
+    let event_log = Arc::new(StaticDurableTurnEventLog::new(vec![
+        TurnLifecycleEvent::from_run_state(&completed, TurnEventKind::Completed, None),
+    ]));
+    let replay_router = RunDeliveryEventRouter::new(
+        Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+    );
+    // Destination registration can race source graph startup. A destination
+    // send alone cannot settle the handoff while source cleanup is absent.
+    replay_router.register(DESTINATION_EXTENSION_ID, &destination_handler);
+    replay_router.wait_until_durable_replay_idle().await;
+
+    assert_eq!(destination_adapter.texts(), vec!["routed reply"]);
+    assert!(
+        source_adapter.retracted_refs().is_empty(),
+        "the source owner is not registered yet"
+    );
+    assert_eq!(
+        store
+            .list_pending_run_final_reply_handoffs(16)
+            .await
+            .expect("pending handoffs")
+            .len(),
+        1,
+        "destination delivery must not discard an absent source owner's cleanup"
+    );
+
+    // Registry iteration order is intentionally unspecified. Every live owner
+    // must be visited and the handoff cannot settle while any owner defers.
+    source_turns.fail_next_get_run_state();
+    replay_router.register(EXTENSION_ID, &source_handler);
+    replay_router.wait_until_durable_replay_idle().await;
+
+    assert_eq!(
+        destination_adapter.texts(),
+        vec!["routed reply"],
+        "source registration must not duplicate the settled destination send"
+    );
+    assert!(
+        source_adapter.retracted_refs().is_empty(),
+        "the transiently unavailable source owner has not cleaned up yet"
+    );
+    assert_eq!(
+        store
+            .list_pending_run_final_reply_handoffs(16)
+            .await
+            .expect("pending handoffs")
+            .len(),
+        1,
+        "one settled owner must not discard another owner's retryable cleanup"
+    );
+
+    #[allow(clippy::disallowed_methods)]
+    let reopened_store = Arc::new(FilesystemOutboundStateStore::new(Arc::clone(&filesystem)));
+    let reopened_turns = Arc::new(EventTurnCoordinator::new(completed.clone()));
+    let reopened_source_handler = build_event_delivery_handler(
+        Arc::clone(&reopened_turns),
+        Arc::clone(&binding),
+        Arc::clone(&source_adapter),
+        Arc::clone(&threads),
+        Arc::clone(&reopened_store),
+        None,
+    );
+    let reopened_destination_handler = build_event_delivery_handler_for_extension(
+        Arc::clone(&reopened_turns),
+        Arc::clone(&binding),
+        Arc::clone(&destination_adapter),
+        Arc::clone(&threads),
+        Arc::clone(&reopened_store),
+        None,
+        DESTINATION_EXTENSION_ID,
+        "install_destination",
+        Some(Arc::clone(&destination_resolver) as Arc<dyn CurrentDeliveryTargetResolver>),
+    );
+    let reopened_router = RunDeliveryEventRouter::new(
+        Arc::clone(&event_log) as Arc<dyn TurnEventProjectionSource>,
+        Arc::clone(&reopened_store) as Arc<dyn OutboundStateStore>,
+    );
+    source_adapter.reports.lock().expect("reports").extend([
+        DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Retryable {
+                reason: "cleanup temporarily unavailable".to_string(),
+            }],
+        },
+        DeliveryReport {
+            parts: vec![PartDeliveryOutcome::Retryable {
+                reason: "cleanup still unavailable".to_string(),
+            }],
+        },
+    ]);
+    reopened_router.register(DESTINATION_EXTENSION_ID, &reopened_destination_handler);
+    reopened_router.wait_until_durable_replay_idle().await;
+    reopened_router.register(EXTENSION_ID, &reopened_source_handler);
+    reopened_router.wait_until_durable_replay_idle().await;
+
+    assert_eq!(
+        destination_adapter.texts(),
+        vec!["routed reply"],
+        "the deterministic destination attempt must suppress a duplicate send on reopen"
+    );
+    assert_eq!(
+        source_adapter.retracted_refs().len(),
+        2,
+        "the coordinator exhausts one bounded cleanup attempt"
+    );
+    assert_eq!(
+        source_adapter.texts(),
+        vec!["Ironclaw is thinking..."],
+        "the explicit result must not be duplicated to the source"
+    );
+    assert_eq!(
+        reopened_store
+            .list_pending_run_final_reply_handoffs(16)
+            .await
+            .expect("pending handoffs")
+            .len(),
+        1,
+        "a failed provider cleanup must keep the cross-channel handoff pending"
+    );
+    let cleanup_request = RunDeliveryCleanupRequest {
+        scope: completed.scope.clone(),
+        run_id,
+        adapter: RunOriginAdapter::new(EXTENSION_ID).expect("source adapter"),
+    };
+    assert_eq!(
+        reopened_store
+            .load_run_delivery_cleanup(cleanup_request.clone())
+            .await
+            .expect("durable cleanup records")
+            .len(),
+        1,
+        "a failed provider cleanup must retain its durable message reference"
+    );
+    let first_cleanup_attempt_ids = source_adapter
+        .envelopes()
+        .into_iter()
+        .filter(|envelope| {
+            envelope
+                .parts
+                .iter()
+                .any(|part| matches!(part, OutboundPart::Retract { .. }))
+        })
+        .map(|envelope| envelope.delivery_attempt_id)
+        .collect::<Vec<_>>();
+    assert_eq!(first_cleanup_attempt_ids.len(), 2);
+    assert_eq!(
+        first_cleanup_attempt_ids[0], first_cleanup_attempt_ids[1],
+        "bounded provider retries belong to one durable delivery attempt"
+    );
+
+    #[allow(clippy::disallowed_methods)]
+    let settled_store = Arc::new(FilesystemOutboundStateStore::new(filesystem));
+    let settled_turns = Arc::new(EventTurnCoordinator::new(completed.clone()));
+    let settled_source_handler = build_event_delivery_handler(
+        Arc::clone(&settled_turns),
+        Arc::clone(&binding),
+        Arc::clone(&source_adapter),
+        Arc::clone(&threads),
+        Arc::clone(&settled_store),
+        None,
+    );
+    let settled_destination_handler = build_event_delivery_handler_for_extension(
+        Arc::clone(&settled_turns),
+        Arc::clone(&binding),
+        Arc::clone(&destination_adapter),
+        Arc::clone(&threads),
+        Arc::clone(&settled_store),
+        None,
+        DESTINATION_EXTENSION_ID,
+        "install_destination",
+        Some(destination_resolver as Arc<dyn CurrentDeliveryTargetResolver>),
+    );
+    let settled_router = RunDeliveryEventRouter::new(
+        event_log as Arc<dyn TurnEventProjectionSource>,
+        Arc::clone(&settled_store) as Arc<dyn OutboundStateStore>,
+    );
+    settled_router.register(DESTINATION_EXTENSION_ID, &settled_destination_handler);
+    settled_router.wait_until_durable_replay_idle().await;
+    settled_router.register(EXTENSION_ID, &settled_source_handler);
+    settled_router.wait_until_durable_replay_idle().await;
+
+    assert_eq!(
+        destination_adapter.texts(),
+        vec!["routed reply"],
+        "cleanup retry must not duplicate the settled destination send"
+    );
+    assert_eq!(
+        source_adapter.retracted_refs().len(),
+        3,
+        "the recovered source owner retries and settles its cleanup"
+    );
+    let cleanup_attempt_ids = source_adapter
+        .envelopes()
+        .into_iter()
+        .filter(|envelope| {
+            envelope
+                .parts
+                .iter()
+                .any(|part| matches!(part, OutboundPart::Retract { .. }))
+        })
+        .map(|envelope| envelope.delivery_attempt_id)
+        .collect::<Vec<_>>();
+    assert_eq!(cleanup_attempt_ids.len(), 3);
+    assert_ne!(
+        cleanup_attempt_ids[1], cleanup_attempt_ids[2],
+        "a later intentional cleanup retry gets a fresh delivery attempt id"
+    );
+    assert!(
+        settled_store
+            .load_run_delivery_cleanup(cleanup_request)
+            .await
+            .expect("settled cleanup records")
+            .is_empty(),
+        "successful retry completes the durable cleanup record"
+    );
+    assert!(
+        settled_store
+            .list_pending_run_final_reply_handoffs(16)
+            .await
+            .expect("pending handoffs")
+            .is_empty(),
+        "the handoff settles after every required owner converges"
+    );
 }
 
 #[tokio::test]
@@ -2226,6 +3107,66 @@ async fn permanent_channel_failure_is_terminal_across_later_recovery() {
             .expect("pending handoffs")
             .is_empty()
     );
+
+    // Terminal evidence is scoped to this exact run/projection. A later,
+    // independent run using the same channel must still reach the provider;
+    // the old permanent result must neither retry nor poison future sends.
+    let later_run_id = TurnRunId::new();
+    let later_turns = Arc::new(EventTurnCoordinator::new(event_run_state(
+        later_run_id,
+        ProductConversationRouteKind::Direct,
+    )));
+    let later_completed = later_turns.transition(TurnStatus::Completed, None, 3);
+    let later_event_log = Arc::new(StaticDurableTurnEventLog::new(vec![
+        TurnLifecycleEvent::from_run_state(&later_completed, TurnEventKind::Completed, None),
+    ]));
+    let later_binding = Arc::new(EffectiveMembershipBindingService::new(
+        ProductConversationRouteKind::Direct,
+    ));
+    let later_threads = Arc::new(InMemorySessionThreadService::default());
+    seed_final_message(&later_threads, later_run_id, "later channel reply").await;
+    let later_handler = build_event_delivery_handler(
+        later_turns,
+        later_binding,
+        Arc::clone(&adapter),
+        later_threads,
+        Arc::clone(&store),
+        None,
+    );
+    let later_router = RunDeliveryEventRouter::new(
+        later_event_log as Arc<dyn TurnEventProjectionSource>,
+        Arc::clone(&store) as Arc<dyn OutboundStateStore>,
+    );
+    later_router.register(EXTENSION_ID, &later_handler);
+    later_router.wait_until_durable_replay_idle().await;
+
+    assert_eq!(
+        adapter.envelopes().len(),
+        2,
+        "the later independent run must make one fresh provider call"
+    );
+    let attempts = store
+        .list_delivery_attempts(binding_scope())
+        .await
+        .expect("delivery attempts");
+    let original_attempt = attempts
+        .iter()
+        .find(|attempt| attempt.candidate.turn_run_id == Some(run_id))
+        .expect("original run attempt");
+    assert_eq!(
+        original_attempt.status,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed,
+        "the original permanent result remains terminal and nonduplicated"
+    );
+    let later_attempt = attempts
+        .iter()
+        .find(|attempt| attempt.candidate.turn_run_id == Some(later_run_id))
+        .expect("later run attempt");
+    assert_eq!(
+        later_attempt.status,
+        ironclaw_outbound::OutboundDeliveryStatus::Delivered,
+        "old terminal evidence must not poison a later run"
+    );
 }
 
 #[tokio::test]
@@ -2288,8 +3229,13 @@ async fn completed_reply_replay_settles_without_send_after_membership_removal() 
     assert_eq!(attempts.len(), 1);
     assert_eq!(
         attempts[0].status,
-        ironclaw_outbound::OutboundDeliveryStatus::Rejected,
+        ironclaw_outbound::OutboundDeliveryStatus::Failed,
         "current membership denial must be recorded as a durable terminal outcome"
+    );
+    assert_eq!(
+        attempts[0].failure_kind,
+        Some(ironclaw_outbound::DeliveryFailureKind::AuthorizationRevoked),
+        "the durable terminal failure must retain the authorization-denial reason"
     );
     assert!(
         store
@@ -2466,7 +3412,7 @@ async fn triggered_oauth_prompt_to_non_dm_target_cancels_and_notifies() {
 async fn triggered_non_serviceable_typed_auth_cancels_with_exact_safe_notice() {
     const GENERIC_NOTICE: &str = "This authentication step can't be completed in chat. Open the Ironclaw web app to review it, then ask me again here.";
     const MANUAL_TOKEN_NOTICE: &str = "Setting this up needs a credential (an API key or token). Sharing one here is a security risk — anything entered in chat is stored in the conversation — so credential-based connections can only be set up in the Ironclaw web app. Connect it there, then ask me again here.";
-    const TRIGGER_FOOTER: &str = "\n\n_From a triggered event: “watch the deploys”. To otherwise interact with this run, open the Ironclaw web app._";
+    const TRIGGER_FOOTER: &str = "\n\n_From a triggered event: “watch the deploys”. You can't interact with triggered events here — open the Ironclaw web app to interact with this run._";
     const PRIVATE_PROMPT_MATERIAL: &str = "private-prompt-material-must-not-be-echoed";
 
     for (challenge_kind, expected_notice) in [

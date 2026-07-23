@@ -333,14 +333,12 @@ pub(crate) fn build_webui_services_with_channel_connection(
         api = api.with_project_service(project_service);
     }
     if let Some(local_runtime) = &services.local_runtime {
-        api = api.with_outbound_preferences_facade(Arc::new(
-            RebornOutboundPreferencesFacade::new(
-                Arc::clone(&local_runtime.outbound_preferences),
-                Arc::new(OutboundDeliveryTargetRegistry::new(
-                    outbound_delivery_target_providers,
-                )),
-            ),
-        ));
+        api = api.with_outbound_preferences_facade(Arc::new(RebornOutboundPreferencesFacade::new(
+            Arc::clone(&local_runtime.outbound_preferences),
+            Arc::new(OutboundDeliveryTargetRegistry::new(
+                outbound_delivery_target_providers,
+            )),
+        )));
     } else if !outbound_delivery_target_providers.is_empty() {
         return Err(RebornBuildError::InvalidConfig {
             reason: "outbound delivery target providers require local runtime services".to_string(),

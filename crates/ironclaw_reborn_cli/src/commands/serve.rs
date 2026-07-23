@@ -1654,8 +1654,9 @@ slack_user_id = "U123"
             std::env::set_var(WEBUI_BASE_URL_ENV, "/");
         }
 
-        let error = webui_product_auth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 8080)), None)
-            .expect_err("slash-only base URL must fail closed");
+        let error =
+            webui_product_auth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 8080)), None)
+                .expect_err("slash-only base URL must fail closed");
         assert!(
             error.to_string().contains(WEBUI_BASE_URL_ENV),
             "error should name the invalid env var, got: {error}"
@@ -1673,8 +1674,9 @@ slack_user_id = "U123"
             std::env::set_var(WEBUI_BASE_URL_ENV, "http://configured.example");
         }
 
-        let error = webui_product_auth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 8080)), None)
-            .expect_err("public cleartext base URL must fail closed");
+        let error =
+            webui_product_auth_callback_origin(SocketAddr::from(([0, 0, 0, 0], 8080)), None)
+                .expect_err("public cleartext base URL must fail closed");
         let message = error.to_string();
         assert!(
             message.contains(WEBUI_BASE_URL_ENV),

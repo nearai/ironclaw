@@ -144,7 +144,7 @@ All pairing state in telegram host state (`/tenant-shared/telegram-pairing/`). T
 - Main-schema manifest (`[[product_adapter.inbound.host_ingress]]` shape) → replaced by the v3 manifest that already exists at `f8e7c72c3:crates/ironclaw_first_party_extensions/assets/telegram/manifest.toml` (same id, same handles, same route suffix, same presentation).
 - `ironclaw_telegram_v2_adapter` diffs against its #6116 descendant `ironclaw_telegram_extension` (the reconciliation already contains that port); keep main-side adapter changes at zero or near-zero.
 
-**#6116-side follow-up (for the fold, not built now):** `channel_connect_strategy()` in the target derives only OAuth-vs-`InboundProofCode`; it must derive `WebGeneratedCode` for Telegram from manifest data (a small generic-side change, no per-extension branch — e.g. a manifest connect hint or channel-config-derived rule). The `WebGeneratedCode` panel/frontend built now is the same one the target strategy will drive.
+**#6116-side follow-up (completed in the fold):** the target derives `WebGeneratedCode` directly from manifest data, with no per-extension branch. Unsupported pasted-proof and QR-only strategies were removed from the public vocabulary rather than retained as unimplemented promises.
 
 **Gates to respect now** (so the fold is mechanical): no retired-taxonomy names in anything new; no `telegram` strings outside the telegram module/crates/inventory (mirror the specificity-gate exemption boundaries even though the gate itself isn't on main).
 
@@ -223,7 +223,7 @@ Plus rewrite the 3 stale Telegram tests in `connect-and-use-other-integrations/t
 
 1. **Gate seam for channel connection**: an in-chat install by an unpaired channel caller must park the run through the manifest-declared channel-connection requirement (provider `telegram`). It ends as `TurnStatus::BlockedAuth` + fanout-resumable; satisfying the gate derives `active` without a public activation action.
 2. **Continuation event for pairing**: confirm `AuthContinuationEvent` (or the dispatcher entry point) can be emitted by a non-OAuth completion with provider `telegram` and `AuthContinuationRef::SetupOnly`/`LifecycleActivation` — the fanout itself is provider-keyed and agnostic.
-3. **Frontend `web_generated_code` handling**: does `channels-tab.tsx`/the connection panel already render this strategy (it handles `inbound_proof_code` and `admin_managed_channels`)? Pin the completion signal (poll vs SSE) to the existing panel mechanism.
+3. **Frontend `web_generated_code` handling**: route this strategy directly from the manifest to the host-generated code/deep-link/QR panel. Pin the completion signal (poll vs SSE) to the existing panel mechanism.
 4. **Single-manifest feasibility**: confirm main's manifest schema accepts a visible extension that declares `[[product_adapter.inbound.host_ingress]]` (visibility is only the `is_internal_extension_package_ref` code list — expected yes).
 5. **Idempotency seam** for duplicate `update_id` (what exactly dedups Slack retries today — workflow-level accepted-message idempotency vs runner-level).
 6. **Existing `telegram` references** in composition (`extension_removal_cleanup.rs`, `slack_actor_identity.rs`, `outbound_preferences.rs`, `communication_context.rs`) — reconcile rather than duplicate.

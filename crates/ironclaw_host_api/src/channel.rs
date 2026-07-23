@@ -191,10 +191,8 @@ impl ChannelDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelConnectionStrategy {
-    InboundProofCode,
     AdminManagedChannels,
     WebGeneratedCode,
-    QrCode,
     #[serde(rename = "oauth", alias = "o_auth")]
     OAuth,
 }
@@ -264,20 +262,13 @@ impl ChannelConnectionDescriptor {
         }
         if let Some(template) = &self.deep_link_template
             && (!template.contains("{code}")
-                || !matches!(
-                    self.strategy,
-                    ChannelConnectionStrategy::WebGeneratedCode | ChannelConnectionStrategy::QrCode
-                ))
+                || !matches!(self.strategy, ChannelConnectionStrategy::WebGeneratedCode))
         {
             return Err(ChannelDescriptorError::InvalidConnectionDeepLink);
         }
         if !self.inbound_code_prefixes.is_empty()
-            && (!matches!(
-                self.strategy,
-                ChannelConnectionStrategy::InboundProofCode
-                    | ChannelConnectionStrategy::WebGeneratedCode
-                    | ChannelConnectionStrategy::QrCode
-            ) || self.inbound_code_prefixes.len() > Self::MAX_INBOUND_CODE_PREFIXES)
+            && (!matches!(self.strategy, ChannelConnectionStrategy::WebGeneratedCode)
+                || self.inbound_code_prefixes.len() > Self::MAX_INBOUND_CODE_PREFIXES)
         {
             return Err(ChannelDescriptorError::InvalidConnectionCodePrefixes);
         }
@@ -409,7 +400,7 @@ pub enum ChannelDescriptorError {
     )]
     InvalidConnectionDeepLink,
     #[error(
-        "channel connection inbound_code_prefixes requires a proof-code strategy and at most 8 unique non-whitespace prefixes of at most 32 bytes"
+        "channel connection inbound_code_prefixes requires web_generated_code and at most 8 unique non-whitespace prefixes of at most 32 bytes"
     )]
     InvalidConnectionCodePrefixes,
     #[error(transparent)]
@@ -525,6 +516,18 @@ max_message_chars = 40000
             channel.validate().unwrap_err(),
             ChannelDescriptorError::InvalidConnectionCodePrefixes
         );
+    }
+
+    #[test]
+    fn unsupported_connection_strategies_are_rejected_during_manifest_parse() {
+        for strategy in ["inbound_proof_code", "qr_code"] {
+            let source =
+                generated_code_connection_toml("[]").replace("web_generated_code", strategy);
+            assert!(
+                toml::from_str::<ChannelDescriptor>(&source).is_err(),
+                "legacy strategy {strategy} must not deserialize"
+            );
+        }
     }
 
     #[test]

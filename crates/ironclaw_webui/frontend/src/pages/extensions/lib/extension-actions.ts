@@ -2,22 +2,14 @@
 export function primaryExtensionAction(ext) {
   const state = extensionLifecycleState(ext);
 
-  if (!ext?.package_ref || state === "active") {
-    return null;
-  }
-  return "configure";
+  return ext?.package_ref && state === "setup_needed" ? "configure" : null;
 }
 
 export function extensionLifecycleState(ext) {
-  const installationState = ext?.installation_state || ext?.installationState;
-  if (installationState) {
-    return installationState === "active" ? "active" : "setup_needed";
-  }
-  const onboardingState = ext?.onboarding_state || ext?.onboardingState;
-  if (onboardingState) {
-    return onboardingState === "active" ? "active" : "setup_needed";
-  }
-  return ext?.active && ext?.needs_setup !== true ? "active" : "setup_needed";
+  const installationState = ext?.installation_state;
+  return installationState === "active" || installationState === "setup_needed"
+    ? installationState
+    : "uninstalled";
 }
 
 export function extensionIsActive(ext) {

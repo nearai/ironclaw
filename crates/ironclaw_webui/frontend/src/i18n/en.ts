@@ -1469,7 +1469,6 @@ registerPack("en", {
   "pairing.connectFromExtensions": "Connect {name} from the Extensions page to continue.",
   "pairing.checkCodeAndRetry": "Pairing failed. Check the code and try again.",
   "pairing.resumeFailed": "{name} connected, but this chat couldn't continue. Reload the page to keep going.",
-  "extensions.channelInstalledSetup": "{name} installed. Connect the account using the setup panel below.",
   "extensions.authUrlHttpsRequired": "Authentication URL must use HTTPS.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "Configured; leave blank to keep",

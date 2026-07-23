@@ -4,13 +4,13 @@ use std::{
 };
 
 use async_trait::async_trait;
+pub use ironclaw_host_api::OutboundDeliveryTargetId;
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_turns::ReplyTargetBindingRef;
 use serde::{Deserialize, Serialize};
 
-use crate::{DeliveryTargetCapabilities, OutboundError};
+use crate::{DeliveryTargetCapabilities, OutboundError, RunFinalReplyDestination};
 
-const OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES: usize = 512;
 const OUTBOUND_DELIVERY_CHANNEL_MAX_BYTES: usize = 64;
 const OUTBOUND_DELIVERY_DISPLAY_NAME_MAX_BYTES: usize = 128;
 const OUTBOUND_DELIVERY_DESCRIPTION_MAX_BYTES: usize = 512;
@@ -40,7 +40,6 @@ impl OutboundDeliveryTargetOwner {
         Self { tenant_id, user_id }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
     pub fn for_scope(scope: &OutboundDeliveryTargetScope) -> Self {
         Self {
             tenant_id: scope.tenant_id.clone(),
@@ -50,57 +49,6 @@ impl OutboundDeliveryTargetOwner {
 
     pub fn matches_scope(&self, scope: &OutboundDeliveryTargetScope) -> bool {
         self.tenant_id == scope.tenant_id && self.user_id == scope.user_id
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String")]
-pub struct OutboundDeliveryTargetId(String);
-
-impl OutboundDeliveryTargetId {
-    pub fn new(value: impl Into<String>) -> Result<Self, String> {
-        let value = value.into();
-        validate_outbound_delivery_display_field(
-            "outbound delivery target id",
-            &value,
-            OUTBOUND_DELIVERY_TARGET_ID_MAX_BYTES,
-            true,
-        )?;
-        Ok(Self(value))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_inner(self) -> String {
-        self.0
-    }
-}
-
-impl TryFrom<String> for OutboundDeliveryTargetId {
-    type Error = String;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl AsRef<str> for OutboundDeliveryTargetId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::fmt::Display for OutboundDeliveryTargetId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl From<OutboundDeliveryTargetId> for String {
-    fn from(value: OutboundDeliveryTargetId) -> Self {
-        value.0
     }
 }
 
@@ -227,8 +175,46 @@ bounded_outbound_text!(
 pub struct OutboundDeliveryTargetEntry {
     pub summary: OutboundDeliveryTargetSummary,
     pub capabilities: DeliveryTargetCapabilities,
-    pub reply_target_binding_ref: ReplyTargetBindingRef,
+    pub destination: RunFinalReplyDestination,
     pub owner: OutboundDeliveryTargetOwner,
+}
+
+/// Generic provider for a host-owned target such as WebApp. The destination
+/// is product-neutral outbound domain data; composition only registers the
+/// provider and never re-declares its policy.
+pub struct HostOwnedOutboundDeliveryTargetProvider {
+    summary: OutboundDeliveryTargetSummary,
+    capabilities: DeliveryTargetCapabilities,
+    destination: RunFinalReplyDestination,
+}
+
+impl HostOwnedOutboundDeliveryTargetProvider {
+    pub fn new(
+        summary: OutboundDeliveryTargetSummary,
+        capabilities: DeliveryTargetCapabilities,
+        destination: RunFinalReplyDestination,
+    ) -> Self {
+        Self {
+            summary,
+            capabilities,
+            destination,
+        }
+    }
+}
+
+#[async_trait]
+impl OutboundDeliveryTargetProvider for HostOwnedOutboundDeliveryTargetProvider {
+    async fn list_outbound_delivery_targets(
+        &self,
+        scope: &OutboundDeliveryTargetScope,
+    ) -> Result<Vec<OutboundDeliveryTargetEntry>, OutboundError> {
+        Ok(vec![OutboundDeliveryTargetEntry {
+            summary: self.summary.clone(),
+            capabilities: self.capabilities.clone(),
+            destination: self.destination.clone(),
+            owner: OutboundDeliveryTargetOwner::for_scope(scope),
+        }])
+    }
 }
 
 #[async_trait]
@@ -264,7 +250,11 @@ pub trait OutboundDeliveryTargetProvider: Send + Sync {
             .into_iter()
             .find(|entry| {
                 entry.capabilities.final_replies
-                    && entry.reply_target_binding_ref.as_str() == target.as_str()
+                    && matches!(
+                        &entry.destination,
+                        RunFinalReplyDestination::External { reply_target_binding_ref }
+                            if reply_target_binding_ref.as_str() == target.as_str()
+                    )
             }))
     }
 }
@@ -613,7 +603,9 @@ mod tests {
                 auth_prompts: true,
                 modalities: Vec::new(),
             },
-            reply_target_binding_ref: reply_ref(format!("reply:{target_id_value}")),
+            destination: RunFinalReplyDestination::External {
+                reply_target_binding_ref: reply_ref(format!("reply:{target_id_value}")),
+            },
             owner: OutboundDeliveryTargetOwner::new(tenant(owner_tenant), user(owner_user)),
         }
     }

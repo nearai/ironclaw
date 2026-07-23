@@ -8,6 +8,7 @@ import {
   RUNTIME_LABELS,
   STATE_LABELS,
   STATE_TONES,
+  hasAuthSurface,
   hasChannelSurface,
   primaryAuthAccount,
   authAccountNeedsReconnect,
@@ -106,6 +107,7 @@ function makeContext() {
     Badge,
     Button,
     Icon,
+    hasAuthSurface,
     hasChannelSurface,
     primaryAuthAccount,
     authAccountNeedsReconnect,
@@ -120,7 +122,7 @@ function makeContext() {
 
 /**
  * Render ExtensionCard with the given ext prop and return the rendered tree.
- * onConfigure / onActivate / onRemove are no-op stubs.
+ * onConfigure / onRemove are no-op stubs.
  */
 function renderExtensionCard(ext) {
   const context = makeContext();
@@ -128,7 +130,6 @@ function renderExtensionCard(ext) {
   const { ExtensionCard } = context.globalThis.__testExports;
   return ExtensionCard({
     ext,
-    onActivate() {},
     onConfigure() {},
     onRemove() {},
     isBusy: false,
@@ -211,7 +212,6 @@ function renderExtensionCardWithInternals(ext) {
   const { ExtensionCard, OverflowMenu } = context.globalThis.__testExports;
   const rendered = ExtensionCard({
     ext,
-    onActivate() {},
     onConfigure() {},
     onRemove() {},
     isBusy: false,
@@ -291,7 +291,7 @@ test("setup-required primary action reads Connect for a channel and Configure fo
     package_ref: { id: "slack" },
     runtime: "first_party",
     surfaces: channelSurfaces,
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
     display_name: "Slack",
   });
   assert.equal(
@@ -305,7 +305,7 @@ test("setup-required primary action reads Connect for a channel and Configure fo
     package_ref: { id: "github" },
     runtime: "mcp",
     surfaces: toolSurfaces,
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
     display_name: "GitHub",
   });
   assert.equal(
@@ -324,7 +324,7 @@ test("expired channel account renders the Reconnect (expired) affordance and exp
     package_ref: { id: "acme" },
     runtime: "first_party",
     surfaces: channelSurfaces,
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
     display_name: "Acme",
     auth_accounts: [
       {
@@ -350,11 +350,11 @@ test("expired channel account renders the Reconnect (expired) affordance and exp
 });
 
 test("healthy connected channel account shows Connect/Reconnect but no expiry affordance (G4)", () => {
-  const rendered = renderExtensionCard({
+  const { rendered, OverflowMenu } = renderExtensionCardWithInternals({
     package_ref: { id: "acme" },
     runtime: "first_party",
     surfaces: channelSurfaces,
-    onboarding_state: "setup_required",
+    installation_state: "active",
     display_name: "Acme",
     auth_accounts: [
       { vendor: "acme", accounts: [{ account_id: "acme", state: "connected", is_default: true }] },
@@ -371,21 +371,22 @@ test("healthy connected channel account shows Connect/Reconnect but no expiry af
     "a connected account must not render an expiry notice",
   );
   assert.equal(
-    renderedContainsValue(rendered, "connect"),
+    extractOverflowActions(rendered, OverflowMenu).some(
+      (action) => action.label === "reconnect"
+    ),
     true,
-    "an unconnected-but-healthy channel keeps the plain Connect affordance",
+    "a connected active channel keeps the Reconnect affordance",
   );
 });
 
 test("failed extension renders its activation_error as a danger reason banner", () => {
-  // `activation_error` is present iff `installation_state === "failed"`
-  // (§6.1) — a terminal, non-auth activation failure. The card must surface
-  // the redacted reason regardless of runtime/surfaces.
+  // Internal failures remain attached to the public setup-needed state. The
+  // card must surface the redacted reason regardless of runtime/surfaces.
   const rendered = renderExtensionCard({
     package_ref: { id: "acme" },
     runtime: "first_party",
     display_name: "Acme",
-    installation_state: "failed",
+    installation_state: "setup_needed",
     activation_error: "The vendor webhook returned a 500.",
   });
   assert.equal(
@@ -403,7 +404,7 @@ test("disconnected auth accounts render a distinct reason per last_error, not a 
     package_ref: { id: "acme" },
     runtime: "first_party",
     surfaces: channelSurfaces,
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
     display_name: "Acme",
     auth_accounts: [
       {
@@ -430,7 +431,7 @@ test("disconnected auth accounts render a distinct reason per last_error, not a 
     package_ref: { id: "acme" },
     runtime: "first_party",
     surfaces: channelSurfaces,
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
     display_name: "Acme",
     auth_accounts: [
       {
@@ -460,7 +461,7 @@ test("disconnected auth accounts render a distinct reason per last_error, not a 
     package_ref: { id: "acme" },
     runtime: "first_party",
     surfaces: channelSurfaces,
-    onboarding_state: "setup_required",
+    installation_state: "setup_needed",
     display_name: "Acme",
     auth_accounts: [
       { vendor: "acme", accounts: [{ account_id: "acme", state: "disconnected", is_default: true }] },
@@ -477,15 +478,12 @@ test("disconnected auth accounts render a distinct reason per last_error, not a 
   assert.equal(renderedContainsValue(fresh, "connect"), true);
 });
 
-test("active package with missing auth renders auth needed setup state", () => {
+test("setup-needed package renders the canonical setup state", () => {
   const rendered = renderExtensionCard({
     package_ref: { kind: "extension", id: "slack" },
-    kind: "wasm_tool",
+    runtime: "first_party",
+    surfaces: channelSurfaces,
     display_name: "Slack",
-    active: true,
-    authenticated: false,
-    needs_setup: true,
-    has_auth: true,
     installation_state: "setup_needed",
   });
 
@@ -495,9 +493,9 @@ test("active package with missing auth renders auth needed setup state", () => {
     "missing Slack OAuth should show auth needed instead of active",
   );
   assert.equal(
-    renderedContainsValue(rendered, "configure"),
+    renderedContainsValue(rendered, "connect"),
     true,
-    "missing Slack OAuth should keep the setup action available",
+    "a setup-needed channel should keep its connect action available",
   );
   assert.equal(renderedContainsValue(rendered, "active"), false);
 });
@@ -513,7 +511,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "telegram" },
         runtime: "first_party",
         surfaces: channelSurfaces,
-        onboarding_state: "setup_required",
+        installation_state: "setup_needed",
         display_name: "Telegram",
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
@@ -532,7 +530,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "telegram" },
         runtime: "first_party",
         surfaces: channelSurfaces,
-        onboarding_state: "setup_needed",
+        installation_state: "setup_needed",
         display_name: "Telegram",
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
@@ -551,7 +549,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "some-wasm-channel" },
         runtime: "wasm",
         surfaces: channelSurfaces,
-        onboarding_state: "setup_required",
+        installation_state: "setup_needed",
         display_name: "My WASM Channel",
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
@@ -570,7 +568,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "some-wasm-channel" },
         runtime: "wasm",
         surfaces: channelSurfaces,
-        onboarding_state: "setup_needed",
+        installation_state: "setup_needed",
         display_name: "My WASM Channel",
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
@@ -665,9 +663,8 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "notion" },
         runtime: "mcp",
         surfaces: toolSurfaces,
-        onboarding_state: "setup_required",
+        installation_state: "setup_needed",
         display_name: "Notion",
-        needs_setup: true,
       };
       const { rendered, OverflowMenu } = renderExtensionCardWithInternals(ext);
       const actions = extractOverflowActions(rendered, OverflowMenu);
@@ -694,12 +691,11 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         package_ref: { id: "telegram" },
         runtime: "first_party",
         surfaces: channelSurfaces,
-        onboarding_state: "setup_needed",
+        installation_state: "setup_needed",
         display_name: "Telegram",
       };
       const rendered = ExtensionCard({
         ext,
-        onActivate() {},
         onConfigure(payload) { configurePayload = payload; },
         onRemove() {},
         isBusy: false,
@@ -726,12 +722,22 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
         runtime: "first_party",
         surfaces: channelSurfaces,
         installation_state: "active",
-        authenticated: true,
         display_name: "Telegram",
+        auth_accounts: [
+          {
+            vendor: "telegram",
+            accounts: [
+              {
+                account_id: "telegram",
+                state: "connected",
+                is_default: true,
+              },
+            ],
+          },
+        ],
       };
       const rendered = ExtensionCard({
         ext,
-        onActivate() {},
         onConfigure(payload) { configurePayload = payload; },
         onRemove() {},
         isBusy: false,
@@ -746,7 +752,7 @@ test("renders_channel_overflow_actions_for_setup_and_reconfigure_states", async 
       reconfigureAction.run();
       assert.deepEqual(configurePayload.packageRef, { id: "telegram" });
       assert.equal(configurePayload.displayName, "Telegram");
-      assert.equal(configurePayload.installationState, "active");
+      assert.equal(configurePayload.installation_state, "active");
     },
   );
 });

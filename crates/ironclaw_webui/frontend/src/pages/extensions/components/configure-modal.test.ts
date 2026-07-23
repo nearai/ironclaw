@@ -4,14 +4,11 @@ import { readFileSync } from "node:fs";
 import { test } from "vitest";
 import vm from "node:vm";
 
-import { rememberChannelConnectionWaiter } from "../../../lib/channel-connection-events";
 import {
   channelConnection,
-  connectsViaOauth,
   hasChannelSurface,
-  isInboundProofCodeConnection,
+  isWebGeneratedCodeConnection,
 } from "../lib/extensions-schema";
-import { redeemPairingCode as realRedeemPairingCode } from "../lib/pairing-api";
 
 // Wire-shaped surface fixtures: a channel extension declares a channel
 // surface; a plain tool extension declares only a tool surface.
@@ -20,7 +17,15 @@ const channelSurfaces = [
     kind: "channel",
     inbound: true,
     outbound: true,
-    connection: { strategy: "inbound_proof_code" },
+    connection: { strategy: "oauth" },
+  },
+];
+const webCodeSurfaces = [
+  {
+    kind: "channel",
+    inbound: true,
+    outbound: true,
+    connection: { strategy: "web_generated_code" },
   },
 ];
 const toolSurfaces = [{ kind: "tool" }];
@@ -48,19 +53,14 @@ function renderModal({
   packageRef = { kind: "extension", id: "slack" },
   channel = undefined,
   displayName = "Slack",
-  onboardingState = "pairing_required",
+  installationState = "setup_needed",
   onClose = () => {},
   onSaved,
-  activate = async () => {},
-  extensionActive = false,
   translate,
-  redeemPairingCode,
   setupResult,
-  setupReady = false,
   oauthMutationState = {},
   runEffects = false,
   blockPopup = false,
-  webCodePairingProbe = { isSuccess: false },
 } = {}) {
   const calls = [];
   const invalidations = [];
@@ -69,23 +69,10 @@ function renderModal({
   const oauthSetupArgs = [];
   const openedPopups = [];
   const notifications = [];
-  let mutationConfig = null;
-  const redeem =
-    redeemPairingCode ||
-    (async (channel, code) => {
-      calls.push(["redeem", channel, code]);
-      return { success: true };
-    });
   const context = {
-    useMutation: (config) => {
-      mutationConfig = config;
-      return { isPending: false, isError: false, error: null, mutate() {} };
-    },
     useQueryClient: () => ({
       invalidateQueries: ({ queryKey }) => invalidations.push(queryKey),
     }),
-    useQuery: () => webCodePairingProbe,
-    getExtensionPairingStatus: async () => ({ connected: false, pending: null }),
     PairingWebCodePanel() {},
     Button() {},
     Icon() {},
@@ -127,27 +114,12 @@ function renderModal({
       };
     },
     useSetupSubmit: () => ({ mutate() {}, isPending: false, error: null }),
-    extensionIsActive: () => extensionActive,
-    extensionLifecycleState: (extension) =>
-      extension?.onboarding_state ||
-      extension?.onboardingState ||
-      extension?.installation_state ||
-      extension?.installationState ||
-      (extension?.active ? "active" : "setup_needed"),
+    extensionIsActive: (extension) => extension?.installation_state === "active",
     // The real surface-taxonomy helpers: modal routing must key off declared
     // channel surfaces and connect strategies, exactly as production does.
-    connectsViaOauth,
     channelConnection,
     hasChannelSurface,
-    isInboundProofCodeConnection,
-    redeemPairingCode: redeem,
-    notifyChannelConnected: async (payload) => {
-      notifications.push(payload);
-    },
-    activateExtension: async (ref) => {
-      calls.push(["activate", ref]);
-      await activate();
-    },
+    isWebGeneratedCodeConnection,
     window: {
       open: (url, target, features) => {
         if (blockPopup) {
@@ -171,7 +143,7 @@ function renderModal({
       displayName,
       surfaces,
       channel,
-      onboarding_state: onboardingState,
+      installation_state: installationState,
     },
     onClose,
     onSaved,
@@ -181,7 +153,6 @@ function renderModal({
     context,
     PairingWebCodePanel: context.PairingWebCodePanel,
     invalidations,
-    mutationConfig,
     notifications,
     oauthCalls,
     oauthSetupArgs,
@@ -239,38 +210,19 @@ function renderedContainsComponent(rendered, component) {
   return false;
 }
 
-test("ConfigureModal renders the code-entry panel for a channel extension that uses manual setup", () => {
-  // A generic proof-code channel: the paste-box flow is the
-  // inbound_proof_code connect strategy's UI.
-  const { rendered, mutationConfig } = renderModal({
-    surfaces: channelSurfaces,
-    packageRef: { kind: "extension", id: "acme-messenger" },
-    channel: "acme-messenger",
-    displayName: "Acme Messenger",
-    onboardingState: "pairing_required",
-  });
-  assert.ok(mutationConfig, "a pairing mutation must be configured");
-  const body = JSON.stringify(rendered);
-  assert.match(body, /pairing\.placeholder/);
-  assert.match(body, /pairing\.instructions/);
-});
-
 test("ConfigureModal hosts the web-code pairing panel instead of a paste box or no-config fallback", () => {
   const view = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: webCodeSurfaces,
     packageRef: { kind: "extension", id: "acme-messenger" },
     channel: "acme-messenger",
     displayName: "Acme Messenger",
-    // Even a pairing_required lifecycle state must not fall into the
-    // proof-code paste box: WebGeneratedCode mints the code on this side.
-    onboardingState: "pairing_required",
-    webCodePairingProbe: { isSuccess: true },
+    installationState: "setup_needed",
   });
 
   assert.equal(
     renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
     true,
-    "a probe-discovered WebGeneratedCode channel must render the minted-code pairing panel",
+    "a manifest-declared WebGeneratedCode channel must render the minted-code pairing panel",
   );
   const body = JSON.stringify(view.rendered);
   assert.ok(!body.includes("pairing.placeholder"), "no proof-code paste box");
@@ -282,12 +234,11 @@ test("ConfigureModal hosts the web-code pairing panel instead of a paste box or 
 
 test("ConfigureModal keeps the web-code panel for an installed (non-pairing) lifecycle state", () => {
   const view = renderModal({
-    surfaces: channelSurfaces,
+    surfaces: webCodeSurfaces,
     packageRef: { kind: "extension", id: "acme-messenger" },
     channel: "acme-messenger",
     displayName: "Acme Messenger",
-    onboardingState: "setup_needed",
-    webCodePairingProbe: { isSuccess: true },
+    installationState: "setup_needed",
   });
 
   assert.equal(
@@ -315,7 +266,7 @@ test("ConfigureModal renders Slack OAuth without opening the popup automatically
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
-    onboardingState: "pairing_required",
+    installationState: "setup_needed",
     setupResult: {
       secrets: [slackOauthSecret],
       fields: [],
@@ -343,7 +294,7 @@ test("ConfigureModal never renders tenant administrator fields in caller setup",
     packageRef: { kind: "extension", id: "provider-neutral-channel" },
     channel: "provider-neutral-channel",
     displayName: "Provider Neutral Channel",
-    onboardingState: "setup_required",
+    installationState: "setup_needed",
     setupResult: {
       secrets: [
         {
@@ -399,8 +350,7 @@ test("ConfigureModal does not show a generic activate action beside Slack OAuth"
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
-    onboardingState: "setup_required",
-    setupReady: true,
+    installationState: "setup_needed",
     setupResult: {
       secrets: [slackOauthSecret],
       fields: [],
@@ -423,7 +373,7 @@ test("ConfigureModal leaves post-OAuth lifecycle continuation to the server", as
     surfaces: toolSurfaces,
     packageRef: { kind: "extension", id: "provider-neutral-tool" },
     displayName: "Provider Neutral Tool",
-    onboardingState: "setup_required",
+    installationState: "setup_needed",
     setupResult: {
       secrets: [
         {
@@ -455,8 +405,7 @@ test("ConfigureModal does not equate shared channel activation with personal con
     packageRef: { kind: "extension", id: "channel-a" },
     channel: "channel-a",
     displayName: "Channel A",
-    onboardingState: "setup_required",
-    extensionActive: true,
+    installationState: "active",
     setupResult: {
       secrets: [
         {
@@ -488,8 +437,7 @@ test("ConfigureModal skips the post-OAuth activation for an already-active exten
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
-    onboardingState: "active",
-    extensionActive: true,
+    installationState: "active",
     setupResult: {
       secrets: [
         {
@@ -521,7 +469,7 @@ test("ConfigureModal surfaces a failed OAuth flow as a retryable error", () => {
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
-    onboardingState: "setup_required",
+    installationState: "setup_needed",
     setupResult: {
       secrets: [
         {
@@ -559,16 +507,12 @@ test("ConfigureModal closes as soon as Slack OAuth setup completes", async () =>
     },
   };
   let closed = false;
-  let releaseActivation;
-  const activationGate = new Promise((resolve) => {
-    releaseActivation = resolve;
-  });
   const { oauthSetupArgs } = renderModal({
     surfaces: channelSurfaces,
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
-    onboardingState: "setup_required",
+    installationState: "setup_needed",
     setupResult: {
       secrets: [slackOauthSecret],
       fields: [],
@@ -579,7 +523,6 @@ test("ConfigureModal closes as soon as Slack OAuth setup completes", async () =>
       isLoading: false,
       error: null,
     },
-    activate: () => activationGate,
     onClose: () => {
       closed = true;
     },
@@ -589,8 +532,6 @@ test("ConfigureModal closes as soon as Slack OAuth setup completes", async () =>
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(closed, true);
-
-  releaseActivation();
   await configuredPromise;
 });
 
@@ -612,7 +553,7 @@ test("ConfigureModal keeps Slack OAuth visibly loading while waiting for authori
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
-    onboardingState: "setup_required",
+    installationState: "setup_needed",
     oauthMutationState: { isAuthorizing: true },
     setupResult: {
       secrets: [slackOauthSecret],
@@ -641,44 +582,21 @@ test("ConfigureModal does not render the pairing panel for a non-channel extensi
 });
 
 test("ConfigureModal routes by manifest connection strategy, not a legacy onboarding state", () => {
-  const { rendered } = renderModal({
-    surfaces: channelSurfaces,
-    onboardingState: "setup_required",
+  const view = renderModal({
+    surfaces: webCodeSurfaces,
+    installationState: "setup_needed",
   });
 
-  assert.match(JSON.stringify(rendered), /pairing\.placeholder/);
-});
-
-test("ConfigureModal localizes channel pairing copy", () => {
-  const { rendered } = renderModal({
-    surfaces: channelSurfaces,
-    packageRef: { kind: "extension", id: "telegram" },
-    channel: "telegram",
-    displayName: "Telegram",
-    onboardingState: "pairing_required",
-    translate: (key) =>
-      ({
-        "extensions.configureName": "Configure {name}",
-        "pairing.instructions": "Localized channel pairing instructions",
-        "pairing.placeholder": "Localized channel pairing placeholder",
-        "pairing.connect": "Localized connect",
-        "common.saving": "Localized saving",
-        "pairing.error": "Localized channel pairing error",
-      })[key] || key,
-  });
-  const body = JSON.stringify(rendered);
-
-  assert.match(body, /Localized channel pairing instructions/);
-  assert.match(body, /Localized channel pairing placeholder/);
-  assert.match(body, /Localized connect/);
-  assert.doesNotMatch(body, /Open Slack and message/);
-  assert.doesNotMatch(body, /Enter pairing code/);
+  assert.equal(
+    renderedContainsComponent(view.rendered, view.PairingWebCodePanel),
+    true,
+  );
 });
 
 test("ConfigureModal renders a localized close label through ModalShell", () => {
   const { context, rendered } = renderModal({
     surfaces: channelSurfaces,
-    onboardingState: "pairing_required",
+    installationState: "setup_needed",
     translate: (key) =>
       ({
         "common.close": "Localized close",
@@ -693,165 +611,6 @@ test("ConfigureModal renders a localized close label through ModalShell", () => 
 
   assert.ok(shell, "the configure modal shell should render");
   assert.match(JSON.stringify(shell), /Localized close/);
-});
-
-test("ConfigureModal pairing redemption reconciles server-side, invalidates queries, and closes", async () => {
-  let closed = false;
-  const { calls, invalidations, mutationConfig } = renderModal({
-    surfaces: channelSurfaces,
-    packageRef: { kind: "extension", id: "telegram" },
-    channel: "telegram",
-    displayName: "Telegram",
-    onboardingState: "pairing_required",
-    onClose: () => {
-      closed = true;
-    },
-  });
-
-  const result = await mutationConfig.mutationFn("A1B2C3");
-  mutationConfig.onSuccess();
-
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["redeem", "telegram", "A1B2C3"]]);
-  assert.deepEqual(result, { success: true });
-  assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
-    ["extensions"],
-    ["pairing", "telegram"],
-  ]);
-  assert.equal(closed, true);
-});
-
-test("ConfigureModal pairing redeems by channel slug without a second package action", async () => {
-  const { calls, invalidations, mutationConfig } = renderModal({
-    surfaces: channelSurfaces,
-    onboardingState: "pairing_required",
-    packageRef: { kind: "extension", id: "telegram-host-package" },
-    channel: "telegram",
-    displayName: "Telegram",
-  });
-
-  await mutationConfig.mutationFn("A1B2C3");
-  mutationConfig.onSuccess();
-
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["redeem", "telegram", "A1B2C3"]]);
-  assert.deepEqual(JSON.parse(JSON.stringify(invalidations)), [
-    ["extensions"],
-    ["pairing", "telegram"],
-  ]);
-});
-
-test("ConfigureModal pairing through the real API waits for blocked chats to resume", async () => {
-  const originalWindow = globalThis.window;
-  const originalFetch = globalThis.fetch;
-  const originalSessionStorage = globalThis.sessionStorage;
-
-  try {
-    const storage = new Map();
-    globalThis.window = {
-      localStorage: {
-        getItem: (key) => (storage.has(key) ? storage.get(key) : null),
-        setItem: (key, value) => storage.set(key, String(value)),
-        removeItem: (key) => storage.delete(key),
-      },
-      addEventListener: () => {},
-      removeEventListener: () => {},
-    };
-    globalThis.sessionStorage = {
-      getItem: () => "token-1",
-      setItem: () => {},
-      removeItem: () => {},
-    };
-    rememberChannelConnectionWaiter({
-      channel: "telegram",
-      threadId: "thread-waiting",
-      sourceMessageId: "tool-1",
-    });
-
-    let releaseResume;
-    const resumeGate = new Promise((resolve) => {
-      releaseResume = resolve;
-    });
-    const fetches = [];
-    globalThis.fetch = async (path, options) => {
-      fetches.push({ path, options });
-      if (path === "/api/webchat/v2/extensions/pairing/redeem") {
-        return new Response(
-          JSON.stringify({ provider: "slack", provider_user_id: "install-alpha:U123" }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        );
-      }
-      if (path === "/api/webchat/v2/threads/thread-waiting/messages") {
-        await resumeGate;
-        return new Response(JSON.stringify({ run_id: "run-1" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      throw new Error(`unexpected fetch: ${path}`);
-    };
-
-    const { mutationConfig } = renderModal({
-      surfaces: channelSurfaces,
-      packageRef: { kind: "extension", id: "telegram" },
-      channel: "telegram",
-      displayName: "Telegram",
-      redeemPairingCode: realRedeemPairingCode,
-    });
-    let settled = false;
-    const mutationPromise = mutationConfig.mutationFn("A1B2C3").then((value) => {
-      settled = true;
-      return value;
-    });
-    await new Promise((resolve) => setImmediate(resolve));
-
-    assert.equal(fetches.length, 2);
-    assert.equal(fetches[0].path, "/api/webchat/v2/extensions/pairing/redeem");
-    assert.equal(fetches[1].path, "/api/webchat/v2/threads/thread-waiting/messages");
-    assert.deepEqual(JSON.parse(fetches[0].options.body), {
-      channel: "telegram",
-      code: "A1B2C3",
-    });
-    assert.equal(
-      JSON.parse(fetches[1].options.body).content,
-      "Telegram is connected. Continue the previous request.",
-    );
-    assert.equal(settled, false, "the modal mutation must wait for resume to finish");
-
-    releaseResume();
-    assert.deepEqual(await mutationPromise, {
-      success: true,
-      provider: "slack",
-      provider_user_id: "install-alpha:U123",
-      resumeError: false,
-      resumedRunCount: 0,
-    });
-    assert.equal(settled, true);
-  } finally {
-    globalThis.window = originalWindow;
-    globalThis.fetch = originalFetch;
-    globalThis.sessionStorage = originalSessionStorage;
-  }
-});
-
-test("ConfigureModal never issues a browser activation after pairing redemption", async () => {
-  const { calls, mutationConfig } = renderModal({
-    surfaces: channelSurfaces,
-    packageRef: { kind: "extension", id: "telegram" },
-    channel: "telegram",
-    displayName: "Telegram",
-    onboardingState: "pairing_required",
-    activate: async () => {
-      throw new Error("activation boom");
-    },
-  });
-
-  // The injected legacy activation callback would fail if called. Redemption
-  // still succeeds because lifecycle reconciliation is server-owned.
-  const result = await mutationConfig.mutationFn("A1B2C3");
-  assert.deepEqual(result, { success: true });
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["redeem", "telegram", "A1B2C3"]]);
 });
 
 test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow", () => {
@@ -872,7 +631,7 @@ test("ConfigureModal surfaces a blocked popup and does not start the OAuth flow"
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
-    onboardingState: "pairing_required",
+    installationState: "setup_needed",
     translate: (key) =>
       key === "authGate.popupBlocked"
         ? "La ventana emergente de autorización fue bloqueada."
@@ -925,7 +684,7 @@ test("ConfigureModal starts the OAuth flow when the popup pre-open succeeds", ()
     packageRef: { kind: "extension", id: "slack" },
     channel: "slack",
     displayName: "Slack",
-    onboardingState: "pairing_required",
+    installationState: "setup_needed",
     setupResult: {
       secrets: [slackOauthSecret],
       fields: [],

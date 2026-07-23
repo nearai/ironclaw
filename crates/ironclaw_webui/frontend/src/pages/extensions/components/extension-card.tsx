@@ -7,6 +7,7 @@ import {
   RUNTIME_LABELS,
   STATE_TONES,
   STATE_LABELS,
+  hasAuthSurface,
   hasChannelSurface,
   primaryAuthAccount,
   authAccountNeedsReconnect,
@@ -130,14 +131,9 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
     null;
 
   const configurePayload = {
+    ...ext,
     packageRef: ext.package_ref,
     displayName,
-    surfaces: ext.surfaces,
-    active: ext.active,
-    authenticated: ext.authenticated,
-    needs_setup: ext.needs_setup,
-    installationState: ext.installation_state,
-    onboardingState: ext.onboarding_state,
   };
 
   // The caller's primary vendor account (§6.3 state + typed last_error). An
@@ -147,6 +143,7 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   // and the notice key off it.
   const channelAccount = hasChannelSurface(ext) ? primaryAuthAccount(ext) : null;
   const needsReconnect = hasChannelSurface(ext) && authAccountNeedsReconnect(ext);
+  const hasConnectedChannelAccount = channelAccount?.state === "connected";
 
   // Connectable channels are configured by pairing (Connect/Reconnect), not by
   // an operator credential form (Configure/Reconfigure). Pick the label by kind,
@@ -154,10 +151,10 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
   const configureLabel = hasChannelSurface(ext)
     ? needsReconnect
       ? t("extensions.reconnectExpired")
-      : ext.authenticated
+      : hasConnectedChannelAccount
         ? t("extensions.reconnect")
         : t("extensions.connect")
-    : ext.authenticated
+    : state === "active"
       ? t("extensions.reconfigure")
       : t("extensions.configure");
 
@@ -172,35 +169,11 @@ export function ExtensionCard({ ext, onConfigure, onRemove, isBusy }) {
       run: () => onConfigure(configurePayload),
     });
   }
-  if (canManage && (ext.needs_setup || ext.has_auth) && primaryAction !== "configure") {
-    overflowActions.push({
-      id: "configure",
-      label: configureLabel,
-      icon: "settings",
-      run: () => onConfigure(configurePayload),
-    });
-  }
-  const hasOverflowConfigureAction = overflowActions.some(
-    (action) => action.id === "configure"
-  );
   if (
     canManage &&
-    primaryAction !== "configure" &&
-    hasChannelSurface(ext) &&
-    state === "setup_needed"
-  ) {
-    overflowActions.push({
-      id: "setup",
-      label: t("extensions.setup"),
-      icon: "settings",
-      run: () => onConfigure(configurePayload),
-    });
-  }
-  if (
-    canManage &&
-    hasChannelSurface(ext) &&
-    !hasOverflowConfigureAction &&
-    state === "active"
+    state === "active" &&
+    (hasAuthSurface(ext) || hasChannelSurface(ext)) &&
+    primaryAction !== "configure"
   ) {
     overflowActions.push({
       id: "reconfigure",
@@ -310,9 +283,6 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
   const kindLabel = translatedKnownLabel(t, "extensions.runtime", entry.runtime, RUNTIME_LABELS);
   const displayName = entry.display_name || packageId(entry);
   const canInstall = Boolean(entry.package_ref && onInstall);
-  const configureAfterInstall = Boolean(
-    entry.needs_setup || entry.has_auth || hasChannelSurface(entry)
-  );
   const keywords = entry.keywords || [];
   const [kwOpen, setKwOpen] = React.useState(false);
 
@@ -368,8 +338,6 @@ export function RegistryCard({ entry, onInstall = null, isBusy, statusLabel = un
               onInstall({
                 packageRef: entry.package_ref,
                 displayName,
-                surfaces: entry.surfaces,
-                configureAfterInstall,
               })}
             disabled={isBusy}
           >

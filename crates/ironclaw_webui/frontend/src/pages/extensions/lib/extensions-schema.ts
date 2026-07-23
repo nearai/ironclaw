@@ -26,6 +26,10 @@ export function hasChannelSurface(item) {
   return extensionSurfaces(item).some((surface) => surface?.kind === "channel");
 }
 
+export function hasAuthSurface(item) {
+  return extensionSurfaces(item).some((surface) => surface?.kind === "auth");
+}
+
 export function hasToolSurface(item) {
   return extensionSurfaces(item).some((surface) => surface?.kind === "tool");
 }
@@ -42,17 +46,8 @@ export function channelConnection(item) {
   return channelSurface(item)?.connection || null;
 }
 
-export function isInboundProofCodeConnection(connection) {
-  return connection?.strategy === "inbound_proof_code";
-}
-
-// A channel extension whose connect affordance is a browser OAuth relay:
-// connecting happens through the configure modal's OAuth secret, never a
-// paste-a-code pairing panel. Derived from the wire only — the surface
-// connection strategy, or an oauth-kind setup secret.
-export function connectsViaOauth(item, secrets = []) {
-  if (channelConnection(item)?.strategy === "oauth") return true;
-  return secrets.some((secret) => secret?.setup?.kind === "oauth");
+export function isWebGeneratedCodeConnection(connection) {
+  return connection?.strategy === "web_generated_code";
 }
 
 // Caller-visible lifecycle has only two listed states. Absence from the

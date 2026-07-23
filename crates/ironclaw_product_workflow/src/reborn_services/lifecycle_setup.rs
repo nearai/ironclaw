@@ -3,17 +3,17 @@ use ironclaw_host_api::ExtensionId;
 
 use crate::{
     LifecycleExtensionCredentialRequirement, LifecyclePackageKind, LifecyclePackageRef,
-    LifecycleProductAction,
-    LifecycleProductContext, LifecycleProductFacade, LifecycleProductResponse,
-    LifecycleProductSurfaceContext, ProductWorkflowError, RebornServicesError,
-    RebornServicesErrorCode, RebornSetupExtensionResponse, RebornViewDescriptor,
-    WebUiAuthenticatedCaller, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiSetupExtensionRequest,
+    LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
+    LifecycleProductResponse, LifecycleProductSurfaceContext, LifecyclePublicState,
+    ProductWorkflowError, RebornServicesError, RebornServicesErrorCode,
+    RebornSetupExtensionResponse, RebornViewDescriptor, WebUiAuthenticatedCaller,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiSetupExtensionRequest,
 };
 
 use super::{
-    ExtensionCredentialSetupService, extension_credentials::credential_scope, extension_onboarding,
-    extension_setup_credentials, views,
+    ExtensionCredentialSetupService,
+    extension_credentials::{ExtensionCredentialReadiness, credential_scope},
+    extension_onboarding, extension_setup_credentials, views,
 };
 
 pub const EXTENSION_SETUP_VIEW: RebornViewDescriptor = RebornViewDescriptor {
@@ -72,15 +72,9 @@ pub(super) async fn submit_extension_setup_capability(
         .map_err(map_lifecycle_error)?;
     let request = serde_json::from_value(serde_json::Value::Object(object))
         .map_err(|_| validation_error("input", WebUiInboundValidationCode::InvalidValue))?;
-    setup_extension(
-        facade,
-        extension_credentials,
-        caller,
-        package_ref,
-        request,
-    )
-    .await
-    .map(|_| ())
+    setup_extension(facade, extension_credentials, caller, package_ref, request)
+        .await
+        .map(|_| ())
 }
 
 pub(super) async fn setup_extension(
@@ -175,22 +169,36 @@ async fn setup_extension_response(
         .package_ref
         .clone()
         .ok_or_else(RebornServicesError::internal_invariant)?;
-    let secrets = extension_setup_credentials::project(
+    let (secrets, readiness) = extension_setup_credentials::project(
         extension_credentials,
         scope,
         extension_id,
         requirements,
     )
     .await?;
-    let onboarding = extension_onboarding::from_lifecycle(&lifecycle).onboarding;
+    let phase = setup_public_phase(lifecycle.phase, readiness);
+    let onboarding =
+        extension_onboarding::from_lifecycle_with_credential_status(&lifecycle, readiness, false)
+            .onboarding;
     Ok(RebornSetupExtensionResponse {
         package_ref,
-        phase: lifecycle.phase,
+        phase,
         blockers: lifecycle.blockers,
         onboarding,
         payload: lifecycle.payload,
         secrets,
     })
+}
+
+fn setup_public_phase(
+    lifecycle_phase: LifecyclePublicState,
+    readiness: ExtensionCredentialReadiness,
+) -> LifecyclePublicState {
+    match (lifecycle_phase, readiness) {
+        (LifecyclePublicState::Uninstalled, _) => LifecyclePublicState::Uninstalled,
+        (_, ExtensionCredentialReadiness::MissingRequired) => LifecyclePublicState::SetupNeeded,
+        (phase, _) => phase,
+    }
 }
 
 fn setup_action(request: &WebUiSetupExtensionRequest) -> Result<SetupAction, RebornServicesError> {

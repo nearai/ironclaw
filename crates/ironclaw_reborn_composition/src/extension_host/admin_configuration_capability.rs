@@ -7,7 +7,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use ironclaw_extension_host::{
     AdminConfigurationGroupState, AdminConfigurationIdempotencyKey, AdminConfigurationServiceError,
-    AdminConfigurationSubmittedValue,
+    AdminConfigurationSubmittedValue, reconcile_admin_configuration_consumers,
 };
 use ironclaw_extensions::{
     AdminConfigurationGroupId, CapabilityManifest, CapabilityVisibility, ExtensionError,
@@ -165,31 +165,15 @@ impl FirstPartyCapabilityHandler for AdminConfigurationReplaceHandler {
             let Some(extension_ids) = self.affected_extensions.get(&group_id) else {
                 return Ok(());
             };
-            let mut failed_reconciliations = 0usize;
-            for extension_id in extension_ids {
-                if let Err(error) = self
-                    .extension_management
-                    .reconcile_runtime_after_admin_configuration(extension_id)
-                    .await
-                {
-                    failed_reconciliations += 1;
-                    tracing::warn!(
-                        extension_id = %extension_id,
-                        error = %error,
-                        "active extension refresh after administrator configuration failed"
-                    );
+            reconcile_admin_configuration_consumers(&group_id, extension_ids, |extension_id| {
+                let extension_management = Arc::clone(&self.extension_management);
+                async move {
+                    extension_management
+                        .reconcile_runtime_after_admin_configuration(&extension_id)
+                        .await
                 }
-            }
-            if failed_reconciliations == 0 {
-                return Ok(());
-            }
-            tracing::warn!(
-                group_id = %group_id,
-                failed_reconciliations,
-                affected_extensions = extension_ids.len(),
-                "administrator configuration runtime reconciliation was incomplete"
-            );
-            Err(AdminConfigurationServiceError::RuntimeReconciliationFailed)
+            })
+            .await
         };
         let state = self
             .service

@@ -16,14 +16,14 @@ use ironclaw_host_api::sha256_digest_token;
 /// prevents a catalog discovered from stale package, manifest, ceiling, or
 /// credential authority from entering the active snapshot.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct HostedMcpDiscoveryAuthority {
+pub(crate) struct McpDiscoveryFence {
     package: ExtensionPackage,
     manifest_hash: ManifestHash,
     max_tools: u32,
     credential_accounts: Vec<CredentialAccount>,
 }
 
-impl HostedMcpDiscoveryAuthority {
+impl McpDiscoveryFence {
     /// Capture the current discovery inputs from their existing canonical
     /// records. The raw manifest digest fences changes that may not alter the
     /// resolved package projection.

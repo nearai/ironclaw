@@ -1419,7 +1419,6 @@ registerPack("ja", {
   "pairing.connectFromExtensions": "続行するには、拡張機能ページで {name} に接続してください。",
   "pairing.checkCodeAndRetry": "ペアリングに失敗しました。コードを確認してもう一度お試しください。",
   "pairing.resumeFailed": "{name} は接続されましたが、このチャットを続行できませんでした。ページを再読み込みして続けてください。",
-  "extensions.channelInstalledSetup": "{name} をインストールしました。下の設定パネルでアカウントに接続してください。",
   "extensions.authUrlHttpsRequired": "認証 URL には HTTPS が必要です。",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "設定済み。保持する場合は空欄",

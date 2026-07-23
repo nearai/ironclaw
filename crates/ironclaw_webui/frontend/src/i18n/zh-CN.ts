@@ -1419,7 +1419,6 @@ registerPack("zh-CN", {
   "pairing.connectFromExtensions": "请从扩展页面连接 {name} 后继续。",
   "pairing.checkCodeAndRetry": "配对失败。请检查代码后重试。",
   "pairing.resumeFailed": "{name} 已连接，但此聊天无法继续。请重新加载页面后继续。",
-  "extensions.channelInstalledSetup": "已安装 {name}。请使用下方设置面板连接账号。",
   "extensions.authUrlHttpsRequired": "认证 URL 必须使用 HTTPS。",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "已配置；留空则保留",

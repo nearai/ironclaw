@@ -10,8 +10,8 @@ use ironclaw_host_api::{
 use ironclaw_product_workflow::{
     LifecyclePackageId, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleReadinessBlocker, LifecycleSkillSource,
-    LifecycleSkillSummary, ProductWorkflowError,
+    LifecycleProductResponse, LifecyclePublicState, LifecycleReadinessBlocker,
+    LifecycleSkillSource, LifecycleSkillSummary, ProductWorkflowError,
 };
 use ironclaw_skills::{
     SkillInstallRequest, SkillInstallSource, SkillManagementContext, SkillManagementError,
@@ -20,7 +20,9 @@ use ironclaw_skills::{
 };
 
 use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
-use crate::extension_host::extension_lifecycle::RebornLocalExtensionManagementPort;
+use crate::extension_host::extension_lifecycle::{
+    ActiveExtensionCapability, RebornLocalExtensionManagementPort,
+};
 use crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService;
 
 const SKILL_SEARCH_RESULT_LIMIT: usize = 50;
@@ -269,6 +271,32 @@ impl RebornLocalLifecycleFacade {
     ) -> Self {
         self.credential_accounts = Some(credential_accounts);
         self
+    }
+
+    /// Resolve the caller's executable, model-visible extension capability
+    /// surface from the concrete lifecycle authority.
+    ///
+    /// Product lifecycle responses remain presentation projections. Runtime
+    /// authority instead joins the exact caller-active extension ids with the
+    /// live registry without constructing an `ExtensionList` response.
+    pub(crate) async fn caller_active_model_visible_capabilities(
+        &self,
+        context: &LifecycleProductContext,
+    ) -> Result<Vec<ActiveExtensionCapability>, ProductWorkflowError> {
+        let Some(extension_management) = &self.extension_management else {
+            return Ok(Vec::new());
+        };
+        let caller = lifecycle_caller(context)?;
+        let credential_gate = self.lifecycle_credential_gate(context)?;
+        let active_extension_ids = extension_management
+            .caller_active_extension_ids(&caller, credential_gate.as_ref())
+            .await?;
+        Ok(extension_management
+            .active_model_visible_capabilities()
+            .await?
+            .into_iter()
+            .filter(|capability| active_extension_ids.contains(&capability.provider))
+            .collect())
     }
 
     async fn execute_action(
@@ -633,7 +661,7 @@ pub(crate) fn response_with_payload(
 ) -> LifecycleProductResponse {
     LifecycleProductResponse {
         package_ref,
-        phase,
+        phase: LifecyclePublicState::from_host_checkpoint(phase),
         blockers: Vec::new(),
         message: None,
         payload: Some(payload),
@@ -663,7 +691,7 @@ fn unsupported_projection(
 ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
     Ok(LifecycleProductResponse::projection(
         package_ref,
-        InstallationState::Unsupported,
+        LifecyclePublicState::SetupNeeded,
         vec![LifecycleReadinessBlocker::runtime(Some(
             "extension_lifecycle_local_runtime_unwired".to_string(),
         ))?],
@@ -722,7 +750,7 @@ mod tests {
             })
             .await
             .expect("install skill");
-        assert_eq!(install.phase, InstallationState::Installed);
+        assert_eq!(install.phase, LifecyclePublicState::SetupNeeded);
         assert_eq!(
             install.package_ref,
             Some(
@@ -745,7 +773,7 @@ mod tests {
             )
             .await
             .expect("list skills");
-        assert_eq!(list.phase, InstallationState::Installed);
+        assert_eq!(list.phase, LifecyclePublicState::SetupNeeded);
         let Some(LifecycleProductPayload::SkillSearch { count, .. }) = list.payload.as_ref() else {
             panic!("expected skill search payload");
         };
@@ -825,7 +853,7 @@ mod tests {
             )
             .await
             .expect("remove skill");
-        assert_eq!(remove.phase, InstallationState::Removed);
+        assert_eq!(remove.phase, LifecyclePublicState::Uninstalled);
         assert!(
             !storage_root
                 .join("skills/lifecycle-skill/SKILL.md")

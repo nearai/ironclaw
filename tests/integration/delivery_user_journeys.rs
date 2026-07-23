@@ -62,16 +62,17 @@ use ironclaw_product_workflow::{
     BlockedAuthPromptRequest, BlockedAuthPromptSource, ChannelDeliveryResolver,
     ConversationBindingService, CurrentDeliveryTarget, CurrentDeliveryTargetResolver,
     DeliveryCoordinator, DeliveryReplyContextSource, DeliveryRetryPolicy,
-    OutboundPreferencesProductFacade, ProductConversationRouteKind, ProductWorkflowError,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
+    OUTBOUND_DELIVERY_TARGETS_VIEW, OutboundPreferencesProductFacade, ProductConversationRouteKind,
+    ProductWorkflowError, RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse, RebornServices,
     RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSubmitTurnResponse, ResolveBindingRequest,
-    ResolveStoredProductReplyTargetRequest, ResolvedBinding, ResolvedChannelDelivery,
-    ResolvedStoredProductReplyTarget, RunDeliveryEventHandler, RunDeliveryEventRouter,
-    RunDeliveryServices, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
-    WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiSendMessageRequest,
+    RebornSetOutboundPreferencesRequest, RebornSubmitTurnResponse, RebornViewQuery,
+    ResolveBindingRequest, ResolveStoredProductReplyTargetRequest, ResolvedBinding,
+    ResolvedChannelDelivery, ResolvedStoredProductReplyTarget, RunDeliveryEventHandler,
+    RunDeliveryEventRouter, RunDeliveryServices, TriggeredRunDeliveryDriver,
+    TriggeredRunDeliveryRequest, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
+    WebUiSendMessageRequest,
 };
 use ironclaw_turns::{
     GateResumeDisposition, GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnPrecondition,
@@ -1059,22 +1060,46 @@ async fn drive_immediate_cross_channel_result(
     else {
         panic!("real source envelope must submit one run: {ack:?}");
     };
-    let blocked = harness
-        .wait_for_status_in_scope(&scope, run_id, TurnStatus::BlockedApproval)
-        .await
-        .expect("model-selected external routing blocks on the approval gate");
-    let gate_ref = blocked
-        .gate_ref
-        .expect("blocked current-run routing carries an approval gate ref");
-    harness
-        .approve_gate_in_scope(&scope, run_id, &gate_ref)
-        .await
-        .expect("the caller can approve the exact blocked routing operation");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let state = harness
+                .turn_coordinator_for_test()
+                .get_run_state(GetRunStateRequest {
+                    scope: scope.clone(),
+                    run_id,
+                })
+                .await
+                .expect("cross-channel run remains readable");
+            match state.status {
+                TurnStatus::BlockedApproval => {
+                    let gate_ref = state
+                        .gate_ref
+                        .expect("blocked current-run routing carries an approval gate ref");
+                    harness
+                        .approve_gate_in_scope(&scope, run_id, &gate_ref)
+                        .await
+                        .expect("the caller can approve the exact blocked routing operation");
+                    return;
+                }
+                TurnStatus::Completed => return,
+                TurnStatus::Failed | TurnStatus::Cancelled => {
+                    panic!(
+                        "cross-channel routing reached terminal status {:?}: {:?}",
+                        state.status, state.failure
+                    );
+                }
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("cross-channel route either blocks for approval or completes");
     harness
         .wait_for_status_in_scope(&scope, run_id, TurnStatus::Completed)
         .await
         .expect("the same source run completes after routing approval");
     event_router.wait_until_run_idle(run_id).await;
+    event_router.wait_until_durable_replay_idle().await;
 
     harness
         .assert_tool_invoked(ROUTE_CURRENT)
@@ -1097,7 +1122,51 @@ async fn drive_immediate_cross_channel_result(
         "the route must preserve the host-resolved binding behind the opaque registry id"
     );
 
-    assert_bot_wire(destination, &egress.requests(), &reply);
+    let destination_requests = egress.requests();
+    assert_bot_wire(destination, &destination_requests, &reply);
+    assert_eq!(
+        destination_requests
+            .iter()
+            .filter(|request| {
+                String::from_utf8_lossy(request.body.as_deref().unwrap_or_default())
+                    .contains(&reply)
+            })
+            .count(),
+        1,
+        "the selected bot wire must receive the one-off result exactly once"
+    );
+    assert!(
+        destination_requests.iter().all(|request| {
+            !String::from_utf8_lossy(request.body.as_deref().unwrap_or_default())
+                .contains("Ironclaw is thinking...")
+        }),
+        "the explicit destination receives only the result, never the source placeholder"
+    );
+
+    let source_requests = harness.captured_network_requests_for_test();
+    let (source_send_suffix, source_retract_suffix) = match source {
+        ChannelKind::Slack => ("/api/chat.postMessage", "/api/chat.delete"),
+        ChannelKind::Telegram => ("/sendMessage", "/deleteMessage"),
+    };
+    let source_sends: Vec<_> = source_requests
+        .iter()
+        .filter(|request| request.url.ends_with(source_send_suffix))
+        .collect();
+    let source_retracts = source_requests
+        .iter()
+        .filter(|request| request.url.ends_with(source_retract_suffix))
+        .count();
+    assert!(
+        source_sends
+            .iter()
+            .all(|request| !String::from_utf8_lossy(&request.body).contains(&reply)),
+        "the explicit cross-channel result must not be duplicated back to its source"
+    );
+    assert_eq!(
+        source_retracts,
+        source_sends.len(),
+        "every source working/gate placeholder must be retracted after the final result routes elsewhere: {source_requests:?}"
+    );
     let attempts = outbound_store
         .list_delivery_attempts(scope)
         .await
@@ -1585,10 +1654,21 @@ async fn web_app_source_immediate_result_fans_out_to_selected_external_bot_wire(
         webui_scope.clone(),
         Arc::clone(&gateway) as Arc<dyn HostManagedModelGateway>,
     );
-    let selected = webui
-        .list_outbound_delivery_targets(caller.clone())
+    let target_page = webui
+        .query(
+            caller.clone(),
+            RebornViewQuery {
+                view_id: OUTBOUND_DELIVERY_TARGETS_VIEW.id.to_string(),
+                params: json!({}),
+                cursor: None,
+            },
+        )
         .await
-        .expect("WebUI caller target inventory resolves")
+        .expect("WebUI caller target inventory resolves");
+    let target_inventory: RebornOutboundDeliveryTargetListResponse =
+        serde_json::from_value(target_page.payload)
+            .expect("outbound target view carries its typed response");
+    let selected = target_inventory
         .targets
         .into_iter()
         .find(|target| {

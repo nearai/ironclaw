@@ -44,12 +44,9 @@ function useExtensionsForTest({ extensions, registry }) {
       useRef: () => ({ current: null }),
       useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
     },
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -95,20 +92,20 @@ test("useExtensions merges registry and installed entries with installed first",
         display_name: "Google Runtime",
         runtime: "wasm",
         surfaces: toolSurfaces,
-        active: true,
+        installation_state: "active",
       },
       {
         package_ref: localRef,
         display_name: "Local Tool",
         runtime: "wasm",
         surfaces: toolSurfaces,
-        active: true,
+        installation_state: "active",
       },
       {
         display_name: "Local No ID",
         runtime: "wasm",
         surfaces: toolSurfaces,
-        active: true,
+        installation_state: "active",
       },
     ],
     registry: [
@@ -173,12 +170,9 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
       useRef: () => ({ current: null }),
       useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
     },
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -225,10 +219,11 @@ test("useExtensions exposes catalog errors and refetches both catalog queries", 
   assert.deepEqual(refetched, ["extensions", "extension-registry"]);
 });
 
-test("install auth popup: noopener null is not an error; insecure URLs are", () => {
-  const stateUpdates = [];
+function installMutationHarness(authoritativeExtension) {
   const mutationConfigs = [];
   const openCalls = [];
+  const setupRequests = [];
+  const refetches = [];
   const context = {
     Date,
     Error,
@@ -237,17 +232,11 @@ test("install auth popup: noopener null is not an error; insecure URLs are", () 
       useCallback: (fn) => fn,
       useEffect: () => {},
       useRef: () => ({ current: null }),
-      useState: (initial) => [
-        typeof initial === "function" ? initial() : initial,
-        (value) => stateUpdates.push(value),
-      ],
+      useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
     },
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     installExtension: () => {},
@@ -259,11 +248,22 @@ test("install auth popup: noopener null is not an error; insecure URLs are", () 
       mutationConfigs.push(config);
       return { isPending: false, mutate: () => {} };
     },
-    useQuery: () => ({ data: {}, isLoading: false }),
+    useQuery: (config) => ({
+      data: config.queryKey[0] === "extension-registry" ? { entries: [] } : {},
+      isLoading: false,
+      error: null,
+      isRefetching: false,
+      refetch: () => {
+        refetches.push(config.queryKey[0]);
+        return Promise.resolve(
+          config.queryKey[0] === "extensions"
+            ? { data: { extensions: authoritativeExtension ? [authoritativeExtension] : [] } }
+            : { data: config.queryKey[0] === "extension-registry" ? { entries: [] } : {} },
+        );
+      },
+    }),
     useQueryClient: () => ({ invalidateQueries: () => {} }),
     useT: () => (key) => key,
-    // Spec-compliant browser: window.open with "noopener" returns null EVEN
-    // when the popup opens, so null on this branch must not surface an error.
     window: {
       clearInterval: () => {},
       setInterval: () => 1,
@@ -275,39 +275,87 @@ test("install auth popup: noopener null is not an error; insecure URLs are", () 
   };
   vm.runInNewContext(useExtensionsSourceForTest(), context);
   context.globalThis.__testExports.useExtensions();
+  return {
+    installConfig: mutationConfigs[0],
+    openCalls,
+    refetches,
+    setupRequests,
+    onNeedsSetup: (request) => setupRequests.push(request),
+  };
+}
 
-  // Install owns the full public lifecycle; there is no second activation
-  // mutation. Remove is declared second but is unrelated to OAuth.
-  const [installConfig] = mutationConfigs;
-  const lastError = () =>
-    stateUpdates.filter((value) => value && value.type === "error").at(-1);
+test("install refreshes the authoritative projection before opening setup", async () => {
+  const packageRef = { kind: "extension", id: "notion" };
+  const authoritativeExtension = {
+    package_ref: packageRef,
+    display_name: "Notion",
+    installation_state: "setup_needed",
+    surfaces: [{ kind: "tool" }, { kind: "auth" }],
+  };
+  const harness = installMutationHarness(authoritativeExtension);
 
-  installConfig.onSuccess(
-    { success: true, auth_url: "https://slack.com/oauth/v2/authorize" },
-    { displayName: "Slack", surfaces: toolSurfaces },
+  await harness.installConfig.onSuccess(
+    { success: true },
+    {
+      packageRef,
+      displayName: "Notion",
+      surfaces: toolSurfaces,
+      onNeedsSetup: harness.onNeedsSetup,
+    },
   );
-  assert.equal(lastError(), undefined, "noopener null must not read as a blocked popup");
-  // The fresh open must pass the full hardened argument set (see
-  // .claude/rules/testing.md mock-hygiene: assert EVERY argument the
-  // production call passes — dropping "noopener" would be a security bug).
-  assert.deepEqual(openCalls.at(-1), {
-    url: "https://slack.com/oauth/v2/authorize",
-    target: "_blank",
-    features: "noopener,noreferrer",
+
+  assert.deepEqual(harness.refetches, [
+    "extensions",
+    "extension-registry",
+  ]);
+  assert.equal(harness.openCalls.length, 0, "install responses must never launch OAuth");
+  assert.equal(harness.setupRequests.length, 1);
+  assert.equal(
+    harness.setupRequests[0].installation_state,
+    "setup_needed",
+  );
+  assert.deepEqual(harness.setupRequests[0].packageRef, packageRef);
+});
+
+test("install does not infer setup from catalog surfaces when the projection is active", async () => {
+  const packageRef = { kind: "extension", id: "notion" };
+  const harness = installMutationHarness({
+    package_ref: packageRef,
+    display_name: "Notion",
+    installation_state: "active",
+    surfaces: [{ kind: "tool" }, { kind: "auth" }],
   });
 
-  installConfig.onSuccess(
-    { success: true, auth_url: "https://slack.com/oauth/v2/authorize" },
-    { displayName: "Slack", surfaces: toolSurfaces },
+  await harness.installConfig.onSuccess(
+    { success: true },
+    {
+      packageRef,
+      displayName: "Notion",
+      surfaces: [{ kind: "tool" }, { kind: "auth" }],
+      onNeedsSetup: harness.onNeedsSetup,
+    },
   );
-  assert.equal(lastError(), undefined);
 
-  // A genuinely non-HTTPS URL reports the translated client-side error key.
-  installConfig.onSuccess(
-    { success: true, auth_url: "http://insecure.example/authorize" },
-    { displayName: "Slack", surfaces: toolSurfaces },
+  assert.equal(harness.setupRequests.length, 0);
+  assert.equal(harness.openCalls.length, 0);
+});
+
+test("install does not fabricate setup when the authoritative extension is absent", async () => {
+  const packageRef = { kind: "extension", id: "notion" };
+  const harness = installMutationHarness(null);
+
+  await harness.installConfig.onSuccess(
+    { success: true },
+    {
+      packageRef,
+      displayName: "Notion",
+      surfaces: [{ kind: "tool" }, { kind: "auth" }],
+      onNeedsSetup: harness.onNeedsSetup,
+    },
   );
-  assert.equal(lastError().message, "extensions.oauthInvalidAuthorizationUrl");
+
+  assert.equal(harness.setupRequests.length, 0);
+  assert.equal(harness.openCalls.length, 0);
 });
 
 test("useOauthSetup waits for flow completion after the OAuth popup closes", async () => {
@@ -329,12 +377,7 @@ test("useOauthSetup waits for flow completion after the OAuth popup closes", asy
         extensions: [
           {
             package_ref: { id: "slack" },
-            active: false,
-            authenticated: false,
-            needs_setup: true,
-            has_auth: true,
-            installation_state: "installed",
-            onboarding_state: "auth_required",
+            installation_state: "setup_needed",
           },
         ],
       },
@@ -360,8 +403,6 @@ test("useOauthSetup waits for flow completion after the OAuth popup closes", asy
         () => {},
       ],
     },
-    activateExtension: () => {},
-    approvePairingCode: () => {},
     fetchExtensionRegistry: () => {},
     fetchExtensionSetup: () => {},
     fetchExtensions: () => {},
@@ -369,7 +410,6 @@ test("useOauthSetup waits for flow completion after the OAuth popup closes", asy
       flowStatusRequests.push({ flowId, invocationId });
       return { status: "completed" };
     },
-    fetchPairingRequests: () => {},
     gatewayStatus: () => {},
     globalThis: {},
     hasChannelSurface,

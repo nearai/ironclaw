@@ -234,7 +234,6 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     .with_channel_extension_bindings(vec![crate::input::ChannelExtensionBinding {
         extension_id: "slack".to_string(),
         adapter: Arc::new(ironclaw_slack_extension::SlackChannelAdapter),
-        inbound_payload_classifier: None,
         preference_target_codec: None,
     }]);
     let input =
@@ -254,9 +253,7 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
         .extension_management
         .as_ref()
         .expect("extension management");
-    let operator = extension_management
-        .tenant_operator_user_id_for_test()
-        .clone();
+    let operator = UserId::new("runtime-channel-bind-race-owner").expect("valid lifecycle caller");
     let slack_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "slack")
         .expect("valid Slack ref");
     extension_management
@@ -342,7 +339,11 @@ async fn runtime_channel_identity_bind_uses_deployment_channel_before_user_activ
     assert_eq!(network_egress.calls.load(Ordering::SeqCst), 1);
 
     extension_management
-        .activate_with_prechecked_credentials_for_test(slack_ref, ExtensionActivationMode::Static)
+        .activate_with_prechecked_credentials_for_test(
+            slack_ref,
+            ExtensionActivationMode::Static,
+            &operator,
+        )
         .await
         .expect("activate Slack and publish the generic host snapshot");
 
@@ -620,7 +621,6 @@ fn production_scheduler_wake_guard_passes_local_dev_with_absent_wiring() {
 
 use ironclaw_authorization::CapabilityLeaseStore;
 use ironclaw_events::{EventStreamKey, ReadScope};
-use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::ProjectId;
 use ironclaw_host_api::{
     Action, ActivityId, AgentId, ApprovalRequest, ApprovalRequestId, AuditStage, CapabilityId,
@@ -641,13 +641,13 @@ use ironclaw_loop_host::{
 use ironclaw_product_adapters::{ProductOutboundPayload, ProductProjectionItem};
 use ironclaw_product_workflow::{
     CREATE_THREAD_OPERATION, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductPayload,
-    LifecycleReadinessBlocker, ProductCapabilityInput, RESOLVE_GATE_OPERATION,
-    RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSkillListResponse,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, SUBMIT_TURN_OPERATION,
-    WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiListAutomationsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
-    approval_gate_ref,
+    LifecyclePublicState, LifecycleReadinessBlocker, ProductCapabilityInput,
+    RESOLVE_GATE_OPERATION, RebornExtensionCredentialSetup, RebornOutboundPreferencesResponse,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornSkillListResponse, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    SUBMIT_TURN_OPERATION, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
+    WebUiListAutomationsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest, approval_gate_ref,
 };
 use ironclaw_run_state::ApprovalRequestStore;
 use ironclaw_skills::SkillTrust;
@@ -1152,21 +1152,23 @@ impl HostManagedModelGateway for AuthGateToolCallingGateway {
             .lock()
             .expect("auth-gate gateway requests lock poisoned")
             .push(request);
-        let notion_search_id = CapabilityId::new("notion.notion-search").expect("notion search id");
-        let notion_tool = capabilities
+        let extension_install_id =
+            CapabilityId::new(ironclaw_product_workflow::EXTENSION_INSTALL_CAPABILITY_ID)
+                .expect("extension install id");
+        let extension_install_tool = capabilities
             .tool_definitions()
             .map_err(model_capability_error)?
             .into_iter()
-            .find(|definition| definition.capability_id == notion_search_id)
-            .expect("activated Notion capability should be visible");
+            .find(|definition| definition.capability_id == extension_install_id)
+            .expect("extension install capability should be visible");
         let candidate = capabilities
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(ProviderToolCall {
                 provider_id: "test-provider".to_string(),
                 provider_model_id: "test-model".to_string(),
                 turn_id: Some("provider-turn-auth-gate".to_string()),
                 id: "call-auth-gate".to_string(),
-                name: notion_tool.name,
-                arguments: serde_json::json!({ "query": "project notes" }),
+                name: extension_install_tool.name,
+                arguments: serde_json::json!({ "extension_id": "notion" }),
                 response_reasoning: None,
                 reasoning: None,
                 signature: None,
@@ -1978,13 +1980,13 @@ async fn runtime_nearai_mcp_bootstraps_from_nearai_session_token() {
         .expect("extension management");
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
-    let operator = extension_management.tenant_operator_user_id_for_test();
-    let credential_gate = runtime_extension_credential_gate(&runtime, operator);
+    let operator = UserId::new("runtime-nearai-session-mcp-owner").expect("valid lifecycle caller");
+    let credential_gate = runtime_extension_credential_gate(&runtime, &operator);
     let projection = extension_management
-        .project(nearai_ref, operator, Some(&credential_gate))
+        .project(nearai_ref, &operator, Some(&credential_gate))
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, InstallationState::Active);
+    assert_eq!(projection.phase, LifecyclePublicState::Active);
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -2088,13 +2090,13 @@ async fn runtime_nearai_mcp_bootstraps_from_stored_nearai_api_key() {
         .expect("extension management");
     let nearai_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "nearai").expect("valid ref");
-    let operator = extension_management.tenant_operator_user_id_for_test();
-    let credential_gate = runtime_extension_credential_gate(&runtime, operator);
+    let operator = UserId::new("runtime-nearai-stored-mcp-owner").expect("valid lifecycle caller");
+    let credential_gate = runtime_extension_credential_gate(&runtime, &operator);
     let projection = extension_management
-        .project(nearai_ref, operator, Some(&credential_gate))
+        .project(nearai_ref, &operator, Some(&credential_gate))
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, InstallationState::Active);
+    assert_eq!(projection.phase, LifecyclePublicState::Active);
 
     let capabilities = extension_management
         .active_model_visible_capabilities()
@@ -3717,44 +3719,6 @@ async fn send_user_message_until_gate_returns_blocked_on_auth_gate() {
     .with_model_gateway_override(gateway_for_runtime);
 
     let runtime = build_reborn_runtime(input).await.expect("runtime builds");
-    let local_runtime = runtime
-        .services
-        .local_runtime
-        .as_ref()
-        .expect("local runtime services");
-    let extension_management = local_runtime
-        .extension_management
-        .as_ref()
-        .expect("extension management");
-    let notion_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion")
-        .expect("valid notion ref");
-    extension_management
-        .install(
-            notion_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
-        .await
-        .expect("install Notion MCP");
-    // v3 hosted-MCP packages publish no model-visible tools on static
-    // activation; script tools/list discovery so the notion-search tool
-    // the auth-gate gateway calls exists as a model-visible capability.
-    extension_management
-        .activate_with_prechecked_credentials_for_test(
-            notion_ref,
-            ExtensionActivationMode::HostedMcpDiscovery {
-                scope: ResourceScope::local_default(
-                    UserId::new("runtime-auth-gate-owner").expect("valid user"),
-                    InvocationId::new(),
-                )
-                .expect("valid scope"),
-                runtime_http_egress: Arc::new(
-                    crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryEgress::with_tool_name("notion-search"),
-                ),
-            },
-        )
-        .await
-        .expect("activate Notion MCP with scripted discovery");
-
     let conversation = runtime.new_conversation().await.expect("conversation");
     runtime
         .enable_global_auto_approve_for_test(&conversation)
@@ -5343,6 +5307,30 @@ async fn submit_webui_extension_setup(
     query_webui_extension_setup(api, caller, package_id).await
 }
 
+async fn install_webui_extension(
+    api: &dyn ironclaw_product_workflow::ProductSurface,
+    caller: WebUiAuthenticatedCaller,
+    package_ref: LifecyclePackageRef,
+) {
+    let resolution = api
+        .invoke(
+            caller,
+            CapabilityId::new(ironclaw_product_workflow::EXTENSION_INSTALL_CAPABILITY_ID)
+                .expect("extension install capability id"),
+            ProductCapabilityInput::json(serde_json::json!({
+                "extension_id": package_ref.id.as_str()
+            })),
+            ActivityId::new(),
+        )
+        .await
+        .expect("install extension through ProductSurface capability");
+    match resolution {
+        Resolution::Done(outcome) if outcome.verdict.is_success() => {}
+        Resolution::Blocked(blocked) if blocked.kind() == "auth" => {}
+        other => panic!("extension install did not succeed: {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -5388,16 +5376,12 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
     );
     let github_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
         .expect("valid package ref");
-    bundle
-        .api
-        .install_extension(caller.clone(), github_ref.clone())
-        .await
-        .expect("install GitHub before projecting its setup");
+    install_webui_extension(bundle.api.as_ref(), caller.clone(), github_ref.clone()).await;
 
     let setup = query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "github").await;
 
     assert_eq!(setup.package_ref.id.as_str(), "github");
-    assert_eq!(setup.phase, InstallationState::Installed);
+    assert_eq!(setup.phase, LifecyclePublicState::SetupNeeded);
     assert!(setup.blockers.is_empty());
     assert_eq!(setup.secrets.len(), 1);
     assert_eq!(setup.secrets[0].name, "github_runtime_token");
@@ -5410,11 +5394,7 @@ async fn local_dev_webui_bundle_uses_local_lifecycle_facade_for_setup_extension(
     ));
     let google_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
         .expect("valid package ref");
-    bundle
-        .api
-        .install_extension(caller.clone(), google_ref)
-        .await
-        .expect("install Google Calendar before projecting its setup");
+    install_webui_extension(bundle.api.as_ref(), caller.clone(), google_ref).await;
     let google_setup =
         query_webui_extension_setup(bundle.api.as_ref(), caller.clone(), "google-calendar").await;
     assert_eq!(google_setup.secrets.len(), 1);
@@ -5529,9 +5509,9 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
         serde_json::from_value(cleared_page.payload).expect("outbound preferences payload");
     assert!(cleared_preferences.final_reply_target.is_none());
 
-    let targets_page = bundle
-        .api
-        .query(
+    let targets_page = tokio::time::timeout(
+        Duration::from_secs(15),
+        bundle.api.query(
             caller,
             ironclaw_product_workflow::RebornViewQuery {
                 view_id: ironclaw_product_workflow::OUTBOUND_DELIVERY_TARGETS_VIEW
@@ -5540,14 +5520,24 @@ async fn local_dev_webui_bundle_exposes_outbound_preferences_facade() {
                 params: serde_json::json!({}),
                 cursor: None,
             },
-        )
-        .await
-        .expect("outbound target listing uses composed facade");
+        ),
+    )
+    .await
+    .expect("outbound target query must not hang")
+    .expect("outbound target listing uses composed facade");
     let targets: ironclaw_product_workflow::RebornOutboundDeliveryTargetListResponse =
         serde_json::from_value(targets_page.payload).expect("outbound targets payload");
-    assert!(targets.targets.is_empty());
+    assert_eq!(targets.targets.len(), 1);
+    assert_eq!(
+        targets.targets[0].target.target_id.as_str(),
+        ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID
+    );
+    assert_eq!(targets.targets[0].target.channel.as_str(), "web_app");
 
-    runtime.shutdown().await.expect("runtime shutdown");
+    tokio::time::timeout(Duration::from_secs(15), runtime.shutdown())
+        .await
+        .expect("runtime shutdown must not hang")
+        .expect("runtime shutdown");
 }
 
 #[tokio::test]
@@ -5871,11 +5861,7 @@ async fn local_dev_webui_setup_extension_stores_and_rotates_runtime_credentials(
         None,
     );
     let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github").unwrap();
-    bundle
-        .api
-        .install_extension(caller.clone(), package_ref)
-        .await
-        .expect("install GitHub before configuring credentials");
+    install_webui_extension(bundle.api.as_ref(), caller.clone(), package_ref).await;
 
     let first = submit_webui_extension_setup(
         bundle.api.as_ref(),

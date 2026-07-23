@@ -1010,11 +1010,26 @@ fn parse_mcp_sse_response(
 ) -> Result<McpJsonRpcResponse, String> {
     let text = std::str::from_utf8(body)
         .map_err(|err| response_error(McpResponseErrorCause::ParseFailed(err.to_string())))?;
-    for line in text.lines() {
-        let Some(payload) = line.strip_prefix("data:") else {
+    let mut event_data = String::new();
+    for line in text.lines().chain(std::iter::once("")) {
+        if !line.is_empty() {
+            let Some(payload) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let payload = payload.strip_prefix(' ').unwrap_or(payload);
+            if !event_data.is_empty() {
+                event_data.push('\n');
+            }
+            event_data.push_str(payload);
             continue;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(payload.trim()) else {
+        }
+        if event_data.trim().is_empty() {
+            event_data.clear();
+            continue;
+        }
+        let value = serde_json::from_str::<Value>(&event_data);
+        event_data.clear();
+        let Ok(value) = value else {
             continue;
         };
         let parsed_id = json_rpc_id(&value);
@@ -1964,6 +1979,36 @@ mod tests {
             .expect("empty SSE data lines should not abort parsing");
 
         assert_eq!(response.result, Some(json!({"ok": true})));
+        assert!(response.error.is_none());
+    }
+
+    #[test]
+    fn parse_mcp_sse_response_joins_one_events_data_lines() {
+        let body = br##"event: message
+data: {
+data:   "jsonrpc": "2.0",
+data:   "id": 7,
+data:   "result": {
+data:     "content": [
+data:       {"type": "text", "text": "# NEAR AI\nURL: https://cloud-api.near.ai"}
+data:     ]
+data:   }
+data: }
+
+"##;
+
+        let response = parse_mcp_sse_response(body, Some(7))
+            .expect("one SSE event may split its JSON over repeated data lines");
+
+        assert_eq!(
+            response.result,
+            Some(json!({
+                "content": [{
+                    "type": "text",
+                    "text": "# NEAR AI\nURL: https://cloud-api.near.ai"
+                }]
+            }))
+        );
         assert!(response.error.is_none());
     }
 

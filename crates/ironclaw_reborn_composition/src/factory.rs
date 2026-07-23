@@ -98,19 +98,11 @@ use ironclaw_filesystem::{
 };
 use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
 #[cfg(feature = "test-support")]
-use ironclaw_first_party_extensions::{
-    EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
-    WEB_SEARCH_CAPABILITY_ID, gsuite_network_policy_for,
-};
-#[cfg(any(test, feature = "test-support"))]
+use ironclaw_host_api::CapabilityGrant;
+#[cfg(test)]
 use ironclaw_host_api::EffectKind;
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
-};
-#[cfg(feature = "test-support")]
-use ironclaw_host_api::{
-    CapabilityGrant, CapabilityGrantId, GrantConstraints, NetworkPolicy, NetworkTargetPattern,
-    Principal,
 };
 use ironclaw_host_api::{
     ExtensionId, HostPath, InvocationId, MountPermissions, MountView, PackageId, ResourceScope,
@@ -133,13 +125,16 @@ use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::FilesystemOutboundStateStore;
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
+#[cfg(any(test, feature = "test-support"))]
+use ironclaw_product_workflow::ChannelPairingConsumeOutcome;
+#[cfg(feature = "test-support")]
+use ironclaw_product_workflow::LifecycleProductContext;
 use ironclaw_product_workflow::{
-    ChannelPairingConsumeOutcome, ChannelPairingRegistry, ChannelPairingService,
-    ChannelPairingServiceParts, CurrentDeliveryTargetResolver, ExtensionAccountSetupRegistry,
-    FilesystemChannelPairingStore, LifecycleAuthContinuationSlot, LifecycleProductSurfaceContext,
-    OutboundPreferencesProductFacade, ProductAuthTurnGateResumeDispatcher, ProjectService,
-    RebornServicesError, RunFinalReplyRoutingService, TriggerFinalReplyTargetService,
-    web_app_outbound_delivery_target_option,
+    ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceDependencies,
+    CurrentDeliveryTargetResolver, ExtensionAccountSetupRegistry, FilesystemChannelPairingStore,
+    LifecycleProductFacade, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
+    ProductAuthTurnGateResumeDispatcher, ProjectService, RunFinalReplyRoutingService,
+    TriggerFinalReplyTargetService, lifecycle_auth_continuation_dispatcher,
 };
 use ironclaw_projects::ProjectRepository;
 use ironclaw_resources::FilesystemBudgetGateStore;
@@ -158,9 +153,9 @@ use ironclaw_triggers::{
     TRIGGER_TRUSTED_EXTERNAL_ACTOR_NAMESPACE, TriggerActiveRunLookup, TriggerError, TriggerRecord,
     TriggerRepository,
 };
-use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(feature = "test-support")]
-use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
+use ironclaw_trust::TrustDecision;
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_turns::FilesystemTurnStateRowStore;
 use ironclaw_turns::InMemoryRunProfileResolver;
 use ironclaw_turns::{
@@ -756,9 +751,7 @@ impl RebornServices {
         &self,
         wiring: ChannelHostAssemblyWiring,
     ) -> Option<Arc<crate::extension_host::channel_host::GenericChannelHostAssembly>> {
-        use crate::extension_host::channel_host::{
-            FilesystemChannelWorkflowStateFactory, GenericChannelHostDeps,
-        };
+        use crate::extension_host::channel_host::GenericChannelHostDeps;
 
         let ChannelHostAssemblyWiring {
             thread_service,
@@ -778,16 +771,19 @@ impl RebornServices {
             .generic_host()?;
         let ingress = self.extension_ingress.as_ref()?;
         let admin_configuration_resolver = local_runtime.admin_configuration_resolver.clone()?;
-        let workflow_state = Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::clone(
-            &local_runtime.extension_filesystem,
-        )));
+        let workflow_filesystem: Arc<dyn RootFilesystem> =
+            local_runtime.extension_filesystem.clone();
+        let workflow_state = Arc::new(ironclaw_product_workflow::ChannelWorkflowStateService::new(
+            workflow_filesystem,
+        ));
         let delivery = self.delivery_coordinator.clone().map(|coordinator| {
             crate::extension_host::channel_host::ChannelHostDeliveryDeps {
                 coordinator,
                 outbound_store: Arc::clone(&local_runtime.outbound_state),
                 route_store: Arc::clone(&local_runtime.delivered_gate_routes),
                 communication_preferences: Arc::clone(&local_runtime.outbound_preferences),
-                delivery_targets: Arc::clone(&local_runtime.outbound_delivery_targets),
+                current_delivery_targets: Arc::clone(&local_runtime.current_delivery_targets)
+                    as Arc<dyn CurrentDeliveryTargetResolver>,
                 approval_context,
                 blocked_auth_prompts,
                 auth_flow_cancel,
@@ -1176,7 +1172,8 @@ impl RebornServices {
         ))
     }
 
-    /// Test-support authority snapshot for active local-dev extensions.
+    /// Test-support authority snapshot for this exact caller's active local-dev
+    /// extensions.
     ///
     /// Binary-E2E harnesses build capability ports at the host-runtime boundary
     /// instead of going through `RefreshingLoopCapabilityPortFactory`, so they need
@@ -1186,11 +1183,12 @@ impl RebornServices {
     pub async fn local_dev_active_extension_authority_for_test(
         &self,
         grantee: &ExtensionId,
+        caller: LifecycleProductSurfaceContext,
     ) -> Option<
         Result<ActiveExtensionAuthorityForTest, ironclaw_product_workflow::ProductWorkflowError>,
     > {
-        let extension_management = self.local_runtime.as_ref()?.extension_management.as_ref()?;
-        Some(active_extension_authority_for_test(extension_management, grantee).await)
+        let lifecycle_facade = crate::runtime::local_lifecycle_facade(self)?;
+        Some(active_extension_authority_for_test(lifecycle_facade, grantee, caller).await)
     }
 }
 
@@ -1202,115 +1200,18 @@ pub struct ActiveExtensionAuthorityForTest {
 
 #[cfg(feature = "test-support")]
 async fn active_extension_authority_for_test(
-    extension_management: &RebornLocalExtensionManagementPort,
+    lifecycle_facade: Arc<RebornLocalLifecycleFacade>,
     grantee: &ExtensionId,
+    caller: LifecycleProductSurfaceContext,
 ) -> Result<ActiveExtensionAuthorityForTest, ironclaw_product_workflow::ProductWorkflowError> {
-    let active_capabilities = extension_management
-        .active_model_visible_capabilities()
+    let caller_user = caller.user_id.clone();
+    let surface = crate::runtime::ExtensionCapabilitySurfaceSource::new(Some(lifecycle_facade))
+        .snapshot(LifecycleProductContext::Surface(caller))
         .await?;
-    let grants = active_capabilities
-        .iter()
-        .map(|capability| CapabilityGrant {
-            id: CapabilityGrantId::new(),
-            capability: capability.id.clone(),
-            grantee: Principal::Extension(grantee.clone()),
-            issued_by: Principal::HostRuntime,
-            constraints: active_extension_grant_constraints_for_test(capability),
-        })
-        .collect();
-    let mut effects_by_provider: std::collections::BTreeMap<ExtensionId, Vec<EffectKind>> =
-        std::collections::BTreeMap::new();
-    for capability in &active_capabilities {
-        let effects = effects_by_provider
-            .entry(capability.provider.clone())
-            .or_default();
-        for effect in &capability.effects {
-            if !effects.contains(effect) {
-                effects.push(*effect);
-            }
-        }
-    }
-    let provider_trust = effects_by_provider
-        .into_iter()
-        .map(|(provider, allowed_effects)| {
-            (
-                provider,
-                TrustDecision {
-                    effective_trust: EffectiveTrustClass::user_trusted(),
-                    authority_ceiling: AuthorityCeiling {
-                        allowed_effects,
-                        max_resource_ceiling: None,
-                    },
-                    provenance: TrustProvenance::AdminConfig,
-                    evaluated_at: chrono::Utc::now(),
-                },
-            )
-        })
-        .collect();
     Ok(ActiveExtensionAuthorityForTest {
-        grants,
-        provider_trust,
+        grants: surface.grants(grantee, &caller_user),
+        provider_trust: surface.provider_trust(&caller_user).into_iter().collect(),
     })
-}
-
-#[cfg(feature = "test-support")]
-fn active_extension_grant_constraints_for_test(
-    capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
-) -> GrantConstraints {
-    GrantConstraints {
-        allowed_effects: capability.effects.clone(),
-        mounts: MountView::default(),
-        network: active_extension_network_policy_for_test(capability),
-        secrets: {
-            let mut handles = Vec::new();
-            for credential in &capability.runtime_credentials {
-                if !handles.contains(&credential.handle) {
-                    handles.push(credential.handle.clone());
-                }
-            }
-            handles
-        },
-        resource_ceiling: None,
-        expires_at: None,
-        max_invocations: None,
-    }
-}
-
-#[cfg(feature = "test-support")]
-fn active_extension_network_policy_for_test(
-    capability: &crate::extension_host::extension_lifecycle::ActiveExtensionCapability,
-) -> NetworkPolicy {
-    if let Some(policy) = gsuite_network_policy_for(&capability.provider) {
-        return policy;
-    }
-
-    let mut targets = Vec::new();
-    for credential in &capability.runtime_credentials {
-        if !targets.contains(&credential.audience) {
-            targets.push(credential.audience.clone());
-        }
-    }
-    let is_web_access_exa_mcp = capability.provider.as_str() == WEB_ACCESS_EXTENSION_ID
-        && matches!(
-            capability.id.as_str(),
-            WEB_SEARCH_CAPABILITY_ID | WEB_GET_CONTENT_CAPABILITY_ID
-        );
-    if is_web_access_exa_mcp
-        && !targets
-            .iter()
-            .any(|target| target.host_pattern == EXA_MCP_HOST)
-    {
-        targets.push(NetworkTargetPattern {
-            scheme: Some(ironclaw_host_api::NetworkScheme::Https),
-            host_pattern: EXA_MCP_HOST.to_string(),
-            port: None,
-        });
-    }
-    NetworkPolicy {
-        allowed_targets: targets,
-        deny_private_ip_ranges: true,
-        max_egress_bytes: is_web_access_exa_mcp.then_some(NETWORK_EGRESS_LIMIT),
-    }
 }
 
 /// Bundle returned by [`RebornServices::local_dev_attachment_test_support_for_test`]
@@ -1375,6 +1276,10 @@ pub(crate) struct RebornRuntimeSubstrate {
     /// layer can resolve at fire time.
     pub(crate) outbound_delivery_targets:
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
+    /// Product-facing send-time authority over the canonical target registry.
+    /// Runtime assembly attaches the live channel codecs after construction.
+    pub(crate) current_delivery_targets:
+        Arc<crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver>,
     /// Global default criteria-based skill auto-activation master switch,
     /// shared by reference between the skill activation selector (reads it per
     /// turn) and the WebUI skills facade (toggles it). Defaults to `true`; a
@@ -1522,6 +1427,8 @@ where
     /// trigger-create service and any product target providers share it.
     pub(crate) outbound_delivery_targets:
         Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
+    pub(crate) current_delivery_targets:
+        Arc<crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver>,
     pub(crate) resource_governor: Arc<dyn ResourceGovernor>,
     pub(crate) budget_gate_store: Arc<dyn BudgetGateStore>,
     pub(crate) broadcast_budget_event_sink: Arc<BroadcastBudgetEventSink>,
@@ -1578,6 +1485,16 @@ impl RebornProductionRuntimeServices {
         match self {
             Self::LibSql(graph) => Arc::clone(&graph.outbound_delivery_targets),
             Self::Postgres(graph) => Arc::clone(&graph.outbound_delivery_targets),
+        }
+    }
+
+    pub(crate) fn current_delivery_targets(
+        &self,
+    ) -> Arc<crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver>
+    {
+        match self {
+            Self::LibSql(graph) => Arc::clone(&graph.current_delivery_targets),
+            Self::Postgres(graph) => Arc::clone(&graph.current_delivery_targets),
         }
     }
 }
@@ -1724,39 +1641,29 @@ fn auth_continuation_dispatcher(
 
 struct ProductAuthServicesCompositionInput {
     ports: RebornProductAuthServicePorts,
-    turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    blocked_auth_snapshot_source:
-        Option<Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>>,
+    continuation_dispatcher: Arc<dyn RebornAuthContinuationDispatcher>,
     provider_composition: OAuthProviderComposition,
     security_audit_sink: Option<Arc<dyn ironclaw_events::SecurityAuditSink>>,
     secret_store: Arc<dyn SecretStore>,
     nearai_mcp_host_managed_scope: Option<AuthProductScope>,
-    lifecycle_activation_continuation: Option<LifecycleAuthContinuationSlot>,
 }
 
 fn compose_product_auth_services(
     input: ProductAuthServicesCompositionInput,
-) -> Result<Arc<RebornProductAuthServices>, RebornBuildError> {
+) -> Result<RebornProductAuthServices, RebornBuildError> {
     let ProductAuthServicesCompositionInput {
         ports,
-        turn_coordinator,
-        blocked_auth_snapshot_source,
+        continuation_dispatcher,
         provider_composition,
         security_audit_sink,
         secret_store,
         nearai_mcp_host_managed_scope,
-        lifecycle_activation_continuation,
     } = input;
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
         None => ports,
     };
-    let continuation = auth_continuation_dispatcher(turn_coordinator, blocked_auth_snapshot_source);
-    let continuation = match lifecycle_activation_continuation {
-        Some(slot) => slot.wrap(continuation),
-        None => continuation,
-    };
-    let mut services = ports.into_services(continuation, secret_store);
+    let mut services = ports.into_services(continuation_dispatcher, secret_store);
     if let Some(sink) = security_audit_sink {
         services = services.with_security_audit_sink(sink);
     }
@@ -1769,7 +1676,7 @@ fn compose_product_auth_services(
     if let Some(scope) = nearai_mcp_host_managed_scope {
         services = services.with_host_managed_nearai_credential_scope(scope)?;
     }
-    Ok(Arc::new(services))
+    Ok(services)
 }
 
 /// Whether a Google OAuth backend is configured, from the composition-side
@@ -2132,18 +2039,21 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let security_audit_sink = services.security_audit_sink();
     let nearai_mcp_host_managed_scope =
         AuthProductScope::new(nearai_mcp_owner_scope.clone(), AuthSurface::Api);
-    let lifecycle_activation_continuation = LifecycleAuthContinuationSlot::default();
-    let product_auth = match product_auth_ports {
+    let base_auth_continuation = auth_continuation_dispatcher(
+        turn_coordinator.clone(),
+        Some(Arc::clone(&store_graph.turn_state)
+            as Arc<
+                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+            >),
+    );
+    let product_auth_core = match product_auth_ports {
         Some(ports) => compose_product_auth_services(ProductAuthServicesCompositionInput {
             ports,
-            turn_coordinator: turn_coordinator.clone(),
-            blocked_auth_snapshot_source: Some(Arc::clone(&store_graph.turn_state)
-                as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
+            continuation_dispatcher: Arc::clone(&base_auth_continuation),
             provider_composition,
             security_audit_sink: security_audit_sink.clone(),
             secret_store: Arc::clone(&secret_store),
             nearai_mcp_host_managed_scope: Some(nearai_mcp_host_managed_scope.clone()),
-            lifecycle_activation_continuation: Some(lifecycle_activation_continuation.clone()),
         })?,
         None => {
             {
@@ -2162,22 +2072,16 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                 // separate field but does NOT wrap the account service, so without this the
                 // durable `FilesystemAuthProductServices::refresh_account` stub returns
                 // `BackendUnavailable` — Google OAuth access tokens are never refreshed and every
-                // capability call reauths once the 1h access token expires. The sibling branch
-                // routes through `compose_product_auth_services`, which applies the same wrap.
-                let continuation =
-                    lifecycle_activation_continuation.wrap(auth_continuation_dispatcher(
-                        turn_coordinator.clone(),
-                        Some(Arc::clone(&store_graph.turn_state)
-                            as Arc<
-                                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
-                            >),
-                    ));
+                // capability call reauths once the 1h access token expires.
                 let services = RebornProductAuthServicePorts::from_shared_with_provider(
                     Arc::clone(&durable_services),
                     Arc::clone(&provider_client),
                 )
                 .with_provider_client(Arc::clone(&provider_client))
-                .into_services(continuation, Arc::clone(&secret_store))
+                .into_services(
+                    Arc::clone(&base_auth_continuation),
+                    Arc::clone(&secret_store),
+                )
                 .with_provider_client(Arc::clone(&provider_client))
                 .with_flow_record_source(durable_services);
                 let services = match provider_composition.engine.clone() {
@@ -2192,16 +2096,22 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                     Some(sink) => services.with_security_audit_sink(sink),
                     None => services,
                 };
-                Arc::new(services.with_host_managed_nearai_credential_scope(
+                services.with_host_managed_nearai_credential_scope(
                     nearai_mcp_host_managed_scope.clone(),
-                )?)
+                )?
             }
         }
     };
+    // Extension management needs product-auth cleanup and account-selection
+    // ports before its lifecycle facade can exist. Keep those ports on an
+    // immutable clone of the fully composed auth core; the externally exposed
+    // facade below replaces only the continuation dispatcher once the concrete
+    // lifecycle facade is available.
+    let product_auth_dependencies = Arc::new(product_auth_core.clone());
     services = services.with_runtime_credential_account_resolver(Arc::new(
         ProductAuthRuntimeCredentialResolver::new_with_refresh(
-            product_auth.runtime_credential_account_selection_service(),
-            product_auth.runtime_credential_account_refresh_service(),
+            product_auth_dependencies.runtime_credential_account_selection_service(),
+            product_auth_dependencies.runtime_credential_account_refresh_service(),
         ),
     ));
     services = attach_wasm_runtime(services)?;
@@ -2359,10 +2269,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             extension_installation_store,
             extension_lifecycle_service,
             active_extensions,
-            Some(Arc::clone(&product_auth) as Arc<dyn ExtensionCredentialCleanup>),
-            // #5459 P1: the base owner is the tenant operator in local-dev —
-            // their installs are tenant-shared, everyone else's are private.
-            nearai_mcp_owner_scope.user_id.clone(),
+            Some(Arc::clone(&product_auth_dependencies) as Arc<dyn ExtensionCredentialCleanup>),
         )
         .with_account_setup_registry(account_setups.clone())
         .with_removal_cleanup_registry(removal_cleanup)
@@ -2377,7 +2284,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     );
     let nearai_mcp_bootstrap_outcome = crate::llm_admin::nearai_mcp::bootstrap_nearai_mcp(
         nearai_mcp_bootstrap_config,
-        &product_auth,
+        &product_auth_dependencies,
         &extension_management,
         nearai_mcp_owner_scope,
     )
@@ -2432,19 +2339,21 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             reason: "local-dev extension lifecycle facade could not be attached".to_string(),
         });
     }
-    let lifecycle_continuation_facade =
+    let lifecycle_continuation_facade: Arc<dyn LifecycleProductFacade> = Arc::new(
         RebornLocalLifecycleFacade::new(Arc::clone(&store_graph.local_runtime.skill_management))
             .with_extension_management(Arc::clone(&extension_management))
             .with_admin_configuration_resolver(Arc::clone(&admin_configuration_resolver))
             .with_runtime_http_egress(product_auth_runtime_ports.runtime_http_egress())
             .with_runtime_credential_accounts(
-                product_auth.runtime_credential_account_selection_service(),
-            );
-    lifecycle_activation_continuation
-        .fill(Arc::new(lifecycle_continuation_facade))
-        .map_err(|reason| RebornBuildError::InvalidConfig {
-            reason: reason.to_string(),
-        })?;
+                product_auth_dependencies.runtime_credential_account_selection_service(),
+            ),
+    );
+    let product_auth = Arc::new(product_auth_core.with_continuation_dispatcher(
+        lifecycle_auth_continuation_dispatcher(
+            Arc::clone(&lifecycle_continuation_facade),
+            Arc::clone(&base_auth_continuation),
+        ),
+    ));
     let trigger_create_hook = local_dev_trigger_create_hook(&store_graph.local_runtime).await?;
     // Built from the same turn-state store the WebUI automations panel reads
     // (`crate::webui::facade`), so both `trigger_list` and the panel agree on
@@ -2464,7 +2373,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         &mut first_party_registry,
         composed_run_final_reply_routing_service(
             Arc::clone(&store_graph.local_runtime.outbound_state),
-            Arc::clone(&store_graph.local_runtime.outbound_delivery_targets),
+            Arc::clone(&store_graph.local_runtime.current_delivery_targets)
+                as Arc<dyn CurrentDeliveryTargetResolver>,
         ),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -2500,7 +2410,7 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
         admin_configuration,
         channel_egress_scope.user_id.clone(),
         admin_configuration_consumers,
-        extension_management,
+        Arc::clone(&extension_management),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("admin configuration handler is invalid: {error}"),
@@ -2661,7 +2571,19 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             // credential-account resolver wiring, and discovery staging
             // needs the resolver.
             if let Some(ports) = services.product_auth_provider_runtime_ports() {
-                management.attach_discovery_runtime_ports(ports);
+                management.attach_discovery_runtime_ports(ports.clone());
+                management
+                    .reconcile_hosted_mcp_runtime_after_restore(
+                        &channel_egress_scope,
+                        product_auth.runtime_credential_account_selection_service(),
+                        ports.runtime_http_egress(),
+                    )
+                    .await
+                    .map_err(|error| RebornBuildError::InvalidConfig {
+                        reason: format!(
+                            "hosted MCP runtime state could not be reconciled: {error}"
+                        ),
+                    })?;
             }
         }
         services.set_extension_tool_resolver(generic.resolver);
@@ -2735,48 +2657,30 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                         extension_id.clone(),
                     ),
                 );
-                let roots =
-                    crate::extension_host::channel_host::default_channel_workflow_storage_roots(
-                        &channel_egress_scope.tenant_id,
-                        extension_id.as_str(),
-                    )
-                    .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
-                let workflow_state_factory =
-                    crate::extension_host::channel_host::FilesystemChannelWorkflowStateFactory::new(
-                        Arc::clone(&filesystem),
+                let workflow_filesystem: Arc<dyn RootFilesystem> = filesystem.clone();
+                let workflow_state_service =
+                    ironclaw_product_workflow::ChannelWorkflowStateService::new(
+                        workflow_filesystem,
                     );
-                let workflow_state =
-                    crate::extension_host::channel_host::ChannelWorkflowStateFactory::build(
-                        &workflow_state_factory,
-                        &roots,
-                        channel_egress_scope.clone(),
-                    )
+                let workflow_state = workflow_state_service
+                    .build_for_extension(&extension_id, channel_egress_scope.clone())
                     .await
-                    .map_err(|reason| RebornBuildError::InvalidConfig { reason })?;
-                let continuation =
-                    lifecycle_activation_continuation.wrap(auth_continuation_dispatcher(
-                        turn_coordinator.clone(),
-                        Some(Arc::clone(&store_graph.turn_state)
-                            as Arc<
-                                dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
-                            >),
-                    ));
-                let service = Arc::new(
-                    ChannelPairingService::new(
-                        ChannelPairingServiceParts {
-                            tenant_id: channel_egress_scope.tenant_id.clone(),
-                            agent_id: channel_egress_scope
+                    .map_err(|error| RebornBuildError::InvalidConfig {
+                        reason: error.to_string(),
+                    })?;
+                let continuation = lifecycle_auth_continuation_dispatcher(
+                    Arc::clone(&lifecycle_continuation_facade),
+                    Arc::clone(&base_auth_continuation),
+                );
+                let service = Arc::new(ChannelPairingService::new(
+                            channel_egress_scope.tenant_id.clone(),
+                            channel_egress_scope
                                 .agent_id
                                 .clone()
                                 .unwrap_or_else(|| ironclaw_host_api::AgentId::new("reborn").expect("static agent id")), // safety: static literal uses the validated agent id grammar.
-                            project_id: channel_egress_scope.project_id.clone(),
-                            extension_id: extension_id.clone(),
-                            connection_notices: descriptor.connection_notices.clone(),
-                            connection_requirement: descriptor.connection_requirement.clone(),
-                            deep_link_template: descriptor.pairing_deep_link_template.clone(),
-                            inbound_code_prefixes: descriptor
-                                .pairing_inbound_code_prefixes
-                                .clone(),
+                            channel_egress_scope.project_id.clone(),
+                            descriptor.clone(),
+                            ChannelPairingServiceDependencies {
                             store: pairing_store,
                             installation,
                             template_values,
@@ -2798,9 +2702,8 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
                                     dm_targets,
                                 ),
                             ),
-                        },
-                    ),
-                );
+                            },
+                ));
                 if !account_setups.connect(
                     &descriptor.extension_id,
                     Arc::clone(&service)
@@ -2817,6 +2720,14 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
             }
             registry
         };
+        channel_pairing_registry_built
+            .reconcile_pending_completions()
+            .await
+            .map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "channel pairing completion startup reconciliation failed: {error}"
+                ),
+            })?;
         channel_pairing_registry = Some(channel_pairing_registry_built);
         // The delivery coordinator (§5.4): sole delivery-state writer over
         // the SAME transport the host's channel hooks egress through and the
@@ -3151,6 +3062,12 @@ async fn build_local_runtime_store_graph(
     let skill_management =
         build_local_skill_management_port(owner_user_id.clone(), Arc::clone(&filesystem))?;
     let outbound_stores = local_dev_outbound_store(Arc::clone(&filesystem));
+    let outbound_delivery_targets = host_owned_outbound_delivery_target_registry()?;
+    let current_delivery_targets = Arc::new(
+        crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver::new(
+            Arc::clone(&outbound_delivery_targets),
+        ),
+    );
     let local_runtime = Arc::new(RebornRuntimeSubstrate {
         extension_lifecycle_surface_context,
         owner_user_id: owner_user_id.clone(),
@@ -3169,7 +3086,8 @@ async fn build_local_runtime_store_graph(
         trigger_repository: Arc::clone(&trigger_repository),
         project_service: Arc::new(RebornProjectService::new(Arc::clone(&project_repository))),
         outbound_preferences: outbound_stores.outbound_preferences,
-        outbound_delivery_targets: host_owned_outbound_delivery_target_registry()?,
+        outbound_delivery_targets,
+        current_delivery_targets,
         skill_auto_activate_learned: Arc::new(AtomicBool::new(true)),
         outbound_state: outbound_stores.outbound_state,
         delivered_gate_routes: outbound_stores.delivered_gate_routes,
@@ -3270,7 +3188,8 @@ async fn local_dev_trigger_create_hook(
         composed_trigger_final_reply_target_service(
             Arc::clone(&local_runtime.trigger_source_turn_state),
             Arc::clone(&local_runtime.outbound_state),
-            Arc::clone(&local_runtime.outbound_delivery_targets),
+            Arc::clone(&local_runtime.current_delivery_targets)
+                as Arc<dyn CurrentDeliveryTargetResolver>,
         ),
     )))
 }
@@ -3278,41 +3197,55 @@ async fn local_dev_trigger_create_hook(
 fn composed_trigger_final_reply_target_service(
     source_turn_state: Arc<std::sync::RwLock<Arc<dyn TurnStateStore>>>,
     run_targets: Arc<dyn OutboundStateStore>,
-    registry: Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
+    current_targets: Arc<dyn CurrentDeliveryTargetResolver>,
 ) -> Arc<TriggerFinalReplyTargetService> {
     Arc::new(TriggerFinalReplyTargetService::new(
         Arc::new(LateBoundTriggerSourceTurnStateStore { source_turn_state }),
         run_targets,
-        registry as Arc<dyn CurrentDeliveryTargetResolver>,
+        current_targets,
     ))
 }
 
 fn composed_run_final_reply_routing_service(
     run_targets: Arc<dyn OutboundStateStore>,
-    registry: Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
+    current_targets: Arc<dyn CurrentDeliveryTargetResolver>,
 ) -> Arc<RunFinalReplyRoutingService> {
     Arc::new(RunFinalReplyRoutingService::new(
-        registry as Arc<dyn CurrentDeliveryTargetResolver>,
+        current_targets,
         run_targets,
     ))
 }
 
-fn host_owned_outbound_delivery_target_registry() -> Result<
-    Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
-    RebornBuildError,
-> {
+fn host_owned_outbound_delivery_target_registry()
+-> Result<Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>, RebornBuildError> {
     let registry = Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
-    let web_app = web_app_outbound_delivery_target_option().map_err(|reason| {
-        RebornBuildError::InvalidConfig {
-            reason: format!("host-owned WebApp delivery target is invalid: {reason}"),
-        }
+    let web_app = ironclaw_outbound::OutboundDeliveryTargetSummary::new(
+        ironclaw_outbound::OutboundDeliveryTargetId::new(
+            ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+        )
+        .map_err(|reason| RebornBuildError::InvalidConfig {
+            reason: format!("host-owned WebApp target id is invalid: {reason}"),
+        })?,
+        "web_app",
+        "Web app only",
+        Some("Store the final answer in run history without external delivery.".to_string()),
+    )
+    .map_err(|reason| RebornBuildError::InvalidConfig {
+        reason: format!("host-owned WebApp delivery target is invalid: {reason}"),
     })?;
     registry
         .register_provider(
             ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
             Arc::new(
-                crate::outbound::HostOwnedOutboundDeliveryTargetProvider::new(
+                ironclaw_outbound::HostOwnedOutboundDeliveryTargetProvider::new(
                     web_app,
+                    ironclaw_outbound::DeliveryTargetCapabilities {
+                        final_replies: true,
+                        progress: false,
+                        gate_prompts: false,
+                        auth_prompts: false,
+                        modalities: Vec::new(),
+                    },
                     ironclaw_outbound::RunFinalReplyDestination::WebApp,
                 ),
             ),
@@ -5545,6 +5478,11 @@ where
     ));
     let outbound_stores = filesystem_outbound_store(Arc::clone(&stores.scoped_filesystem));
     let outbound_delivery_targets = host_owned_outbound_delivery_target_registry()?;
+    let current_delivery_targets = Arc::new(
+        crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver::new(
+            Arc::clone(&outbound_delivery_targets),
+        ),
+    );
     let checkpoint_state_store: Arc<dyn CheckpointStateStore> = Arc::new(
         FilesystemCheckpointStateStore::new(Arc::clone(&stores.scoped_filesystem)),
     );
@@ -5615,6 +5553,7 @@ where
         trigger_repository: Arc::clone(&trigger_repository),
         outbound_state: outbound_stores.outbound_state,
         outbound_delivery_targets,
+        current_delivery_targets,
         resource_governor: production_resource_governor,
         budget_gate_store,
         broadcast_budget_event_sink,
@@ -5632,7 +5571,8 @@ where
                 Arc::clone(&production_runtime_graph.turn_state) as Arc<dyn TurnStateStore>,
             )),
             Arc::clone(&production_runtime_graph.outbound_state),
-            Arc::clone(&production_runtime_graph.outbound_delivery_targets),
+            Arc::clone(&production_runtime_graph.current_delivery_targets)
+                as Arc<dyn CurrentDeliveryTargetResolver>,
         ),
     ));
     // Same store-backed lookup the WebUI automations panel builds via
@@ -5652,7 +5592,8 @@ where
         &mut first_party_registry,
         composed_run_final_reply_routing_service(
             Arc::clone(&production_runtime_graph.outbound_state),
-            Arc::clone(&production_runtime_graph.outbound_delivery_targets),
+            Arc::clone(&production_runtime_graph.current_delivery_targets)
+                as Arc<dyn CurrentDeliveryTargetResolver>,
         ),
     )
     .map_err(|error| RebornBuildError::InvalidConfig {
@@ -5744,20 +5685,21 @@ where
         .engine
         .as_ref()
         .map(|engine| Arc::clone(engine.recipes()));
-    let product_auth_services =
-        compose_product_auth_services(ProductAuthServicesCompositionInput {
+    let product_auth_services = Arc::new(compose_product_auth_services(
+        ProductAuthServicesCompositionInput {
             ports: product_auth_ports,
-            turn_coordinator: turn_coordinator.clone(),
             // Blocked-auth fan-out over this builder's own durable turn-state
             // store: a completed connect resumes every run the same owner has
             // parked on the same provider, matching the local-dev builder. The
             // blanket `TurnRunSnapshotSource` impl covers the generic
             // filesystem store directly.
-            blocked_auth_snapshot_source: Some(Arc::clone(&turn_state)
-                as Arc<dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource>),
-            // This production builder wires no lifecycle-activation facade, so an
-            // empty slot leaves lifecycle-activation auth continuations unsupported
-            // here, preserving this builder's prior behavior.
+            continuation_dispatcher: auth_continuation_dispatcher(
+                turn_coordinator.clone(),
+                Some(Arc::clone(&turn_state)
+                    as Arc<
+                        dyn crate::blocked_auth_resume::BlockedAuthSnapshotSource,
+                    >),
+            ),
             provider_composition,
             security_audit_sink,
             secret_store: Arc::clone(&secret_store),
@@ -5765,8 +5707,8 @@ where
             // `build_local_runtime`'s local-dev/hosted-single-tenant path today;
             // preserves this builder's prior behavior of never attaching it.
             nearai_mcp_host_managed_scope: None,
-            lifecycle_activation_continuation: None,
-        })?;
+        },
+    )?);
     // Bundle the keepalive sweep deps so they are wired all-or-nothing. The
     // candidate source is present only when this path built a durable instance
     // (no caller-supplied product_auth_ports); recipes are present only when

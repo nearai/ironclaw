@@ -2,9 +2,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    DispatchError, ExtensionId, InvocationOrigin, ResourceEstimate,
-    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, RunId, SecretHandle,
-    UserId, VendorId,
+    DispatchError, ExtensionId, InvocationOrigin, ResourceEstimate, RunId,
+    RuntimeCredentialAuthRequirement, RuntimeDispatchErrorKind, RuntimeKind, SecretHandle, UserId,
+    VendorId,
 };
 use serde_json::json;
 

@@ -50,10 +50,9 @@ impl TriggerFinalReplyTargetService {
         scope: &ResourceScope,
         target: &TriggerDeliveryTargetId,
     ) -> Result<(), TriggerError> {
-        let target_id = target.clone();
         match self
             .current_targets
-            .resolve_current_destination(scope, &target_id)
+            .resolve_current_destination(scope, target)
             .await
         {
             Ok(Some(_)) => Ok(()),

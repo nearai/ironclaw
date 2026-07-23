@@ -22,7 +22,7 @@ use ironclaw_extensions::ExtensionInstallationStore;
 #[cfg(test)]
 use ironclaw_filesystem::RootFilesystem;
 #[cfg(test)]
-use ironclaw_host_api::{AgentId, TenantId};
+use ironclaw_host_api::TenantId;
 use ironclaw_host_api::{ExtensionId, UserId};
 use ironclaw_product_adapters::AdapterInstallationId;
 

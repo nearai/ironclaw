@@ -484,8 +484,8 @@ mod tests {
 
     #[test]
     fn gate_resolution_text_stays_a_plain_message_for_host_reclassification() {
-        // The adapter must NOT classify gate resolutions — the host sink
-        // does, via `classify_interaction_resolution`.
+        // The adapter must NOT classify gate resolutions — the shared host
+        // sink applies the channel-neutral interaction grammar.
         let outcome = inbound(
             br#"{
                 "type": "event_callback",

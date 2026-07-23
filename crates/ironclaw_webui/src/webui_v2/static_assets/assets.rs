@@ -317,33 +317,27 @@ mod tests {
             );
         }
 
-        // Every channel package renders the same generic sections: no
-        // concrete package-id condition remains in the channels tab or the
-        // configure modal (extension-runtime overview §6.4 — affordances
-        // derive from the state enums plus config completeness on the wire).
+        // Connection presentation derives from the manifest strategy. The
+        // channels tab remains a lifecycle list; Configure owns setup UI.
         let schema = source_text("pages/extensions/lib/extensions-schema.ts");
         assert!(
-            schema.contains("inbound_proof_code"),
+            schema.contains("isWebGeneratedCodeConnection"),
             "the shared surface taxonomy owns the connect-strategy vocabulary"
         );
 
         let channels_tab = source_text("pages/extensions/components/channels-tab.tsx");
-        assert!(
-            channels_tab.contains("channelConnection"),
-            "connect affordances come from the extension's channel surface"
-        );
-        assert!(channels_tab.contains("isInboundProofCodeConnection"));
-        assert!(
-            channels_tab.contains("copy={connection}"),
-            "pairing copy is the surface connection requirement"
-        );
+        assert!(channels_tab.contains("ExtensionCard"));
+        assert!(!channels_tab.contains("PairingSection"));
+        assert!(!channels_tab.contains("redeemPairingCode"));
         assert!(!channels_tab.to_ascii_lowercase().contains("slack"));
 
         let configure_modal = source_text("pages/extensions/components/configure-modal.tsx");
         assert!(
-            configure_modal.contains("connectsViaOauth(extension, secrets)"),
-            "pairing-vs-OAuth routing derives from the wire connect strategy / secrets"
+            configure_modal.contains("isWebGeneratedCodeConnection(channelConnection(extension))"),
+            "WebGeneratedCode routing derives directly from the manifest surface"
         );
+        assert!(!configure_modal.contains("getExtensionPairingStatus"));
+        assert!(!configure_modal.contains("redeemPairingCode"));
         assert!(
             configure_modal.contains("queryClient.invalidateQueries({ queryKey })"),
             "OAuth completion must refresh the server-owned lifecycle projection"
@@ -374,35 +368,31 @@ mod tests {
         assert!(events.contains("resumeWaitingChannelConnections"));
         assert!(events.contains("ironclaw:channel-connection:waiting:v1"));
 
-        // gates.ts recognizes the challenge kinds (manual_token / oauth_url)
+        // gates.ts recognizes the challenge kinds (manual_token / oauth_url /
+        // pairing)
         // that ALL auth gates use, and normalizes the optional channel
         // `connection` context onto the pending gate.
         let gates = source_text("pages/chat/lib/gates.ts");
         assert!(gates.contains("manual_token"));
         assert!(gates.contains("oauth_url"));
+        assert!(gates.contains("pairing"));
         assert!(gates.contains("connectionFromContext"));
 
-        // The channel-connection/onboarding state machine — the channel-connected
-        // subscription, pairing redemption through the generic pairing API
-        // (submitOnboardingPairing -> redeemPairingCode; frontend scaffolding —
-        // no backend mounts the generic redeem route until the first non-Slack
-        // inbound channel lands, see PAIRING_REDEEM_PATH), and the
-        // waiter/onboarding-resume wiring that resumes a chat blocked on a
-        // channel connected in another tab — moved out of useChat into the
-        // dedicated useChannelOnboarding hook (PR #5604 mn10). useChat still
-        // wires that hook in and re-exposes its handles, so the wiring is
-        // verified here and the state machine itself in its new home below.
+        // The channel-connection/onboarding state machine observes generic
+        // connection completion and resumes the originating chat. Codes minted
+        // by the host are completed provider-side; the browser has no pasted
+        // proof redemption route.
         let use_chat = source_text("pages/chat/hooks/useChat.ts");
         assert!(use_chat.contains("useChannelOnboarding(threadId, {"));
-        assert!(use_chat.contains("submitOnboardingPairing"));
-        assert!(use_chat.contains("submitChannelConnectionPairing"));
+        assert!(!use_chat.contains("submitOnboardingPairing"));
+        assert!(!use_chat.contains("submitChannelConnectionPairing"));
         assert!(!use_chat.contains("Slack is connected. Continue the previous request."));
 
         let use_channel_onboarding = source_text("pages/chat/hooks/useChannelOnboarding.ts");
         assert!(use_channel_onboarding.contains("subscribeChannelConnected"));
-        assert!(use_channel_onboarding.contains("submitOnboardingPairing"));
-        assert!(use_channel_onboarding.contains("submitChannelConnectionPairing"));
-        assert!(use_channel_onboarding.contains("redeemPairingCode"));
+        assert!(!use_channel_onboarding.contains("submitOnboardingPairing"));
+        assert!(!use_channel_onboarding.contains("submitChannelConnectionPairing"));
+        assert!(!use_channel_onboarding.contains("redeemPairingCode"));
         assert!(use_channel_onboarding.contains("connectionEventMatchesOnboarding"));
         // OAuth completion/failure matching goes through the shared flow-id
         // matchers, not a hand-rolled comparison that could drift on the
@@ -414,15 +404,24 @@ mod tests {
         assert!(use_channel_onboarding.contains("channelConnectionRequirementFromCard"));
         assert!(use_channel_onboarding.contains("pendingOnboarding"));
 
-        // chat.ts renders the pairing card off a manual_token gate carrying a
+        // chat.ts renders the pairing card off a pairing gate carrying a
         // connection, on the same auth-gate switch as the token / oauth cards.
         let chat = source_text("pages/chat/chat.tsx");
         assert!(chat.contains("OnboardingPairingCard"));
         assert!(chat.contains("pendingGate.connection"));
-        assert!(chat.contains("submitChannelConnectionPairing"));
+        assert!(chat.contains("pendingGate.challengeKind === \"pairing\""));
+        assert!(!chat.contains("submitChannelConnectionPairing"));
 
-        let generic_pairing = source_text("pages/extensions/lib/pairing-api.ts");
-        assert!(generic_pairing.contains("notifyChannelConnected"));
+        for deleted in [
+            "pages/extensions/lib/pairing-api.ts",
+            "pages/extensions/components/pairing-section.tsx",
+        ] {
+            let full = format!("{}/frontend/src/{deleted}", env!("CARGO_MANIFEST_DIR"));
+            assert!(
+                !std::path::Path::new(&full).exists(),
+                "{deleted} was unsupported scaffolding and must not return"
+            );
+        }
     }
 
     #[test]
@@ -796,6 +795,10 @@ mod tests {
     #[test]
     fn extension_configuration_uses_only_the_public_lifecycle_states() {
         let extension_actions = source_text("pages/extensions/lib/extension-actions.ts");
+        assert!(
+            extension_actions.contains("const installationState = ext?.installation_state;"),
+            "the caller-visible lifecycle must use only installation_state"
+        );
         assert!(extension_actions.contains("export function extensionIsActive"));
         assert!(
             extension_actions.contains("return state === \"active\";"),
@@ -805,8 +808,33 @@ mod tests {
         assert!(!extension_actions.contains("state === \"ready\""));
 
         let extension_card = source_text("pages/extensions/components/extension-card.tsx");
-        assert!(extension_card.contains("installationState: ext.installation_state"));
-        assert!(extension_card.contains("onboardingState: ext.onboarding_state"));
+        assert!(extension_card.contains("const state = extensionLifecycleState(ext);"));
+        for retired in ["ext.active", "ext.needs_setup", "ext.onboarding_state"] {
+            assert!(
+                !extension_card.contains(retired),
+                "extension cards must not consume retired lifecycle field {retired}"
+            );
+        }
+
+        let channel_onboarding = source_text("pages/chat/hooks/useChannelOnboarding.ts");
+        assert!(
+            channel_onboarding.contains("extension?.installation_state === \"active\""),
+            "chat connection-card suppression must use the caller-scoped lifecycle projection"
+        );
+        for retired in [
+            "extension.authenticated",
+            "extension.needs_setup",
+            "extension.onboarding_state",
+        ] {
+            assert!(
+                !channel_onboarding.contains(retired),
+                "chat connection handling must not consume retired lifecycle field {retired}"
+            );
+        }
+
+        let settings_channels = source_text("pages/settings/components/channels-tab.tsx");
+        assert!(settings_channels.contains("channel?.installation_state || \"setup_needed\""));
+        assert!(!settings_channels.contains("channel?.onboarding_state"));
 
         let configure_modal = source_text("pages/extensions/components/configure-modal.tsx");
         assert!(configure_modal.contains("const isActive = extensionIsActive(extension);"));
@@ -817,10 +845,13 @@ mod tests {
 
         let regression = source_text("pages/extensions/lib/extension-actions.test.ts");
         assert!(
-            regression.contains("extensionIsActive accepts card payload lifecycle fields"),
-            "caller-visible card payload lifecycle fields need JS regression coverage"
+            regression.contains("extensionIsActive requires authoritative active state"),
+            "the authoritative caller-visible lifecycle predicate needs JS regression coverage"
         );
-        assert!(regression.contains("extensionIsActive({ active: true })"));
+        assert!(
+            regression
+                .contains("extensionIsActive({ installation_state: \"setup_needed\" }), false")
+        );
     }
 
     #[test]

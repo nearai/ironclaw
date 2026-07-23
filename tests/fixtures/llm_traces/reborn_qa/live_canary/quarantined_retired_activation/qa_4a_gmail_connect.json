@@ -1,4 +1,5 @@
 {
+  "_quarantine_reason": "recorded trace invokes retired builtin.extension_activate",
   "model_name": "reborn-qa-qa_4a_gmail_connect",
   "steps": [
     {

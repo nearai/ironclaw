@@ -9,11 +9,11 @@ import {
   authAccountReasonLabelKey,
   channelConnection,
   channelSurface,
-  connectsViaOauth,
   extensionSurfaces,
+  hasAuthSurface,
   hasChannelSurface,
   hasToolSurface,
-  isInboundProofCodeConnection,
+  isWebGeneratedCodeConnection,
   primaryAuthAccount,
 } from "./extensions-schema";
 
@@ -43,6 +43,15 @@ test("hasChannelSurface keys off a declared channel surface only", () => {
   assert.equal(hasChannelSurface(undefined), false);
 });
 
+test("hasAuthSurface keys off the typed auth surface", () => {
+  assert.equal(hasAuthSurface({ surfaces: [{ kind: "auth" }] }), true);
+  assert.equal(
+    hasAuthSurface({ surfaces: [{ kind: "tool" }, { kind: "channel" }] }),
+    false,
+  );
+  assert.equal(hasAuthSurface({}), false);
+});
+
 test("hasToolSurface keys off a declared tool surface only", () => {
   assert.equal(
     hasToolSurface({
@@ -60,7 +69,7 @@ test("hasToolSurface keys off a declared tool surface only", () => {
 });
 
 test("channelSurface and channelConnection extract the typed channel surface", () => {
-  const connection = { channel: "telegram", strategy: "inbound_proof_code" };
+  const connection = { channel: "telegram", strategy: "web_generated_code" };
   const surface = {
     kind: "channel",
     inbound: true,
@@ -83,42 +92,10 @@ test("channelSurface and channelConnection extract the typed channel surface", (
     "a channel surface without a connect affordance yields no connection",
   );
 
-  assert.equal(isInboundProofCodeConnection(connection), true);
-  assert.equal(isInboundProofCodeConnection({ strategy: "oauth" }), false);
-  assert.equal(isInboundProofCodeConnection({ strategy: "admin_managed_channels" }), false);
-  assert.equal(isInboundProofCodeConnection(null), false);
-});
-
-test("connectsViaOauth derives from the wire connection strategy or oauth setup secrets", () => {
-  const oauthConnected = {
-    surfaces: [
-      { kind: "channel", inbound: true, outbound: true, connection: { strategy: "oauth" } },
-    ],
-  };
-  const proofCodeConnected = {
-    surfaces: [
-      {
-        kind: "channel",
-        inbound: true,
-        outbound: true,
-        connection: { strategy: "inbound_proof_code" },
-      },
-    ],
-  };
-  const bare = { surfaces: [{ kind: "channel", inbound: true, outbound: true }] };
-
-  assert.equal(connectsViaOauth(oauthConnected), true);
-  assert.equal(connectsViaOauth(proofCodeConnected), false);
-  assert.equal(connectsViaOauth(bare), false);
-  assert.equal(connectsViaOauth(undefined), false);
-
-  // An oauth-kind setup secret marks the extension OAuth-connecting even when
-  // the surface carries no connection requirement.
-  const oauthSecret = { name: "vendor_oauth", setup: { kind: "oauth" } };
-  const manualSecret = { name: "vendor_token", setup: { kind: "manual_token" } };
-  assert.equal(connectsViaOauth(bare, [oauthSecret]), true);
-  assert.equal(connectsViaOauth(bare, [manualSecret]), false);
-  assert.equal(connectsViaOauth(bare, [null]), false);
+  assert.equal(isWebGeneratedCodeConnection(connection), true);
+  assert.equal(isWebGeneratedCodeConnection({ strategy: "oauth" }), false);
+  assert.equal(isWebGeneratedCodeConnection({ strategy: "admin_managed_channels" }), false);
+  assert.equal(isWebGeneratedCodeConnection(null), false);
 });
 
 test("RUNTIME_LABELS covers exactly the honest runtime wire values", () => {

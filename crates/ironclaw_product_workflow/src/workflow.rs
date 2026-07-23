@@ -514,7 +514,7 @@ async fn resolve_projection_subject(
     }
 }
 
-async fn lookup_interaction_binding(
+pub(crate) async fn lookup_interaction_binding(
     envelope: &ProductInboundEnvelope,
     binding_service: &dyn ConversationBindingService,
 ) -> Result<ResolvedBinding, ProductWorkflowError> {

@@ -721,6 +721,27 @@ impl FailingOutboundStore {
 
 #[async_trait]
 impl OutboundStateStore for FailingOutboundStore {
+    async fn put_run_delivery_cleanup(
+        &self,
+        _record: ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn load_run_delivery_cleanup(
+        &self,
+        _request: ironclaw_outbound::RunDeliveryCleanupRequest,
+    ) -> Result<Vec<ironclaw_outbound::RunDeliveryCleanupRecord>, OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
+    async fn complete_run_delivery_cleanup(
+        &self,
+        _record: &ironclaw_outbound::RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        Err(OutboundError::Backend)
+    }
+
     async fn put_run_final_reply_handoff(
         &self,
         _record: ironclaw_outbound::RunFinalReplyHandoffRecord,

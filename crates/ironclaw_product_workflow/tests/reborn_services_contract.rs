@@ -23,16 +23,16 @@ use ironclaw_approvals::{
 };
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_auth::{
-    AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountProjection,
-    CredentialAccountStatus,
+    AuthAccountLastError, AuthAccountState, CredentialAccountId, CredentialAccountLabel,
+    CredentialAccountProjection, CredentialAccountStatus, CredentialOwnership,
 };
+use ironclaw_host_api::CapabilitySurfaceKind;
 use ironclaw_host_api::{
     ActivityId, AgentId, ApprovalRequestId, CapabilityId, EffectKind, ExtensionId, InvocationId,
     Outcome, OutcomeRefs, PermissionMode, Principal, ProjectId, Resolution, ResourceScope,
     ResultPreviewMeta, ResultProgress, ResultRef, SafeSummary, SecretHandle, TenantId,
     TerminateHint, ThreadId, ToolVerdict, UserId,
 };
-use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
     ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
@@ -51,8 +51,8 @@ use ironclaw_product_workflow::{
     AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductFacade,
     CREATE_THREAD_OPERATION, ChannelAuthAccountState, ChannelConnectionFacade,
     ChannelConnectionRequirement, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
-    ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
+    EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
+    EXTENSIONS_VIEW, ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
     ExtensionCredentialSubmitRequest, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW,
     FilesystemBrowseReader, FsMount, GLOBAL_AUTO_APPROVE_VIEW, InboundAttachmentLander,
     InboundAttachmentReader, LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW,
@@ -63,12 +63,12 @@ use ironclaw_product_workflow::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
     LifecycleProductFacade, LifecycleProductPayload, LifecycleProductResponse,
     LifecyclePublicState, LifecycleReadinessBlocker, ListPendingApprovalsRequest,
-    ListPendingApprovalsResponse,
-    ListPendingAuthInteractionsRequest, ListPendingAuthInteractionsResponse, LlmActiveSelection,
-    LlmConfigService, LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
+    ListPendingApprovalsResponse, ListPendingAuthInteractionsRequest,
+    ListPendingAuthInteractionsResponse, LlmActiveSelection, LlmConfigService,
+    LlmConfigServiceError, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult,
+    LlmProviderView, NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest,
+    NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
     OPERATOR_CONFIG_SET_TOOL_PERMISSION_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
     OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
     OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
@@ -85,47 +85,47 @@ use ironclaw_product_workflow::{
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
-    RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
-    RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionSurface,
-    RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse,
-    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
-    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
-    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
-    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
-    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
-    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
-    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
-    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
-    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
-    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
-    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
-    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
-    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsStatRequest,
-    RebornProjectFsStatResponse, RebornProjectInfo, RebornProjectMemberInfo,
-    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
-    RebornRemoveMemberRequest, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
-    RebornRunArtifact, RebornRunArtifactRequest, RebornServiceLifecycleAction,
-    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
-    RebornServices, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
-    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
-    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
-    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
-    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
-    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductFacade,
-    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
-    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
-    automation_trigger_thread_metadata_json,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornDeleteProjectRequest, RebornDeleteThreadRequest, RebornExtensionListResponse,
+    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
+    RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
+    RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
+    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
+    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
+    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
+    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
+    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
+    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
+    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
+    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
+    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
+    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
+    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
+    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
+    RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
+    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
+    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
+    RebornServiceLifecycleState, RebornServices, RebornServicesError, RebornServicesErrorCode,
+    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
+    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
+    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
+    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
+    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
+    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
+    SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService,
+    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
+    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
+    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    automation_trigger_thread_metadata_json, install_extension_on_surface,
 };
 use ironclaw_product_workflow::{
     AdminCreateUserFields, AdminCreatedUser, AdminUserError, AdminUserRecord, AdminUserRole,
@@ -918,6 +918,7 @@ impl AuthInteractionService for RecordingAuthInteractionService {
 struct RecordingLifecycleFacade {
     package_refs: Mutex<Vec<LifecyclePackageRef>>,
     imported_bundles: Mutex<Vec<Vec<u8>>>,
+    phase: LifecyclePublicState,
     credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
     onboarding: Option<LifecycleExtensionOnboarding>,
 }
@@ -927,6 +928,7 @@ impl RecordingLifecycleFacade {
         Self {
             package_refs: Mutex::new(Vec::new()),
             imported_bundles: Mutex::new(Vec::new()),
+            phase: LifecyclePublicState::SetupNeeded,
             credential_requirements: Vec::new(),
             onboarding: None,
         }
@@ -938,6 +940,7 @@ impl RecordingLifecycleFacade {
         Self {
             package_refs: Mutex::new(Vec::new()),
             imported_bundles: Mutex::new(Vec::new()),
+            phase: LifecyclePublicState::SetupNeeded,
             credential_requirements,
             onboarding: None,
         }
@@ -950,6 +953,21 @@ impl RecordingLifecycleFacade {
         Self {
             package_refs: Mutex::new(Vec::new()),
             imported_bundles: Mutex::new(Vec::new()),
+            phase: LifecyclePublicState::SetupNeeded,
+            credential_requirements,
+            onboarding: Some(onboarding),
+        }
+    }
+
+    fn with_phase_and_credential_requirements(
+        phase: LifecyclePublicState,
+        credential_requirements: Vec<LifecycleExtensionCredentialRequirement>,
+        onboarding: LifecycleExtensionOnboarding,
+    ) -> Self {
+        Self {
+            package_refs: Mutex::new(Vec::new()),
+            imported_bundles: Mutex::new(Vec::new()),
+            phase,
             credential_requirements,
             onboarding: Some(onboarding),
         }
@@ -989,7 +1007,7 @@ impl RecordingLifecycleFacade {
         Some(LifecycleProductPayload::ExtensionList {
             extensions: vec![LifecycleInstalledExtensionSummary {
                 summary,
-                phase: InstallationState::Configured,
+                phase: self.phase,
                 install_scope: None,
             }],
             count: 1,
@@ -1009,7 +1027,7 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
         };
         Ok(LifecycleProductResponse::projection(
             Some(package_ref),
-            InstallationState::Configured,
+            self.phase,
             Vec::new(),
         ))
     }
@@ -1023,14 +1041,9 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
             .lock()
             .expect("lock")
             .push(package_ref.clone());
-        let phase = if self.credential_requirements.is_empty() {
-            InstallationState::Unsupported
-        } else {
-            InstallationState::Configured
-        };
         let mut response = LifecycleProductResponse::projection(
             Some(package_ref),
-            phase,
+            self.phase,
             vec![LifecycleReadinessBlocker::runtime(Some(
                 "extension_lifecycle_store_unwired".to_string(),
             ))?],
@@ -1047,7 +1060,7 @@ impl LifecycleProductFacade for RecordingLifecycleFacade {
         self.imported_bundles.lock().expect("lock").push(bundle);
         Ok(LifecycleProductResponse {
             package_ref: None,
-            phase: InstallationState::Installed,
+            phase: LifecyclePublicState::SetupNeeded,
             blockers: Vec::new(),
             message: Some("imported".to_string()),
             payload: None,
@@ -1085,6 +1098,86 @@ impl LifecycleProductFacade for ListingLifecycleFacade {
         _package_ref: LifecyclePackageRef,
     ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
         panic!("list_extensions should execute the list action, not project one package")
+    }
+}
+
+struct CallerScopedListingLifecycleFacade {
+    member_user_id: UserId,
+    extension: LifecycleInstalledExtensionSummary,
+}
+
+#[async_trait]
+impl LifecycleProductFacade for CallerScopedListingLifecycleFacade {
+    async fn execute(
+        &self,
+        context: LifecycleProductContext,
+        action: LifecycleProductAction,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        assert!(matches!(action, LifecycleProductAction::ExtensionList));
+        let LifecycleProductContext::Surface(surface) = context else {
+            panic!("extension list must use caller surface context");
+        };
+        let extensions = (surface.user_id == self.member_user_id)
+            .then(|| self.extension.clone())
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok(LifecycleProductResponse {
+            package_ref: None,
+            phase: extensions
+                .first()
+                .map_or(LifecyclePublicState::Uninstalled, |extension| {
+                    extension.phase
+                }),
+            blockers: Vec::new(),
+            message: None,
+            payload: Some(LifecycleProductPayload::ExtensionList {
+                count: extensions.len(),
+                extensions,
+            }),
+        })
+    }
+
+    async fn project_package(
+        &self,
+        _context: LifecycleProductContext,
+        _package_ref: LifecyclePackageRef,
+    ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
+        panic!("install readback must query the caller-scoped extension list")
+    }
+}
+
+type ExtensionInstallInvokeCall = (
+    WebUiAuthenticatedCaller,
+    CapabilityId,
+    serde_json::Value,
+    ActivityId,
+);
+
+#[derive(Clone, Default)]
+struct RecordingExtensionInstallInvoker {
+    calls: Arc<Mutex<Vec<ExtensionInstallInvokeCall>>>,
+}
+
+impl RecordingExtensionInstallInvoker {
+    fn calls(&self) -> Vec<ExtensionInstallInvokeCall> {
+        self.calls.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl ProductCapabilityInvoker for RecordingExtensionInstallInvoker {
+    async fn invoke(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        capability: CapabilityId,
+        input: serde_json::Value,
+        activity_id: ActivityId,
+    ) -> Result<Resolution, RebornServicesError> {
+        self.calls
+            .lock()
+            .expect("lock")
+            .push((caller, capability, input, activity_id.clone()));
+        Ok(operator_config_success_resolution(activity_id))
     }
 }
 
@@ -1526,7 +1619,6 @@ impl OutboundPreferencesProductFacade for RecordingOutboundPreferencesFacade {
             next_cursor: None,
         })
     }
-
 }
 
 fn outbound_target_summary(target_id: &str) -> RebornOutboundDeliveryTargetSummary {
@@ -1578,9 +1670,17 @@ fn automation_info(
 struct RecordingExtensionCredentialSetupService {
     status_requests: Mutex<Vec<ExtensionCredentialStatusRequest>>,
     submit_requests: Mutex<Vec<ExtensionCredentialSubmitRequest>>,
+    account_status: Option<CredentialAccountStatus>,
 }
 
 impl RecordingExtensionCredentialSetupService {
+    fn with_account_status(account_status: CredentialAccountStatus) -> Self {
+        Self {
+            account_status: Some(account_status),
+            ..Self::default()
+        }
+    }
+
     fn status_count(&self) -> usize {
         self.status_requests.lock().expect("lock").len()
     }
@@ -1596,8 +1696,20 @@ impl ExtensionCredentialSetupService for RecordingExtensionCredentialSetupServic
         &self,
         request: ExtensionCredentialStatusRequest,
     ) -> Result<Option<CredentialAccountProjection>, RebornServicesError> {
+        let account = self
+            .account_status
+            .map(|status| CredentialAccountProjection {
+                id: CredentialAccountId::new(),
+                provider: request.provider.clone(),
+                label: CredentialAccountLabel::new("fixture account").expect("valid label"),
+                status,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                secret_handle_count: 1,
+            });
         self.status_requests.lock().expect("lock").push(request);
-        Ok(None)
+        Ok(account)
     }
 
     async fn submit_manual_token(
@@ -5873,7 +5985,7 @@ async fn setup_extension_projects_through_configured_lifecycle_facade() {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid package ref")
     );
-    assert_eq!(response.phase, InstallationState::Unsupported);
+    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
     assert!(response.blockers.iter().any(|blocker| matches!(
         blocker,
         LifecycleReadinessBlocker::Runtime { ref_id: Some(ref_id) }
@@ -5906,7 +6018,7 @@ async fn extension_setup_is_available_as_product_view() {
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid package ref")
     );
-    assert_eq!(response.phase, InstallationState::Unsupported);
+    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
     assert_eq!(
         lifecycle_facade.package_refs(),
         vec![
@@ -5929,7 +6041,7 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
                 vec![manual_credential_requirement("github_runtime_token", true)],
                 Some(onboarding_fixture()),
             ),
-            phase: InstallationState::Installed,
+            phase: LifecyclePublicState::SetupNeeded,
             install_scope: None,
         },
     }));
@@ -5941,8 +6053,8 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
 
     assert_eq!(extension.tools, vec!["github.read", "github.write"]);
     assert_eq!(
-        extension.onboarding_state,
-        Some(RebornExtensionOnboardingState::SetupRequired)
+        extension.installation_state,
+        LifecyclePublicState::SetupNeeded
     );
     let onboarding = extension.onboarding.as_ref().expect("onboarding payload");
     assert_eq!(
@@ -5955,6 +6067,108 @@ async fn list_extensions_projects_onboarding_payload_through_reborn_services() {
             "After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools."
         )
     );
+}
+
+#[tokio::test]
+async fn install_extension_operation_invokes_and_reads_back_exact_caller_membership() {
+    let invoker = RecordingExtensionInstallInvoker::default();
+    let services = RebornServices::new_with_product_capability_invoker(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+        invoker.clone(),
+    )
+    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+        extension: LifecycleInstalledExtensionSummary {
+            summary: extension_summary("github", Vec::new(), None),
+            phase: LifecyclePublicState::Active,
+            install_scope: None,
+        },
+    }));
+    let package_ref = lifecycle_package_ref("github");
+    let activity_id = ActivityId::new();
+
+    let response = install_extension_on_surface(
+        &services,
+        caller(),
+        package_ref.clone(),
+        activity_id.clone(),
+    )
+    .await
+    .expect("installed membership is authoritative");
+
+    assert!(response.success);
+    assert_eq!(response.message, "Extension installed.");
+    let calls = invoker.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, caller());
+    assert_eq!(
+        calls[0].1,
+        CapabilityId::new(EXTENSION_INSTALL_CAPABILITY_ID).expect("capability id")
+    );
+    assert_eq!(
+        calls[0].2,
+        json!({ "extension_id": package_ref.id.as_str() })
+    );
+    assert_eq!(calls[0].3, activity_id);
+}
+
+#[tokio::test]
+async fn install_extension_operation_rejects_success_without_exact_membership_readback() {
+    let services = RebornServices::new_with_product_capability_invoker(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+        RecordingExtensionInstallInvoker::default(),
+    )
+    .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
+        extension: LifecycleInstalledExtensionSummary {
+            summary: extension_summary("not-the-requested-extension", Vec::new(), None),
+            phase: LifecyclePublicState::Active,
+            install_scope: None,
+        },
+    }));
+
+    let error = install_extension_on_surface(
+        &services,
+        caller(),
+        lifecycle_package_ref("github"),
+        ActivityId::new(),
+    )
+    .await
+    .expect_err("capability success without caller membership is not success");
+
+    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(error.retryable);
+}
+
+#[tokio::test]
+async fn install_extension_operation_rejects_membership_owned_by_another_user() {
+    let services = RebornServices::new_with_product_capability_invoker(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+        RecordingExtensionInstallInvoker::default(),
+    )
+    .with_lifecycle_product_facade(Arc::new(CallerScopedListingLifecycleFacade {
+        member_user_id: UserId::new("user-alpha").expect("member user"),
+        extension: LifecycleInstalledExtensionSummary {
+            summary: extension_summary("github", Vec::new(), None),
+            phase: LifecyclePublicState::Active,
+            install_scope: None,
+        },
+    }));
+
+    let error = install_extension_on_surface(
+        &services,
+        caller_for_user("user-beta"),
+        lifecycle_package_ref("github"),
+        ActivityId::new(),
+    )
+    .await
+    .expect_err("another user's membership cannot satisfy caller readback");
+
+    assert_eq!(error.status_code, 503);
+    assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
 }
 
 #[tokio::test]
@@ -6048,9 +6262,12 @@ async fn list_extensions_projects_channel_surface_with_directions_and_connection
     .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
         extension: LifecycleInstalledExtensionSummary {
             summary,
-            phase: InstallationState::Active,
+            phase: LifecyclePublicState::Active,
             install_scope: None,
         },
+    }))
+    .with_channel_connection_facade(Arc::new(ConnectedChannelConnectionFacade {
+        connections: std::collections::HashMap::from([("slack".to_string(), true)]),
     }));
 
     let response = query_extensions(&services, caller())
@@ -6150,7 +6367,7 @@ async fn list_extensions_golden_wire_multi_surface_extension_freezes_accounts_li
     .with_lifecycle_product_facade(Arc::new(ListingLifecycleFacade {
         extension: LifecycleInstalledExtensionSummary {
             summary,
-            phase: InstallationState::Active,
+            phase: LifecyclePublicState::Active,
             install_scope: None,
         },
     }))
@@ -6343,7 +6560,7 @@ async fn list_extensions_surfaces_failed_state_expired_account_and_activation_er
             // An enabled extension whose activation failed for a non-auth
             // reason — the terminal `Failed` state, distinct from a pristine
             // `Installed`, carrying its reason.
-            phase: InstallationState::Failed,
+            phase: LifecyclePublicState::SetupNeeded,
             install_scope: None,
         },
         activation_errors: std::collections::HashMap::from([(
@@ -9524,6 +9741,11 @@ async fn automation_facade_unwired_fails_closed() {
 
 #[tokio::test]
 async fn setup_extension_returns_post_setup_onboarding_payload() {
+    let credentials = Arc::new(
+        RecordingExtensionCredentialSetupService::with_account_status(
+            CredentialAccountStatus::Configured,
+        ),
+    );
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
         Arc::new(FakeTurnCoordinator::default()),
@@ -9533,14 +9755,15 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
             vec![manual_credential_requirement("github_runtime_token", true)],
             onboarding_fixture(),
         ),
-    ));
+    ))
+    .with_extension_credentials(credentials);
 
     let response = query_extension_setup(&services, caller(), "github")
         .await
         .expect("setup extension response");
 
     let onboarding = response.onboarding.as_ref().expect("onboarding payload");
-    assert_eq!(response.phase, InstallationState::Configured);
+    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
     assert_eq!(
         onboarding.credential_instructions.as_deref(),
         Some(
@@ -9553,6 +9776,88 @@ async fn setup_extension_returns_post_setup_onboarding_payload() {
             "After saving the token, IronClaw finishes GitHub installation automatically and publishes its tools."
         )
     );
+}
+
+#[tokio::test]
+async fn setup_extension_projects_revoked_personal_auth_as_setup_needed() {
+    let credentials = Arc::new(
+        RecordingExtensionCredentialSetupService::with_account_status(
+            CredentialAccountStatus::Revoked,
+        ),
+    );
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_facade(Arc::new(
+        RecordingLifecycleFacade::with_phase_and_credential_requirements(
+            LifecyclePublicState::Active,
+            vec![manual_credential_requirement("github_runtime_token", true)],
+            onboarding_fixture(),
+        ),
+    ))
+    .with_extension_credentials(credentials);
+
+    let response = query_extension_setup(&services, caller(), "github")
+        .await
+        .expect("setup extension response");
+
+    assert_eq!(response.phase, LifecyclePublicState::SetupNeeded);
+    assert_eq!(response.secrets.len(), 1);
+    assert!(!response.secrets[0].provided);
+    let onboarding = response.onboarding.as_ref().expect("onboarding payload");
+    assert_eq!(
+        onboarding.credential_instructions.as_deref(),
+        Some("Paste the GitHub token IronClaw should use.")
+    );
+}
+
+struct RetryablyUnavailableExtensionCredentials;
+
+#[async_trait]
+impl ExtensionCredentialSetupService for RetryablyUnavailableExtensionCredentials {
+    async fn credential_status(
+        &self,
+        _request: ExtensionCredentialStatusRequest,
+    ) -> Result<Option<CredentialAccountProjection>, RebornServicesError> {
+        Err(RebornServicesError {
+            code: RebornServicesErrorCode::Unavailable,
+            kind: RebornServicesErrorKind::ServiceUnavailable,
+            status_code: 503,
+            retryable: true,
+            field: None,
+            validation_code: None,
+        })
+    }
+
+    async fn submit_manual_token(
+        &self,
+        _request: ExtensionCredentialSubmitRequest,
+    ) -> Result<CredentialAccountId, RebornServicesError> {
+        panic!("setup projection must not submit credentials")
+    }
+}
+
+#[tokio::test]
+async fn setup_extension_preserves_active_phase_when_credential_status_is_retryably_unavailable() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_lifecycle_product_facade(Arc::new(
+        RecordingLifecycleFacade::with_phase_and_credential_requirements(
+            LifecyclePublicState::Active,
+            vec![manual_credential_requirement("github_runtime_token", true)],
+            onboarding_fixture(),
+        ),
+    ))
+    .with_extension_credentials(Arc::new(RetryablyUnavailableExtensionCredentials));
+
+    let response = query_extension_setup(&services, caller(), "github")
+        .await
+        .expect("retryable status outage is not missing auth");
+
+    assert_eq!(response.phase, LifecyclePublicState::Active);
 }
 
 #[tokio::test]
@@ -9581,6 +9886,74 @@ async fn setup_extension_rejects_blank_required_manual_secret() {
     assert_setup_validation(err, "secrets", WebUiInboundValidationCode::Blank);
     assert_eq!(credentials.status_count(), 1);
     assert_eq!(credentials.submit_count(), 0);
+}
+
+#[tokio::test]
+async fn setup_extension_rejects_blank_or_omitted_required_secret_for_nonconfigured_accounts() {
+    for account_status in [
+        CredentialAccountStatus::Inactive,
+        CredentialAccountStatus::Missing,
+        CredentialAccountStatus::Expired,
+        CredentialAccountStatus::RefreshFailed,
+        CredentialAccountStatus::Revoked,
+        CredentialAccountStatus::PendingSetup,
+    ] {
+        for secrets in [json!({}), json!({ "api_token": "   " })] {
+            let credentials = Arc::new(
+                RecordingExtensionCredentialSetupService::with_account_status(account_status),
+            );
+            let services = setup_services_with_requirements(vec![manual_credential_requirement(
+                "api_token",
+                true,
+            )])
+            .with_extension_credentials(credentials.clone());
+
+            let error = invoke_extension_setup_submit(
+                &services,
+                caller(),
+                "github",
+                WebUiSetupExtensionRequest {
+                    action: Some("submit".to_string()),
+                    payload: Some(json!({ "secrets": secrets })),
+                },
+            )
+            .await
+            .expect_err("nonconfigured account cannot satisfy a required secret");
+
+            assert_eq!(error.kind, RebornServicesErrorKind::Validation);
+            assert_eq!(credentials.submit_count(), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn setup_extension_allows_configured_required_secret_to_be_left_unchanged() {
+    for secrets in [json!({}), json!({ "api_token": "   " })] {
+        let credentials = Arc::new(
+            RecordingExtensionCredentialSetupService::with_account_status(
+                CredentialAccountStatus::Configured,
+            ),
+        );
+        let services = setup_services_with_requirements(vec![manual_credential_requirement(
+            "api_token",
+            true,
+        )])
+        .with_extension_credentials(credentials.clone());
+
+        invoke_extension_setup_submit(
+            &services,
+            caller(),
+            "github",
+            WebUiSetupExtensionRequest {
+                action: Some("submit".to_string()),
+                payload: Some(json!({ "secrets": secrets })),
+            },
+        )
+        .await
+        .expect("configured secret can be left unchanged");
+
+        assert_eq!(credentials.submit_count(), 0);
+    }
 }
 
 #[tokio::test]
@@ -10521,17 +10894,6 @@ async fn invoke_extension_setup_submit<S: ProductSurface + ?Sized>(
             ActivityId::new(),
         )
         .await
-}
-
-async fn submit_extension_setup_and_query<S: ProductSurface + ?Sized>(
-    services: &S,
-    caller: WebUiAuthenticatedCaller,
-    package_id: &str,
-    request: WebUiSetupExtensionRequest,
-) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
-    let caller_for_query = caller.clone();
-    invoke_extension_setup_submit(services, caller, package_id, request).await?;
-    query_extension_setup(services, caller_for_query, package_id).await
 }
 
 #[tokio::test]

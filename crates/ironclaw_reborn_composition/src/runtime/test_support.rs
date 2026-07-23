@@ -35,6 +35,7 @@ impl RebornServices {
         })?);
         Ok(Some(build_approval_interaction_service(
             local_runtime,
+            local_lifecycle_facade(self),
             builtin_capability_policy,
             turn_coordinator,
             None,
@@ -94,6 +95,7 @@ impl RebornServices {
         Ok(Some(
             build_approval_interaction_service_with_turn_run_source(
                 local_runtime,
+                local_lifecycle_facade(self),
                 builtin_capability_policy,
                 turn_coordinator,
                 None,

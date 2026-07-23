@@ -202,16 +202,12 @@ fn product_connection_strategy(
     strategy: ChannelConnectionStrategy,
 ) -> RebornChannelConnectStrategy {
     match strategy {
-        ChannelConnectionStrategy::InboundProofCode => {
-            RebornChannelConnectStrategy::InboundProofCode
-        }
         ChannelConnectionStrategy::AdminManagedChannels => {
             RebornChannelConnectStrategy::AdminManagedChannels
         }
         ChannelConnectionStrategy::WebGeneratedCode => {
             RebornChannelConnectStrategy::WebGeneratedCode
         }
-        ChannelConnectionStrategy::QrCode => RebornChannelConnectStrategy::QrCode,
         ChannelConnectionStrategy::OAuth => RebornChannelConnectStrategy::OAuth,
     }
 }
@@ -225,16 +221,11 @@ fn account_setup_descriptor_from_manifest(
         .as_ref()?
         .connection
         .as_ref()?;
-    if !matches!(
-        connection.strategy,
-        ChannelConnectionStrategy::InboundProofCode
-            | ChannelConnectionStrategy::WebGeneratedCode
-            | ChannelConnectionStrategy::QrCode
-    ) {
+    if connection.strategy != ChannelConnectionStrategy::WebGeneratedCode {
         // OAuth is already declared by the manifest credential/auth recipe;
         // admin-managed channels have no caller pairing gate. This registry
-        // owns proof-code status only and must not recast every strategy as a
-        // synthetic Pairing credential requirement.
+        // owns host-generated-code status only and must not recast every
+        // strategy as a synthetic Pairing credential requirement.
         return None;
     }
     Some(ExtensionAccountSetupDescriptor {

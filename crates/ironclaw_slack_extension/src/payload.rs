@@ -114,7 +114,7 @@ pub fn parse_slack_event(
 /// channel-adapter contract: a URL-verification challenge, an ignored event,
 /// or one plain user message. Gate-resolution classification (`approve` /
 /// `deny gate:<ref>` / `auth deny <ref>`) is deliberately NOT applied here —
-/// the host sink reclassifies via [`classify_interaction_resolution`].
+/// the shared host sink applies the channel-neutral interaction grammar.
 #[derive(Debug)]
 pub enum SlackInboundEvent {
     UrlVerification { challenge: String },
@@ -252,7 +252,6 @@ pub fn classify_channel_interaction_resolution(
         _ => None,
     })
 }
-
 fn parse_app_mention(
     event_id: ExternalEventId,
     team_id: Option<&str>,
@@ -297,7 +296,8 @@ fn parse_message_event(
 /// Fixed user-message routing strategies in this first slice.
 /// `AppMention`: public channel, strip leading `@mention`, thread fallback to `ts`.
 /// `Dm`: direct-message channel required, keep text verbatim, no thread fallback.
-/// `ThreadReply`: channel thread reply, keep text verbatim, require `thread_ts`.
+/// `ThreadReply`: channel thread reply, strip an optional leading `@mention`,
+/// require `thread_ts`.
 #[derive(Debug, Clone, Copy)]
 enum SlackMessageKind {
     AppMention,
@@ -345,7 +345,7 @@ fn try_parse_user_message(
             ProductTriggerReason::DirectChat,
         ),
         SlackMessageKind::ThreadReply => (
-            raw_text.to_string(),
+            strip_leading_bot_mention(raw_text),
             event.thread_ts.as_deref(),
             ProductTriggerReason::ReplyToBot,
         ),

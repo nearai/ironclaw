@@ -224,10 +224,6 @@ pub struct ChannelExtensionBinding {
     pub extension_id: String,
     /// The channel adapter implementation linked into the deployment.
     pub adapter: std::sync::Arc<dyn ironclaw_product_adapters::ChannelAdapter>,
-    /// Protocol-specific inbound payload reclassification (gate-resolution
-    /// replies), registered on the channel host assembly.
-    pub inbound_payload_classifier:
-        Option<std::sync::Arc<crate::extension_host::extension_ingress::InboundPayloadClassifier>>,
     /// The vendor half of the preference-target codec, consumed by the
     /// generic outbound-target provider and triggered-delivery hook.
     pub preference_target_codec:
@@ -686,8 +682,8 @@ impl RebornBuildInput {
     /// Supply the binary-assembled channel-adapter bindings for channel
     /// extensions whose runtime is not `first_party` (extension-runtime
     /// DEL-7): the generic loader binds each adapter at activation, and the
-    /// channel host assembly registers the accompanying extras (gate-reply
-    /// classifier, preference-target codec).
+    /// channel host assembly registers the accompanying preference-target
+    /// codec. Gate replies are parsed by the shared inbound sink.
     pub fn with_channel_extension_bindings(
         mut self,
         bindings: Vec<ChannelExtensionBinding>,

@@ -34,6 +34,7 @@ mod automation_thread_metadata;
 mod binding;
 mod binding_ref;
 mod channel_pairing;
+mod channel_workflow_state;
 mod command_dispatch;
 mod commands;
 mod conversation_binding;
@@ -108,8 +109,12 @@ pub use channel_pairing::{
     ChannelPairingConsumeOutcome, ChannelPairingDirectTargetStore, ChannelPairingError,
     ChannelPairingIdentityBindOutcome, ChannelPairingIdentityStore,
     ChannelPairingInstallationSource, ChannelPairingInterception, ChannelPairingInterceptor,
-    ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceParts,
+    ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceDependencies,
     ChannelPairingStatus, ChannelPairingTemplateValues, FilesystemChannelPairingStore,
+};
+pub use channel_workflow_state::{
+    ChannelDisconnectActions, ChannelWorkflowState, ChannelWorkflowStateError,
+    ChannelWorkflowStateService, disconnect_channel_in_order,
 };
 pub use command_dispatch::{
     ProductCommandAdmission, ProductCommandAdmissionService, ProductCommandContext,
@@ -158,7 +163,7 @@ pub use lifecycle::{
     LifecyclePublicState, LifecycleReadinessBlocker, LifecycleSearchExtensionSummary,
     LifecycleSkillSource, LifecycleSkillSummary, UnsupportedLifecycleProductFacade,
 };
-pub use lifecycle_auth_continuation::LifecycleAuthContinuationSlot;
+pub use lifecycle_auth_continuation::lifecycle_auth_continuation_dispatcher;
 // Product hosts use this outbound orchestration seam to wire outbound policy
 // decisions to adapter rendering without reaching into module internals.
 pub use delivery_coordinator::{
@@ -178,8 +183,9 @@ pub use run_delivery::{
     ApprovalPromptContextSource, BlockedAuthPromptSource, CurrentDeliveryTarget,
     CurrentDeliveryTargetResolver, DeliveredChannelMessage, PreferenceTargetCodec,
     PreferenceTargetEncodeRequest, RunDeliveryError, RunDeliveryEventHandler,
-    RunDeliveryEventRouter, RunDeliveryObserver, RunDeliveryServices, TriggeredRunDeliveryDriver,
-    TriggeredRunDeliveryRequest, TriggeredRunExternalDeliveryTarget,
+    RunDeliveryEventRouter, RunDeliveryObserver, RunDeliveryServices, TriggeredRunDeliveryChannel,
+    TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest, TriggeredRunDeliveryRouter,
+    TriggeredRunExternalDeliveryTarget,
 };
 pub use trigger_final_reply_target::{RunFinalReplyRoutingService, TriggerFinalReplyTargetService};
 // Projection/event types that route handlers need to thread through SSE
@@ -212,10 +218,9 @@ pub use reborn_services::{
     AUTOMATIONS_VIEW, ActiveModelReader, AdminCreateUserFields, AdminCreatedUser, AdminUserError,
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserService, AdminUserStatus,
     AutomationListRequest, AutomationProductFacade, CANCEL_RUN_OPERATION, CREATE_THREAD_OPERATION,
-    ChannelAuthAccountState, ChannelConnectionFacade,
-    ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome,
-    ChannelInboundSurfaceRejectedAdmission, ChannelInboundSurfaceRequest, CodexLoginStart,
-    EXTENSION_IMPORT_CAPABILITY,
+    ChannelAuthAccountState, ChannelConnectionFacade, ChannelInboundSurfaceAdmission,
+    ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
+    ChannelInboundSurfaceRequest, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY,
     EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY, EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_REMOVE_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
@@ -272,12 +277,11 @@ pub use reborn_services::{
     RebornAutomationInfo, RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRequest, RebornAutomationRunStatus,
     RebornAutomationSource, RebornAutomationState, RebornCancelRunResponse,
-    RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCreateProjectRequest, RebornCreateThreadResponse, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
-    RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupSecret,
+    RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateProjectRequest,
+    RebornCreateThreadResponse, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornDeleteThreadResponse, RebornExtensionActionResponse, RebornExtensionCredentialSetup,
+    RebornExtensionInfo, RebornExtensionListResponse, RebornExtensionOnboardingPayload,
+    RebornExtensionRegistryEntry, RebornExtensionRegistryResponse, RebornExtensionSetupSecret,
     RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
     RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
@@ -330,12 +334,12 @@ pub use reborn_services::{
     UnavailableRebornViewProvider, UnsupportedAutomationProductFacade,
     UnsupportedOperatorLogsService, UnsupportedOperatorServiceLifecycleService,
     UnsupportedOperatorStatusService, UnsupportedOutboundPreferencesProductFacade,
-    UpsertLlmProviderRequest, list_outbound_delivery_targets_for_model,
-    normalize_operator_log_context_value, outbound_delivery_synthetic_provider,
-    outbound_delivery_target_set_input_schema, outbound_delivery_target_set_operator_tool_info,
-    outbound_delivery_targets_list_input_schema, parse_outbound_delivery_target_set_input,
-    parse_outbound_delivery_targets_list_input, set_outbound_delivery_target_for_model,
-    web_app_outbound_delivery_target_option,
+    UpsertLlmProviderRequest, install_extension_on_surface,
+    list_outbound_delivery_targets_for_model, normalize_operator_log_context_value,
+    outbound_delivery_synthetic_provider, outbound_delivery_target_set_input_schema,
+    outbound_delivery_target_set_operator_tool_info, outbound_delivery_targets_list_input_schema,
+    parse_outbound_delivery_target_set_input, parse_outbound_delivery_targets_list_input,
+    set_outbound_delivery_target_for_model, web_app_outbound_delivery_target_option,
 };
 
 pub use webui_inbound::{

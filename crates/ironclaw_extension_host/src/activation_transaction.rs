@@ -11,14 +11,15 @@ use async_trait::async_trait;
 use ironclaw_auth::CredentialAccount;
 use ironclaw_extensions::{
     ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
-    ExtensionManifestRecord, ExtensionPackage, is_hosted_http_mcp_package,
+    ExtensionManifestRecord, ExtensionPackage, ExtensionRuntime, is_hosted_http_mcp_package,
 };
 use ironclaw_host_api::{
-    ExtensionId, ResourceScope, RuntimeCredentialAuthRequirement, RuntimeHttpEgress, UserId,
+    ExtensionId, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceScope,
+    RuntimeCredentialAuthRequirement, RuntimeHttpEgress, UserId,
 };
 use tokio::sync::Mutex;
 
-use crate::hosted_mcp_discovery_authority::HostedMcpDiscoveryAuthority;
+use crate::hosted_mcp_discovery_authority::McpDiscoveryFence;
 
 /// Runtime lane selected for one internal readiness reconciliation.
 #[derive(Clone)]
@@ -62,7 +63,7 @@ struct ExtensionActivationSnapshot {
 /// Owner transaction result consumed by the product presentation adapter.
 pub enum ExtensionActivationTransactionResult {
     CredentialsMissing(Vec<RuntimeCredentialAuthRequirement>),
-    Activated(ExtensionPackage),
+    Activated(Box<ExtensionPackage>),
 }
 
 /// Concrete operations supplied by the composition root.
@@ -74,6 +75,7 @@ pub enum ExtensionActivationTransactionResult {
 #[async_trait]
 pub trait ExtensionActivationOperations: Send + Sync {
     type Error: Send;
+    type HostedMcpDiscoveryAuthority: Send;
 
     async fn load_installation(
         &self,
@@ -112,7 +114,8 @@ pub trait ExtensionActivationOperations: Send + Sync {
         &self,
         scope: &ResourceScope,
         package: &ExtensionPackage,
-    );
+        network_policy: NetworkPolicy,
+    ) -> Self::HostedMcpDiscoveryAuthority;
 
     async fn discover_hosted_mcp_package(
         &self,
@@ -204,8 +207,10 @@ where
     };
 
     let (initial, scope, runtime_http_egress) = initial;
-    operations
-        .stage_hosted_mcp_discovery_authority(&scope, &initial.package)
+    let network_policy = hosted_mcp_discovery_network_policy(&initial.package)
+        .map_err(|error| operations.map_authority_error(error))?;
+    let _discovery_authority_guard = operations
+        .stage_hosted_mcp_discovery_authority(&scope, &initial.package, network_policy)
         .await;
     let credential_accounts = match operations.credential_readiness(&initial.package).await? {
         ExtensionActivationCredentialReadiness::Ready(accounts) => accounts,
@@ -215,12 +220,9 @@ where
             ));
         }
     };
-    let discovery_authority = HostedMcpDiscoveryAuthority::capture(
-        initial.package,
-        &initial.manifest,
-        credential_accounts,
-    )
-    .map_err(|error| operations.map_authority_error(error))?;
+    let discovery_authority =
+        McpDiscoveryFence::capture(initial.package, &initial.manifest, credential_accounts)
+            .map_err(|error| operations.map_authority_error(error))?;
     let active_package = operations
         .discover_hosted_mcp_package(
             discovery_authority.package(),
@@ -251,15 +253,83 @@ where
         }
     };
     let current_authority =
-        HostedMcpDiscoveryAuthority::capture(current.package, &current.manifest, current_accounts)
-            .map_err(|error| {
+        McpDiscoveryFence::capture(current.package, &current.manifest, current_accounts).map_err(
+            |error| {
                 let error = operations.map_authority_error(error);
                 operations.discovery_recheck_error(Some(error))
-            })?;
+            },
+        )?;
     if !discovery_authority.still_authorizes(&current_authority) {
         return Err(operations.discovery_recheck_error(None));
     }
     commit_activation(operations, extension_id, installation_id, active_package).await
+}
+
+fn hosted_mcp_discovery_network_policy(
+    package: &ExtensionPackage,
+) -> Result<NetworkPolicy, ExtensionInstallationError> {
+    const MCP_NETWORK_EGRESS_LIMIT: u64 = 2 * 1024 * 1024;
+
+    let ExtensionRuntime::Mcp {
+        transport,
+        command: None,
+        args,
+        url: Some(url),
+    } = &package.manifest.runtime
+    else {
+        return Err(ExtensionInstallationError::InvalidInstallation {
+            reason: format!(
+                "hosted MCP extension {} has no hosted HTTP runtime",
+                package.id.as_str()
+            ),
+        });
+    };
+    if transport != "http" || !args.is_empty() {
+        return Err(ExtensionInstallationError::InvalidInstallation {
+            reason: format!(
+                "hosted MCP extension {} has an unsupported discovery transport",
+                package.id.as_str()
+            ),
+        });
+    }
+    let parsed =
+        url::Url::parse(url).map_err(|_| ExtensionInstallationError::InvalidInstallation {
+            reason: format!(
+                "hosted MCP extension {} has an invalid discovery endpoint",
+                package.id.as_str()
+            ),
+        })?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ExtensionInstallationError::InvalidInstallation {
+            reason: format!(
+                "hosted MCP extension {} has an invalid discovery endpoint",
+                package.id.as_str()
+            ),
+        });
+    }
+    let host =
+        parsed
+            .host_str()
+            .ok_or_else(|| ExtensionInstallationError::InvalidInstallation {
+                reason: format!(
+                    "hosted MCP extension {} has no discovery endpoint host",
+                    package.id.as_str()
+                ),
+            })?;
+    Ok(NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: host.to_ascii_lowercase(),
+            port: parsed.port(),
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(MCP_NETWORK_EGRESS_LIMIT),
+    })
 }
 
 async fn capture_snapshot<O>(
@@ -290,7 +360,9 @@ where
     O: ExtensionActivationOperations,
 {
     if operations.package_is_published(extension_id, &package) {
-        return Ok(ExtensionActivationTransactionResult::Activated(package));
+        return Ok(ExtensionActivationTransactionResult::Activated(Box::new(
+            package,
+        )));
     }
     operations.enable_lifecycle_package(extension_id).await?;
     if let Err(error) = operations.publish_active_package(&package) {
@@ -323,5 +395,406 @@ where
         }
         return Err(error);
     }
-    Ok(ExtensionActivationTransactionResult::Activated(package))
+    Ok(ExtensionActivationTransactionResult::Activated(Box::new(
+        package,
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use async_trait::async_trait;
+    use chrono::Utc;
+    use ironclaw_extensions::{
+        ExtensionInstallation, ExtensionManifest, ExtensionManifestRecord, ExtensionManifestRef,
+        ExtensionPackage, HostApiContractRegistry, InstallationOwner, ManifestSource,
+    };
+    use ironclaw_host_api::{
+        HOST_RUNTIME_HTTP_EGRESS_PORT_ID, HostPortCatalog, HostPortCatalogEntry, HostPortId,
+        InvocationId, NetworkPolicy, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+        RuntimeHttpEgressResponse, VirtualPath,
+    };
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn hosted_discovery_authority_is_revoked_after_success() {
+        let operations = ActivationOperationsFixture::success();
+        let drops = Arc::clone(&operations.guard_drops);
+        let policies = Arc::clone(&operations.staged_policies);
+
+        let result = run_extension_activation(
+            &Mutex::new(()),
+            &operations,
+            &fixture_extension_id(),
+            &fixture_installation_id(),
+            &fixture_user_id(),
+            fixture_discovery_mode(),
+        )
+        .await
+        .expect("hosted MCP discovery should succeed");
+
+        assert!(matches!(
+            result,
+            ExtensionActivationTransactionResult::Activated(_)
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            policies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)[0]
+                .max_egress_bytes,
+            Some(2 * 1024 * 1024),
+            "hosted discovery must use the normal bounded MCP egress ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn hosted_discovery_authority_is_revoked_after_error() {
+        let operations = ActivationOperationsFixture::failure();
+        let drops = Arc::clone(&operations.guard_drops);
+
+        let error = match run_extension_activation(
+            &Mutex::new(()),
+            &operations,
+            &fixture_extension_id(),
+            &fixture_installation_id(),
+            &fixture_user_id(),
+            fixture_discovery_mode(),
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("scripted discovery failure should propagate"),
+        };
+
+        assert_eq!(error, "scripted discovery failure");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn hosted_discovery_authority_is_revoked_when_caller_cancels() {
+        let entered_discovery = Arc::new(Notify::new());
+        let operations = Arc::new(ActivationOperationsFixture::pending(Arc::clone(
+            &entered_discovery,
+        )));
+        let drops = Arc::clone(&operations.guard_drops);
+        let task_operations = Arc::clone(&operations);
+
+        let task = tokio::spawn(async move {
+            run_extension_activation(
+                &Mutex::new(()),
+                task_operations.as_ref(),
+                &fixture_extension_id(),
+                &fixture_installation_id(),
+                &fixture_user_id(),
+                fixture_discovery_mode(),
+            )
+            .await
+        });
+        entered_discovery.notified().await;
+        task.abort();
+        match task.await {
+            Err(error) if error.is_cancelled() => {}
+            Err(_) => panic!("task should be canceled, not fail while joining"),
+            Ok(_) => panic!("canceled task unexpectedly completed"),
+        }
+
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "dropping the caller future must revoke staged discovery authority"
+        );
+    }
+
+    struct DropProbeGuard {
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Drop for DropProbeGuard {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    enum DiscoveryScript {
+        Success,
+        Failure,
+        Pending(Arc<Notify>),
+    }
+
+    struct ActivationOperationsFixture {
+        installation: ExtensionInstallation,
+        package: ExtensionPackage,
+        manifest: ExtensionManifestRecord,
+        discovery: DiscoveryScript,
+        guard_drops: Arc<AtomicUsize>,
+        staged_policies: Arc<StdMutex<Vec<NetworkPolicy>>>,
+    }
+
+    impl ActivationOperationsFixture {
+        fn success() -> Self {
+            Self::new(DiscoveryScript::Success)
+        }
+
+        fn failure() -> Self {
+            Self::new(DiscoveryScript::Failure)
+        }
+
+        fn pending(entered: Arc<Notify>) -> Self {
+            Self::new(DiscoveryScript::Pending(entered))
+        }
+
+        fn new(discovery: DiscoveryScript) -> Self {
+            let (package, manifest) = hosted_activation_package();
+            Self {
+                installation: installation("hosted", &["fixture-user"]),
+                package,
+                manifest,
+                discovery,
+                guard_drops: Arc::new(AtomicUsize::new(0)),
+                staged_policies: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ExtensionActivationOperations for ActivationOperationsFixture {
+        type Error = String;
+        type HostedMcpDiscoveryAuthority = DropProbeGuard;
+
+        async fn load_installation(
+            &self,
+            _extension_id: &ExtensionId,
+            _installation_id: &ExtensionInstallationId,
+        ) -> Result<ExtensionInstallation, Self::Error> {
+            Ok(self.installation.clone())
+        }
+
+        fn ensure_caller_may_operate(
+            &self,
+            _installation: &ExtensionInstallation,
+            _caller: &UserId,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn lifecycle_package(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<ExtensionPackage, Self::Error> {
+            Ok(self.package.clone())
+        }
+
+        async fn installed_manifest(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<ExtensionManifestRecord, Self::Error> {
+            Ok(self.manifest.clone())
+        }
+
+        async fn missing_account_setup(
+            &self,
+            _extension_id: &ExtensionId,
+            _caller: &UserId,
+        ) -> Result<Option<RuntimeCredentialAuthRequirement>, Self::Error> {
+            Ok(None)
+        }
+
+        async fn credential_readiness(
+            &self,
+            _package: &ExtensionPackage,
+        ) -> Result<ExtensionActivationCredentialReadiness, Self::Error> {
+            Ok(ExtensionActivationCredentialReadiness::Ready(Vec::new()))
+        }
+
+        async fn stage_hosted_mcp_discovery_authority(
+            &self,
+            _scope: &ResourceScope,
+            _package: &ExtensionPackage,
+            network_policy: NetworkPolicy,
+        ) -> Self::HostedMcpDiscoveryAuthority {
+            self.staged_policies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(network_policy);
+            DropProbeGuard {
+                drops: Arc::clone(&self.guard_drops),
+            }
+        }
+
+        async fn discover_hosted_mcp_package(
+            &self,
+            package: &ExtensionPackage,
+            _max_tools: u32,
+            _scope: ResourceScope,
+            _runtime_http_egress: Arc<dyn RuntimeHttpEgress>,
+        ) -> Result<ExtensionPackage, Self::Error> {
+            match &self.discovery {
+                DiscoveryScript::Success => Ok(package.clone()),
+                DiscoveryScript::Failure => Err("scripted discovery failure".to_string()),
+                DiscoveryScript::Pending(entered) => {
+                    entered.notify_one();
+                    std::future::pending().await
+                }
+            }
+        }
+
+        fn package_is_published(
+            &self,
+            _extension_id: &ExtensionId,
+            _package: &ExtensionPackage,
+        ) -> bool {
+            true
+        }
+
+        async fn enable_lifecycle_package(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn disable_lifecycle_package(
+            &self,
+            _extension_id: &ExtensionId,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn publish_active_package(&self, _package: &ExtensionPackage) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn unpublish_active_package(&self, _package: &ExtensionPackage) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn publish_runtime_package(
+            &self,
+            _extension_id: &ExtensionId,
+            _installation_id: &ExtensionInstallationId,
+            _package: &ExtensionPackage,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn map_authority_error(&self, error: ExtensionInstallationError) -> Self::Error {
+            error.to_string()
+        }
+
+        fn discovery_recheck_error(&self, error: Option<Self::Error>) -> Self::Error {
+            error.unwrap_or_else(|| "discovery authority changed".to_string())
+        }
+
+        fn compensation_failure(
+            &self,
+            context: &'static str,
+            original: Self::Error,
+            compensation: Self::Error,
+        ) -> Self::Error {
+            format!("{context}: {original}; {compensation}")
+        }
+    }
+
+    struct UnreachableRuntimeHttpEgress;
+
+    #[async_trait]
+    impl RuntimeHttpEgress for UnreachableRuntimeHttpEgress {
+        async fn execute(
+            &self,
+            _request: RuntimeHttpEgressRequest,
+        ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+            panic!("fixture discovery never delegates to runtime HTTP")
+        }
+    }
+
+    fn fixture_discovery_mode() -> ExtensionActivationMode {
+        ExtensionActivationMode::HostedMcpDiscovery {
+            scope: ResourceScope::local_default(fixture_user_id(), InvocationId::new())
+                .expect("resource scope"),
+            runtime_http_egress: Arc::new(UnreachableRuntimeHttpEgress),
+        }
+    }
+
+    fn fixture_extension_id() -> ExtensionId {
+        ExtensionId::new("hosted").expect("extension id")
+    }
+
+    fn fixture_installation_id() -> ExtensionInstallationId {
+        ExtensionInstallationId::new("hosted").expect("installation id")
+    }
+
+    fn fixture_user_id() -> UserId {
+        UserId::new("fixture-user").expect("user id")
+    }
+
+    fn hosted_activation_package() -> (ExtensionPackage, ExtensionManifestRecord) {
+        let raw_manifest = r#"
+schema_version = "reborn.extension_manifest.v3"
+id = "hosted"
+name = "Hosted"
+version = "1.0.0"
+description = "hosted MCP authority fixture"
+trust = "third_party"
+
+[mcp]
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+server = "https://hosted.example.test/mcp"
+namespace = "hosted"
+max_tools = 3
+default_permission = "ask"
+effects = ["network"]
+"#;
+        let contracts = HostApiContractRegistry::new();
+        let manifest = ExtensionManifestRecord::from_toml(
+            raw_manifest,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::new(vec![HostPortCatalogEntry::new(
+                HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID).expect("host port id"),
+            )])
+            .expect("host port catalog"),
+            None,
+            &contracts,
+        )
+        .expect("manifest record");
+        let package_manifest: ExtensionManifest = manifest
+            .manifest()
+            .clone()
+            .try_into()
+            .expect("package manifest");
+        let package = ExtensionPackage::from_manifest_toml(
+            package_manifest,
+            VirtualPath::new("/system/extensions/hosted").expect("package root"),
+            raw_manifest,
+        )
+        .expect("package");
+        (package, manifest)
+    }
+
+    fn installation(extension_id: &str, members: &[&str]) -> ExtensionInstallation {
+        let extension_id = ExtensionId::new(extension_id).expect("extension id");
+        let owner = InstallationOwner::users(
+            members
+                .iter()
+                .map(|member| UserId::new(*member).expect("user id"))
+                .collect::<BTreeSet<_>>(),
+        )
+        .expect("non-empty owner");
+        ExtensionInstallation::new(
+            ExtensionInstallationId::new(extension_id.as_str()).expect("installation id"),
+            extension_id.clone(),
+            ExtensionManifestRef::new(extension_id, None),
+            Vec::new(),
+            Utc::now(),
+            owner,
+        )
+        .expect("installation")
+    }
 }

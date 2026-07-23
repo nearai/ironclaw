@@ -243,6 +243,88 @@ async fn unpair_external_actor_revokes_direct_conversation_bindings() {
 }
 
 #[tokio::test]
+async fn user_scoped_channel_unpair_revokes_every_owned_actor_and_direct_route() {
+    let services = InMemoryConversationServices::default();
+    let removed_actor = external_actor("slack-user-reconnected");
+    let retained_actor = external_actor("slack-user-other-installation");
+    let removed_conversation = external_conversation("slack-dm-reconnected", None);
+    let other_installation =
+        AdapterInstallationId::new("other-installation").expect("installation");
+
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            removed_actor.clone(),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            other_installation.clone(),
+            retained_actor.clone(),
+            user("alice"),
+        )
+        .await;
+    services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            removed_actor.clone(),
+            removed_conversation.clone(),
+            "slack-event-before-removal",
+        ))
+        .await
+        .expect("old user owns the first direct route");
+
+    let removed = services
+        .unpair_external_actors_owned_by(
+            &tenant(),
+            &telegram(),
+            Some(&default_installation()),
+            &user("alice"),
+        )
+        .await
+        .expect("user-scoped channel removal");
+    assert_eq!(removed, 1);
+
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            removed_actor.clone(),
+            user("bob"),
+        )
+        .await;
+    let rebound = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            removed_actor,
+            removed_conversation,
+            "slack-event-after-reconnect",
+        ))
+        .await
+        .expect("the same external actor can bind to the new user after removal");
+    assert_eq!(rebound.actor.user_id, user("bob"));
+
+    let mut retained_request = resolve_request(
+        telegram(),
+        retained_actor,
+        external_conversation("slack-dm-other-installation", None),
+        "slack-event-other-installation",
+    );
+    retained_request.adapter_installation_id = other_installation;
+    let retained = services
+        .resolve_or_create_binding(retained_request)
+        .await
+        .expect("another installation remains paired");
+    assert_eq!(retained.actor.user_id, user("alice"));
+}
+
+#[tokio::test]
 async fn stored_reply_target_revalidates_durable_run_authority_and_revocation() {
     let services = InMemoryConversationServices::default();
     let actor = external_actor("telegram-user-stored-route");

@@ -1,6 +1,6 @@
 # Generic extension correctness: deleted-test parity audit
 
-Status: **merge-blocking audit; the former “274 deleted tests” claim is disproven**
+Status: **inventory complete; replacement execution remains a merge gate; the former “274 deleted tests” claim is disproven**
 
 This audit compares the exact tree merged by PR #6116 with the tree immediately
 before that merge. It deliberately treats renamed tests as unproven until a
@@ -102,20 +102,18 @@ isolation, target revalidation, OAuth continuation, delivery evidence, or
 pairing concurrency merely because their original test lived in a retired
 crate.
 
-### Missing regressions found by the audit
+### Regressions added after the initial audit
 
-These are concrete caller-path gaps, not naming discrepancies. They remain
-unchecked until the named replacement lands and passes.
+The initial audit found three concrete caller-path gaps. Replacement journeys
+are now present in the working tree. This is source-level parity evidence only:
+the final exact-head test matrix must still execute them successfully before
+merge.
 
-| Required journey | Exact deleted evidence | Current partial coverage | Required replacement |
+| Required journey | Exact deleted evidence | Replacement now present | Caller-visible proof |
 |---|---|---|---|
-| fresh-thread unpair then re-pair | `tests/integration/telegram_journeys/scenario_unpair_repair_fresh_slate.rs::telegram_unpair_then_repair_starts_fresh_thread_not_the_old_blocked_one` | conversation-store and pairing-panel component tests only | real HTTP/webhook-shaped unpair/re-pair journey proving a fresh thread and no revival of the blocked thread |
-| exactly one concurrent pairing-code winner plus wrong-user isolation | `crates/ironclaw_telegram_extension/src/pairing/tests.rs::concurrent_consume_of_one_code_binds_exactly_one_winner` and `telegram_account_bound_to_other_user_is_refused` | `consume_refuses_codes_for_foreign_installations_and_bound_senders` is sequential | concurrent generic pairing consumption with exactly one winner, durable ownership assertion, and wrong-user denial |
-| permanent send failure terminates and later delivery recovers without duplicates | deleted vendor delivery failure/retry cases, including `crates/ironclaw_channel_delivery/src/tests.rs::driver_slack_api_rejection_records_failed_not_delivered` | coordinator tests cover retryable-then-success, partial multipart terminal failure, and interrupted `Sending` recovery separately | caller-level channel journey proving bounded permanent failure, a later independent recovery/send, and no duplicate provider evidence |
-
-The first two gaps are assigned to the composition CI workstream; the delivery
-recovery gap is assigned to the channel-event delivery workstream. They are not
-marked complete by this audit.
+| fresh-thread unpair then re-pair | `tests/integration/telegram_journeys/scenario_unpair_repair_fresh_slate.rs::telegram_unpair_then_repair_starts_fresh_thread_not_the_old_blocked_one` | `tests/integration/extension_delivery.rs::unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_to_the_paired_user` | production HTTP unpair plus verified Telegram webhook re-pair; the same external actor resolves to a new thread and the repaired reply is delivered |
+| exactly one concurrent pairing-code winner plus wrong-user isolation | `crates/ironclaw_telegram_extension/src/pairing/tests.rs::concurrent_consume_of_one_code_binds_exactly_one_winner` and `telegram_account_bound_to_other_user_is_refused` | `crates/ironclaw_reborn_composition/src/extension_host/channel_pairing/tests.rs::{concurrent_caller_admission_has_exactly_one_pairing_winner,caller_admission_isolates_foreign_installations_and_wrong_users}` | two concurrent ingress admissions yield one durable binding; foreign-installation and already-bound wrong-user attempts reveal no code ownership and preserve the existing binding |
+| permanent send failure terminates and later delivery recovers without duplicates | deleted vendor delivery failure/retry cases, including `crates/ironclaw_channel_delivery/src/tests.rs::driver_slack_api_rejection_records_failed_not_delivered` | `crates/ironclaw_product_workflow/tests/run_delivery_contract.rs::permanent_channel_failure_is_terminal_across_later_recovery` | the failed run records terminal evidence and is not resent during recovery; a later independent run reaches the provider once and records delivered evidence |
 
 ## Deleted high-risk inventory by old path
 
@@ -183,7 +181,7 @@ one shared contract type, fewer mirror DTOs, no one-implementation domain
 
 This audit is complete as an inventory, but parity is **not green** until:
 
-1. the three missing journeys above land and pass;
+1. the three replacement journeys above pass on the exact final PR SHA;
 2. all re-expressed rows pass through their production caller seam;
 3. the final PR SHA passes the deterministic matrix in the merge-readiness
    checklist; and

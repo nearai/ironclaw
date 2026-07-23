@@ -22,6 +22,7 @@
 // suite; decomposition tracked in
 // docs/plans/2026-07-02-reborn-internal-module-refactor.md.
 
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -34,11 +35,15 @@ use ironclaw_extension_host::{
     AdminConfigurationIdempotencyKey, AdminConfigurationService, AdminConfigurationSubmittedValue,
     FilesystemAdminConfigurationStore,
 };
-use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource};
+use ironclaw_extensions::{
+    ExtensionInstallation, ExtensionInstallationId, ExtensionInstallationStore,
+    ExtensionManifestRecord, ExtensionManifestRef, FilesystemExtensionInstallationStore,
+    InstallationOwner, ManifestSource,
+};
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    AgentId, ApprovalRequestId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId,
-    ThreadId, UserId,
+    AgentId, ApprovalRequestId, ExtensionId, InvocationId, ProjectId, ResourceScope, SecretHandle,
+    TenantId, ThreadId, UserId,
 };
 use ironclaw_outbound::test_support::in_memory_backed_outbound_state_store;
 use ironclaw_outbound::{
@@ -89,8 +94,8 @@ use ironclaw_extension_host::egress::{ApprovedChannelEgress, ChannelEgressTransp
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
 
 use super::{
-    ChannelExtras, ChannelHostDeliveryDeps, ChannelHostIdentity,
-    FilesystemChannelWorkflowStateFactory, GenericChannelHostAssembly, GenericChannelHostDeps,
+    ChannelExtras, ChannelHostDeliveryDeps, ChannelHostIdentity, GenericChannelHostAssembly,
+    GenericChannelHostDeps,
 };
 
 struct SlackTriggeredTargetResolver;
@@ -135,8 +140,8 @@ use crate::extension_host::channel_delivery::{
     IngressReplyContextSource, SnapshotChannelDeliveryResolver,
 };
 use crate::extension_host::extension_ingress::{
-    ExtensionIngressParts, InboundPayloadClassifier, PostAdmissionObserver,
-    build_extension_ingress, extension_ingress_route_mount,
+    ExtensionIngressParts, PostAdmissionObserver, build_extension_ingress,
+    extension_ingress_route_mount,
 };
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use crate::webui::route_mounts::PublicRouteMount;
@@ -166,6 +171,34 @@ const SECRET: &str = "topsecret";
 const GATE: &str = "gate:approval-00000000-0000-0000-0000-000000000001";
 const GATE_B: &str = "gate:approval-00000000-0000-0000-0000-000000000002";
 const AUTH_GATE: &str = "gate:auth-slack";
+
+fn outbound_reply_target(
+    entry: &crate::outbound::OutboundDeliveryTargetEntry,
+) -> ReplyTargetBindingRef {
+    match &entry.destination {
+        ironclaw_outbound::RunFinalReplyDestination::External {
+            reply_target_binding_ref,
+        } => reply_target_binding_ref.clone(),
+        ironclaw_outbound::RunFinalReplyDestination::WebApp => {
+            panic!("channel target must carry an external reply binding")
+        }
+    }
+}
+
+fn current_target_resolver(
+    assembly: &Arc<GenericChannelHostAssembly>,
+    registry: Arc<crate::outbound::MutableOutboundDeliveryTargetRegistry>,
+) -> Arc<dyn CurrentDeliveryTargetResolver> {
+    let resolver = Arc::new(
+        crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver::new(
+            registry,
+        ),
+    );
+    resolver
+        .attach_assembly(assembly)
+        .expect("attach current delivery target resolver");
+    resolver
+}
 
 fn slack_manifest_from_bundled_inventory() -> String {
     ironclaw_first_party_extensions::packages::bundled_packages()
@@ -205,6 +238,9 @@ struct Harness {
     /// The production configure service backing the assembly — admission
     /// scenarios save routing values through it mid-test.
     admin_configuration_resolver: Arc<ComposedExtensionAdminConfigurationResolver>,
+    /// Durable caller-membership authority used by the production outbound
+    /// target provider. The active host snapshot remains deployment-global.
+    installation_store: Arc<FilesystemExtensionInstallationStore>,
     /// The harness's outbound state store — the SAME allocation the
     /// assembly's delivery deps read communication preferences from, so
     /// tests can seed the creator's personal preference.
@@ -431,6 +467,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     let egress = RecordingEgress::default();
 
     let host = channel_test_extension_host(options.telegram).await;
+    let installation_store = channel_test_installation_store(options.telegram).await;
     let ingress = build_extension_ingress(
         host.snapshot_watch(),
         Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
@@ -461,6 +498,13 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         format!("{INSTALLATION}:{SLACK_USER}"),
         UserId::new(USER).expect("user"), // safety: static test user id is valid.
     )]));
+    let outbound_delivery_targets =
+        Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default());
+    let current_delivery_targets = Arc::new(
+        crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver::new(
+            Arc::clone(&outbound_delivery_targets),
+        ),
+    );
 
     let admin_configuration_resolver = configured_admin_configuration_resolver().await;
     let deps = GenericChannelHostDeps {
@@ -468,9 +512,9 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         registry: Arc::clone(&ingress.registry),
         admin_configuration_resolver: Arc::clone(&admin_configuration_resolver),
-        workflow_state: Arc::new(FilesystemChannelWorkflowStateFactory::new(Arc::new(
-            InMemoryBackend::new(),
-        ))),
+        workflow_state: Arc::new(ironclaw_product_workflow::ChannelWorkflowStateService::new(
+            Arc::new(InMemoryBackend::new()),
+        )),
         thread_service: Arc::new(threads.clone()),
         turn_coordinator: Arc::new(coordinator.clone()),
         approval_interaction: Some(approval_interaction),
@@ -488,9 +532,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             outbound_store,
             route_store: Arc::clone(&route_store),
             communication_preferences: preferences,
-            delivery_targets: Arc::new(
-                crate::outbound::MutableOutboundDeliveryTargetRegistry::default(),
-            ),
+            current_delivery_targets: Arc::clone(&current_delivery_targets)
+                as Arc<dyn CurrentDeliveryTargetResolver>,
             approval_context: None,
             blocked_auth_prompts: options.auth_challenges.map(|provider| {
                 Arc::new(ProductAuthBlockedAuthPromptSource::new(Some(provider)))
@@ -502,17 +545,18 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         channel_pairing: None,
     };
     let assembly = GenericChannelHostAssembly::start(deps);
+    current_delivery_targets
+        .attach_assembly(&assembly)
+        .expect("attach current delivery target resolver");
     // Vendor extras exactly as the binary's channel-extension binding feeds
-    // them: the gate-reply classifier and the preference-target codec — no
-    // storage-root override.
+    // them: the preference-target codec, with gate replies owned generically
+    // by the shared sink.
     assembly
         .register_extras(
             "slack",
             ChannelExtras {
-                classifier: Some(slack_gate_reply_classifier()),
                 preference_target_codec: Some(Arc::new(SlackPreferenceTargetCodec)),
                 subject_route_resolver: None,
-                storage_roots: None,
             },
         )
         .await;
@@ -521,10 +565,8 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
             .register_extras(
                 "telegram",
                 ChannelExtras {
-                    classifier: None,
                     preference_target_codec: Some(Arc::new(TelegramPreferenceTargetCodec)),
                     subject_route_resolver: None,
-                    storage_roots: None,
                 },
             )
             .await;
@@ -543,6 +585,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         route_store,
         identity_lookup,
         admin_configuration_resolver,
+        installation_store,
         outbound,
         _host: host,
         assembly,
@@ -550,15 +593,51 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
     }
 }
 
-/// Slack's gate-resolution reclassification for the generic sink — the same
-/// closure the binary-side native registration provides.
-fn slack_gate_reply_classifier() -> Arc<InboundPayloadClassifier> {
-    Arc::new(|message| {
-        ironclaw_slack_extension::classify_channel_interaction_resolution(
-            &message.text,
-            message.trigger,
+async fn channel_test_installation_store(
+    include_telegram: bool,
+) -> Arc<FilesystemExtensionInstallationStore> {
+    let store = Arc::new(crate::extension_host::filesystem_installation_store_for_test().await);
+    let members = InstallationOwner::users(BTreeSet::from([
+        UserId::new(USER).expect("Alice user"),
+        UserId::new("user:slack-bob").expect("Bob user"),
+    ]))
+    .expect("non-empty fixture members");
+    for (manifest_toml, installation_id) in
+        [(slack_manifest_from_bundled_inventory(), INSTALLATION)]
+            .into_iter()
+            .chain(include_telegram.then(|| {
+                (
+                    telegram_manifest_from_bundled_inventory(),
+                    TELEGRAM_INSTALLATION,
+                )
+            }))
+    {
+        let record = ExtensionManifestRecord::from_toml(
+            manifest_toml,
+            ManifestSource::HostBundled,
+            &ironclaw_host_runtime::default_host_port_catalog().expect("host ports"),
+            None,
+            &product_extension_host_api_contract_registry().expect("contracts"),
         )
-    })
+        .expect("bundled channel manifest resolves");
+        let extension_id = record.resolved().id.clone();
+        store
+            .upsert_manifest_and_installation(
+                record,
+                ExtensionInstallation::new(
+                    ExtensionInstallationId::new(installation_id).expect("installation id"),
+                    extension_id.clone(),
+                    ExtensionManifestRef::new(extension_id, None),
+                    Vec::new(),
+                    chrono::Utc::now(),
+                    members.clone(),
+                )
+                .expect("channel installation"),
+            )
+            .await
+            .expect("persist channel installation");
+    }
+    store
 }
 
 /// Production-shaped administrator configuration for the real Slack manifest.
@@ -1290,9 +1369,11 @@ async fn triggered_approval_prompt_route_resolves_dm_approve_on_foreign_scope() 
         foreign_scope.clone(),
         TurnActor::new(user.clone()),
         blocked_run_id,
-        TurnStatus::BlockedApproval,
-        TurnOriginKind::ScheduledTrigger,
-        Some(GateRef::new(GATE).expect("gate ref")), // safety: static test gate ref is valid.
+        TurnStatePhase {
+            status: TurnStatus::BlockedApproval,
+            origin: TurnOriginKind::ScheduledTrigger,
+            gate_ref: Some(GateRef::new(GATE).expect("gate ref")), // safety: static test gate ref is valid.
+        },
         dm_target,
         AcceptedMessageRef::new("slack:triggered-approval").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
@@ -1524,9 +1605,11 @@ async fn triggered_auth_prompt_route_delivers_dm_setup_link_on_foreign_scope() {
         foreign_scope.clone(),
         TurnActor::new(user.clone()),
         run_id,
-        TurnStatus::BlockedAuth,
-        TurnOriginKind::ScheduledTrigger,
-        Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
+        TurnStatePhase {
+            status: TurnStatus::BlockedAuth,
+            origin: TurnOriginKind::ScheduledTrigger,
+            gate_ref: Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
+        },
         dm_target,
         AcceptedMessageRef::new("slack:triggered-auth").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
@@ -1649,9 +1732,11 @@ async fn triggered_auth_prompt_oauth_target_not_dm_suppresses_setup_link_and_can
         foreign_scope.clone(),
         TurnActor::new(user.clone()),
         run_id,
-        TurnStatus::BlockedAuth,
-        TurnOriginKind::ScheduledTrigger,
-        Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
+        TurnStatePhase {
+            status: TurnStatus::BlockedAuth,
+            origin: TurnOriginKind::ScheduledTrigger,
+            gate_ref: Some(GateRef::new(AUTH_GATE).expect("auth gate ref")), // safety: static test gate ref is valid.
+        },
         dm_target,
         AcceptedMessageRef::new("slack:triggered-auth-not-dm").expect("accepted ref"), // safety: static test accepted ref is valid.
     );
@@ -2733,9 +2818,11 @@ impl RecordingTurnCoordinator {
                     scope,
                     actor,
                     run_id,
-                    TurnStatus::Completed,
-                    origin,
-                    None,
+                    TurnStatePhase {
+                        status: TurnStatus::Completed,
+                        origin,
+                        gate_ref: None,
+                    },
                     reply_target_binding_ref,
                     accepted_message_ref,
                 ),
@@ -2880,9 +2967,11 @@ impl RecordingTurnCoordinator {
                     scope,
                     actor,
                     run_id,
-                    TurnStatus::Completed,
-                    TurnOriginKind::Inbound,
-                    None,
+                    TurnStatePhase {
+                        status: TurnStatus::Completed,
+                        origin: TurnOriginKind::Inbound,
+                        gate_ref: None,
+                    },
                     reply_target_binding_ref,
                     accepted_message_ref,
                 ),
@@ -2954,9 +3043,11 @@ impl TurnCoordinator for RecordingTurnCoordinator {
             request.scope,
             request.actor,
             run_id,
-            status,
-            TurnOriginKind::Inbound,
-            gate_ref,
+            TurnStatePhase {
+                status,
+                origin: TurnOriginKind::Inbound,
+                gate_ref,
+            },
             request.reply_target_binding_ref,
             request.accepted_message_ref,
         );
@@ -3102,13 +3193,17 @@ async fn append_final_assistant_message(
     Ok(())
 }
 
+struct TurnStatePhase {
+    status: TurnStatus,
+    origin: TurnOriginKind,
+    gate_ref: Option<GateRef>,
+}
+
 fn turn_state(
     scope: TurnScope,
     actor: TurnActor,
     run_id: TurnRunId,
-    status: TurnStatus,
-    origin: TurnOriginKind,
-    gate_ref: Option<GateRef>,
+    phase: TurnStatePhase,
     reply_target_binding_ref: ReplyTargetBindingRef,
     accepted_message_ref: AcceptedMessageRef,
 ) -> TurnRunState {
@@ -3117,7 +3212,7 @@ fn turn_state(
         actor: Some(actor.clone()),
         turn_id: TurnId::new(),
         run_id,
-        status,
+        status: phase.status,
         accepted_message_ref,
         source_binding_ref: ironclaw_turns::SourceBindingRef::new("slack:source")
             .expect("source binding"), // safety: static test source binding is valid.
@@ -3128,13 +3223,13 @@ fn turn_state(
         model_usage: None,
         received_at: chrono::Utc::now(),
         checkpoint_id: None,
-        gate_ref,
+        gate_ref: phase.gate_ref,
         blocked_activity_id: None,
         credential_requirements: Vec::new(),
         failure: None,
         event_cursor: EventCursor::default(),
         product_context: Some(ProductTurnContext::new(
-            origin,
+            phase.origin,
             Some(TurnSurfaceType::Direct),
             // The generic ingress graph stamps the manifest extension id as
             // the product adapter id. Vendor codec ids such as `slack_v2`
@@ -4133,6 +4228,8 @@ fn generic_outbound_target_provider(
         watch: harness.assembly.snapshot_watch(),
         assembly: Arc::clone(&harness.assembly),
         admin_configuration_resolver: Arc::clone(&harness.admin_configuration_resolver),
+        installation_store: Arc::clone(&harness.installation_store)
+            as Arc<dyn ExtensionInstallationStore>,
         dm_targets,
         identity: ChannelOutboundTargetIdentity {
             tenant_id: TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
@@ -4208,11 +4305,11 @@ async fn generic_outbound_targets_list_from_admin_configuration_and_generic_dm_s
         "generic ids keep the retired lane's shape"
     );
     let shared_conversation = codec
-        .conversation_for_target(&shared.reply_target_binding_ref)
+        .conversation_for_target(&outbound_reply_target(shared))
         .expect("shared binding ref decodes");
     assert_eq!(shared_conversation.conversation_id(), ROUTED_CHANNEL);
     assert_eq!(shared_conversation.space_id(), Some(TEAM));
-    assert!(!codec.is_personal_direct_message(&shared.reply_target_binding_ref));
+    assert!(!codec.is_personal_direct_message(&outbound_reply_target(shared)));
 
     let dm = listed
         .iter()
@@ -4222,20 +4319,20 @@ async fn generic_outbound_targets_list_from_admin_configuration_and_generic_dm_s
         dm.summary.target_id.as_str(),
         format!("slack:personal-dm:{TEAM}:{USER}")
     );
-    assert!(codec.is_personal_direct_message(&dm.reply_target_binding_ref));
+    assert!(codec.is_personal_direct_message(&outbound_reply_target(dm)));
     assert_eq!(
-        codec.direct_message_actor_for_target(&dm.reply_target_binding_ref),
+        codec.direct_message_actor_for_target(&outbound_reply_target(dm)),
         Some(SLACK_USER.to_string()),
         "the encoded DM ref carries the provisioned actor"
     );
     // The encoded refs carry the DURABLE installation id from the snapshot.
     assert!(
-        dm.reply_target_binding_ref.as_str().contains(&format!(
+        outbound_reply_target(dm).as_str().contains(&format!(
             "installation:{}:{INSTALLATION};",
             INSTALLATION.len()
         )),
         "DM ref must embed the durable installation id: {}",
-        dm.reply_target_binding_ref.as_str()
+        outbound_reply_target(dm).as_str()
     );
 
     // resolve-by-id round-trips for the owner…
@@ -4285,6 +4382,156 @@ async fn generic_outbound_targets_list_from_admin_configuration_and_generic_dm_s
     }
 }
 
+/// Removing one caller from a shared installation revokes that caller's
+/// outbound target authority immediately, without tearing down the active
+/// deployment, administrator configuration, or another member's targets.
+/// This is the production separation between tenant configuration/runtime
+/// and per-user extension membership.
+#[tokio::test]
+async fn generic_outbound_targets_require_current_non_last_member_authority() {
+    let harness = build_harness(TurnMode::Running).await;
+    save_outbound_target_config(&harness).await;
+    let dm_targets = generic_dm_target_store();
+    let alice = UserId::new(USER).expect("Alice user");
+    let bob = UserId::new("user:slack-bob").expect("Bob user");
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &alice,
+            SLACK_USER.to_string(),
+            dm_target_payload(Some(TEAM), CHANNEL),
+        )
+        .await
+        .expect("provision Alice DM target");
+    dm_targets
+        .upsert(
+            ADAPTER,
+            &bob,
+            "U456".to_string(),
+            dm_target_payload(Some(TEAM), "D456"),
+        )
+        .await
+        .expect("provision Bob DM target");
+    let provider = generic_outbound_target_provider(&harness, dm_targets);
+    let bob_caller =
+        OutboundDeliveryTargetScope::new(TenantId::new(TENANT).expect("tenant"), bob.clone());
+
+    let alice_targets = provider
+        .list_outbound_delivery_targets(&operator_caller())
+        .await
+        .expect("list Alice targets");
+    let bob_targets = provider
+        .list_outbound_delivery_targets(&bob_caller)
+        .await
+        .expect("list Bob targets");
+    assert_eq!(alice_targets.len(), 2, "Alice initially owns shared + DM");
+    assert_eq!(bob_targets.len(), 1, "Bob initially owns only his DM");
+    assert!(
+        bob_targets[0]
+            .summary
+            .target_id
+            .as_str()
+            .contains(&format!(":{TEAM}:")),
+        "Bob's target still uses tenant administrator configuration"
+    );
+
+    let installation_id = ExtensionInstallationId::new(INSTALLATION).expect("installation id");
+    let installation = harness
+        .installation_store
+        .get_installation(&installation_id)
+        .await
+        .expect("load installation")
+        .expect("shared Slack installation exists");
+    harness
+        .installation_store
+        .upsert_installation(installation.with_owner(InstallationOwner::user(bob.clone())))
+        .await
+        .expect("persist non-last-member removal");
+
+    assert!(
+        harness
+            .assembly
+            .snapshot_watch()
+            .current()
+            .extension(ADAPTER)
+            .is_some(),
+        "removing Alice must not tear down Bob's shared active runtime"
+    );
+    assert_eq!(
+        harness
+            .admin_configuration_resolver
+            .non_secret_value(
+                &ExtensionId::new(ADAPTER).expect("extension id"),
+                "slack_team_id",
+            )
+            .await
+            .expect("read admin configuration")
+            .as_deref(),
+        Some(TEAM),
+        "personal removal must not alter tenant administrator configuration"
+    );
+
+    assert!(
+        provider
+            .list_outbound_delivery_targets(&operator_caller())
+            .await
+            .expect("list removed caller targets")
+            .is_empty(),
+        "the operator's admin privilege cannot replace removed personal membership"
+    );
+    for target in &alice_targets {
+        assert!(
+            provider
+                .resolve_outbound_delivery_target(&operator_caller(), &target.summary.target_id,)
+                .await
+                .expect("resolve removed caller target")
+                .is_none(),
+            "removed Alice must not resolve target id {}",
+            target.summary.target_id.as_str()
+        );
+        assert!(
+            provider
+                .resolve_reply_target_binding(&operator_caller(), &outbound_reply_target(target),)
+                .await
+                .expect("resolve removed caller binding")
+                .is_none(),
+            "removed Alice must not resolve a previously sealed binding"
+        );
+    }
+
+    let bob_after_removal = provider
+        .list_outbound_delivery_targets(&bob_caller)
+        .await
+        .expect("list remaining member targets");
+    assert_eq!(
+        bob_after_removal
+            .iter()
+            .map(|entry| entry.summary.target_id.as_str())
+            .collect::<Vec<_>>(),
+        bob_targets
+            .iter()
+            .map(|entry| entry.summary.target_id.as_str())
+            .collect::<Vec<_>>(),
+        "Bob keeps his independent target after Alice leaves"
+    );
+    assert!(
+        provider
+            .resolve_outbound_delivery_target(&bob_caller, &bob_targets[0].summary.target_id,)
+            .await
+            .expect("resolve Bob target")
+            .is_some(),
+        "remaining member still resolves by target id"
+    );
+    assert!(
+        provider
+            .resolve_reply_target_binding(&bob_caller, &outbound_reply_target(&bob_targets[0]),)
+            .await
+            .expect("resolve Bob binding")
+            .is_some(),
+        "remaining member still resolves by sealed binding"
+    );
+}
+
 /// REGRESSION (migration tolerance): stored beta preferences embed the
 /// RETIRED setup installation id in their binding refs. Resolution must
 /// tolerate both ids — ownership is proven against caller-scoped generic
@@ -4327,12 +4574,11 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
         .expect("resolve succeeds")
         .expect("retired-id shared preference still resolves");
     assert!(
-        resolved_shared
-            .reply_target_binding_ref
+        outbound_reply_target(&resolved_shared)
             .as_str()
             .contains(&durable_segment),
         "re-resolved ref carries the durable installation id: {}",
-        resolved_shared.reply_target_binding_ref.as_str()
+        outbound_reply_target(&resolved_shared).as_str()
     );
 
     // Personal-DM preference saved under the retired setup id.
@@ -4351,12 +4597,11 @@ async fn generic_outbound_targets_tolerate_retired_installation_id_binding_refs(
         .expect("resolve succeeds")
         .expect("retired-id DM preference still resolves");
     assert!(
-        resolved_dm
-            .reply_target_binding_ref
+        outbound_reply_target(&resolved_dm)
             .as_str()
             .contains(&durable_segment),
         "re-resolved DM ref carries the durable installation id: {}",
-        resolved_dm.reply_target_binding_ref.as_str()
+        outbound_reply_target(&resolved_dm).as_str()
     );
 
     // Fail-closed arms: a tampered actor never resolves; an unrouted
@@ -4448,7 +4693,10 @@ async fn generic_triggered_hook_routes_fire_to_the_owning_extension_driver() {
         Arc::clone(&harness.assembly),
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
-        Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default()),
+        current_target_resolver(
+            &harness.assembly,
+            Arc::new(crate::outbound::MutableOutboundDeliveryTargetRegistry::default()),
+        ),
         Arc::clone(&harness.event_router),
     );
 
@@ -4597,7 +4845,7 @@ async fn generic_triggered_hook_honors_per_trigger_target_without_global_default
         Arc::clone(&harness.assembly),
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
-        registry,
+        current_target_resolver(&harness.assembly, registry),
         Arc::clone(&harness.event_router),
     );
     let fire = TriggerFire {
@@ -4659,19 +4907,42 @@ async fn generic_triggered_hook_leaves_web_app_target_in_run_history() {
         .register_provider(
             ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
             Arc::new(
-                crate::outbound::HostOwnedOutboundDeliveryTargetProvider::new(
-                    ironclaw_product_workflow::web_app_outbound_delivery_target_option()
-                        .expect("host WebApp target option"),
+                ironclaw_outbound::HostOwnedOutboundDeliveryTargetProvider::new(
+                    ironclaw_outbound::OutboundDeliveryTargetSummary::new(
+                        ironclaw_outbound::OutboundDeliveryTargetId::new(
+                            ironclaw_outbound::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+                        )
+                        .expect("host WebApp target id"),
+                        "web_app",
+                        "Web app only",
+                        Some(
+                            "Store the final answer in run history without external delivery."
+                                .to_string(),
+                        ),
+                    )
+                    .expect("host WebApp target summary"),
+                    ironclaw_outbound::DeliveryTargetCapabilities {
+                        final_replies: true,
+                        progress: false,
+                        gate_prompts: false,
+                        auth_prompts: false,
+                        modalities: Vec::new(),
+                    },
                     ironclaw_outbound::RunFinalReplyDestination::WebApp,
                 ),
             ),
         )
         .expect("register host WebApp target provider");
+    let current_targets = Arc::new(
+        crate::extension_host::channel_outbound_targets::ComposedCurrentDeliveryTargetResolver::new(
+            Arc::clone(&registry),
+        ),
+    );
     let hook = GenericTriggeredRunDeliveryHook::new(
         Arc::clone(&harness.assembly),
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
-        registry,
+        current_targets as Arc<dyn CurrentDeliveryTargetResolver>,
         Arc::clone(&harness.event_router),
     );
     let run_id = TurnRunId::new();
@@ -4718,10 +4989,10 @@ async fn completed_trigger_run_for_user(
     result: &str,
 ) -> (TurnScope, TurnRunId) {
     let scope = TurnScope::new_with_owner(
-        TenantId::new(TENANT).expect("tenant"),
-        Some(AgentId::new(AGENT).expect("agent")),
-        Some(ProjectId::new(PROJECT).expect("project")),
-        ThreadId::new(thread_id).expect("thread"),
+        TenantId::new(TENANT).expect("tenant"), // safety: cfg(test)-only static fixture is valid.
+        Some(AgentId::new(AGENT).expect("agent")), // safety: cfg(test)-only static fixture is valid.
+        Some(ProjectId::new(PROJECT).expect("project")), // safety: cfg(test)-only static fixture is valid.
+        ThreadId::new(thread_id).expect("thread"), // safety: cfg(test)-only caller supplies a valid fixture id.
         Some(user.clone()),
     );
     harness.ensure_scope_thread(&scope).await;
@@ -4736,7 +5007,7 @@ async fn completed_trigger_run_for_user(
             TurnOriginKind::ScheduledTrigger,
         )
         .await
-        .expect("seed completed trigger run");
+        .expect("seed completed trigger run"); // safety: cfg(test)-only fixture setup must succeed.
     (scope, run_id)
 }
 
@@ -4746,18 +5017,16 @@ async fn wait_for_triggered_delivery_outcome(
 ) -> ironclaw_outbound::TriggeredRunDeliveryOutcomeKind {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Some(record) = store
-                .load_triggered_run_delivery(run_id)
-                .await
-                .expect("load triggered delivery outcome")
-            {
+            let loaded = store.load_triggered_run_delivery(run_id).await;
+            let record = loaded.expect("load outcome"); // safety: cfg(test)-only in-memory store must remain readable.
+            if let Some(record) = record {
                 return record.outcome;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("triggered delivery records a terminal outcome")
+    .expect("terminal outcome") // safety: cfg(test)-only bounded wait asserts fixture completion.
 }
 
 /// A sealed target is only a locator, never permanent delivery authority.
@@ -4804,7 +5073,7 @@ async fn generic_triggered_delivery_revalidates_current_authority_before_egress(
         Arc::clone(&harness.assembly),
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
-        Arc::clone(&registry),
+        current_target_resolver(&harness.assembly, Arc::clone(&registry)),
         Arc::clone(&harness.event_router),
     );
 
@@ -4820,7 +5089,7 @@ async fn generic_triggered_delivery_revalidates_current_authority_before_egress(
                     TenantId::new(TENANT).expect("tenant"),
                     alice.clone(),
                 ),
-                final_reply_target: Some(alice_target.reply_target_binding_ref.clone()),
+                final_reply_target: Some(outbound_reply_target(&alice_target)),
                 progress_target: None,
                 approval_prompt_target: None,
                 auth_prompt_target: None,
@@ -5052,7 +5321,7 @@ async fn telegram_target_is_enumerated_resolved_and_delivered_through_generic_wi
             .starts_with("telegram:personal-dm:")
     );
     assert_eq!(
-        telegram.reply_target_binding_ref.as_str(),
+        outbound_reply_target(telegram).as_str(),
         format!("tg:{TELEGRAM_USER}:_:_"),
         "the provider emits Telegram's canonical protocol binding"
     );
@@ -5063,11 +5332,11 @@ async fn telegram_target_is_enumerated_resolved_and_delivered_through_generic_wi
         .expect("resolve target")
         .expect("listed Telegram target resolves");
     assert_eq!(
-        resolved.reply_target_binding_ref,
-        telegram.reply_target_binding_ref
+        outbound_reply_target(&resolved),
+        outbound_reply_target(telegram)
     );
     let resolved_by_binding = provider
-        .resolve_reply_target_binding(&operator_caller(), &resolved.reply_target_binding_ref)
+        .resolve_reply_target_binding(&operator_caller(), &outbound_reply_target(&resolved))
         .await
         .expect("resolve generated binding")
         .expect("provider-generated Telegram binding resolves");
@@ -5104,7 +5373,7 @@ async fn telegram_target_is_enumerated_resolved_and_delivered_through_generic_wi
         Arc::clone(&harness.assembly),
         Arc::clone(&delivery_store) as Arc<dyn TriggeredRunDeliveryStore>,
         harness.outbound.clone() as Arc<dyn CommunicationPreferenceRepository>,
-        registry,
+        current_target_resolver(&harness.assembly, registry),
         Arc::clone(&harness.event_router),
     );
     let fire = TriggerFire {

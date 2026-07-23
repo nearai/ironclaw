@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use ironclaw_extensions::{AdminConfigurationGroupId, ExtensionAdminConfigurationDescriptor};
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::{ResourceScope, SecretHandle};
+use ironclaw_host_api::{ExtensionId, ResourceScope, SecretHandle};
 use ironclaw_secrets::{SecretMaterial, SecretStore};
 use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
@@ -24,6 +24,46 @@ use crate::{
 
 const MAX_VALUE_BYTES: usize = 16 * 1024;
 const MAX_TOTAL_VALUE_BYTES: usize = 256 * 1024;
+
+/// Reconcile every extension that consumes one administrator configuration
+/// group, reporting one aggregate failure only after all consumers had a
+/// chance to refresh.
+///
+/// This is owner-side policy rather than composition policy: callers provide
+/// the manifest-derived consumer set and a statically dispatched runtime
+/// operation, while this service owns the all-consumers/partial-failure rule.
+pub async fn reconcile_admin_configuration_consumers<R, Fut, E>(
+    group_id: &AdminConfigurationGroupId,
+    extension_ids: &BTreeSet<ExtensionId>,
+    reconcile: R,
+) -> Result<(), AdminConfigurationServiceError>
+where
+    R: Fn(ExtensionId) -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+    E: std::fmt::Display,
+{
+    let mut failed_reconciliations = 0usize;
+    for extension_id in extension_ids {
+        if let Err(error) = reconcile(extension_id.clone()).await {
+            failed_reconciliations += 1;
+            tracing::warn!(
+                %extension_id,
+                %error,
+                "extension refresh after administrator configuration failed"
+            );
+        }
+    }
+    if failed_reconciliations == 0 {
+        return Ok(());
+    }
+    tracing::warn!(
+        %group_id,
+        failed_reconciliations,
+        affected_extensions = extension_ids.len(),
+        "administrator configuration runtime reconciliation was incomplete"
+    );
+    Err(AdminConfigurationServiceError::RuntimeReconciliationFailed)
+}
 
 /// One value submitted by an authenticated administrator.
 ///

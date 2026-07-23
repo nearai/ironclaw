@@ -5,44 +5,33 @@
 //! command and accepts completion only after the caller-scoped projection is
 //! active with no remaining readiness blockers.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef, AuthProductError};
-use ironclaw_host_api::InstallationState;
 
 use crate::{
     LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
-    LifecycleProductFacade, LifecycleProductSurfaceContext, ProductAuthContinuationDispatcher,
-    ProductWorkflowError,
+    LifecycleProductFacade, LifecycleProductSurfaceContext, LifecyclePublicState,
+    ProductAuthContinuationDispatcher, ProductWorkflowError,
 };
 
-#[derive(Clone, Default)]
-pub struct LifecycleAuthContinuationSlot {
-    facade: Arc<OnceLock<Arc<dyn LifecycleProductFacade>>>,
-}
-
-impl LifecycleAuthContinuationSlot {
-    pub fn fill(&self, facade: Arc<dyn LifecycleProductFacade>) -> Result<(), &'static str> {
-        self.facade
-            .set(facade)
-            .map_err(|_| "extension lifecycle continuation facade was already configured")
-    }
-
-    pub fn wrap(
-        &self,
-        inner: Arc<dyn ProductAuthContinuationDispatcher>,
-    ) -> Arc<dyn ProductAuthContinuationDispatcher> {
-        Arc::new(LifecycleAuthContinuationDispatcher {
-            inner,
-            facade: Arc::clone(&self.facade),
-        })
-    }
+/// Wrap auth continuation delivery with canonical lifecycle readiness
+/// reconciliation for lifecycle-activation continuations.
+///
+/// The concrete lifecycle facade is required at construction so production
+/// composition cannot silently omit readiness reconciliation or defer it
+/// through a process-local late-binding cell.
+pub fn lifecycle_auth_continuation_dispatcher(
+    facade: Arc<dyn LifecycleProductFacade>,
+    inner: Arc<dyn ProductAuthContinuationDispatcher>,
+) -> Arc<dyn ProductAuthContinuationDispatcher> {
+    Arc::new(LifecycleAuthContinuationDispatcher { inner, facade })
 }
 
 struct LifecycleAuthContinuationDispatcher {
     inner: Arc<dyn ProductAuthContinuationDispatcher>,
-    facade: Arc<OnceLock<Arc<dyn LifecycleProductFacade>>>,
+    facade: Arc<dyn LifecycleProductFacade>,
 }
 
 #[async_trait]
@@ -52,11 +41,7 @@ impl ProductAuthContinuationDispatcher for LifecycleAuthContinuationDispatcher {
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         if let AuthContinuationRef::LifecycleActivation { package_ref } = &event.continuation {
-            let facade = self
-                .facade
-                .get()
-                .ok_or(AuthProductError::BackendUnavailable)?;
-            if reconcile_lifecycle_activation(facade, &event, package_ref.as_str()).await?
+            if reconcile_lifecycle_activation(&self.facade, &event, package_ref.as_str()).await?
                 == LifecycleAuthContinuationOutcome::SetupIncomplete
             {
                 // This OAuth requirement completed successfully, but another
@@ -103,10 +88,10 @@ async fn reconcile_lifecycle_activation(
         )
         .await
         .map_err(map_lifecycle_readiness_error)?;
-    if response.phase == InstallationState::Active && response.blockers.is_empty() {
+    if response.phase == LifecyclePublicState::Active && response.blockers.is_empty() {
         return Ok(LifecycleAuthContinuationOutcome::Ready);
     }
-    if response.phase != InstallationState::Active && !response.blockers.is_empty() {
+    if response.phase != LifecyclePublicState::Active && !response.blockers.is_empty() {
         return Ok(LifecycleAuthContinuationOutcome::SetupIncomplete);
     }
     Err(AuthProductError::LifecycleActivationFailed)
@@ -218,16 +203,14 @@ mod tests {
         let facade = Arc::new(RecordingLifecycleFacade {
             response: LifecycleProductResponse::projection(
                 Some(package_ref.clone()),
-                InstallationState::Active,
+                LifecyclePublicState::Active,
                 Vec::new(),
             ),
             reconciled: Mutex::new(Vec::new()),
         });
         let inner = Arc::new(RecordingInner::default());
-        let slot = LifecycleAuthContinuationSlot::default();
-        slot.fill(facade.clone()).expect("fill facade");
 
-        slot.wrap(inner.clone())
+        lifecycle_auth_continuation_dispatcher(facade.clone(), inner.clone())
             .dispatch_auth_continuation(event())
             .await
             .expect("ready extension continues to turn fanout");
@@ -250,7 +233,7 @@ mod tests {
         let facade = Arc::new(RecordingLifecycleFacade {
             response: LifecycleProductResponse::projection(
                 Some(package_ref),
-                InstallationState::Configured,
+                LifecyclePublicState::SetupNeeded,
                 vec![
                     LifecycleReadinessBlocker::runtime(Some(
                         "hosted_mcp_discovery_pending".to_string(),
@@ -261,10 +244,8 @@ mod tests {
             reconciled: Mutex::new(Vec::new()),
         });
         let inner = Arc::new(RecordingInner::default());
-        let slot = LifecycleAuthContinuationSlot::default();
-        slot.fill(facade).expect("fill facade");
 
-        slot.wrap(inner.clone())
+        lifecycle_auth_continuation_dispatcher(facade, inner.clone())
             .dispatch_auth_continuation(event())
             .await
             .expect("the completed credential flow settles while setup remains incomplete");
@@ -279,17 +260,14 @@ mod tests {
         let facade = Arc::new(RecordingLifecycleFacade {
             response: LifecycleProductResponse::projection(
                 Some(package_ref),
-                InstallationState::Configured,
+                LifecyclePublicState::SetupNeeded,
                 Vec::new(),
             ),
             reconciled: Mutex::new(Vec::new()),
         });
         let inner = Arc::new(RecordingInner::default());
-        let slot = LifecycleAuthContinuationSlot::default();
-        slot.fill(facade).expect("fill facade");
 
-        let error = slot
-            .wrap(inner.clone())
+        let error = lifecycle_auth_continuation_dispatcher(facade, inner.clone())
             .dispatch_auth_continuation(event())
             .await
             .expect_err("unexplained incomplete readiness must fail closed");

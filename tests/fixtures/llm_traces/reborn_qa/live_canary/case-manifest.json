@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source_run": 29837220214,
   "source_commit": "c918d91943a84071726924b4e3e9a47d33d8f695",
   "selected_cases": [
@@ -57,5 +57,22 @@
     "qa_7a_slack_product_channel_connect",
     "qa_8a_slack_connect",
     "qa_9a_slack_connect"
+  ],
+  "quarantined_model_cases": [
+    "qa_2a_gmail_connect",
+    "qa_2b_calendar_connect",
+    "qa_2c_drive_connect",
+    "qa_2e_calendar_prep_email_routine",
+    "qa_4a_gmail_connect",
+    "qa_4b_github_connect",
+    "qa_4c_github_release_live_chat",
+    "qa_4d_github_release_slack_routine",
+    "qa_5b_drive_connect",
+    "qa_5c_strategy_doc_knowledge_base",
+    "qa_6a_gmail_connect",
+    "qa_6b_sheets_connect",
+    "qa_6d_gmail_to_sheet_routine",
+    "qa_7b_sheets_connect",
+    "qa_9c_slack_digest_names_not_ids"
   ]
 }

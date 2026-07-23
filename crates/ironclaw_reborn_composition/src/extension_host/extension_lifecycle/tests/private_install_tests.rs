@@ -45,7 +45,7 @@ async fn members_install_the_same_tool_independently() {
 
     // alice installs → visible to alice only.
     let response = install("alice").await.expect("alice installs for herself");
-    assert_eq!(response.phase, InstallationState::Active);
+    assert_eq!(response.phase, LifecyclePublicState::Active);
     let owner_row = || async {
         installation_store
             .get_installation(&installation_id)
@@ -65,7 +65,7 @@ async fn members_install_the_same_tool_independently() {
     let response = install("bob")
         .await
         .expect("bob installs the same tool for himself (membership, not a slot)");
-    assert_eq!(response.phase, InstallationState::Active);
+    assert_eq!(response.phase, LifecyclePublicState::Active);
     let installation = owner_row().await;
     assert!(!installation.owner().is_tenant());
     assert!(
@@ -101,7 +101,7 @@ async fn members_install_the_same_tool_independently() {
     let retry = install("alice")
         .await
         .expect("alice install retry remains successful");
-    assert_eq!(retry.phase, InstallationState::Active);
+    assert_eq!(retry.phase, LifecyclePublicState::Active);
     let installation = owner_row().await;
     assert!(installation.owner().visible_to(&alice));
     assert!(installation.owner().visible_to(&bob));
@@ -170,7 +170,7 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
         )
         .await
         .expect("alice removes the tool for herself");
-    assert_eq!(response.phase, InstallationState::Removed);
+    assert_eq!(response.phase, LifecyclePublicState::Uninstalled);
     let installation = installation_store
         .get_installation(&installation_id)
         .await
@@ -209,7 +209,7 @@ async fn member_remove_leaves_others_and_last_member_remove_tears_down() {
     };
     assert_eq!(
         extensions[0].phase,
-        InstallationState::Active,
+        LifecyclePublicState::Active,
         "Bob's independent no-setup install remains active"
     );
 
@@ -283,7 +283,7 @@ async fn operator_install_joins_members_without_creating_tenant_ownership() {
         )
         .await
         .expect("operator joins with a personal install");
-    assert_eq!(response.phase, InstallationState::Active);
+    assert_eq!(response.phase, LifecyclePublicState::Active);
     let installation = installation_store
         .get_installation(&installation_id)
         .await
@@ -339,7 +339,7 @@ async fn operator_install_joins_members_without_creating_tenant_ownership() {
         )
         .await
         .expect("operator install retry remains successful");
-    assert_eq!(retry.phase, InstallationState::Active);
+    assert_eq!(retry.phase, LifecyclePublicState::Active);
     facade
         .execute(
             lifecycle_surface_context(),
@@ -392,7 +392,7 @@ async fn member_can_install_when_operator_already_has_a_personal_install() {
         )
         .await
         .expect("Alice installs independently");
-    assert_eq!(response.phase, InstallationState::Active);
+    assert_eq!(response.phase, LifecyclePublicState::Active);
 }
 
 /// #5525 review: `LifecycleProductCommandService` dispatches every
@@ -419,7 +419,7 @@ async fn extension_lifecycle_commands_derive_caller_from_command_auth_claim() {
         )
         .await
         .expect("command install derives caller from auth claim");
-    assert_eq!(response.phase, InstallationState::Active);
+    assert_eq!(response.phase, LifecyclePublicState::Active);
     let installation = installation_store
         .get_installation(&installation_id)
         .await

@@ -9,7 +9,6 @@ use ironclaw_auth::{
 use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer};
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_host_api::InstallationState;
 use ironclaw_host_api::{
     CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind, ExecutionContext,
     ExtensionId, GrantConstraints, InvocationId, MountAlias, MountGrant, MountPermissions,
@@ -28,7 +27,7 @@ use ironclaw_host_runtime::{
     TRIGGER_REMOVE_CAPABILITY_ID,
 };
 use ironclaw_host_runtime::{RuntimeCredentialAccountRequest, RuntimeCredentialAccountResolver};
-use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef};
+use ironclaw_product_workflow::{LifecyclePackageKind, LifecyclePackageRef, LifecyclePublicState};
 
 use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
@@ -312,6 +311,7 @@ async fn local_runtime_with_failing_trigger_conversations() -> Arc<RebornRuntime
         persistent_approval_policies: Arc::clone(&base_runtime.persistent_approval_policies),
         tool_permission_overrides: Arc::clone(&base_runtime.tool_permission_overrides),
         outbound_delivery_targets: Arc::clone(&base_runtime.outbound_delivery_targets),
+        current_delivery_targets: Arc::clone(&base_runtime.current_delivery_targets),
         auto_approve_settings: Arc::clone(&base_runtime.auto_approve_settings),
         turn_state: Arc::clone(&base_runtime.turn_state),
         trigger_source_turn_state: Arc::clone(&base_runtime.trigger_source_turn_state),
@@ -991,29 +991,29 @@ async fn local_dev_gsuite_installs_activates_and_dispatches_through_host_runtime
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "gmail").expect("valid ref");
     let calendar_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "google-calendar")
         .expect("valid ref");
+    let caller = UserId::new("local-dev-gsuite-owner").expect("valid lifecycle caller");
 
     extension_management
-        .install(
-            gmail_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(gmail_ref.clone(), &caller)
         .await
         .expect("install Gmail");
     extension_management
-        .activate_with_prechecked_credentials_for_test(gmail_ref, ExtensionActivationMode::Static)
+        .activate_with_prechecked_credentials_for_test(
+            gmail_ref,
+            ExtensionActivationMode::Static,
+            &caller,
+        )
         .await
         .expect("activate Gmail");
     extension_management
-        .install(
-            calendar_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(calendar_ref.clone(), &caller)
         .await
         .expect("install Google Calendar");
     extension_management
         .activate_with_prechecked_credentials_for_test(
             calendar_ref,
             ExtensionActivationMode::Static,
+            &caller,
         )
         .await
         .expect("activate Google Calendar");
@@ -1116,6 +1116,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
         .expect("extension management");
     let notion_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("valid ref");
+    let caller = UserId::new("local-dev-notion-mcp-owner").expect("valid lifecycle caller");
     let catalog =
         AvailableExtensionCatalog::from_first_party_assets().expect("first-party extensions load");
     let notion_package = catalog.resolve(&notion_ref).expect("Notion MCP is bundled");
@@ -1138,10 +1139,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
     );
 
     extension_management
-        .install(
-            notion_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(notion_ref.clone(), &caller)
         .await
         .expect("install Notion MCP");
     extension_management
@@ -1157,6 +1155,7 @@ async fn local_dev_notion_mcp_installs_activates_and_reaches_auth_gate() {
                     HostedMcpDiscoveryEgress::with_tool_name("notion-search").read_only(),
                 ),
             },
+            &caller,
         )
         .await
         .expect("activate Notion MCP with scripted discovery");
@@ -1202,18 +1201,17 @@ async fn local_dev_web_access_installs_activates_and_dispatches_through_host_run
         .expect("extension management");
     let web_access_ref =
         LifecyclePackageRef::new(LifecyclePackageKind::Extension, "web-access").expect("valid ref");
+    let caller = UserId::new("local-dev-web-access-owner").expect("valid lifecycle caller");
 
     extension_management
-        .install(
-            web_access_ref.clone(),
-            extension_management.tenant_operator_user_id_for_test(),
-        )
+        .install(web_access_ref.clone(), &caller)
         .await
         .expect("install Web Access");
     extension_management
         .activate_with_prechecked_credentials_for_test(
             web_access_ref,
             ExtensionActivationMode::Static,
+            &caller,
         )
         .await
         .expect("activate Web Access");
@@ -1644,7 +1642,7 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
         )
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, InstallationState::Active);
+    assert_eq!(projection.phase, LifecyclePublicState::Active);
 
     // v3 hosted-MCP surface: boot-time bootstrap activates the package
     // statically, publishing the host-internal MCP connection template
@@ -1692,6 +1690,7 @@ async fn local_dev_nearai_mcp_auto_bootstraps_from_injected_config() {
                     "web_search",
                 )),
             },
+            &UserId::new(owner).expect("valid lifecycle caller"),
         )
         .await
         .expect("scripted NEAR AI discovery activation");
@@ -1924,7 +1923,7 @@ async fn local_dev_nearai_mcp_bootstrap_reinstalls_discovered_reused_credential(
         .project(nearai_ref, &owner_scope.user_id, Some(&credential_gate))
         .await
         .expect("NEAR AI MCP projected");
-    assert_eq!(projection.phase, InstallationState::Active);
+    assert_eq!(projection.phase, LifecyclePublicState::Active);
 
     // v3 hosted-MCP surface: reinstall-and-activate publishes the
     // host-internal MCP connection template plus the statically pinned

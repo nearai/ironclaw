@@ -445,10 +445,9 @@ where
             if let Some(event) = deserialize_materialized_row::<TurnLifecycleEvent>(
                 &versioned.entry.body,
                 RowCollection::Events.as_str(),
-            )? {
-                if event.cursor > after_cursor {
-                    events.push(event);
-                }
+            )? && event.cursor > after_cursor
+            {
+                events.push(event);
             }
         }
         events.sort_by_key(|event| event.cursor);

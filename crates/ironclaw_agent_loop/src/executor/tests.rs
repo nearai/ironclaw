@@ -4718,10 +4718,14 @@ async fn completed_provider_call_appends_provider_replay_metadata() {
     assert_eq!(model_observation.summary, safe_summary);
     assert!(matches!(
         &model_observation.detail,
-        ToolObservationDetail::GenericFailure {
-            failure_kind,
-            detail: None,
-        } if failure_kind.as_str() == "none"
+        ToolObservationDetail::ResultReference {
+            result_ref: observed_ref,
+            byte_len: 0,
+            preview: None,
+            total_bytes: None,
+            next_offset: None,
+            item_count: None,
+        } if observed_ref == result_ref.as_str()
     ));
     assert!(model_observation.artifacts.is_empty());
     assert!(model_observation.recovery.is_none());
@@ -7319,7 +7323,8 @@ async fn auth_resume_after_approval_carries_resume_token_and_approval_request_id
                  (pre-fix: was None because resume_token was not propagated)",
         );
     assert_eq!(
-        phase3_auth_resume.resume_token, resume_token,
+        phase3_auth_resume.resume_token.as_ref(),
+        Some(&resume_token),
         "auth_resume.resume_token must match the original approval resume token"
     );
     let phase3_pa = phase3_auth_resume
@@ -7410,7 +7415,8 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
                     Vec::new(),
                     "auth required".to_string(),
                     Some(CapabilityAuthResume {
-                        resume_token: auth_gate_resume_token,
+                        resume_token: Some(auth_gate_resume_token),
+                        disposition: None,
                         prior_approval: None,
                     }),
                 )
@@ -7498,7 +7504,8 @@ async fn auth_resume_after_approval_carries_original_correlation_id() {
         .as_ref()
         .expect("phase 3 invocation must carry auth_resume");
     assert_eq!(
-        phase3_ar.resume_token, resume_token,
+        phase3_ar.resume_token.as_ref(),
+        Some(&resume_token),
         "phase 3 auth_resume.resume_token must preserve the original approval invocation token"
     );
     let phase3_pa = phase3_ar
@@ -7640,7 +7647,8 @@ async fn auth_resume_slot_consumed_on_first_batch_match_not_reused_for_second_ca
         .as_ref()
         .expect("first batch call must carry auth_resume (pre-fix: both carried it)");
     assert_eq!(
-        first_auth.resume_token, resume_token,
+        first_auth.resume_token.as_ref(),
+        Some(&resume_token),
         "first call auth_resume.resume_token must match"
     );
     let first_pa = first_auth
@@ -8130,7 +8138,15 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
     // Use a provider call fixture (provider_replay set) so the observation is
     // actually appended to appended_result_refs by
     // append_capability_safe_summary_ref_with_observation.
-    let host = MockHost::new(Vec::new()); // no model responses or batch outcomes needed
+    let host =
+        MockHost::new(Vec::new()).with_batch_outcomes(vec![ironclaw_host_api::ResolutionBatch {
+            resolutions: vec![resolution::failed(
+                CapabilityFailureKind::GateDeclined,
+                "auth gate denied by user".to_string(),
+                None,
+            )],
+            stopped_on_suspension: false,
+        }]);
     let family = crate::families::default();
     let ctx = StageContext {
         planner: family.planner(),
@@ -8165,17 +8181,22 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
     };
     calls[0].activity_id = denied_activity_id;
 
+    let mut current_surface =
+        ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
+            &host,
+            VisibleCapabilityRequest,
+        )
+        .await
+        .expect("visible surface");
+    current_surface.descriptors.clear();
+    current_surface.callable_capability_ids = Some(Vec::new());
+
     let step = CapabilityStage
         .process(
             ctx,
             CapabilityInput {
                 state,
-                surface: ironclaw_turns::run_profile::LoopCapabilityPort::visible_capabilities(
-                    &host,
-                    VisibleCapabilityRequest,
-                )
-                .await
-                .expect("visible surface"),
+                surface: current_surface,
                 calls,
             },
         )
@@ -8196,24 +8217,23 @@ async fn capability_stage_denied_auth_resume_surfaces_gate_declined_failure_and_
         "pending_auth_resume must be cleared after surfacing the deny failure"
     );
 
-    // 3. Zero batch invocations: the short-circuit fired before invoke_capability_batch.
-    assert!(
-        host.batch_invocations().is_empty(),
-        "denied auth resume must not dispatch any capability batch invocations"
+    // 3. The denial crosses the canonical capability port as a typed terminal
+    // auth resume even though the blocked capability has disappeared from the
+    // current surface. The production host uses this request only to
+    // terminalize the exact durable invocation; it never dispatches the
+    // capability provider.
+    let batches = host.batch_invocations();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].invocations.len(), 1);
+    let auth_resume = batches[0].invocations[0]
+        .auth_resume
+        .as_ref()
+        .expect("denied auth resume reaches the capability lifecycle");
+    assert_eq!(
+        auth_resume.disposition,
+        Some(ironclaw_turns::GateResumeDisposition::Denied)
     );
-    assert!(
-        host.progress_events().iter().any(|event| matches!(
-            event,
-            LoopProgressEvent::CapabilityActivityFailed {
-                activity_id,
-                capability_id: emitted_capability_id,
-                reason_kind: CapabilityFailureKind::GateDeclined,
-                ..
-            } if *activity_id == denied_activity_id && *emitted_capability_id == capability_id()
-        )),
-        "denied auth resume must emit a persistent failed capability activity"
-    );
-
+    assert!(auth_resume.resume_token.is_none());
     // 4. One model-visible observation appended with GateDeclined error + Forbidden retry.
     let appended = host.appended_result_refs();
     assert_eq!(

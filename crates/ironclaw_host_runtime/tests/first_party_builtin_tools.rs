@@ -263,7 +263,6 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         MEMORY_SEARCH_CAPABILITY_ID,
         TRIGGER_LIST_CAPABILITY_ID,
         PROFILE_SET_CAPABILITY_ID,
-        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     ] {
         assert_eq!(loop_run(ungated), OriginGatePolicy::Ungated, "{ungated}");
     }
@@ -273,6 +272,7 @@ async fn builtin_first_party_package_declares_behavior_neutral_origin_gate_matri
         MEMORY_WRITE_CAPABILITY_ID,
         SKILL_INSTALL_CAPABILITY_ID,
         TRIGGER_CREATE_CAPABILITY_ID,
+        OUTBOUND_DELIVERY_TARGET_ROUTE_CURRENT_CAPABILITY_ID,
     ] {
         assert_eq!(
             loop_run(gated),

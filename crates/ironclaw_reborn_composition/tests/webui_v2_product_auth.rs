@@ -24,12 +24,11 @@ use ironclaw_auth::{
     SecretSubmitResult,
 };
 use ironclaw_host_api::{
-    AgentId, InstallationState, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId,
-    UserId,
+    AgentId, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId, UserId,
 };
 use ironclaw_product_workflow::{
     EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef,
-    ProductOperationRequest, ProductOperationResponse, ProductSurface,
+    LifecyclePublicState, ProductOperationRequest, ProductOperationResponse, ProductSurface,
     RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
     RebornExtensionSetupSecret, RebornServicesError, RebornSetupExtensionResponse, RebornViewPage,
     RebornViewQuery, WebUiAuthenticatedCaller, rejecting_reborn_services_error,
@@ -263,7 +262,7 @@ impl UnusedServices {
                     (*package_id).to_string(),
                     RebornSetupExtensionResponse {
                         package_ref,
-                        phase: InstallationState::Installed,
+                        phase: LifecyclePublicState::SetupNeeded,
                         blockers: Vec::new(),
                         payload: None,
                         secrets: vec![RebornExtensionSetupSecret {
@@ -296,16 +295,11 @@ impl UnusedServices {
                     display_name: (*package_id).to_string(),
                     runtime: "wasm".to_string(),
                     description: "test installed extension".to_string(),
-                    authenticated: false,
-                    active: false,
                     tools: Vec::new(),
-                    needs_setup: true,
-                    has_auth: true,
                     installation_state:
                         ironclaw_product_workflow::LifecyclePublicState::SetupNeeded,
                     activation_error: None,
                     version: None,
-                    onboarding_state: None,
                     onboarding: None,
                     auth_accounts: Vec::new(),
                     surfaces: Vec::new(),

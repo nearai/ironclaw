@@ -787,7 +787,6 @@ fn telegram_channel_extension_binding() -> ironclaw_reborn_composition::ChannelE
     ironclaw_reborn_composition::ChannelExtensionBinding {
         extension_id: "telegram".to_string(),
         adapter: Arc::new(ironclaw_telegram_extension::TelegramChannelAdapter::default()),
-        inbound_payload_classifier: None,
         preference_target_codec: None,
     }
 }

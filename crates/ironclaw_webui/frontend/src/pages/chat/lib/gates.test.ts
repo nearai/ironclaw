@@ -225,27 +225,25 @@ test("gateFromEvent defaults, passes through challenge kinds, and carries channe
     "manual_token",
   );
 
-  // A channel-pairing gate rides the manual_token rail and carries a normalized
-  // connection requirement for the pairing card.
+  // A host-issued channel pairing gate carries normalized manifest context.
   const pairing = gateFromEvent("auth_required", {
     turn_run_id: "run-pair",
     auth_request_ref: "gate:pair",
-    challenge_kind: "manual_token",
+    challenge_kind: "pairing",
     connection: {
       channel: "slack",
-      strategy: "inbound_proof_code",
-      instructions: "Message the app for a pairing code.",
-      input_placeholder: "Enter code",
+      strategy: "web_generated_code",
+      instructions: "Open the app with the generated link.",
       submit_label: "Connect",
       error_message: "Invalid code.",
     },
   });
-  assert.equal(pairing.challengeKind, "manual_token");
+  assert.equal(pairing.challengeKind, "pairing");
   assert.deepEqual(plain(pairing.connection), {
     channel: "slack",
-    strategy: "inbound_proof_code",
-    instructions: "Message the app for a pairing code.",
-    inputPlaceholder: "Enter code",
+    strategy: "web_generated_code",
+    instructions: "Open the app with the generated link.",
+    inputPlaceholder: null,
     submitLabel: "Connect",
     errorMessage: "Invalid code.",
   });
@@ -259,22 +257,21 @@ test("gateFromProjectionGate normalizes the connection context from auth_context
     gate_kind: "auth",
     gate_ref: "gate:pair",
     auth_context: {
-      challenge_kind: "manual_token",
+      challenge_kind: "pairing",
       connection: {
         channel: "slack",
-        input_placeholder: "Enter code",
-        submit_label: "Connect",
+        strategy: "web_generated_code",
       },
     },
   });
 
-  assert.equal(gate.challengeKind, "manual_token");
+  assert.equal(gate.challengeKind, "pairing");
   assert.deepEqual(plain(gate.connection), {
     channel: "slack",
-    strategy: null,
+    strategy: "web_generated_code",
     instructions: null,
-    inputPlaceholder: "Enter code",
-    submitLabel: "Connect",
+    inputPlaceholder: null,
+    submitLabel: null,
     errorMessage: null,
   });
 });

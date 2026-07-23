@@ -9,9 +9,10 @@ use std::sync::Mutex;
 use tokio::time::Instant;
 
 use ironclaw_product_adapters::{
-    AuthResolutionResult, ExternalConversationRef, ExternalEventId, ProductAdapterError,
-    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
-    ProductRejectionKind, ProductTriggerReason, ProductWorkflowRejectionKind,
+    AuthPromptChallengeKind, AuthResolutionResult, ExternalConversationRef, ExternalEventId,
+    ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductRejection, ProductRejectionKind, ProductTriggerReason, ProductWorkflowRejectionKind,
+    render_channel_auth_prompt,
 };
 use ironclaw_turns::{GetRunStateRequest, TurnRunId, TurnStatus};
 
@@ -21,7 +22,10 @@ use super::{
     turn_scope_from_thread_scope,
 };
 use crate::delivery_coordinator::DeliveryIntent;
-use crate::{ChannelConnectionNoticePolicy, ResolveBindingRequest, ResolvedBinding};
+use crate::{
+    ChannelConnectionNoticePolicy, ProductConversationRouteKind, ResolveBindingRequest,
+    ResolvedBinding,
+};
 
 const CONNECT_NOTICE_THROTTLE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -129,11 +133,11 @@ impl RunDeliveryObserver {
             return false;
         }
 
-        let binding = match self
-            .services
-            .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
-            .await
+        let binding = match crate::workflow::lookup_interaction_binding(
+            envelope,
+            self.services.binding_service.as_ref(),
+        )
+        .await
         {
             Ok(binding) => binding,
             Err(error) => {
@@ -373,14 +377,18 @@ impl RunDeliveryObserver {
         // state-specific. When the conversation has no resolvable binding,
         // fall back to the generic copy rather than going silent — the hint
         // replies to the sender's own conversation and leaks nothing.
+        let binding_request = ResolveBindingRequest::from_envelope(envelope);
+        let direct = binding_request.route_kind == ProductConversationRouteKind::Direct;
         let (hint, scope) = match self
             .services
             .binding_service
-            .lookup_binding(ResolveBindingRequest::from_envelope(envelope))
+            .lookup_binding(binding_request)
             .await
         {
             Ok(binding) => {
-                let hint = self.busy_hint_from_run_state(&binding, active_run_id).await;
+                let hint = self
+                    .busy_hint_from_run_state(&binding, active_run_id, direct)
+                    .await;
                 let scope = thread_scope_from_binding(&binding)
                     .and_then(|thread_scope| turn_scope_from_thread_scope(&binding, &thread_scope))
                     .unwrap_or_else(|_| self.services.fallback_notice_scope.clone());
@@ -417,6 +425,7 @@ impl RunDeliveryObserver {
         &self,
         binding: &ResolvedBinding,
         active_run_id: TurnRunId,
+        direct: bool,
     ) -> String {
         let scope = match thread_scope_from_binding(binding)
             .and_then(|thread_scope| turn_scope_from_thread_scope(binding, &thread_scope))
@@ -469,16 +478,16 @@ impl RunDeliveryObserver {
                     }
                     None => prompts::BUSY_APPROVAL_MESSAGE.to_string(),
                 },
-                // Auth gates can't be completed over chat (credential
-                // sharing is a security risk), but still name the blocking
-                // ref so the user can decline it here.
                 TurnStatus::BlockedAuth => match state.gate_ref.as_ref() {
-                    Some(gate_ref) => format!(
-                        "Ironclaw is waiting on authentication before taking new messages. Reply \
-                         `auth deny {ref}` to decline it here, or complete the connection in the \
-                         Ironclaw web app to resume.",
-                        ref = gate_ref.as_str()
-                    ),
+                    Some(gate_ref) => {
+                        self.busy_auth_hint(
+                            &binding.actor_user_id,
+                            &state,
+                            gate_ref.as_str(),
+                            direct,
+                        )
+                        .await
+                    }
                     None => prompts::BUSY_GENERIC_MESSAGE.to_string(),
                 },
                 _ => prompts::BUSY_GENERIC_MESSAGE.to_string(),
@@ -492,6 +501,61 @@ impl RunDeliveryObserver {
                 prompts::BUSY_GENERIC_MESSAGE.to_string()
             }
         }
+    }
+
+    /// Re-project the same typed challenge as the original auth event when a
+    /// user sends another message while the run is parked. This must not
+    /// guess from provider names: the prompt source has already resolved the
+    /// manifest auth recipe and materialized any safe channel challenge.
+    async fn busy_auth_hint(
+        &self,
+        owner_user_id: &ironclaw_host_api::UserId,
+        state: &ironclaw_turns::TurnRunState,
+        gate_ref: &str,
+        direct: bool,
+    ) -> String {
+        let Some(source) = &self.services.blocked_auth_prompts else {
+            return prompts::AUTH_UNAVAILABLE_MESSAGE.to_string();
+        };
+        let view = source
+            .auth_prompt_for_blocked_run(crate::auth_prompt::BlockedAuthPromptRequest {
+                fallback_owner_user_id: owner_user_id,
+                scope: &state.scope,
+                run_id: state.run_id,
+                gate_ref,
+                invocation_id: None,
+                body: "Authenticate to continue this run.".to_string(),
+                credential_requirements: &state.credential_requirements,
+            })
+            .await;
+        let Ok(mut view) = view else {
+            tracing::debug!(
+                target = "ironclaw::reborn::run_delivery",
+                run_id = %state.run_id,
+                "busy-thread auth hint challenge lookup failed; using safe WebUI copy"
+            );
+            return prompts::AUTH_UNAVAILABLE_MESSAGE.to_string();
+        };
+
+        if !prompts::auth_prompt_is_serviceable(&view) {
+            return prompts::unserviceable_auth_prompt_message(Some(&view)).to_string();
+        }
+
+        view.body = prompts::actionable_auth_prompt_body(&view);
+        if !direct {
+            view.authorization_url = None;
+            view.pairing = None;
+            view.body = match view.challenge_kind {
+                Some(AuthPromptChallengeKind::Pairing) => {
+                    prompts::PAIRING_PRIVATE_SETUP_MESSAGE.to_string()
+                }
+                Some(AuthPromptChallengeKind::OAuthUrl) => {
+                    prompts::OAUTH_PRIVATE_SETUP_MESSAGE.to_string()
+                }
+                _ => prompts::AUTH_UNAVAILABLE_MESSAGE.to_string(),
+            };
+        }
+        render_channel_auth_prompt(&view, direct)
     }
 }
 

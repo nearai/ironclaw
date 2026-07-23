@@ -1419,7 +1419,6 @@ registerPack("hi", {
   "pairing.connectFromExtensions": "जारी रखने के लिए एक्सटेंशन पेज से {name} कनेक्ट करें।",
   "pairing.checkCodeAndRetry": "पेयरिंग विफल हुई। कोड जांचें और फिर से प्रयास करें।",
   "pairing.resumeFailed": "{name} कनेक्ट हो गया, लेकिन यह चैट जारी नहीं रह सकी। जारी रखने के लिए पेज फिर से लोड करें।",
-  "extensions.channelInstalledSetup": "{name} इंस्टॉल हो गया। नीचे दिए सेटअप पैनल से खाता कनेक्ट करें।",
   "extensions.authUrlHttpsRequired": "ऑथेंटिकेशन URL में HTTPS होना चाहिए।",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "कॉन्फ़िगर है; बनाए रखने के लिए खाली छोड़ें",

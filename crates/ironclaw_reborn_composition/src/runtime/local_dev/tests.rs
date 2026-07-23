@@ -4,6 +4,8 @@ mod tests {
 
     mod display_preview;
 
+    use std::time::Duration;
+
     use super::super::*;
 
     use ironclaw_approvals::{
@@ -11,13 +13,17 @@ mod tests {
         PersistentApprovalPolicyInput, PersistentApprovalPolicyStore, ToolPermissionOverride,
         ToolPermissionOverrideInput,
     };
+    use ironclaw_auth::{
+        AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
+        CredentialAccountStatus, CredentialOwnership, NewCredentialAccount, ProviderScope,
+    };
     use ironclaw_authorization::{CapabilityLeaseStatus, CapabilityLeaseStore};
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{
         AgentId, CapabilityId, DispatchInputIssueCode, EffectKind, FailureKind, GrantConstraints,
         InvocationId, MountAlias, MountGrant, MountPermissions, MountView, NetworkPolicy,
-        Principal, ProjectId, ProviderToolName, Resolution, TenantId, ThreadId, UserId,
-        VirtualPath,
+        Principal, ProjectId, ProviderToolName, Resolution, ResourceScope, TenantId, ThreadId,
+        UserId, VirtualPath,
     };
     use ironclaw_host_runtime::{
         APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
@@ -32,8 +38,8 @@ mod tests {
         HostSkillContextSource,
     };
     use ironclaw_outbound::{
-        CommunicationPreferenceKey, DeliveryTargetCapabilities, OutboundDeliveryTargetId,
-        OutboundDeliveryTargetScope, OutboundDeliveryTargetSummary, OutboundError,
+        CommunicationPreferenceKey, DeliveryTargetCapabilities, OutboundDeliveryTargetScope,
+        OutboundDeliveryTargetSummary, OutboundError,
     };
     use ironclaw_product_workflow::{
         LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction, LifecycleProductContext,
@@ -57,6 +63,7 @@ mod tests {
         },
     };
 
+    use crate::extension_host::extension_activation_credentials::RuntimeExtensionActivationCredentialGate;
     use crate::extension_host::extension_lifecycle_capabilities::{
         EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REMOVE_CAPABILITY_ID,
         EXTENSION_SEARCH_CAPABILITY_ID,
@@ -376,18 +383,6 @@ mod tests {
         )
     }
 
-    /// Lifecycle context for the same member whose runtime capability surface
-    /// the test later inspects. Extension membership is per user, including
-    /// when that user also happens to hold the tenant operator role.
-    fn member_lifecycle_context(label: &str, member: &UserId) -> LifecycleProductContext {
-        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-            tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-            user_id: member.clone(),
-            agent_id: None,
-            project_id: None,
-        })
-    }
-
     #[derive(Debug, Default)]
     struct UnavailableModelGateway;
 
@@ -502,6 +497,353 @@ mod tests {
             .collect::<Vec<_>>();
 
         (descriptor_ids, tool_definition_ids)
+    }
+
+    #[tokio::test]
+    async fn hosted_mcp_callable_surface_is_scoped_to_each_members_personal_readiness() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member_a = "hosted-mcp-ready-member-a";
+        let member_b = UserId::new("hosted-mcp-setup-member-b").expect("member B");
+        let discovery_script = Arc::new(
+            crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name(
+                "member-a-catalog",
+            ),
+        );
+        let notion_oauth_backend = crate::OAuthClientConfig::new(
+            "itest-notion-client-id",
+            "http://127.0.0.1/oauth/callback/notion",
+            None,
+        )
+        .expect("valid test Notion OAuth client config");
+        let services = crate::build_reborn_services(
+            crate::RebornBuildInput::local_dev(member_a, dir.path().join("local-dev"))
+                .with_network_http_egress_for_test(discovery_script.clone())
+                .with_vendor_oauth_client("notion", notion_oauth_backend),
+        )
+        .await
+        .expect("services");
+        let local_runtime = services.local_runtime.as_ref().expect("local runtime");
+        let extension_management = local_runtime
+            .extension_management
+            .as_ref()
+            .expect("extension management")
+            .clone();
+        let lifecycle = Arc::new(
+            crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+                &local_runtime.skill_management,
+            ))
+            .with_extension_management(Arc::clone(&extension_management))
+            .with_runtime_http_egress(
+                local_runtime
+                    .runtime_http_egress
+                    .as_ref()
+                    .expect("runtime egress")
+                    .clone(),
+            )
+            .with_runtime_credential_accounts(
+                services
+                    .product_auth
+                    .as_ref()
+                    .expect("product auth")
+                    .runtime_credential_account_selection_service(),
+            ),
+        );
+        let member_a_scope = hosted_mcp_member_scope(
+            UserId::new(member_a).expect("member A"),
+            InvocationId::new(),
+        );
+        seed_configured_account_and_secret(&services, &member_a_scope, "notion").await;
+        let credential_accounts = services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .runtime_credential_account_selection_service();
+        let member_a_credential_gate = RuntimeExtensionActivationCredentialGate::new(
+            member_a_scope.clone(),
+            Arc::clone(&credential_accounts),
+        );
+        let package_ref =
+            LifecyclePackageRef::new(LifecyclePackageKind::Extension, "notion").expect("notion");
+
+        extension_management
+            .install(package_ref.clone(), &member_a_scope.user_id)
+            .await
+            .expect("member A durable membership");
+        assert!(
+            extension_management
+                .caller_active_extension_ids(
+                    &member_a_scope.user_id,
+                    Some(&member_a_credential_gate),
+                )
+                .await
+                .expect("member A readiness before publication")
+                .is_empty(),
+            "membership and credentials alone do not make an unpublished extension callable"
+        );
+
+        let member_a_install = lifecycle
+            .execute(
+                lifecycle_surface_context(&member_a_scope),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("member A installs and discovers Notion");
+        assert_eq!(
+            member_a_install.phase,
+            ironclaw_product_workflow::LifecyclePublicState::Active
+        );
+        assert!(
+            extension_management
+                .caller_active_extension_ids(
+                    &member_a_scope.user_id,
+                    Some(&member_a_credential_gate),
+                )
+                .await
+                .expect("member A readiness after publication")
+                .contains(&ironclaw_host_api::ExtensionId::new("notion").expect("notion id")),
+            "published extension is callable for its credential-ready member"
+        );
+
+        let member_b_scope = hosted_mcp_member_scope(member_b.clone(), InvocationId::new());
+        let member_b_credential_gate = RuntimeExtensionActivationCredentialGate::new(
+            member_b_scope.clone(),
+            credential_accounts,
+        );
+        assert!(
+            extension_management
+                .caller_active_extension_ids(
+                    &member_b_scope.user_id,
+                    Some(&member_b_credential_gate),
+                )
+                .await
+                .expect("member B readiness before membership")
+                .is_empty(),
+            "provider-global publication does not grant a non-member"
+        );
+        let member_b_install = lifecycle
+            .execute(
+                lifecycle_surface_context(&member_b_scope),
+                LifecycleProductAction::ExtensionInstall {
+                    package_ref: package_ref.clone(),
+                },
+            )
+            .await
+            .expect("member B joins without credentials");
+        assert_eq!(
+            member_b_install.phase,
+            ironclaw_product_workflow::LifecyclePublicState::SetupNeeded
+        );
+        assert!(
+            extension_management
+                .caller_active_extension_ids(
+                    &member_b_scope.user_id,
+                    Some(&member_b_credential_gate),
+                )
+                .await
+                .expect("member B readiness without credentials")
+                .is_empty(),
+            "membership plus provider-global publication does not bypass personal credentials"
+        );
+
+        let member_a_surface = ExtensionCapabilitySurface::from_readiness_source_for_caller(
+            lifecycle.as_ref(),
+            lifecycle_surface_context(&member_a_scope),
+        )
+        .await
+        .expect("member A surface");
+        let member_b_surface = ExtensionCapabilitySurface::from_readiness_source_for_caller(
+            lifecycle.as_ref(),
+            lifecycle_surface_context(&member_b_scope),
+        )
+        .await
+        .expect("member B surface");
+        let grantee = ironclaw_host_api::ExtensionId::new("agent-loop").expect("grantee");
+        assert!(
+            member_a_surface
+                .grants(&grantee, &member_a_scope.user_id)
+                .iter()
+                .any(|grant| grant.capability.as_str() == "notion.member-a-catalog"),
+            "configured member A receives the provider-global discovered tool"
+        );
+        assert!(
+            member_b_surface
+                .grants(&grantee, &member_b_scope.user_id)
+                .is_empty(),
+            "setup-needed member B receives neither model-visible tools nor executable grants"
+        );
+        let wiring = capability_wiring(
+            &services,
+            Arc::new(InMemorySessionThreadService::default()),
+            member_a_scope.user_id.clone(),
+            Arc::new(
+                crate::builtin_capability_policy::builtin_capability_policy()
+                    .expect("policy parses"),
+            ),
+            Arc::new(UnavailableModelGateway),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+            None,
+            None,
+            None,
+        )
+        .expect("local-dev capability wiring");
+        let member_a_run = hosted_mcp_member_run_context(&member_a_scope, "member-a").await;
+        let member_b_run = hosted_mcp_member_run_context(&member_b_scope, "member-b").await;
+        let (member_a_descriptors, member_a_tools) =
+            visible_capability_ids(&wiring, &member_a_run).await;
+        let (member_b_descriptors, member_b_tools) =
+            visible_capability_ids(&wiring, &member_b_run).await;
+        for actual in [&member_a_descriptors, &member_a_tools] {
+            assert!(
+                actual.iter().any(|id| id == "notion.member-a-catalog"),
+                "ready member A receives the discovered model surface: {actual:?}"
+            );
+        }
+        for actual in [&member_b_descriptors, &member_b_tools] {
+            assert!(
+                !actual.iter().any(|id| id == "notion.member-a-catalog"),
+                "setup-needed member B receives neither visible definitions nor model tools: {actual:?}"
+            );
+        }
+
+        seed_configured_account_and_secret(&services, &member_b_scope, "notion").await;
+        assert!(
+            extension_management
+                .caller_active_extension_ids(
+                    &member_b_scope.user_id,
+                    Some(&member_b_credential_gate),
+                )
+                .await
+                .expect("member B readiness after credentials")
+                .contains(&ironclaw_host_api::ExtensionId::new("notion").expect("notion id")),
+            "membership, personal credentials, and publication derive active without a separate user transition"
+        );
+        let member_b_retry = lifecycle
+            .execute(
+                lifecycle_surface_context(&member_b_scope),
+                LifecycleProductAction::ExtensionInstall { package_ref },
+            )
+            .await
+            .expect("member B retries after OAuth");
+        assert_eq!(
+            member_b_retry.phase,
+            ironclaw_product_workflow::LifecyclePublicState::Active
+        );
+
+        for (scope, label) in [(&member_a_scope, "member A"), (&member_b_scope, "member B")] {
+            let surface = ExtensionCapabilitySurface::from_readiness_source_for_caller(
+                lifecycle.as_ref(),
+                lifecycle_surface_context(scope),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{label} surface: {error}"));
+            let granted = surface
+                .grants(&grantee, &scope.user_id)
+                .into_iter()
+                .map(|grant| grant.capability.as_str().to_string())
+                .collect::<Vec<_>>();
+            assert!(
+                granted.contains(&"notion.member-a-catalog".to_string()),
+                "{label} receives the provider-global catalog only after personal readiness: {granted:?}"
+            );
+        }
+        let (member_b_descriptors, member_b_tools) =
+            visible_capability_ids(&wiring, &member_b_run).await;
+        for actual in [&member_b_descriptors, &member_b_tools] {
+            assert!(
+                actual.iter().any(|id| id == "notion.member-a-catalog"),
+                "member B becomes callable only after personal readiness completes: {actual:?}"
+            );
+        }
+    }
+
+    fn hosted_mcp_member_scope(user_id: UserId, invocation_id: InvocationId) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("reborn-cli").expect("tenant"),
+            user_id,
+            agent_id: Some(AgentId::new("reborn-cli-agent").expect("agent")),
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id,
+        }
+    }
+
+    fn lifecycle_surface_context(scope: &ResourceScope) -> LifecycleProductContext {
+        LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
+            tenant_id: scope.tenant_id.clone(),
+            user_id: scope.user_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+        })
+    }
+
+    async fn hosted_mcp_member_run_context(
+        scope: &ResourceScope,
+        thread_label: &str,
+    ) -> LoopRunContext {
+        run_context_with_scope(TurnScope::new(
+            scope.tenant_id.clone(),
+            scope.agent_id.clone(),
+            scope.project_id.clone(),
+            ThreadId::new(format!("hosted-mcp-{thread_label}")).expect("thread id"),
+        ))
+        .await
+        .with_actor(TurnActor::new(scope.user_id.clone()))
+    }
+
+    async fn seed_configured_account_and_secret(
+        services: &crate::RebornServices,
+        scope: &ResourceScope,
+        provider: &str,
+    ) {
+        seed_configured_account_and_secret_with_scopes(services, scope, provider, &[]).await;
+    }
+
+    async fn seed_configured_account_and_secret_with_scopes(
+        services: &crate::RebornServices,
+        scope: &ResourceScope,
+        provider: &str,
+        scopes: &[&str],
+    ) {
+        services
+            .product_auth
+            .as_ref()
+            .expect("product auth")
+            .credential_account_service()
+            .create_account(NewCredentialAccount {
+                scope: AuthProductScope::credential_owner(scope, AuthSurface::Api),
+                provider: AuthProviderId::new(provider).expect("provider"),
+                label: CredentialAccountLabel::new(provider).expect("label"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(
+                    ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                        .expect("secret handle"),
+                ),
+                refresh_secret: None,
+                scopes: scopes
+                    .iter()
+                    .map(|scope| ProviderScope::new((*scope).to_string()).expect("valid scope"))
+                    .collect(),
+            })
+            .await
+            .expect("create configured account");
+        let owner_scope = AuthProductScope::credential_owner(scope, AuthSurface::Api);
+        services
+            .secret_store()
+            .put(
+                owner_scope.resource,
+                ironclaw_host_api::SecretHandle::new(format!("{provider}-test-token"))
+                    .expect("secret handle"),
+                ironclaw_secrets::SecretMaterial::from(format!("{provider}-access-token")),
+                None,
+            )
+            .await
+            .expect("seed access token");
     }
 
     #[tokio::test]
@@ -644,7 +986,7 @@ mod tests {
         .expect("local-dev services build");
         let run_context = run_context(label).await;
         let user_id = UserId::new(user).expect("user id");
-        install_gsuite_extensions(&services, &user_id, extension_state).await;
+        install_gsuite_extensions(&services, &run_context, &user_id, extension_state).await;
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
@@ -672,6 +1014,7 @@ mod tests {
 
     async fn install_gsuite_extensions(
         services: &crate::RebornServices,
+        run_context: &LoopRunContext,
         user_id: &UserId,
         extension_state: GsuiteExtensionState,
     ) {
@@ -684,27 +1027,26 @@ mod tests {
             .as_ref()
             .expect("extension management")
             .clone();
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
-        )
-        .with_extension_management(extension_management.clone())
-        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        let lifecycle_facade =
+            crate::runtime::local_lifecycle_product_facade(services).expect("lifecycle facade");
+        let caller_scope = local_dev_resource_scope_for_run(run_context, user_id);
+        if matches!(extension_state, GsuiteExtensionState::Activated) {
+            seed_configured_account_and_secret_with_scopes(
+                services,
+                &caller_scope,
+                "google",
+                ironclaw_first_party_extensions::GSUITE_PROVIDER_SCOPES,
+            )
+            .await;
+        }
         for extension_id in ["gmail", "google-calendar"] {
             let package_ref =
                 LifecyclePackageRef::new(LifecyclePackageKind::Extension, extension_id)
                     .expect("valid extension ref");
-            let member_context = |label: &str| {
-                LifecycleProductContext::Surface(LifecycleProductSurfaceContext {
-                    tenant_id: TenantId::new(format!("tenant-{label}")).expect("tenant id"),
-                    user_id: user_id.clone(),
-                    agent_id: None,
-                    project_id: None,
-                })
-            };
             if matches!(extension_state, GsuiteExtensionState::Activated) {
-                facade
+                lifecycle_facade
                     .execute(
-                        member_context(extension_id),
+                        lifecycle_surface_context(&caller_scope),
                         LifecycleProductAction::ExtensionInstall { package_ref },
                     )
                     .await
@@ -715,54 +1057,6 @@ mod tests {
                     .await
                     .expect("seed internal pre-readiness GSuite row");
             }
-        }
-    }
-
-    struct ConfiguredRuntimeCredentialAccounts;
-
-    #[async_trait::async_trait]
-    impl crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionService
-        for ConfiguredRuntimeCredentialAccounts
-    {
-        async fn select_configured_account_for_binding(
-            &self,
-            _lookup: ironclaw_auth::CredentialAccountSelectionRequest,
-            _runtime_scope: ironclaw_auth::AuthProductScope,
-        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
-            Err(ironclaw_auth::AuthProductError::CredentialMissing)
-        }
-
-        async fn select_unique_configured_runtime_account(
-            &self,
-            _request: crate::product_auth::credentials::runtime_credentials::RuntimeCredentialAccountSelectionRequest,
-        ) -> Result<ironclaw_auth::CredentialAccount, ironclaw_auth::AuthProductError> {
-            let now = chrono::Utc::now();
-            Ok(ironclaw_auth::CredentialAccount {
-                id: ironclaw_auth::CredentialAccountId::new(),
-                scope: ironclaw_auth::AuthProductScope::new(
-                    ironclaw_host_api::ResourceScope::local_default(
-                        UserId::new("configured-credential-user").expect("user id"),
-                        ironclaw_host_api::InvocationId::new(),
-                    )
-                    .expect("resource scope"),
-                    ironclaw_auth::AuthSurface::Api,
-                ),
-                provider: ironclaw_auth::AuthProviderId::new("test-provider").expect("provider id"),
-                label: ironclaw_auth::CredentialAccountLabel::new("test-provider")
-                    .expect("account label"),
-                status: ironclaw_auth::CredentialAccountStatus::Configured,
-                ownership: ironclaw_auth::CredentialOwnership::UserReusable,
-                owner_extension: None,
-                granted_extensions: Vec::new(),
-                access_secret: Some(
-                    ironclaw_host_api::SecretHandle::new("test-secret").expect("secret handle"),
-                ),
-                refresh_secret: None,
-                scopes: Vec::new(),
-                provider_identity: None,
-                created_at: now,
-                updated_at: now,
-            })
         }
     }
 
@@ -3645,7 +3939,7 @@ mod tests {
         let slack_target_id =
             RebornOutboundDeliveryTargetId::new("slack:test-dm").expect("target id");
         let slack_target_summary = OutboundDeliveryTargetSummary::new(
-            OutboundDeliveryTargetId::new(slack_target_id.as_str()).expect("target id"),
+            slack_target_id.clone(),
             "slack",
             "Slack DM",
             Some("Personal Slack direct message".to_string()),
@@ -3667,7 +3961,6 @@ mod tests {
                 destination: ironclaw_outbound::RunFinalReplyDestination::External {
                     reply_target_binding_ref: slack_reply_target.clone(),
                 },
-                current_target: None,
                 // Overwritten with the querying caller at list-time.
                 owner: OutboundDeliveryTargetOwner::new(
                     TenantId::new("tenant-outbound-delivery").expect("tenant id"),
@@ -3811,8 +4104,8 @@ mod tests {
             .find(|definition| definition.name.as_str() == "builtin__outbound_delivery_target_set")
             .expect("set tool definition should exist");
         assert!(
-            set_tool.description.contains("DEFAULT"),
-            "set tool description should frame the preference as the user-wide default"
+            set_tool.description.contains("FALLBACK"),
+            "set tool description should frame the preference as the user-wide fallback"
         );
         assert!(
             set_tool
@@ -3922,10 +4215,13 @@ mod tests {
         let missing_set_activity_id = missing_set_candidate.activity_id;
         let missing_set_surface_version = missing_set_candidate.surface_version.clone();
         let missing_set_capability_id_from_candidate = missing_set_candidate.capability_id.clone();
-        let missing_blocked_outcome = port
-            .invoke_capability(invocation_for_candidate(&missing_set_candidate))
-            .await
-            .expect("missing-target set call reaches approval gate");
+        let missing_blocked_outcome = tokio::time::timeout(
+            Duration::from_secs(15),
+            port.invoke_capability(invocation_for_candidate(&missing_set_candidate)),
+        )
+        .await
+        .expect("missing-target set approval gate must not hang")
+        .expect("missing-target set call reaches approval gate");
         let (missing_resume_token, missing_gate_origin) = match missing_blocked_outcome {
             Resolution::Blocked(blocked) => {
                 assert_eq!(blocked.kind(), "approval");
@@ -4376,7 +4672,7 @@ mod tests {
         let slack_target_id =
             RebornOutboundDeliveryTargetId::new("slack:yolo-dm").expect("target id");
         let slack_target_summary = OutboundDeliveryTargetSummary::new(
-            OutboundDeliveryTargetId::new(slack_target_id.as_str()).expect("target id"),
+            slack_target_id.clone(),
             "slack",
             "Slack DM",
             Some("Personal Slack direct message".to_string()),
@@ -4397,7 +4693,6 @@ mod tests {
                 destination: ironclaw_outbound::RunFinalReplyDestination::External {
                     reply_target_binding_ref: slack_reply_target.clone(),
                 },
-                current_target: None,
                 // Overwritten with the querying caller at list-time.
                 owner: OutboundDeliveryTargetOwner::new(
                     TenantId::new("tenant-outbound-delivery").expect("tenant id"),
@@ -5203,6 +5498,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let storage_root = dir.path().join("local-dev");
         let owner_id = "local-dev-github-surface-owner";
+        let user_id = UserId::new("local-dev-github-user").expect("user id");
+        let run_context = run_context("github-surface").await;
+        let caller_scope = local_dev_resource_scope_for_run(&run_context, &user_id);
         {
             let services = crate::build_reborn_services(crate::RebornBuildInput::local_dev(
                 owner_id,
@@ -5210,26 +5508,14 @@ mod tests {
             ))
             .await
             .expect("local-dev services build");
-            let local_runtime = services
-                .local_runtime
-                .as_ref()
-                .expect("local runtime substrate");
-            let extension_management = local_runtime
-                .extension_management
-                .as_ref()
-                .expect("extension management")
-                .clone();
-            let user_id = UserId::new("local-dev-github-user").expect("user id");
-            let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-                local_runtime.skill_management.clone(),
-            )
-            .with_extension_management(extension_management)
-            .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+            seed_configured_account_and_secret(&services, &caller_scope, "github").await;
+            let facade = crate::runtime::local_lifecycle_product_facade(&services)
+                .expect("lifecycle facade");
             let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
                 .expect("valid github ref");
             facade
                 .execute(
-                    member_lifecycle_context("github-install", &user_id),
+                    lifecycle_surface_context(&caller_scope),
                     LifecycleProductAction::ExtensionInstall {
                         package_ref: package_ref.clone(),
                     },
@@ -5244,11 +5530,10 @@ mod tests {
         ))
         .await
         .expect("local-dev services rebuild");
-        let run_context = run_context("github-surface").await;
         let wiring = capability_wiring(
             &services,
             Arc::new(InMemorySessionThreadService::default()),
-            UserId::new("local-dev-github-user").expect("user id"),
+            user_id,
             Arc::new(
                 crate::builtin_capability_policy::builtin_capability_policy()
                     .expect("policy parses"),
@@ -5308,26 +5593,16 @@ mod tests {
             "github capability should stay hidden before activation"
         );
 
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
-            .expect("local runtime substrate");
-        let extension_management = local_runtime
-            .extension_management
-            .as_ref()
-            .expect("extension management")
-            .clone();
         let user_id = UserId::new("local-dev-live-github-user").expect("user id");
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
-        )
-        .with_extension_management(extension_management)
-        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        let caller_scope = local_dev_resource_scope_for_run(&run_context, &user_id);
+        seed_configured_account_and_secret(&services, &caller_scope, "github").await;
+        let facade =
+            crate::runtime::local_lifecycle_product_facade(&services).expect("lifecycle facade");
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
         facade
             .execute(
-                member_lifecycle_context("github-live-install", &user_id),
+                lifecycle_surface_context(&caller_scope),
                 LifecycleProductAction::ExtensionInstall {
                     package_ref: package_ref.clone(),
                 },
@@ -5514,26 +5789,16 @@ mod tests {
             .await
             .expect("first register");
 
-        let local_runtime = services
-            .local_runtime
-            .as_ref()
-            .expect("local runtime substrate");
-        let extension_management = local_runtime
-            .extension_management
-            .as_ref()
-            .expect("extension management")
-            .clone();
         let user_id = UserId::new("local-dev-mid-response-user").expect("user id");
-        let facade = crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(
-            local_runtime.skill_management.clone(),
-        )
-        .with_extension_management(extension_management)
-        .with_runtime_credential_accounts(Arc::new(ConfiguredRuntimeCredentialAccounts));
+        let caller_scope = local_dev_resource_scope_for_run(&run_context, &user_id);
+        seed_configured_account_and_secret(&services, &caller_scope, "github").await;
+        let facade =
+            crate::runtime::local_lifecycle_product_facade(&services).expect("lifecycle facade");
         let package_ref = LifecyclePackageRef::new(LifecyclePackageKind::Extension, "github")
             .expect("valid github ref");
         facade
             .execute(
-                member_lifecycle_context("mid-response-install", &user_id),
+                lifecycle_surface_context(&caller_scope),
                 LifecycleProductAction::ExtensionInstall {
                     package_ref: package_ref.clone(),
                 },
@@ -5593,12 +5858,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activated_gmail_provider_tool_call_without_account_returns_oauth_gate() {
+    async fn gmail_without_account_is_hidden_until_extension_install_opens_oauth_gate() {
         let harness = gsuite_surface_harness(
             "local-dev-gmail-auth-owner",
             "gmail-auth-gate",
             "local-dev-gmail-auth-user",
-            GsuiteExtensionState::Activated,
+            GsuiteExtensionState::Installed,
         )
         .await;
         let port = harness
@@ -5610,28 +5875,35 @@ mod tests {
         port.visible_capabilities(VisibleCapabilityRequest {})
             .await
             .expect("visible surface");
-        let tool_definition = port
-            .tool_definitions()
-            .expect("tool definitions")
+        let tool_definitions = port.tool_definitions().expect("tool definitions");
+        assert!(
+            tool_definitions
+                .iter()
+                .all(|definition| definition.capability_id.as_str() != "gmail.list_messages"),
+            "setup-needed Gmail must stay hidden from the model until OAuth completes"
+        );
+        let install_definition = tool_definitions
             .into_iter()
-            .find(|definition| definition.capability_id.as_str() == "gmail.list_messages")
-            .expect("gmail.list_messages tool definition");
-        assert_eq!(tool_definition.name.as_str(), "gmail__list_messages");
+            .find(|definition| definition.capability_id.as_str() == EXTENSION_INSTALL_CAPABILITY_ID)
+            .expect("extension install tool definition");
 
         let candidate = port
             .register_provider_tool_call(RegisterProviderToolCallRequest::new(
-                provider_tool_call_with_name(tool_definition.name.as_str(), serde_json::json!({})),
+                provider_tool_call_with_name(
+                    install_definition.name.as_str(),
+                    serde_json::json!({"extension_id": "gmail"}),
+                ),
             ))
             .await
-            .expect("gmail provider tool call stages");
+            .expect("extension install tool call stages");
 
         let outcome = port
             .invoke_capability(invocation_for_candidate(&candidate))
             .await
-            .expect("gmail provider tool call invokes");
+            .expect("extension install tool call invokes");
 
         let Resolution::Blocked(blocked) = outcome else {
-            panic!("expected Gmail provider tool call to return an auth gate, got {outcome:?}");
+            panic!("expected Gmail install to return an OAuth gate, got {outcome:?}");
         };
         assert_eq!(blocked.kind(), "auth");
         // Flip consequence (§5.2.9 collapse, confirmed) — the `credential_requirements`

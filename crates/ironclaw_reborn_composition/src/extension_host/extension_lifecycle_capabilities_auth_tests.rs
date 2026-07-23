@@ -123,7 +123,7 @@ async fn local_dev_extension_readiness_accepts_manual_token_from_webui_gate_scop
         .expect("internal readiness reconciliation uses submitted manual token");
     assert_eq!(
         reconciled.phase,
-        ironclaw_host_api::InstallationState::Active
+        ironclaw_product_workflow::LifecyclePublicState::Active
     );
 
     let active = active_extension_capability_ids(&extension_management).await;

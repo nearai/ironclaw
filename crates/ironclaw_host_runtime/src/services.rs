@@ -193,6 +193,38 @@ pub struct ProductAuthProviderRuntimePorts {
     credential_account_resolver: Option<Arc<dyn RuntimeCredentialAccountResolver>>,
 }
 
+/// Scoped lease over host-staged runtime authority.
+///
+/// Host-driven operations that bypass the normal capability obligation
+/// lifecycle retain this guard for exactly as long as the external call may
+/// borrow its network policy or credential material. Dropping the future that
+/// owns the guard is sufficient to revoke both handoffs, so cancellation
+/// cannot leave ambient authority behind.
+#[must_use = "dropping this guard immediately revokes the staged runtime authority"]
+pub struct ProductAuthRuntimeHandoffGuard {
+    scope: ResourceScope,
+    capability_id: CapabilityId,
+    secret_injection_store: Arc<RuntimeSecretInjectionStore>,
+    network_policy_store: Arc<NetworkObligationPolicyStore>,
+}
+
+impl Drop for ProductAuthRuntimeHandoffGuard {
+    fn drop(&mut self) {
+        self.network_policy_store
+            .discard_for_capability(&self.scope, &self.capability_id);
+        if let Err(error) = self
+            .secret_injection_store
+            .discard_for_capability(&self.scope, &self.capability_id)
+        {
+            tracing::debug!(
+                error = ?error,
+                capability_id = %self.capability_id,
+                "failed to discard staged runtime credentials while revoking host-driven authority"
+            );
+        }
+    }
+}
+
 /// Alias for [`RuntimeSecretStageError`], which re-exports
 /// [`ironclaw_host_api::CredentialStageError`].
 pub type ProductAuthCredentialStageError = RuntimeSecretStageError;
@@ -222,6 +254,24 @@ impl ProductAuthProviderRuntimePorts {
 
     pub fn obligation_handler(&self) -> Arc<dyn CapabilityObligationHandler> {
         Arc::clone(&self.obligation_handler)
+    }
+
+    /// Lease cleanup ownership for a host-driven scoped runtime call.
+    ///
+    /// Create the guard before staging either policy or credential material.
+    /// Its synchronous `Drop` cleanup covers success, error, and async
+    /// cancellation without exposing the mutable handoff stores.
+    pub fn staged_handoff_guard(
+        &self,
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+    ) -> ProductAuthRuntimeHandoffGuard {
+        ProductAuthRuntimeHandoffGuard {
+            scope,
+            capability_id,
+            secret_injection_store: Arc::clone(&self.secret_injection_store),
+            network_policy_store: Arc::clone(&self.network_policy_store),
+        }
     }
 
     pub async fn stage_secret_once(

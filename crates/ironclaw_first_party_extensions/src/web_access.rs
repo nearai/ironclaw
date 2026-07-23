@@ -863,16 +863,17 @@ async fn execute_runtime_http(
 }
 
 fn extract_mcp_text(body: &str) -> Option<String> {
-    for line in body.lines().filter_map(|line| line.strip_prefix("data:")) {
-        if let Some(text) = text_from_mcp_json(line.trim()) {
-            return Some(text);
-        }
-    }
-    text_from_mcp_json(body)
+    let value = mcp_json_value_from_body(body.as_bytes())?;
+    text_from_mcp_value(&value)
 }
 
+#[cfg(test)]
 fn text_from_mcp_json(raw: &str) -> Option<String> {
     let value: Value = serde_json::from_str(raw).ok()?;
+    text_from_mcp_value(&value)
+}
+
+fn text_from_mcp_value(value: &Value) -> Option<String> {
     if value.get("error").is_some() || value.pointer("/result/isError") == Some(&Value::Bool(true))
     {
         return None;
@@ -1952,6 +1953,46 @@ data: }
         ]);
 
         assert_get_content_accepts_initialize_response(initialize_response).await;
+    }
+
+    #[tokio::test]
+    async fn get_content_accepts_split_data_sse_mcp_tool_response() {
+        let executor = WebAccessExecutor::default();
+        let capability = capability_id(WEB_GET_CONTENT_CAPABILITY_ID);
+        let scope = scope();
+        let input = json!({"url":"https://cloud-api.near.ai"});
+        let tool_response = RecordingEgress::ok_sse_data_lines(&[
+            "{",
+            r#""jsonrpc": "2.0","#,
+            r#""id": 2,"#,
+            r#""result": {"content": ["#,
+            r##"{"type": "text", "text": "# NEAR AI Cloud API\nURL: https://cloud-api.near.ai\n\nCloud API content"}"##,
+            "]}}",
+        ]);
+        let egress = Arc::new(RecordingEgress::with_responses(vec![
+            Ok(RecordingEgress::ok_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"protocolVersion": "2024-11-05", "capabilities": {}}
+            }))),
+            Ok(RecordingEgress::accepted()),
+            Ok(tool_response),
+        ]));
+
+        let result = executor
+            .dispatch(request(
+                &capability,
+                &scope,
+                &input,
+                Some(egress as Arc<dyn RuntimeHttpEgress>),
+            ))
+            .await
+            .expect("split SSE tools/call response");
+
+        assert_eq!(result.output["provider_used"], "exa_mcp");
+        assert_eq!(result.output["title"], "NEAR AI Cloud API");
+        assert_eq!(result.output["url"], "https://cloud-api.near.ai");
+        assert_eq!(result.output["content"], "Cloud API content");
     }
 
     #[tokio::test]

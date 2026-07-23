@@ -8,12 +8,28 @@ use crate::{
     AdvanceSubscriptionCursorRequest, ClaimDeliveryAttemptForSendRequest,
     LoadSubscriptionCursorRequest, OutboundDeliveryAttempt, OutboundError, OutboundPushCandidate,
     OutboundPushKind, OutboundPushPlan, OutboundPushTargetRequest, ProjectionSubscriptionRecord,
-    RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord, RunFinalReplyTargetRequest,
-    ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
+    RunDeliveryCleanupRecord, RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord,
+    RunFinalReplyTargetRecord, RunFinalReplyTargetRequest, ThreadNotificationPolicy,
+    UpdateDeliveryStatusRequest,
 };
 
 #[async_trait]
 pub trait OutboundStateStore: Send + Sync {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError>;
+
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: RunDeliveryCleanupRequest,
+    ) -> Result<Vec<RunDeliveryCleanupRecord>, OutboundError>;
+
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError>;
+
     /// Persist the minimal completed-run projection key used to resume final
     /// reply delivery after a process crash.
     async fn put_run_final_reply_handoff(
@@ -25,6 +41,26 @@ pub trait OutboundStateStore: Send + Sync {
         &self,
         limit: usize,
     ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError>;
+
+    /// Continue a stable `(event_cursor, run_id)` scan after `after`.
+    ///
+    /// The production filesystem store overrides this with an indexed keyset
+    /// query so callers may delete settled rows between pages without
+    /// shifting or skipping later records. The default preserves compatibility
+    /// for test/error stores that only implement the original first-page API.
+    async fn list_pending_run_final_reply_handoffs_after(
+        &self,
+        after: Option<&RunFinalReplyHandoffRecord>,
+        limit: usize,
+    ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError> {
+        let mut records = self.list_pending_run_final_reply_handoffs(limit).await?;
+        if let Some(after) = after {
+            records.retain(|record| {
+                (record.event_cursor, record.run_id) > (after.event_cursor, after.run_id)
+            });
+        }
+        Ok(records)
+    }
 
     async fn complete_run_final_reply_handoff(
         &self,

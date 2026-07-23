@@ -3,22 +3,23 @@
 // arch-exempt: large_file, cross-instance claim regressions share the existing outbound persistence harness, plan #6175
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FilesystemError,
-    FilesystemOperation, Filter, InMemoryBackend, IndexSpec, Page, RecordVersion, RootFilesystem,
-    ScopedFilesystem, VersionedEntry,
+    FilesystemOperation, Filter, InMemoryBackend, IndexKind, IndexName, IndexSpec, Page,
+    RecordVersion, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{
     AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
     UserId, VirtualPath,
 };
 use ironclaw_outbound::*;
-use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
-use tokio::sync::Mutex;
+use ironclaw_turns::{ReplyTargetBindingRef, RunOriginAdapter, TurnActor, TurnRunId, TurnScope};
+use tokio::sync::{Mutex, Notify};
 
 const TEST_OUTBOUND_ROOT: &str = "/engine/tenants/test/users/test/outbound";
 
@@ -44,6 +45,19 @@ fn build_outbound_store_for_backend(
     backend: Arc<InMemoryBackend>,
 ) -> FilesystemOutboundStateStore<InMemoryBackend> {
     FilesystemOutboundStateStore::new(build_scoped_fs(backend, TEST_OUTBOUND_ROOT))
+}
+
+fn build_outbound_store_with_permissions<F: RootFilesystem>(
+    backend: Arc<F>,
+    permissions: MountPermissions,
+) -> FilesystemOutboundStateStore<F> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/outbound").expect("alias"),
+        VirtualPath::new(TEST_OUTBOUND_ROOT).expect("target"),
+        permissions,
+    )])
+    .expect("mount view");
+    FilesystemOutboundStateStore::new(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
 }
 
 #[tokio::test]
@@ -1796,6 +1810,138 @@ impl RootFilesystem for VersionRacingBackend {
     }
 }
 
+/// Synchronization decorator for deterministic two-store conditional-delete
+/// races. This is an interleaving barrier, not an I/O fault fake: every
+/// operation delegates to the real [`InMemoryBackend`].
+struct DeletePauseBackend {
+    inner: Arc<InMemoryBackend>,
+    pause_point: AtomicU8,
+    delete_entered: Notify,
+    release_delete: Notify,
+}
+
+impl DeletePauseBackend {
+    const NONE: u8 = 0;
+    const BEFORE_DELETE: u8 = 1;
+    const AFTER_DELETE: u8 = u8::MAX;
+
+    fn new(inner: Arc<InMemoryBackend>) -> Self {
+        Self {
+            inner,
+            pause_point: AtomicU8::new(Self::NONE),
+            delete_entered: Notify::new(),
+            release_delete: Notify::new(),
+        }
+    }
+
+    fn arm_before_delete(&self) {
+        self.pause_point
+            .store(Self::BEFORE_DELETE, Ordering::SeqCst);
+    }
+
+    fn arm_before_deletes(&self, count: u8) {
+        assert!(count < Self::AFTER_DELETE);
+        self.pause_point.store(count, Ordering::SeqCst);
+    }
+
+    fn arm_after_delete(&self) {
+        self.pause_point.store(Self::AFTER_DELETE, Ordering::SeqCst);
+    }
+
+    async fn wait_for_delete(&self) {
+        self.delete_entered.notified().await;
+    }
+
+    fn release_delete(&self) {
+        self.release_delete.notify_one();
+    }
+
+    async fn pause(&self) {
+        self.delete_entered.notify_one();
+        self.release_delete.notified().await;
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for DeletePauseBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        expected_version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        let pause_point = self
+            .pause_point
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                if current == Self::AFTER_DELETE {
+                    Some(Self::NONE)
+                } else if current > Self::NONE {
+                    Some(current - 1)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(Self::NONE);
+        match pause_point {
+            Self::NONE => self.inner.delete_if_version(path, expected_version).await,
+            Self::AFTER_DELETE => {
+                let result = self.inner.delete_if_version(path, expected_version).await;
+                self.pause().await;
+                result
+            }
+            _ => {
+                self.pause().await;
+                self.inner.delete_if_version(path, expected_version).await
+            }
+        }
+    }
+}
+
 /// Test backend that mimics a mount that cannot honor CAS writes for critical
 /// preference updates or delivery ownership claims. An accidental byte
 /// fallback would retry as `CasExpectation::Any` and succeed through the inner
@@ -2171,11 +2317,10 @@ async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_i
 /// explicitly by tenant and a path-rewriting bug surfaces as a
 /// query-time mismatch.
 ///
-/// Records a delivery attempt under tenant A's scope, then issues a
-/// raw `RootFilesystem::query` against `/outbound/deliveries` with
-/// `Filter::Eq { key: "tenant_id", value: <tenant-a> }` and asserts the
-/// record is returned; a query for a different tenant must return zero
-/// rows.
+/// Records a delivery attempt and a run-delivery-cleanup snapshot under tenant
+/// A's scope, then issues raw `RootFilesystem::query` calls against both roots
+/// with `Filter::Eq { key: "tenant_id", value: <tenant-a> }`. Each record must
+/// be returned for tenant A and hidden from a different tenant.
 #[tokio::test]
 async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
     let backend = Arc::new(InMemoryBackend::new());
@@ -2239,7 +2384,7 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
         .query(
             &virtual_prefix,
             &Filter::Eq {
-                key: tenant_key,
+                key: tenant_key.clone(),
                 value: ironclaw_filesystem::IndexValue::Text("tenant-b".to_string()),
             },
             Page::new(0, Page::MAX_LIMIT),
@@ -2250,6 +2395,64 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
         miss.is_empty(),
         "tenant_id projection must NOT surface tenant-outbound's delivery under tenant-b query; got {} rows",
         miss.len(),
+    );
+
+    let cleanup = cleanup_record(TurnRunId::new(), "tenant-index");
+    store
+        .put_run_delivery_cleanup(cleanup)
+        .await
+        .expect("persist cleanup snapshot");
+    let cleanup_prefix =
+        ironclaw_host_api::ScopedPath::new("/outbound/run-delivery-cleanup".to_string()).unwrap();
+    let cleanup_virtual_prefix = scoped
+        .resolve(&scope.to_resource_scope(), &cleanup_prefix)
+        .unwrap();
+    let conflicting_cleanup_index = IndexSpec::new(
+        IndexName::new("outbound_by_tenant").unwrap(),
+        vec![ironclaw_filesystem::IndexKey::new("wrong_tenant_key").unwrap()],
+        IndexKind::Exact,
+    );
+    assert!(
+        matches!(
+            backend
+                .ensure_index(&cleanup_virtual_prefix, &conflicting_cleanup_index)
+                .await,
+            Err(FilesystemError::IndexConflict { .. })
+        ),
+        "cleanup mutation must declare the canonical tenant index before writing"
+    );
+    let cleanup_hit = backend
+        .query(
+            &cleanup_virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key.clone(),
+                value: ironclaw_filesystem::IndexValue::Text(scope.tenant_id.as_str().to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cleanup_hit.len(),
+        1,
+        "tenant_id projection must surface the cleanup snapshot via Filter::Eq",
+    );
+
+    let cleanup_miss = backend
+        .query(
+            &cleanup_virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key,
+                value: ironclaw_filesystem::IndexValue::Text("tenant-b".to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        cleanup_miss.is_empty(),
+        "tenant_id projection must NOT surface tenant-outbound's cleanup snapshot under tenant-b query; got {} rows",
+        cleanup_miss.len(),
     );
 }
 
@@ -2374,6 +2577,354 @@ async fn final_reply_handoff_survives_reopen_and_cursor_replay_is_monotonic() {
             .await
             .expect("settled handoff is absent")
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn final_reply_handoff_keyset_survives_deletion_between_pages() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(backend);
+    let mut handoffs = (0..3)
+        .map(|_| RunFinalReplyHandoffRecord {
+            event_cursor: ironclaw_turns::EventCursor(41),
+            scope: turn_scope(),
+            run_id: TurnRunId::new(),
+        })
+        .collect::<Vec<_>>();
+    handoffs.sort_by_key(|record| (record.event_cursor, record.run_id));
+    for handoff in &handoffs {
+        store
+            .put_run_final_reply_handoff(handoff.clone())
+            .await
+            .expect("persist handoff");
+    }
+
+    let first_page = store
+        .list_pending_run_final_reply_handoffs_after(None, 1)
+        .await
+        .expect("first keyset page");
+    assert_eq!(first_page, vec![handoffs[0].clone()]);
+    store
+        .complete_run_final_reply_handoff(&first_page[0])
+        .await
+        .expect("delete first page before continuing");
+
+    assert_eq!(
+        store
+            .list_pending_run_final_reply_handoffs_after(first_page.first(), 1)
+            .await
+            .expect("second keyset page after deleted cursor row"),
+        vec![handoffs[1].clone()],
+        "the continuation key must not depend on deletion-sensitive offsets"
+    );
+}
+
+#[tokio::test]
+async fn completing_last_run_delivery_cleanup_record_deletes_snapshot() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = build_outbound_store_for_backend(Arc::clone(&backend));
+    let record = RunDeliveryCleanupRecord::new(
+        turn_scope(),
+        TurnRunId::new(),
+        RunOriginAdapter::new("test-adapter").expect("adapter"),
+        reply_ref("reply-cleanup-compaction"),
+        "conversation-cleanup-compaction".to_string(),
+        "vendor-message-cleanup-compaction".to_string(),
+    )
+    .expect("cleanup record");
+    let cleanup_root = VirtualPath::new(format!("{TEST_OUTBOUND_ROOT}/run-delivery-cleanup"))
+        .expect("cleanup root");
+
+    store
+        .put_run_delivery_cleanup(record.clone())
+        .await
+        .expect("persist cleanup record");
+    assert_eq!(
+        backend
+            .query(&cleanup_root, &Filter::All, Page::default())
+            .await
+            .expect("query cleanup snapshots")
+            .len(),
+        1
+    );
+
+    store
+        .complete_run_delivery_cleanup(&record)
+        .await
+        .expect("complete cleanup record");
+    assert!(
+        backend
+            .query(&cleanup_root, &Filter::All, Page::default())
+            .await
+            .expect("query compacted cleanup snapshots")
+            .is_empty(),
+        "an empty cleanup snapshot must be removed instead of retained forever"
+    );
+}
+
+fn cleanup_record(run_id: TurnRunId, suffix: &str) -> RunDeliveryCleanupRecord {
+    RunDeliveryCleanupRecord::new(
+        turn_scope(),
+        run_id,
+        RunOriginAdapter::new("test-adapter").expect("adapter"),
+        reply_ref(&format!("reply-cleanup-{suffix}")),
+        format!("conversation-cleanup-{suffix}"),
+        format!("vendor-message-cleanup-{suffix}"),
+    )
+    .expect("cleanup record")
+}
+
+#[tokio::test]
+async fn cleanup_put_rejects_invalid_existing_snapshot_without_writing() {
+    for (case, mismatch_identity) in [("mismatched-identity", true), ("malformed-record", false)] {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store = build_outbound_store_for_backend(Arc::clone(&backend));
+        let run_id = TurnRunId::new();
+        let existing = cleanup_record(run_id, &format!("{case}-existing"));
+        let incoming = cleanup_record(run_id, &format!("{case}-incoming"));
+        store
+            .put_run_delivery_cleanup(existing)
+            .await
+            .expect("seed cleanup snapshot");
+
+        let cleanup_root = VirtualPath::new(format!("{TEST_OUTBOUND_ROOT}/run-delivery-cleanup"))
+            .expect("cleanup root");
+        let mut rows = backend
+            .query(&cleanup_root, &Filter::All, Page::default())
+            .await
+            .expect("query seeded cleanup snapshot");
+        assert_eq!(rows.len(), 1, "{case}: exactly one snapshot must exist");
+        let stored = rows.remove(0);
+        let path = stored.path.clone();
+        let mut snapshot_json: serde_json::Value =
+            serde_json::from_slice(&stored.entry.body).expect("decode raw cleanup snapshot");
+        let record_json = snapshot_json
+            .get_mut("records")
+            .and_then(serde_json::Value::as_array_mut)
+            .and_then(|records| records.first_mut())
+            .expect("cleanup snapshot has one record");
+        if mismatch_identity {
+            record_json["run_id"] =
+                serde_json::to_value(TurnRunId::new()).expect("serialize mismatched run id");
+        } else {
+            record_json["vendor_message_ref"] = serde_json::Value::String(String::new());
+        }
+        let corrupted_body =
+            serde_json::to_vec(&snapshot_json).expect("encode corrupted cleanup snapshot");
+        let mut corrupted_entry = stored.entry;
+        corrupted_entry.body = corrupted_body.clone();
+        let corrupted_version = backend
+            .put(
+                &path,
+                corrupted_entry,
+                CasExpectation::Version(stored.version),
+            )
+            .await
+            .expect("write corrupted cleanup snapshot");
+
+        assert!(
+            matches!(
+                store.put_run_delivery_cleanup(incoming).await,
+                Err(OutboundError::Serialization)
+            ),
+            "{case}: put must reject invalid authoritative snapshot data"
+        );
+        let after = backend
+            .get(&path)
+            .await
+            .expect("read snapshot after rejected put")
+            .expect("corrupted snapshot remains");
+        assert_eq!(
+            after.version, corrupted_version,
+            "{case}: rejected put must not write"
+        );
+        assert_eq!(
+            after.entry.body, corrupted_body,
+            "{case}: rejected put must preserve authoritative bytes"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cleanup_completion_retries_delete_when_second_store_adds_sibling_record() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(DeletePauseBackend::new(inner));
+    let first = Arc::new(FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    )));
+    let second = FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    ));
+    let run_id = TurnRunId::new();
+    let completed = cleanup_record(run_id, "completed");
+    let sibling = cleanup_record(run_id, "sibling");
+
+    first
+        .put_run_delivery_cleanup(completed.clone())
+        .await
+        .expect("seed cleanup record");
+    backend.arm_before_delete();
+    let completed_for_task = completed.clone();
+    let completion = {
+        let first = Arc::clone(&first);
+        tokio::spawn(async move {
+            first
+                .complete_run_delivery_cleanup(&completed_for_task)
+                .await
+        })
+    };
+    backend.wait_for_delete().await;
+
+    second
+        .put_run_delivery_cleanup(sibling.clone())
+        .await
+        .expect("second store adds sibling during delete race");
+    backend.release_delete();
+    completion
+        .await
+        .expect("completion task joins")
+        .expect("completion retries version mismatch");
+
+    assert_eq!(
+        second
+            .load_run_delivery_cleanup(completed.request())
+            .await
+            .expect("load cleanup snapshot"),
+        vec![sibling],
+        "the second store's sibling record must survive delete-vs-write contention"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_completion_uses_shared_retry_budget_under_two_store_contention() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(DeletePauseBackend::new(inner));
+    let first = Arc::new(FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    )));
+    let second = FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    ));
+    let run_id = TurnRunId::new();
+    let completed = cleanup_record(run_id, "retry-budget-completed");
+    let racing = cleanup_record(run_id, "retry-budget-racing");
+
+    first
+        .put_run_delivery_cleanup(completed.clone())
+        .await
+        .expect("seed cleanup record");
+    backend.arm_before_deletes(5);
+    let completed_for_task = completed.clone();
+    let completion = {
+        let first = Arc::clone(&first);
+        tokio::spawn(async move {
+            first
+                .complete_run_delivery_cleanup(&completed_for_task)
+                .await
+        })
+    };
+
+    for _ in 0..5 {
+        backend.wait_for_delete().await;
+        second
+            .put_run_delivery_cleanup(racing.clone())
+            .await
+            .expect("racing store bumps the snapshot version");
+        second
+            .complete_run_delivery_cleanup(&racing)
+            .await
+            .expect("racing store restores the one-record snapshot");
+        backend.release_delete();
+    }
+
+    completion
+        .await
+        .expect("completion task joins")
+        .expect("shared retry budget exceeds the legacy fixed five attempts");
+    assert!(
+        second
+            .load_run_delivery_cleanup(completed.request())
+            .await
+            .expect("load cleanup snapshot")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cleanup_completion_rechecks_aba_recreation_by_second_store() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let backend = Arc::new(DeletePauseBackend::new(inner));
+    let first = Arc::new(FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    )));
+    let second = FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        TEST_OUTBOUND_ROOT,
+    ));
+    let record = cleanup_record(TurnRunId::new(), "aba");
+
+    first
+        .put_run_delivery_cleanup(record.clone())
+        .await
+        .expect("seed cleanup record");
+    backend.arm_after_delete();
+    let record_for_task = record.clone();
+    let completion = {
+        let first = Arc::clone(&first);
+        tokio::spawn(async move { first.complete_run_delivery_cleanup(&record_for_task).await })
+    };
+    backend.wait_for_delete().await;
+
+    second
+        .put_run_delivery_cleanup(record.clone())
+        .await
+        .expect("second store recreates same record after delete commits");
+    backend.release_delete();
+    completion
+        .await
+        .expect("completion task joins")
+        .expect("completion rechecks recreated path");
+
+    assert!(
+        second
+            .load_run_delivery_cleanup(record.request())
+            .await
+            .expect("load cleanup snapshot")
+            .is_empty(),
+        "completion must not return while an ABA recreation still contains the record"
+    );
+}
+
+#[tokio::test]
+async fn cleanup_completion_delete_permission_fault_preserves_snapshot() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let writer = build_outbound_store_with_permissions(
+        Arc::clone(&backend),
+        MountPermissions::read_write_list_delete(),
+    );
+    let no_delete = build_outbound_store_with_permissions(backend, MountPermissions::read_write());
+    let record = cleanup_record(TurnRunId::new(), "permission-fault");
+
+    writer
+        .put_run_delivery_cleanup(record.clone())
+        .await
+        .expect("seed cleanup record");
+    assert!(matches!(
+        no_delete.complete_run_delivery_cleanup(&record).await,
+        Err(OutboundError::Backend)
+    ));
+    assert_eq!(
+        writer
+            .load_run_delivery_cleanup(record.request())
+            .await
+            .expect("load preserved cleanup snapshot"),
+        vec![record],
+        "a conditional-delete fault must not drop or rewrite the cleanup snapshot"
     );
 }
 

@@ -1,3 +1,8 @@
+//! Caller-scoped extension authority projected into runtime capability grants.
+//!
+//! This mechanism is shared by local development and hosted single-tenant
+//! deployments; deployment policy selects the surrounding runtime substrate.
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use chrono::Utc;
@@ -7,28 +12,26 @@ use ironclaw_host_api::{
 };
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
-use crate::extension_host::extension_lifecycle::{
-    ActiveExtensionCapability, RebornLocalExtensionManagementPort,
+use crate::extension_host::{
+    extension_lifecycle::ActiveExtensionCapability, lifecycle::RebornLocalLifecycleFacade,
 };
 use ironclaw_first_party_extensions::{
     EXA_MCP_HOST, NETWORK_EGRESS_LIMIT, WEB_ACCESS_EXTENSION_ID, WEB_GET_CONTENT_CAPABILITY_ID,
     WEB_SEARCH_CAPABILITY_ID, gsuite_network_policy_for,
 };
-use ironclaw_product_workflow::ProductWorkflowError;
+use ironclaw_product_workflow::{LifecycleProductContext, ProductWorkflowError};
 
 #[derive(Clone, Default)]
-pub(in crate::runtime) struct ExtensionCapabilitySurfaceSource {
-    extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+pub(crate) struct ExtensionCapabilitySurfaceSource {
+    readiness_source: Option<Arc<RebornLocalLifecycleFacade>>,
     #[cfg(test)]
     static_surface: Option<ExtensionCapabilitySurface>,
 }
 
 impl ExtensionCapabilitySurfaceSource {
-    pub(in crate::runtime) fn new(
-        extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
-    ) -> Self {
+    pub(crate) fn new(readiness_source: Option<Arc<RebornLocalLifecycleFacade>>) -> Self {
         Self {
-            extension_management,
+            readiness_source,
             #[cfg(test)]
             static_surface: None,
         }
@@ -37,27 +40,28 @@ impl ExtensionCapabilitySurfaceSource {
     #[cfg(test)]
     pub(in crate::runtime) fn from_surface(surface: ExtensionCapabilitySurface) -> Self {
         Self {
-            extension_management: None,
+            readiness_source: None,
             static_surface: Some(surface),
         }
     }
 
-    pub(in crate::runtime) async fn snapshot(
+    pub(crate) async fn snapshot(
         &self,
+        caller: LifecycleProductContext,
     ) -> Result<ExtensionCapabilitySurface, ProductWorkflowError> {
         #[cfg(test)]
         if let Some(surface) = &self.static_surface {
             return Ok(surface.clone());
         }
-        let Some(extension_management) = self.extension_management.as_deref() else {
+        let Some(readiness_source) = self.readiness_source.as_deref() else {
             return Ok(ExtensionCapabilitySurface::default());
         };
-        ExtensionCapabilitySurface::from_extension_management(extension_management).await
+        ExtensionCapabilitySurface::from_readiness_source_for_caller(readiness_source, caller).await
     }
 }
 
 #[derive(Debug, Clone, Default)]
-pub(in crate::runtime) struct ExtensionCapabilitySurface {
+pub(crate) struct ExtensionCapabilitySurface {
     active_capabilities: Vec<ActiveExtensionCapability>,
 }
 
@@ -71,23 +75,36 @@ impl ExtensionCapabilitySurface {
         }
     }
 
-    pub(super) async fn from_extension_management(
-        extension_management: &RebornLocalExtensionManagementPort,
+    pub(super) async fn from_readiness_source_for_caller(
+        readiness_source: &RebornLocalLifecycleFacade,
+        caller: LifecycleProductContext,
     ) -> Result<Self, ProductWorkflowError> {
         Ok(Self {
-            active_capabilities: extension_management
-                .active_model_visible_capabilities()
+            active_capabilities: readiness_source
+                .caller_active_model_visible_capabilities(&caller)
                 .await?,
         })
     }
 
-    /// Mint capability grants for one request (#5459 P1: filtered to the
-    /// CALLER — tenant-owned capabilities grant to everyone, user-private ones
-    /// only to their owner). This is the single choke point: dispatch
-    /// authorization reuses the grants minted here, so a capability filtered
-    /// out is both invisible in the surface AND denied at dispatch — grant
-    /// absence fails closed with no separate preflight.
-    pub(in crate::runtime) fn grants(
+    #[cfg(test)]
+    fn from_active_capabilities_for_active_extensions(
+        active_capabilities: Vec<ActiveExtensionCapability>,
+        active_extension_ids: &std::collections::BTreeSet<ExtensionId>,
+    ) -> Self {
+        Self {
+            active_capabilities: active_capabilities
+                .into_iter()
+                .filter(|capability| active_extension_ids.contains(&capability.provider))
+                .collect(),
+        }
+    }
+
+    /// Mint capability grants after the surface source has retained only
+    /// caller-active packages (#5459 P1 then applies the installation-owner
+    /// filter: tenant-owned capabilities grant to everyone, user-private ones
+    /// only to their owner). Dispatch authorization reuses these grants, so a
+    /// capability filtered at either stage is both invisible and denied.
+    pub(crate) fn grants(
         &self,
         grantee: &ExtensionId,
         caller: &ironclaw_host_api::UserId,
@@ -114,10 +131,11 @@ impl ExtensionCapabilitySurface {
             .find(|capability| capability.id == *capability_id)
     }
 
-    /// Provider trust for the same request; filtered by the same owner rule as
-    /// [`Self::grants`] so a user-private extension's provider is not even
+    /// Provider trust for the same request; the source has already removed
+    /// setup-needed packages, then this applies the same owner rule as
+    /// [`Self::grants`] so a user-private extension's provider is not
     /// advertised to other users' surfaces.
-    pub(super) fn provider_trust(
+    pub(crate) fn provider_trust(
         &self,
         caller: &ironclaw_host_api::UserId,
     ) -> BTreeMap<ExtensionId, TrustDecision> {
@@ -232,17 +250,59 @@ fn extension_network_policy(capability: &ActiveExtensionCapability) -> NetworkPo
 }
 
 #[cfg(test)]
+mod caller_readiness_tests {
+    use std::collections::BTreeSet;
+
+    use ironclaw_host_api::{PermissionMode, UserId};
+
+    use super::*;
+
+    #[test]
+    fn provider_global_schema_replacement_does_not_grant_an_unready_caller() {
+        let provider = ExtensionId::new("notion").expect("provider");
+        let capability =
+            CapabilityId::new("notion.replaced-provider-global-tool").expect("capability");
+        let active = vec![ActiveExtensionCapability {
+            id: capability.clone(),
+            provider: provider.clone(),
+            effects: vec![EffectKind::Network],
+            default_permission: PermissionMode::Allow,
+            runtime_credentials: Vec::new(),
+            network_targets: Vec::new(),
+            owner: ironclaw_extensions::InstallationOwner::Tenant,
+        }];
+        let caller = UserId::new("setup-needed-caller").expect("caller");
+        let grantee = ExtensionId::new("agent-loop").expect("grantee");
+
+        let setup_needed =
+            ExtensionCapabilitySurface::from_active_capabilities_for_active_extensions(
+                active.clone(),
+                &BTreeSet::new(),
+            );
+        assert!(setup_needed.capability(&capability).is_none());
+        assert!(setup_needed.grants(&grantee, &caller).is_empty());
+        assert!(setup_needed.provider_trust(&caller).is_empty());
+
+        let ready = ExtensionCapabilitySurface::from_active_capabilities_for_active_extensions(
+            active,
+            &BTreeSet::from([provider.clone()]),
+        );
+        assert!(ready.capability(&capability).is_some());
+        assert_eq!(ready.grants(&grantee, &caller).len(), 1);
+        assert!(ready.provider_trust(&caller).contains_key(&provider));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use ironclaw_first_party_extensions::google_api_network_policy;
     use ironclaw_host_api::{CapabilityId, PermissionMode, UserId};
 
-    /// #5459 P1: the grant-minting choke point — a member-held extension's
-    /// capabilities mint grants (and advertise provider trust) ONLY for its
-    /// members (every member of the set, not just one); tenant-owned ones
-    /// mint for everyone. Grant absence is what makes an un-held tool both
-    /// invisible in the surface and denied at dispatch, so this filter IS
-    /// the enforcement.
+    /// #5459 P1: after caller lifecycle readiness filters packages, a
+    /// member-held extension's capabilities mint grants (and advertise
+    /// provider trust) only for its members; tenant-owned ones mint for
+    /// everyone.
     #[test]
     fn grants_and_provider_trust_filter_member_held_capabilities_to_their_members() {
         let alice = UserId::new("alice").unwrap();

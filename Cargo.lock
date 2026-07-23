@@ -3787,6 +3787,7 @@ dependencies = [
  "ironclaw_memory_native",
  "ironclaw_network",
  "ironclaw_observability",
+ "ironclaw_outbound",
  "ironclaw_process_sandbox",
  "ironclaw_processes",
  "ironclaw_prompt_envelope",

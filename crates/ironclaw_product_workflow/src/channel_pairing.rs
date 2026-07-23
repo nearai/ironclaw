@@ -29,7 +29,8 @@ use ironclaw_auth::{
     AuthSurface,
 };
 use ironclaw_conversations::{
-    AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner, ExternalActorRef,
+    AdapterKind, ConversationActorPairingService, ExpectedExternalActorOwner,
+    ExternalActorBindingEpoch, ExternalActorRef,
 };
 use ironclaw_filesystem::{
     CasApply, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem, cas_update,
@@ -48,13 +49,20 @@ use crate::{
     CHANNEL_PAIRING_CODE_ALPHABET as PAIRING_CODE_ALPHABET,
     CHANNEL_PAIRING_CODE_LEN as PAIRING_CODE_LEN, ChannelConnectionNoticePolicy,
     ChannelConnectionRequirement, ChannelPairingCode, ChannelPairingIssue,
-    ProductAuthContinuationDispatcher,
+    ExtensionAccountSetupDescriptor, ProductActorUserResolutionRequest, ProductActorUserResolver,
+    ProductAuthContinuationDispatcher, ProductWorkflowError, ResolvedProductActorUser,
 };
 
 const PAIRING_TTL_MINUTES: i64 = 15;
 
-/// Pairing snapshots keep at most this many total records per extension
-/// (expired/consumed records beyond the bound are evicted oldest-first).
+/// Bounds completion ownership after a process loss. This lease protects only
+/// one outbox dispatch attempt; it does not track or watch the resumed run.
+const PAIRING_COMPLETION_LEASE_SECONDS: i64 = 30;
+const PAIRING_COMPLETION_RENEWAL_SECONDS: u64 = 10;
+
+/// Per-collection record bound for one extension snapshot. Replaceable pairing
+/// codes are evicted oldest-first; live completion, actor, and cleanup records
+/// reject new distinct admission rather than being silently discarded.
 const PAIRING_SNAPSHOT_CAP: usize = 4096;
 
 const PAIRING_ALIAS: &str = "/tenant-shared/channel-pairing";
@@ -114,6 +122,26 @@ struct PendingPairingCompletion {
     external_actor_id: String,
     #[serde(default = "Utc::now")]
     emitted_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding_epoch: Option<ExternalActorBindingEpoch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease: Option<PairingCompletionLease>,
+}
+
+/// Durable, cross-instance ownership of one pairing workflow commit.
+/// Completion dispatch and final unpair identity deletion both use the claim
+/// token to fence exact release and settlement when an old owner resumes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PairingCompletionLease {
+    owner_id: uuid::Uuid,
+    claim_id: uuid::Uuid,
+    expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct ClaimedPairingCompletion {
+    completion: PendingPairingCompletion,
+    lease: PairingCompletionLease,
 }
 
 /// Durable metadata for one identity binding written by pairing consume —
@@ -126,6 +154,29 @@ struct PairedActorRecord {
     actor_kind: String,
     external_actor_id: String,
     user_id: UserId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    binding_epoch: Option<ExternalActorBindingEpoch>,
+}
+
+/// One durable user-scoped disconnect transaction.
+///
+/// Actor records stay attached until identity deletion succeeds. That makes
+/// every earlier cleanup retryable and keeps the transaction visible to
+/// issue/consume, while the lease fences concurrent workers at the final
+/// identity commit point.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingUnpairTransaction {
+    transaction_id: uuid::Uuid,
+    user_id: UserId,
+    actors: Vec<PairedActorRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease: Option<PairingCompletionLease>,
+}
+
+enum PendingUnpairClaim {
+    Claimed(PairingCompletionLease),
+    Busy,
+    Settled,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +184,12 @@ struct PairingSnapshot {
     pairings: Vec<ChannelPairingRecord>,
     completions: Vec<PendingPairingCompletion>,
     paired_actors: Vec<PairedActorRecord>,
+    /// Rollback-compatible legacy actor cleanup intents. New writes migrate
+    /// these into `pending_unpair_transactions`.
+    #[serde(default)]
+    pending_unpairs: Vec<PairedActorRecord>,
+    #[serde(default)]
+    pending_unpair_transactions: Vec<PendingUnpairTransaction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -408,6 +465,9 @@ fn bound_snapshot(snapshot: &mut PairingSnapshot) {
         let excess = snapshot.pairings.len() - PAIRING_SNAPSHOT_CAP;
         snapshot.pairings.drain(0..excess);
     }
+    // Unlike replaceable pairing codes, these collections carry live work or
+    // cleanup authority and must never be evicted here. Their admission paths
+    // reject new records at the cap.
 }
 
 /// The generic pairing service for one `WebGeneratedCode` channel extension.
@@ -416,6 +476,11 @@ fn bound_snapshot(snapshot: &mut PairingSnapshot) {
 /// id itself (the same provider the parked `BlockedAuth` requirement names in
 /// the extension's account-setup descriptor).
 pub struct ChannelPairingService {
+    completion_owner_id: uuid::Uuid,
+    #[cfg(any(test, feature = "test-support"))]
+    completion_lease_duration: Duration,
+    #[cfg(any(test, feature = "test-support"))]
+    completion_renewal_interval: std::time::Duration,
     tenant_id: TenantId,
     agent_id: AgentId,
     project_id: Option<ProjectId>,
@@ -447,15 +512,10 @@ impl std::fmt::Debug for ChannelPairingService {
     }
 }
 
-pub struct ChannelPairingServiceParts {
-    pub tenant_id: TenantId,
-    pub agent_id: AgentId,
-    pub project_id: Option<ProjectId>,
-    pub extension_id: ExtensionId,
-    pub connection_notices: ChannelConnectionNoticePolicy,
-    pub connection_requirement: ChannelConnectionRequirement,
-    pub deep_link_template: Option<String>,
-    pub inbound_code_prefixes: Vec<String>,
+/// Runtime ports used by one manifest-declared channel pairing service.
+/// Manifest data stays in the canonical [`ExtensionAccountSetupDescriptor`]
+/// instead of being mirrored into another constructor DTO.
+pub struct ChannelPairingServiceDependencies {
     pub store: Arc<FilesystemChannelPairingStore>,
     pub installation: Arc<dyn ChannelPairingInstallationSource>,
     pub template_values: Arc<dyn ChannelPairingTemplateValues>,
@@ -465,606 +525,7 @@ pub struct ChannelPairingServiceParts {
     pub direct_targets: Arc<dyn ChannelPairingDirectTargetStore>,
 }
 
-impl ChannelPairingService {
-    pub fn new(parts: ChannelPairingServiceParts) -> Self {
-        Self {
-            tenant_id: parts.tenant_id,
-            agent_id: parts.agent_id,
-            project_id: parts.project_id,
-            extension_id: parts.extension_id,
-            connection_notices: parts.connection_notices,
-            connection_requirement: parts.connection_requirement,
-            deep_link_template: parts.deep_link_template,
-            inbound_code_prefixes: parts.inbound_code_prefixes,
-            store: parts.store,
-            installation: parts.installation,
-            template_values: parts.template_values,
-            identity: parts.identity,
-            continuation: parts.continuation,
-            conversation_actor_pairings: parts.conversation_actor_pairings,
-            direct_targets: parts.direct_targets,
-        }
-    }
-
-    pub fn extension_id(&self) -> &ExtensionId {
-        &self.extension_id
-    }
-
-    pub fn connection_notices(&self) -> &ChannelConnectionNoticePolicy {
-        &self.connection_notices
-    }
-
-    pub fn connection_requirement(&self) -> &ChannelConnectionRequirement {
-        &self.connection_requirement
-    }
-
-    async fn resolve_deep_link(
-        &self,
-        code: &ChannelPairingCode,
-    ) -> Result<Option<String>, ChannelPairingError> {
-        let Some(template) = &self.deep_link_template else {
-            return Ok(None);
-        };
-        let mut link = template.clone();
-        link = link.replace("{code}", code.as_str());
-        for handle in template_handles(template) {
-            let Some(value) = self
-                .template_values
-                .template_value(&handle)
-                .await
-                .map_err(store_unavailable)?
-            else {
-                return Ok(None);
-            };
-            link = link.replace(&format!("{{{handle}}}"), &value);
-        }
-        // A template placeholder without a configured value means setup is
-        // incomplete — presenting a broken link would strand the user, so the
-        // issue falls back to code-only presentation.
-        if link.contains('{') {
-            return Ok(None);
-        }
-        Ok(Some(link))
-    }
-
-    async fn issue_for_record(
-        &self,
-        record: &ChannelPairingRecord,
-    ) -> Result<ChannelPairingIssue, ChannelPairingError> {
-        Ok(ChannelPairingIssue {
-            code: record.code.clone(),
-            deep_link: self.resolve_deep_link(&record.code).await?,
-            expires_at: record.expires_at,
-        })
-    }
-
-    /// Mint (or rotate) the caller's pairing code. Fails closed when the
-    /// channel is not installed for the caller — no code is ever minted first.
-    pub async fn issue_or_rotate(
-        &self,
-        caller: &UserId,
-    ) -> Result<ChannelPairingIssue, ChannelPairingError> {
-        let installation_id = self
-            .installation
-            .current_installation(caller)
-            .await
-            .map_err(store_unavailable)?
-            .ok_or(ChannelPairingError::NotConfigured)?;
-        let now = Utc::now();
-        let record = ChannelPairingRecord {
-            code: mint_pairing_code()?,
-            user_id: caller.clone(),
-            installation_id,
-            created_at: now,
-            expires_at: now + Duration::minutes(PAIRING_TTL_MINUTES),
-            consumed_at: None,
-        };
-        let stored = record.clone();
-        self.store
-            .update_snapshot(move |mut snapshot| {
-                // Rotation: at most one live code per user.
-                snapshot.pairings.retain(|existing| {
-                    existing.user_id != stored.user_id || existing.consumed_at.is_some()
-                });
-                snapshot.pairings.push(stored.clone());
-                (snapshot, ())
-            })
-            .await?;
-        self.issue_for_record(&record).await
-    }
-
-    pub async fn status_for(
-        &self,
-        caller: &UserId,
-    ) -> Result<ChannelPairingStatus, ChannelPairingError> {
-        let installation_id = self
-            .installation
-            .current_installation(caller)
-            .await
-            .map_err(store_unavailable)?;
-        let connected = match &installation_id {
-            Some(_installation_id) => self
-                .direct_targets
-                .is_connected(&self.extension_id, caller)
-                .await
-                .map_err(store_unavailable)?,
-            None => false,
-        };
-        let pending = match (&installation_id, connected) {
-            (Some(installation_id), false) => {
-                let snapshot = self.store.read_snapshot().await?;
-                let record = snapshot
-                    .pairings
-                    .iter()
-                    .find(|record| {
-                        &record.user_id == caller
-                            && record.is_live(Utc::now())
-                            && &record.installation_id == installation_id
-                    })
-                    .cloned();
-                match record {
-                    Some(record) => Some(self.issue_for_record(&record).await?),
-                    None => None,
-                }
-            }
-            _ => None,
-        };
-        Ok(ChannelPairingStatus { connected, pending })
-    }
-
-    /// Materialize the current pairing challenge without rotating a still-live
-    /// code. Projection and channel-delivery replays therefore observe the
-    /// same durable challenge as the WebUI pairing panel.
-    pub async fn pending_or_issue(
-        &self,
-        caller: &UserId,
-    ) -> Result<Option<ChannelPairingIssue>, ChannelPairingError> {
-        let status = self.status_for(caller).await?;
-        if status.connected {
-            return Ok(None);
-        }
-        match status.pending {
-            Some(issue) => Ok(Some(issue)),
-            None => self.issue_or_rotate(caller).await.map(Some),
-        }
-    }
-
-    /// Consume a code arriving over the verified webhook from a direct
-    /// conversation.
-    ///
-    /// Ordering is claim-first: the code is atomically consumed (single
-    /// winner) BEFORE any identity/target side effect, so two concurrent
-    /// consumers of one code can never both bind. Completion (peer target +
-    /// continuation dispatch) is idempotently repairable: a sender already
-    /// bound to the code's user re-runs the completion effects — including on
-    /// an already-consumed code — so a consume that failed after the claim is
-    /// recovered by re-sending a code instead of stranding the blocked run.
-    pub async fn consume(
-        &self,
-        authenticated_installation_id: &AdapterInstallationId,
-        raw_code: &str,
-        actor_kind: &str,
-        external_actor_id: &str,
-        conversation_space_id: Option<&str>,
-        conversation_id: &str,
-    ) -> Result<ChannelPairingConsumeOutcome, ChannelPairingError> {
-        let Ok(code) = ChannelPairingCode::new(raw_code) else {
-            return Ok(ChannelPairingConsumeOutcome::ExpiredOrUnknown);
-        };
-        let snapshot = self.store.read_snapshot().await?;
-        let Some(record) = snapshot
-            .pairings
-            .iter()
-            .find(|record| record.code == code)
-            .cloned()
-        else {
-            return Ok(ChannelPairingConsumeOutcome::ExpiredOrUnknown);
-        };
-        if &record.installation_id != authenticated_installation_id {
-            return Ok(ChannelPairingConsumeOutcome::ExpiredOrUnknown);
-        }
-        match self
-            .bound_user_for(&record.installation_id, external_actor_id)
-            .await?
-        {
-            Some(existing) if existing == record.user_id => {
-                // Repair path: burn the code if it is still live (whoever
-                // wins — the sender is already bound), then re-run completion.
-                let _already_burned = self.claim(&code).await?;
-                self.complete_pairing(
-                    &record,
-                    actor_kind,
-                    external_actor_id,
-                    conversation_space_id,
-                    conversation_id,
-                )
-                .await?;
-                return Ok(ChannelPairingConsumeOutcome::AlreadyPairedSameUser {
-                    user_id: existing,
-                });
-            }
-            Some(_other) => {
-                if !record.is_live(Utc::now()) {
-                    return Ok(ChannelPairingConsumeOutcome::ExpiredOrUnknown);
-                }
-                // Refusal keeps the live code intact for its owner.
-                return Ok(ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser);
-            }
-            None => {}
-        }
-        // Single-consumer claim BEFORE identity/target writes: exactly one
-        // concurrent consumer of a live code proceeds past this point.
-        let Some(record) = self.claim(&code).await? else {
-            return Ok(ChannelPairingConsumeOutcome::ExpiredOrUnknown);
-        };
-        match self
-            .identity
-            .bind_user(
-                &self.extension_id,
-                &record.installation_id,
-                external_actor_id,
-                record.user_id.clone(),
-            )
-            .await
-            .map_err(store_unavailable)?
-        {
-            ChannelPairingIdentityBindOutcome::Bound => {}
-            ChannelPairingIdentityBindOutcome::AlreadyBoundToOtherUser => {
-                return Ok(ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser);
-            }
-        }
-        self.complete_pairing(
-            &record,
-            actor_kind,
-            external_actor_id,
-            conversation_space_id,
-            conversation_id,
-        )
-        .await?;
-        Ok(ChannelPairingConsumeOutcome::Paired {
-            user_id: record.user_id,
-        })
-    }
-
-    /// Commit the idempotent completion intent shared by first-time pairing
-    /// and the repair path, then publish the DM target. The product-owned
-    /// interceptor dispatches and settles this durable intent before the
-    /// provider ingress acknowledgement is returned.
-    async fn complete_pairing(
-        &self,
-        record: &ChannelPairingRecord,
-        actor_kind: &str,
-        external_actor_id: &str,
-        conversation_space_id: Option<&str>,
-        conversation_id: &str,
-    ) -> Result<(), ChannelPairingError> {
-        let candidate = PendingPairingCompletion {
-            dispatch_id: AuthFlowId::new(),
-            installation_id: record.installation_id.clone(),
-            user_id: record.user_id.clone(),
-            conversation_space_id: conversation_space_id.map(str::to_string),
-            conversation_id: conversation_id.to_string(),
-            actor_kind: actor_kind.to_string(),
-            external_actor_id: external_actor_id.to_string(),
-            emitted_at: Utc::now(),
-        };
-        let provider_user_id = self
-            .identity
-            .binding_key(&record.installation_id, external_actor_id);
-        let paired_actor = PairedActorRecord {
-            provider_user_id,
-            installation_id: record.installation_id.clone(),
-            actor_kind: actor_kind.to_string(),
-            external_actor_id: external_actor_id.to_string(),
-            user_id: record.user_id.clone(),
-        };
-        let completion = self
-            .store
-            .update_snapshot(move |mut snapshot| {
-                let completion = match snapshot.completions.iter_mut().find(|existing| {
-                    existing.installation_id == candidate.installation_id
-                        && existing.user_id == candidate.user_id
-                }) {
-                    Some(existing) => {
-                        existing.conversation_space_id = candidate.conversation_space_id.clone();
-                        existing.conversation_id = candidate.conversation_id.clone();
-                        existing.actor_kind = candidate.actor_kind.clone();
-                        existing.external_actor_id = candidate.external_actor_id.clone();
-                        existing.clone()
-                    }
-                    None => {
-                        snapshot.completions.push(candidate.clone());
-                        candidate.clone()
-                    }
-                };
-                snapshot
-                    .paired_actors
-                    .retain(|existing| existing.provider_user_id != paired_actor.provider_user_id);
-                snapshot.paired_actors.push(paired_actor.clone());
-                (snapshot, completion)
-            })
-            .await?;
-        self.persist_dm_target(&completion).await
-    }
-
-    async fn finish_pending_for_user(&self, user_id: &UserId) -> Result<(), ChannelPairingError> {
-        let snapshot = self.store.read_snapshot().await?;
-        let pending: Vec<_> = snapshot
-            .completions
-            .iter()
-            .filter(|completion| &completion.user_id == user_id)
-            .cloned()
-            .collect();
-        for completion in pending {
-            self.finish_pending_completion(completion).await?;
-        }
-        Ok(())
-    }
-
-    async fn finish_pending_completion(
-        &self,
-        completion: PendingPairingCompletion,
-    ) -> Result<(), ChannelPairingError> {
-        self.finish_pending_completion_with(
-            completion,
-            self.tenant_id.clone(),
-            Arc::clone(&self.continuation),
-        )
-        .await
-    }
-
-    async fn finish_pending_completion_with(
-        &self,
-        completion: PendingPairingCompletion,
-        tenant_id: TenantId,
-        continuation: Arc<dyn ProductAuthContinuationDispatcher>,
-    ) -> Result<(), ChannelPairingError> {
-        // Boxed: the continuation fan-out resumes parked runs through the
-        // turn coordinator — a deep async subtree relative to this caller.
-        Box::pin(self.dispatch_pairing_completion_with(&completion, tenant_id, continuation))
-            .await?;
-        let settled_dispatch_id = completion.dispatch_id;
-        let settled_installation_id = completion.installation_id.clone();
-        let settled_user_id = completion.user_id.clone();
-        self.store
-            .update_snapshot(move |mut snapshot| {
-                snapshot.completions.retain(|existing| {
-                    existing.dispatch_id != settled_dispatch_id
-                        || existing.installation_id != settled_installation_id
-                        || existing.user_id != settled_user_id
-                });
-                (snapshot, ())
-            })
-            .await
-    }
-
-    async fn persist_dm_target(
-        &self,
-        completion: &PendingPairingCompletion,
-    ) -> Result<(), ChannelPairingError> {
-        self.direct_targets
-            .upsert(
-                &self.extension_id,
-                &completion.user_id,
-                &completion.external_actor_id,
-                completion.conversation_space_id.as_deref(),
-                &completion.conversation_id,
-            )
-            .await
-            .map_err(store_unavailable)
-    }
-
-    /// Unpair the caller: bindings and peer targets removed, pending code
-    /// invalidated. Only this user is affected; history is retained.
-    ///
-    /// Deliberately independent of the current installation: an admin
-    /// clearing the deployment must not orphan a user's durable bindings —
-    /// those would silently resurrect the connection when the same channel is
-    /// reconfigured even though the user disconnected.
-    pub async fn unpair(&self, caller: &UserId) -> Result<(), ChannelPairingError> {
-        self.identity
-            .delete_user_bindings(&self.extension_id, caller)
-            .await
-            .map_err(store_unavailable)?;
-        let adapter_kind =
-            AdapterKind::new(self.extension_id.as_str()).map_err(store_unavailable)?;
-        self.direct_targets
-            .delete(&self.extension_id, caller)
-            .await
-            .map_err(store_unavailable)?;
-        let caller_owned = caller.clone();
-        let cleanup: Vec<PairedActorRecord> = self
-            .store
-            .update_snapshot(move |mut snapshot| {
-                snapshot.pairings.retain(|record| {
-                    record.user_id != caller_owned || record.consumed_at.is_some()
-                });
-                snapshot
-                    .completions
-                    .retain(|completion| completion.user_id != caller_owned);
-                let (removed_actors, kept): (Vec<_>, Vec<_>) = snapshot
-                    .paired_actors
-                    .drain(..)
-                    .partition(|actor| actor.user_id == caller_owned);
-                snapshot.paired_actors = kept;
-                (snapshot, removed_actors)
-            })
-            .await?;
-        // Conversation-actor pairing cleanup (disconnect parity with the
-        // OAuth channel lane): the workflow paired this external actor to the caller at
-        // inbound; leaving that pairing behind re-attaches a re-paired user
-        // to their old thread — and any run parked on it. The generic
-        // identity store carries no binding epoch, so ownership is checked by
-        // user id alone (accepted delta from the epoch-guarded host-state
-        // shape this generalizes).
-        for actor in cleanup {
-            let actor_ref = ExternalActorRef::new(&actor.actor_kind, &actor.external_actor_id)
-                .map_err(store_unavailable)?;
-            let installation_id =
-                ironclaw_conversations::AdapterInstallationId::new(actor.installation_id.as_str())
-                    .map_err(store_unavailable)?;
-            self.conversation_actor_pairings
-                .unpair_external_actor_if_owned_by(
-                    &self.tenant_id,
-                    &adapter_kind,
-                    &installation_id,
-                    &actor_ref,
-                    &ExpectedExternalActorOwner {
-                        user_id: caller.clone(),
-                        binding_epoch: None,
-                    },
-                )
-                .await
-                .map_err(store_unavailable)?;
-        }
-        Ok(())
-    }
-
-    /// Atomically consume the code (single winner): the CAS snapshot update
-    /// marks it consumed and returns the pre-claim record exactly once.
-    async fn claim(
-        &self,
-        code: &ChannelPairingCode,
-    ) -> Result<Option<ChannelPairingRecord>, ChannelPairingError> {
-        let code = code.clone();
-        self.store
-            .update_snapshot(move |mut snapshot| {
-                let now = Utc::now();
-                let mut claimed = None;
-                for record in snapshot.pairings.iter_mut() {
-                    if record.code == code && record.is_live(now) {
-                        let pre_claim = record.clone();
-                        record.consumed_at = Some(now);
-                        claimed = Some(pre_claim);
-                        break;
-                    }
-                }
-                (snapshot, claimed)
-            })
-            .await
-    }
-
-    async fn bound_user_for(
-        &self,
-        installation_id: &AdapterInstallationId,
-        external_actor_id: &str,
-    ) -> Result<Option<UserId>, ChannelPairingError> {
-        self.identity
-            .resolve_user(&self.extension_id, installation_id, external_actor_id)
-            .await
-            .map_err(store_unavailable)
-    }
-
-    /// Emit the standard lifecycle continuation. Pairing is the final
-    /// manifest-declared setup step, so activation is completed server-side
-    /// before blocked runs resume; no browser or model-issued second action is
-    /// part of the product state machine.
-    async fn dispatch_pairing_completion_with(
-        &self,
-        completion: &PendingPairingCompletion,
-        tenant_id: TenantId,
-        continuation: Arc<dyn ProductAuthContinuationDispatcher>,
-    ) -> Result<(), ChannelPairingError> {
-        let provider = AuthProviderId::new(self.extension_id.as_str()).map_err(|error| {
-            ChannelPairingError::ContinuationDispatch {
-                reason: error.to_string(),
-            }
-        })?;
-        let event = AuthContinuationEvent {
-            flow_id: completion.dispatch_id,
-            scope: AuthProductScope::new(
-                ResourceScope {
-                    tenant_id,
-                    user_id: completion.user_id.clone(),
-                    agent_id: Some(self.agent_id.clone()),
-                    project_id: self.project_id.clone(),
-                    mission_id: None,
-                    thread_id: None,
-                    invocation_id: InvocationId::new(),
-                },
-                AuthSurface::Callback,
-            ),
-            continuation: AuthContinuationRef::LifecycleActivation {
-                package_ref: ironclaw_auth::LifecyclePackageRef::new(self.extension_id.as_str())
-                    .map_err(|error| ChannelPairingError::ContinuationDispatch {
-                        reason: error.to_string(),
-                    })?,
-            },
-            provider,
-            credential_account_id: None,
-            emitted_at: completion.emitted_at,
-        };
-        continuation
-            .dispatch_auth_continuation(event)
-            .await
-            .map_err(|error| ChannelPairingError::ContinuationDispatch {
-                reason: error.to_string(),
-            })
-    }
-
-    /// Re-dispatch pairing completion through the caller's real turn world.
-    /// Integration groups execute runs in a shared turn store created after
-    /// this composed service, unlike production where both use one store.
-    /// Test-only: zero production bytes.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn finish_pending_for_user_with_for_test(
-        &self,
-        user_id: &UserId,
-        tenant_id: TenantId,
-        continuation: Arc<dyn ProductAuthContinuationDispatcher>,
-    ) -> Result<(), ChannelPairingError> {
-        let snapshot = self.store.read_snapshot().await?;
-        let pending: Vec<_> = snapshot
-            .completions
-            .iter()
-            .filter(|completion| &completion.user_id == user_id)
-            .cloned()
-            .collect();
-        for completion in pending {
-            self.finish_pending_completion_with(
-                completion,
-                tenant_id.clone(),
-                Arc::clone(&continuation),
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    /// Settle pending completions through the service's configured dispatcher.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn finish_pending_for_user_for_test(
-        &self,
-        user_id: &UserId,
-    ) -> Result<(), ChannelPairingError> {
-        self.finish_pending_for_user(user_id).await
-    }
-
-    /// Inspect durable completion identities without exposing the private
-    /// persistence snapshot shape to composition tests.
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn pending_completion_dispatch_ids_for_test(
-        &self,
-    ) -> Result<Vec<AuthFlowId>, ChannelPairingError> {
-        Ok(self
-            .store
-            .read_snapshot()
-            .await?
-            .completions
-            .into_iter()
-            .map(|completion| completion.dispatch_id)
-            .collect())
-    }
-
-    /// Replace the continuation dispatcher in composition-level fault tests.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn replace_continuation_for_test(
-        &mut self,
-        continuation: Arc<dyn ProductAuthContinuationDispatcher>,
-    ) {
-        self.continuation = continuation;
-    }
-}
+mod service;
 
 /// Composition-built registry of pairing services keyed by extension id.
 /// The factory populates it for every account-setup descriptor declaring the
@@ -1096,6 +557,71 @@ impl ChannelPairingRegistry {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         services.get(extension_id).cloned()
+    }
+
+    /// Reconcile all registered completion outboxes without holding the
+    /// synchronous registry lock across async persistence or dispatch.
+    pub async fn reconcile_pending_completions(&self) -> Result<(), ChannelPairingError> {
+        let services: Vec<_> = {
+            let services = self
+                .services
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            services.values().cloned().collect()
+        };
+        for service in services {
+            service.reconcile_pending_completions().await?;
+        }
+        Ok(())
+    }
+}
+
+/// Pairing-strategy channels resolve verified actors through the same durable
+/// record that owns unpair fencing. Returning its generation ensures the
+/// canonical conversation pairing cannot silently discard the exact-owner
+/// epoch on the actor's next ordinary inbound message.
+#[async_trait]
+impl ProductActorUserResolver for ChannelPairingService {
+    async fn resolve_product_actor_user(
+        &self,
+        request: ProductActorUserResolutionRequest,
+    ) -> Result<Option<ResolvedProductActorUser>, ProductWorkflowError> {
+        if request.adapter_id.as_str() != self.extension_id.as_str() {
+            return Ok(None);
+        }
+        let user_id = self
+            .identity
+            .resolve_user(
+                &self.extension_id,
+                &request.installation_id,
+                request.external_actor_ref.id(),
+            )
+            .await
+            .map_err(|error| ProductWorkflowError::BindingResolutionFailed { reason: error })?;
+        let Some(user_id) = user_id else {
+            return Ok(None);
+        };
+        let snapshot = self.store.read_snapshot().await.map_err(|error| {
+            ProductWorkflowError::BindingResolutionFailed {
+                reason: error.to_string(),
+            }
+        })?;
+        let binding_epoch = snapshot
+            .paired_actors
+            .iter()
+            .find(|actor| {
+                actor.installation_id == request.installation_id
+                    && actor.actor_kind == request.external_actor_ref.kind()
+                    && actor.external_actor_id == request.external_actor_ref.id()
+                    && actor.user_id == user_id
+            })
+            .and_then(|actor| actor.binding_epoch.clone());
+        Ok(Some(match binding_epoch {
+            Some(binding_epoch) => {
+                ResolvedProductActorUser::with_binding_epoch(user_id, binding_epoch)
+            }
+            None => ResolvedProductActorUser::new(user_id),
+        }))
     }
 }
 

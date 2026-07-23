@@ -24,8 +24,9 @@ use ironclaw_extension_host::ingress::{
 use ironclaw_host_api::{SecretHandle, TenantId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ChannelInboundClassification, ExternalConversationRef, ExternalEventId,
-    NormalizedInboundMessage, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductSourceChannel, ProtocolAuthEvidence,
+    ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
+    ProductSourceChannel, ProtocolAuthEvidence, parse_interaction_resolution_text,
+    strip_wrapping_inline_code,
 };
 use ironclaw_product_workflow::{
     ChannelInboundSurfaceOutcome, ChannelInboundSurfaceRejectedAdmission,
@@ -67,13 +68,6 @@ pub trait PostAdmissionObserver: Send + Sync {
     ) {
     }
 }
-
-/// Optional protocol-specific reclassification of a normalized message into
-/// a richer channel payload classification (today: gate-resolution replies like
-/// `approve` / `deny gate:<ref>` / `auth deny <ref>`). Transitional debt:
-/// deleted when gate replies become a host-generic channel concern.
-pub type InboundPayloadClassifier =
-    dyn Fn(&NormalizedInboundMessage) -> Option<ChannelInboundClassification> + Send + Sync;
 
 /// How the sink mints the trusted auth claim for admitted messages —
 /// mirrors the ingress verification recipe the router executed.
@@ -305,8 +299,6 @@ pub struct ChannelInboundSinkConfig {
     pub adapter_id: ProductAdapterId,
     /// Auth-claim shape matching the executed verification recipe.
     pub evidence: VerifiedEvidenceMint,
-    /// Optional protocol-specific payload reclassification (gate replies).
-    pub classifier: Option<Arc<InboundPayloadClassifier>>,
     /// The ProductSurface channel admission door: durable idempotency ledger →
     /// identity/conversation binding → turn submission.
     pub surface: Arc<dyn ProductSurface>,
@@ -472,6 +464,34 @@ impl InboundSink for GenericChannelInboundSink {
             }
         }
         let evidence = self.config.evidence.mint(&installation_id);
+        // Gate-resolution commands are part of the channel-neutral product
+        // grammar advertised by the shared delivery driver. Every normalized
+        // channel message crosses this sink, so classify them here exactly
+        // once instead of relying on an optional vendor registration that can
+        // silently diverge between Slack, Telegram, and future channels.
+        let interaction = parse_interaction_resolution_text(
+            strip_wrapping_inline_code(&message.text),
+            message.trigger,
+        )
+        .map_err(Self::permanent)?;
+        let classification = match interaction {
+            Some(ProductInboundPayload::ApprovalResolution(payload)) => {
+                Some(ChannelInboundClassification::ApprovalResolution(payload))
+            }
+            Some(ProductInboundPayload::ScopedApprovalResolution(payload)) => Some(
+                ChannelInboundClassification::ScopedApprovalResolution(payload),
+            ),
+            Some(ProductInboundPayload::AuthResolution(payload)) => {
+                Some(ChannelInboundClassification::AuthResolution(payload))
+            }
+            Some(ProductInboundPayload::NoOp) => Some(ChannelInboundClassification::NoOp),
+            Some(_) => {
+                return Err(Self::permanent(
+                    "channel interaction parser returned a non-interaction payload",
+                ));
+            }
+            None => None,
+        };
         // Durable dedupe + admission commit (idempotency ledger keyed by
         // installation + external event fingerprint) plus identity/
         // conversation binding and turn submission — synchronous, so the
@@ -486,11 +506,7 @@ impl InboundSink for GenericChannelInboundSink {
             installation_id: installation,
             evidence,
             received_at: Utc::now(),
-            classification: self
-                .config
-                .classifier
-                .as_ref()
-                .and_then(|classify| classify(&message)),
+            classification,
             message,
         };
         let response = Box::pin(self.config.surface.execute_command(
@@ -789,12 +805,14 @@ mod serve_mount {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ironclaw_host_api::UserId;
     use ironclaw_product_adapters::{
-        ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
-        ProductInboundPayload, ProductTriggerReason, TrustedInboundContext, UserMessagePayload,
+        ChannelAdapter, ExternalActorRef, ExternalConversationRef, ExternalEventId, InboundOutcome,
+        NormalizedInboundMessage, ParsedProductInbound, ProductInboundPayload,
+        ProductTriggerReason, TrustedInboundContext, UserMessagePayload, VerifiedInbound,
     };
     use ironclaw_product_workflow::{
         ChannelInboundSurfaceAdmission, ChannelInboundSurfaceOutcome, ProductOperationId,
@@ -808,17 +826,26 @@ mod tests {
 
     struct CountingSurface {
         submissions: AtomicUsize,
+        payloads: Mutex<Vec<ProductInboundPayload>>,
     }
 
     impl CountingSurface {
         fn new() -> Self {
             Self {
                 submissions: AtomicUsize::new(0),
+                payloads: Mutex::new(Vec::new()),
             }
         }
 
         fn submit_count(&self) -> usize {
             self.submissions.load(Ordering::SeqCst)
+        }
+
+        fn payloads(&self) -> Vec<ProductInboundPayload> {
+            match self.payloads.lock() {
+                Ok(payloads) => payloads.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
         }
     }
 
@@ -841,6 +868,26 @@ mod tests {
                 ));
             };
             self.submissions.fetch_add(1, Ordering::SeqCst);
+            let payload = match request.classification {
+                Some(classification) => classification.into(),
+                None => ProductInboundPayload::UserMessage(
+                    UserMessagePayload::new(
+                        request.message.text.clone(),
+                        request
+                            .message
+                            .attachments
+                            .iter()
+                            .map(|attachment| attachment.descriptor.clone())
+                            .collect(),
+                        request.message.trigger,
+                    )
+                    .expect("user message payload"),
+                ),
+            };
+            match self.payloads.lock() {
+                Ok(mut payloads) => payloads.push(payload.clone()),
+                Err(poisoned) => poisoned.into_inner().push(payload.clone()),
+            }
             let ack = ProductInboundAck::Accepted {
                 accepted_message_ref: AcceptedMessageRef::new("msg:extension-ingress-test")
                     .expect("accepted message ref"),
@@ -859,14 +906,7 @@ mod tests {
                     request.message.event_id,
                     request.message.actor,
                     request.message.conversation,
-                    ProductInboundPayload::UserMessage(
-                        UserMessagePayload::new(
-                            request.message.text,
-                            Vec::new(),
-                            request.message.trigger,
-                        )
-                        .expect("user message payload"),
-                    ),
+                    payload,
                 )
                 .expect("parsed inbound"),
             )
@@ -978,7 +1018,6 @@ mod tests {
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
             surface: Arc::clone(&workflow) as Arc<dyn ProductSurface>,
             observer: None,
         })
@@ -989,6 +1028,110 @@ mod tests {
             ))),
         );
         (sink, workflow, outcomes)
+    }
+
+    fn one_normalized_message(
+        adapter: &dyn ChannelAdapter,
+        extension_id: &str,
+        installation_id: &str,
+        body: &[u8],
+    ) -> NormalizedInboundMessage {
+        let outcome = adapter
+            .inbound(VerifiedInbound {
+                extension_id,
+                installation_id,
+                body,
+                headers: &[],
+            })
+            .expect("shipping channel adapter must normalize the fixture");
+        let InboundOutcome::Messages(mut messages) = outcome else {
+            panic!("fixture must normalize to one channel message");
+        };
+        assert_eq!(messages.len(), 1);
+        messages.remove(0)
+    }
+
+    async fn admit_through_shipping_sink(
+        extension_id: &str,
+        installation_id: &str,
+        message: NormalizedInboundMessage,
+    ) -> Arc<CountingSurface> {
+        let surface = Arc::new(CountingSurface::new());
+        let sink = GenericChannelInboundSink::new(ChannelInboundSinkConfig {
+            adapter_id: ProductAdapterId::new(extension_id).expect("adapter id"),
+            evidence: VerifiedEvidenceMint::SharedSecretHeader {
+                header: "X-Test-Verified".to_string(),
+            },
+            surface: Arc::clone(&surface) as Arc<dyn ProductSurface>,
+            observer: None,
+        });
+        sink.admit(InboundAdmission {
+            extension_id: extension_id.to_string(),
+            installation_id: installation_id.to_string(),
+            message,
+        })
+        .await
+        .expect("normalized interaction reaches workflow");
+        surface
+    }
+
+    #[tokio::test]
+    async fn real_slack_and_telegram_normalizers_reach_shared_sink_as_auth_resolution() {
+        let slack_message = one_normalized_message(
+            &ironclaw_slack_extension::SlackChannelAdapter,
+            "slack",
+            "slack-install",
+            br#"{
+                "type":"event_callback",
+                "team_id":"T-A",
+                "api_app_id":"A-slack",
+                "event_id":"Ev-auth-deny-shared-sink",
+                "event":{
+                    "type":"message",
+                    "channel_type":"im",
+                    "user":"U123",
+                    "channel":"D123",
+                    "text":"`auth deny gate:auth-shared-sink`",
+                    "ts":"1710000000.000001"
+                }
+            }"#,
+        );
+        let telegram_message = one_normalized_message(
+            &ironclaw_telegram_extension::TelegramChannelAdapter::default(),
+            "telegram",
+            "telegram-install",
+            br#"{
+                "update_id":701,
+                "message":{
+                    "message_id":17,
+                    "date":1710000000,
+                    "text":"`auth deny gate:auth-shared-sink`",
+                    "from":{"id":9911,"is_bot":false,"first_name":"Ada"},
+                    "chat":{"id":8675309,"type":"private"}
+                }
+            }"#,
+        );
+
+        for (extension_id, installation_id, message) in [
+            ("slack", "slack-install", slack_message),
+            ("telegram", "telegram-install", telegram_message),
+        ] {
+            let workflow =
+                admit_through_shipping_sink(extension_id, installation_id, message).await;
+            let payloads = workflow.payloads();
+            assert_eq!(payloads.len(), 1);
+            let ProductInboundPayload::AuthResolution(payload) = &payloads[0] else {
+                panic!(
+                    "{extension_id} auth-deny must reach the workflow as AuthResolution, got {:?}",
+                    payloads[0]
+                );
+            };
+            assert_eq!(payload.auth_request_ref, "gate:auth-shared-sink");
+            assert_eq!(
+                payload.result,
+                ironclaw_product_adapters::AuthResolutionResult::Denied
+            );
+        }
     }
 
     struct FailingSink;
@@ -1128,7 +1271,6 @@ mod tests {
                 evidence: VerifiedEvidenceMint::SharedSecretHeader {
                     header: "X-Vendor-Secret".to_string(),
                 },
-                classifier: None,
                 surface: surface as Arc<dyn ProductSurface>,
                 observer: None,
             })
@@ -1172,7 +1314,6 @@ mod tests {
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
             surface: Arc::clone(&surface) as Arc<dyn ProductSurface>,
             observer: None,
         })

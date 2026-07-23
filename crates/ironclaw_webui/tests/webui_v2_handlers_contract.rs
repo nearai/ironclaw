@@ -25,9 +25,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::Utc;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{
-    ActivityId, AgentId, CapabilityId, ExtensionId, InstallationState, InvocationId, Outcome,
-    OutcomeRefs, ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef, RuntimeKind,
-    SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
+    ActivityId, AgentId, Blocked, CapabilityId, ExtensionId, GateRef, GateWaypoint, InvocationId,
+    Outcome, OutcomeRefs, ProjectId, Resolution, ResultPreviewMeta, ResultProgress, ResultRef,
+    RuntimeKind, SafeSummary, TenantId, TerminateHint, ThreadId, ToolVerdict, UserId,
 };
 use ironclaw_product_adapters::{
     AdapterInstallationId, CapabilityActivityStatusView, CapabilityActivityView,
@@ -40,20 +40,20 @@ use ironclaw_product_workflow::{
     ADMIN_USER_SET_ROLE_CAPABILITY_ID, ADMIN_USER_SET_STATUS_CAPABILITY_ID,
     ADMIN_USER_UPDATE_CAPABILITY_ID, ADMIN_USER_VIEW, ADMIN_USERS_VIEW, AUTOMATIONS_VIEW,
     AdminUserRecord, AdminUserRole, AdminUserSecretMeta, AdminUserStatus, CodexLoginStart,
-    EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_IMPORT_CAPABILITY_ID,
-    EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY_ID,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
-    FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY_ID,
-    LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LOGS_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, LlmActiveSelection, LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest,
-    LlmProbeResult, LlmProviderView, NearAiLoginRequest, NearAiLoginStart,
-    NearAiWalletLoginRequest, NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW,
-    OPERATOR_CONFIG_LIST_VIEW, OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID,
-    OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SETUP_RUN_CAPABILITY_ID, OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW,
-    OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY_ID,
-    OUTBOUND_PREFERENCES_VIEW, PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW,
-    PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
+    EXTENSION_IMPORT_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID, EXTENSION_REGISTRY_VIEW,
+    EXTENSION_REMOVE_CAPABILITY_ID, EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW,
+    EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
+    LLM_ACTIVE_SET_CAPABILITY_ID, LLM_CONFIG_VIEW, LLM_PROVIDER_DELETE_CAPABILITY_ID, LOGS_VIEW,
+    LifecyclePackageKind, LifecyclePackageRef, LifecyclePublicState, LlmActiveSelection,
+    LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
+    NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
+    OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY_ID, OPERATOR_CONFIG_VALIDATE_VIEW,
+    OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW, OPERATOR_SETUP_RUN_CAPABILITY_ID,
+    OPERATOR_SETUP_VIEW, OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW,
+    OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OUTBOUND_PREFERENCES_VIEW,
+    PROJECT_DELETE_CAPABILITY_ID, PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW,
+    PROJECT_MEMBER_ADD_CAPABILITY_ID, PROJECT_MEMBER_REMOVE_CAPABILITY_ID,
     PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY_ID,
     PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityInput, ProductOperationId,
     ProductOperationRequest, ProductOperationResponse, ProductSurface, ProjectFsEntry,
@@ -196,6 +196,13 @@ fn successful_resolution(activity_id: ActivityId) -> Resolution {
     })
 }
 
+fn blocked_auth_resolution(activity_id: ActivityId) -> Resolution {
+    Resolution::Blocked(Blocked::Auth(GateWaypoint::new(GateRef::from_uuid(
+        activity_id.as_uuid(),
+    ))))
+}
+
+type OperatorSetupCall = (Option<String>, Option<String>, bool, bool);
 type OperatorConfigSetCall = (String, Value);
 type LlmUpsertCall = (String, bool);
 type LlmActiveCall = (String, Option<String>);
@@ -309,6 +316,7 @@ struct StubServices {
     stall_global_auto_approve: Mutex<bool>,
     next_global_auto_approve_error: Mutex<Option<RebornServicesError>>,
     view_queries: Mutex<Vec<RebornViewQuery>>,
+    next_extensions_view: Mutex<Option<RebornExtensionListResponse>>,
     invoke_calls: Mutex<Vec<(CapabilityId, Value, ActivityId)>>,
     operation_calls: Mutex<Vec<ProductOperationRequest>>,
     next_operation_response: Mutex<Option<Result<ProductOperationResponse, RebornServicesError>>>,
@@ -385,6 +393,10 @@ impl StubServices {
         response: Result<ProductOperationResponse, RebornServicesError>,
     ) {
         *self.next_operation_response.lock().expect("lock") = Some(response);
+    }
+
+    fn set_extensions_view(&self, response: RebornExtensionListResponse) {
+        *self.next_extensions_view.lock().expect("lock") = Some(response);
     }
 
     fn fail_set_operator_config_key(&self, error: RebornServicesError) {
@@ -949,9 +961,15 @@ impl StubServices {
                 next_cursor: None,
             }),
             id if id == EXTENSIONS_VIEW.id => Ok(RebornViewPage {
-                payload: serde_json::to_value(RebornExtensionListResponse {
-                    extensions: vec![extension_info("google-calendar", true)],
-                })
+                payload: serde_json::to_value(
+                    self.next_extensions_view
+                        .lock()
+                        .expect("lock")
+                        .take()
+                        .unwrap_or_else(|| RebornExtensionListResponse {
+                            extensions: vec![extension_info("google-calendar", true)],
+                        }),
+                )
                 .expect("extensions payload"),
                 next_cursor: None,
             }),
@@ -1640,11 +1658,10 @@ fn operator_config_entry(key: String, value: Value) -> RebornOperatorConfigEntry
 fn extension_setup_response(package_ref: LifecyclePackageRef) -> RebornSetupExtensionResponse {
     RebornSetupExtensionResponse {
         package_ref,
-        phase: InstallationState::Unsupported,
+        phase: LifecyclePublicState::SetupNeeded,
         blockers: Vec::new(),
         payload: None,
         secrets: Vec::new(),
-        fields: Vec::new(),
         onboarding: None,
     }
 }
@@ -1656,19 +1673,14 @@ fn extension_info(id: &str, active: bool) -> RebornExtensionInfo {
         display_name: id.to_string(),
         runtime: "first_party".to_string(),
         description: format!("{id} extension"),
-        authenticated: true,
-        active,
         tools: Vec::new(),
-        needs_setup: !active,
-        has_auth: false,
         installation_state: if active {
-            InstallationState::Active
+            LifecyclePublicState::Active
         } else {
-            InstallationState::Installed
+            LifecyclePublicState::SetupNeeded
         },
         activation_error: None,
         version: Some("1.0.0".to_string()),
-        onboarding_state: None,
         onboarding: None,
         auth_accounts: Vec::new(),
         surfaces: Vec::new(),
@@ -5027,7 +5039,7 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
                 .uri("/api/webchat/v2/extensions/install")
                 .header("content-type", "application/json")
                 .body(Body::from(
-                    r#"{"package_ref":{"kind":"extension","id":"nearai-mcp"}}"#,
+                    r#"{"package_ref":{"kind":"extension","id":"google-calendar"}}"#,
                 ))
                 .expect("request"),
         )
@@ -5045,7 +5057,103 @@ async fn install_extension_invokes_lifecycle_capability_with_body_package_ref() 
     );
     assert_eq!(
         invoke_calls[0].1,
-        serde_json::json!({ "extension_id": "nearai-mcp" })
+        serde_json::json!({ "extension_id": "google-calendar" })
+    );
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, EXTENSIONS_VIEW.id);
+}
+
+#[tokio::test]
+async fn install_extension_accepts_auth_gate_only_after_setup_needed_read_back() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(blocked_auth_resolution(ActivityId::new())));
+    services.set_extensions_view(RebornExtensionListResponse {
+        extensions: vec![extension_info("google-calendar", false)],
+    });
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"package_ref":{"kind":"extension","id":"google-calendar"}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(body["success"], true);
+
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, EXTENSIONS_VIEW.id);
+}
+
+#[tokio::test]
+async fn install_extension_rejects_capability_success_without_exact_membership_readback() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/install")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"package_ref":{"kind":"extension","id":"github"}}"#,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = read_json(response).await;
+    assert_eq!(body["kind"], "service_unavailable");
+    assert_eq!(body["retryable"], true);
+    let queries = services.view_queries.lock().expect("lock").clone();
+    assert_eq!(queries.len(), 1);
+    assert_eq!(queries[0].view_id, EXTENSIONS_VIEW.id);
+}
+
+#[tokio::test]
+async fn install_extension_uses_client_gesture_idempotency_not_permanent_input_deduplication() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    for idempotency_key in ["install-gesture-one", "install-gesture-two"] {
+        services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/webchat/v2/extensions/install")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(
+                        r#"{{"package_ref":{{"kind":"extension","id":"google-calendar"}},"idempotency_key":"{idempotency_key}"}}"#,
+                    )))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let calls = services.invoke_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 2);
+    assert_ne!(
+        calls[0].2, calls[1].2,
+        "separate install gestures must never replay one permanent cached lifecycle outcome"
     );
 }
 
@@ -5203,7 +5311,7 @@ async fn import_extension_is_stripped_alongside_operator_routes() {
 }
 
 #[tokio::test]
-async fn activate_and_remove_extension_decode_path_package_id_to_lifecycle_paths() {
+async fn remove_extension_decodes_path_package_id_to_lifecycle_path() {
     let services = Arc::new(StubServices::default());
     services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let router = router_with(services.clone());
@@ -5220,24 +5328,12 @@ async fn activate_and_remove_extension_decode_path_package_id_to_lifecycle_paths
         .await
         .expect("oneshot");
 
-    assert_eq!(activate_response.status(), StatusCode::OK);
-    let activate_body = read_json(activate_response).await;
-    assert_eq!(activate_body["success"], true);
-    assert_eq!(activate_body["activated"], true);
-
-    let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
-    assert_eq!(invoke_calls.len(), 1);
-    assert_eq!(
-        invoke_calls[0].0,
-        CapabilityId::new(EXTENSION_ACTIVATE_CAPABILITY_ID).expect("capability id")
+    assert_eq!(activate_response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        services.invoke_calls.lock().expect("lock").is_empty(),
+        "the removed activate action must not reach the lifecycle capability path"
     );
-    assert_eq!(
-        invoke_calls[0].1,
-        serde_json::json!({ "extension_id": "google-calendar" })
-    );
-    drop(invoke_calls);
 
-    services.enqueue_invoke_response(Ok(successful_resolution(ActivityId::new())));
     let remove_response = router
         .oneshot(
             Request::builder()
@@ -5251,13 +5347,13 @@ async fn activate_and_remove_extension_decode_path_package_id_to_lifecycle_paths
 
     assert_eq!(remove_response.status(), StatusCode::OK);
     let invoke_calls = services.invoke_calls.lock().expect("lock").clone();
-    assert_eq!(invoke_calls.len(), 2);
+    assert_eq!(invoke_calls.len(), 1);
     assert_eq!(
-        invoke_calls[1].0,
+        invoke_calls[0].0,
         CapabilityId::new(EXTENSION_REMOVE_CAPABILITY_ID).expect("capability id")
     );
     assert_eq!(
-        invoke_calls[1].1,
+        invoke_calls[0].1,
         serde_json::json!({ "extension_id": "google-calendar" })
     );
 }
@@ -5282,7 +5378,7 @@ async fn get_extension_setup_queries_product_surface_view() {
     let body = read_json(response).await;
     assert_eq!(body["package_ref"]["id"], "telegram");
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported");
+    assert_eq!(body["phase"], "setup_needed");
 
     let queries = services.view_queries.lock().expect("lock");
     assert!(
@@ -5322,7 +5418,7 @@ async fn setup_extension_invokes_product_surface_capability() {
         "facade must echo the package id from the path",
     );
     assert_eq!(body["package_ref"]["kind"], "extension");
-    assert_eq!(body["phase"], "unsupported");
+    assert_eq!(body["phase"], "setup_needed");
     assert!(
         body.get("status").is_none(),
         "setup_extension must not expose legacy status aliases: {body}"

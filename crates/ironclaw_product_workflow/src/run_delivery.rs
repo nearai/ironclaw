@@ -45,10 +45,12 @@ mod gate_routes;
 mod lifecycle_events;
 mod observer;
 pub(crate) mod prompts;
+mod trigger_router;
 mod triggered;
 
 pub use lifecycle_events::{RunDeliveryEventHandler, RunDeliveryEventRouter};
 pub use observer::RunDeliveryObserver;
+pub use trigger_router::{TriggeredRunDeliveryChannel, TriggeredRunDeliveryRouter};
 pub use triggered::{
     CurrentDeliveryTarget, CurrentDeliveryTargetResolver, PreferenceTargetCodec,
     PreferenceTargetEncodeRequest, TriggeredRunDeliveryDriver, TriggeredRunDeliveryRequest,
@@ -169,6 +171,8 @@ pub enum RunDeliveryError {
     DeliveryFailed {
         failure_kind: ironclaw_outbound::DeliveryFailureKind,
     },
+    #[error("cleanup retraction was not delivered")]
+    CleanupNotDelivered,
     #[error("invalid projection ref: {reason}")]
     InvalidProjectionRef { reason: String },
 }
@@ -311,24 +315,38 @@ impl RunDeliveryServices {
         }
     }
 
-    /// Best-effort cleanup of an earlier delivery (`Cleanup` intent with a
-    /// `Retract` part).
+    /// Attempt cleanup of an earlier delivery (`Cleanup` intent with a
+    /// `Retract` part), returning `true` only when the provider reports the
+    /// retraction delivered.
     pub(crate) async fn retract_message(
         &self,
         scope: TurnScope,
         run_id: Option<TurnRunId>,
         message: DeliveredChannelMessage,
-    ) {
+    ) -> Result<bool, CoordinatedDeliveryError> {
+        Ok(matches!(
+            self.retract_message_outcome(scope, run_id, message, 0)
+                .await?,
+            CoordinatedDeliveryOutcome::Delivered { .. }
+        ))
+    }
+
+    pub(crate) async fn retract_message_outcome(
+        &self,
+        scope: TurnScope,
+        run_id: Option<TurnRunId>,
+        message: DeliveredChannelMessage,
+        attempt_ordinal: u32,
+    ) -> Result<CoordinatedDeliveryOutcome, CoordinatedDeliveryError> {
         let notice_ref = format!(
-            "retract-{}",
+            "retract-{}-attempt-{attempt_ordinal}",
             message
                 .vendor_message_ref
                 .chars()
                 .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
                 .collect::<String>()
         );
-        if let Err(error) = self
-            .coordinator
+        self.coordinator
             .deliver_notice(NoticeDeliveryRequest {
                 intent: DeliveryIntent::Cleanup,
                 scope,
@@ -342,12 +360,5 @@ impl RunDeliveryServices {
                 notice_ref,
             })
             .await
-        {
-            tracing::warn!(
-                target = "ironclaw::reborn::run_delivery",
-                %error,
-                "failed to retract channel prompt/status message"
-            );
-        }
     }
 }

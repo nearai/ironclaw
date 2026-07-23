@@ -16,14 +16,14 @@ use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, In
 use ironclaw_filesystem::InMemoryBackend;
 use ironclaw_product_adapters::{
     ExternalActorRef, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
-    ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductTriggerReason, ProductWorkflow,
+    ProductAdapterId, ProductTriggerReason,
 };
 use ironclaw_product_workflow::{
     ChannelConnectionNoticePolicy, ChannelPairingCode, ChannelPairingConsumeOutcome,
     ChannelPairingError, ChannelPairingInstallationSource, ChannelPairingInterception,
-    ChannelPairingInterceptor, ChannelPairingService, ChannelPairingServiceParts,
-    ChannelPairingTemplateValues, FilesystemChannelPairingStore,
+    ChannelPairingInterceptor, ChannelPairingService, ChannelPairingServiceDependencies,
+    ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor, FilesystemChannelPairingStore,
+    ProductSurface,
 };
 use tokio::sync::Notify;
 
@@ -229,15 +229,7 @@ impl RebornAuthContinuationDispatcher for FailOnceIdempotentFanout {
 
 struct UnexpectedWorkflow;
 
-#[async_trait]
-impl ProductWorkflow for UnexpectedWorkflow {
-    async fn submit_inbound(
-        &self,
-        _envelope: ProductInboundEnvelope,
-    ) -> Result<ProductInboundAck, ProductAdapterError> {
-        panic!("a pairing code must not enter ordinary turn admission")
-    }
-}
+impl ProductSurface for UnexpectedWorkflow {}
 
 #[derive(Default)]
 struct RecordingActorPairings {
@@ -331,11 +323,14 @@ fn fixture_with_prefixes(
         operator,
         extension_id.clone(),
     ));
-    let service = ChannelPairingService::new(ChannelPairingServiceParts {
-        tenant_id: tenant,
-        agent_id: ironclaw_host_api::AgentId::new("agent-a").expect("agent"),
-        project_id: None,
-        extension_id,
+    let descriptor = ExtensionAccountSetupDescriptor {
+        extension_id: extension_id.clone(),
+        auth_requirement: ironclaw_host_api::RuntimeCredentialAuthRequirement {
+            provider: ironclaw_host_api::VendorId::new(EXT).expect("vendor"),
+            setup: ironclaw_host_api::RuntimeCredentialAccountSetup::Pairing,
+            requester_extension: extension_id,
+            provider_scopes: Vec::new(),
+        },
         connection_notices: ChannelConnectionNoticePolicy::generic("Vendor X"),
         connection_requirement: ironclaw_product_workflow::ChannelConnectionRequirement {
             channel: EXT.to_string(),
@@ -346,28 +341,38 @@ fn fixture_with_prefixes(
             submit_label: "Connect".to_string(),
             error_message: "Invalid or expired pairing code.".to_string(),
         },
-        deep_link_template: deep_link_template.map(str::to_string),
-        inbound_code_prefixes: inbound_code_prefixes
+        connection_success_message: "Connected.".to_string(),
+        pairing_deep_link_template: deep_link_template.map(str::to_string),
+        pairing_inbound_code_prefixes: inbound_code_prefixes
             .iter()
             .map(|prefix| (*prefix).to_string())
             .collect(),
-        store,
-        installation: Arc::new(StaticInstallation(
-            installation.map(|id| AdapterInstallationId::new(id).expect("installation id")),
-        )),
-        template_values: Arc::new(StaticTemplateValues(template_values)),
-        identity: Arc::new(ComposedChannelPairingIdentityStore::new(
-            Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingStore>,
-            Arc::clone(&identity) as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
-            Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingDeleteStore>,
-        )),
-        continuation: Arc::clone(&dispatcher) as Arc<dyn RebornAuthContinuationDispatcher>,
-        conversation_actor_pairings: Arc::clone(&actor_pairings)
-            as Arc<dyn ConversationActorPairingService>,
-        direct_targets: Arc::new(ComposedChannelPairingDirectTargetStore::new(Arc::clone(
-            &dm_targets,
-        ))),
-    });
+    };
+    let service = ChannelPairingService::new(
+        tenant,
+        ironclaw_host_api::AgentId::new("agent-a").expect("agent"),
+        None,
+        descriptor,
+        ChannelPairingServiceDependencies {
+            store,
+            installation: Arc::new(StaticInstallation(
+                installation.map(|id| AdapterInstallationId::new(id).expect("installation id")),
+            )),
+            template_values: Arc::new(StaticTemplateValues(template_values)),
+            identity: Arc::new(ComposedChannelPairingIdentityStore::new(
+                Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingStore>,
+                Arc::clone(&identity)
+                    as Arc<dyn crate::provider_identity::RebornUserIdentityLookup>,
+                Arc::clone(&identity) as Arc<dyn RebornUserIdentityBindingDeleteStore>,
+            )),
+            continuation: Arc::clone(&dispatcher) as Arc<dyn RebornAuthContinuationDispatcher>,
+            conversation_actor_pairings: Arc::clone(&actor_pairings)
+                as Arc<dyn ConversationActorPairingService>,
+            direct_targets: Arc::new(ComposedChannelPairingDirectTargetStore::new(Arc::clone(
+                &dm_targets,
+            ))),
+        },
+    );
     Fixture {
         service,
         identity,
@@ -405,8 +410,7 @@ fn pairing_ingress(service: Arc<ChannelPairingService>) -> Arc<GenericChannelInb
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
-            workflow: Arc::new(UnexpectedWorkflow),
+            surface: Arc::new(UnexpectedWorkflow),
             observer: None,
         })
         .with_pairing(service as Arc<dyn ChannelPairingInterceptor>, None),
@@ -426,8 +430,7 @@ fn pairing_ingress_with_outcomes(
             evidence: VerifiedEvidenceMint::SharedSecretHeader {
                 header: "X-Vendor-Secret".to_string(),
             },
-            classifier: None,
-            workflow: Arc::new(UnexpectedWorkflow),
+            surface: Arc::new(UnexpectedWorkflow),
             observer: None,
         })
         .with_pairing(
@@ -1051,9 +1054,9 @@ async fn unpair_drops_bindings_target_codes_and_conversation_actor_pairings() {
     assert_eq!(unpairs.len(), 1);
     assert_eq!(unpairs[0].0, INSTALL);
     assert_eq!(unpairs[0].1, "u-1");
-    assert_eq!(
-        unpairs[0].2, None,
-        "generic identity store carries no epoch"
+    assert!(
+        unpairs[0].2.is_some(),
+        "pairing completion carries its durable exact-owner epoch into cleanup"
     );
 }
 

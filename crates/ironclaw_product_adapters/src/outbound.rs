@@ -1024,36 +1024,29 @@ pub enum AuthPromptChallengeKind {
     #[serde(rename = "oauth_url")]
     OAuthUrl,
     /// User pastes a secret string into the chat form. Wire value is
-    /// `manual_token` (via `rename_all = "snake_case"`): paste a secret. Covers
-    /// a GitHub PAT, an API key, AND a channel pairing code (e.g. Telegram): the
-    /// interaction modality — "paste a string" — is identical; what differs is
-    /// the resolve route, which rides in `connection` context (present for
-    /// channel pairing, absent for a stored-credential secret).
+    /// `manual_token` (via `rename_all = "snake_case"`): paste a credential
+    /// such as a GitHub PAT or API key.
     ManualToken,
     /// Host-issued channel pairing (WebGeneratedCode direction): the UI shows
     /// a code/deep-link panel and completion happens on the EXTERNAL side
     /// (e.g. Telegram `/start <code>`), then the run resumes server-side.
-    /// Nothing is pasted into IronClaw — the inverse of `ManualToken`'s
-    /// paste-a-code modality. Wire value is `pairing`.
+    /// Nothing is pasted into IronClaw. Wire value is `pairing`.
     Pairing,
     /// Other challenge kind (account selection, setup required, reauthorize).
     /// The UI should fall back to a generic "authentication required" card.
     Other,
 }
 
-/// Connection context for a channel-pairing challenge riding the `manual_token`
-/// modality. Present on an auth prompt when the paste is a pairing code that
-/// connects an inbound channel (e.g. Telegram), carrying the render copy and the
-/// resolve-route discriminator (`channel`) so one paste card serves both a
-/// stored-credential secret and a channel pairing code. Additive + serde-default
-/// so rows written before this field deserialize as `None`.
+/// Manifest-derived connection context for a channel authentication challenge.
+/// The strategy selects presentation while `channel` identifies the generic
+/// connection route. Additive + serde-default so older rows deserialize as
+/// `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ConnectionPromptContext {
-    /// Connectable channel id (e.g. `slack`). Doubles as the resolve-route
-    /// discriminator: "this paste is a pairing code for channel X".
+    /// Connectable channel id (e.g. `telegram`).
     pub channel: String,
-    /// Connect strategy wire value (e.g. `inbound_proof_code`).
+    /// Connect strategy wire value (e.g. `web_generated_code`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strategy: Option<String>,
     /// Backend-authored connect instructions for the pairing card.
@@ -1114,10 +1107,9 @@ pub struct AuthPromptView {
     /// Challenge expiry. Present when the auth flow has a bounded TTL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Channel-pairing connection context. Present only for a `manual_token`
-    /// challenge whose paste is a pairing code (channel connection), carrying
-    /// the render copy + resolve route. Absent for stored-credential secrets and
-    /// OAuth. Additive + serde-default.
+    /// Manifest-derived channel connection context. Presentation is selected
+    /// by `challenge_kind` and `connection.strategy`, never by provider name.
+    /// Additive + serde-default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<ConnectionPromptContext>,
     /// Host-issued WebGeneratedCode presentation. Present only when
@@ -1822,11 +1814,12 @@ mod tests {
 
     #[test]
     fn auth_prompt_challenge_kind_all_variants_roundtrip() {
-        // Stable wire values: `oauth_url` (browser OAuth) and `manual_token`
-        // (paste a secret — PAT / API key / channel pairing code).
+        // Stable wire values: browser OAuth, pasted credentials, and
+        // host-issued channel pairing.
         for (variant, expected) in [
             (AuthPromptChallengeKind::OAuthUrl, "\"oauth_url\""),
             (AuthPromptChallengeKind::ManualToken, "\"manual_token\""),
+            (AuthPromptChallengeKind::Pairing, "\"pairing\""),
             (AuthPromptChallengeKind::Other, "\"other\""),
         ] {
             let serialized = serde_json::to_string(&variant).expect("serialize challenge kind");
@@ -1839,8 +1832,8 @@ mod tests {
 
     #[test]
     fn auth_prompt_context_round_trips_channel_connection() {
-        // A manual_token challenge whose paste is a pairing code carries the
-        // connection context (channel + copy). Round-trip it through the wire.
+        // A host-issued pairing challenge carries manifest-derived connection
+        // context. Round-trip it through the wire.
         let run_id = TurnRunId::new();
         let state = ProductProjectionState::new(
             "thread-1",
@@ -1854,18 +1847,16 @@ mod tests {
                 allow_always: false,
                 auth_context: Some(Box::new(
                     AuthPromptContextView::new(
-                        AuthPromptChallengeKind::ManualToken,
+                        AuthPromptChallengeKind::Pairing,
                         Some("telegram".to_string()),
                         None,
                         None,
                         None,
                         Some(ConnectionPromptContext {
                             channel: "telegram".to_string(),
-                            strategy: Some("inbound_proof_code".to_string()),
-                            instructions: Some(
-                                "Message the app to get a pairing code.".to_string(),
-                            ),
-                            input_placeholder: Some("Enter Telegram pairing code...".to_string()),
+                            strategy: Some("web_generated_code".to_string()),
+                            instructions: Some("Open the app with the generated code.".to_string()),
+                            input_placeholder: None,
                             submit_label: Some("Connect".to_string()),
                             error_message: Some("Invalid or expired pairing code.".to_string()),
                         }),
@@ -1881,15 +1872,16 @@ mod tests {
         // place); there is no duplicate top-level Gate.connection field.
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["challenge_kind"],
-            "manual_token"
+            "pairing"
         );
         assert_eq!(
             value["items"][0]["gate"]["auth_context"]["connection"]["channel"],
             "telegram"
         );
-        assert_eq!(
-            value["items"][0]["gate"]["auth_context"]["connection"]["input_placeholder"],
-            "Enter Telegram pairing code..."
+        assert!(
+            value["items"][0]["gate"]["auth_context"]["connection"]
+                .get("input_placeholder")
+                .is_none()
         );
         let decoded: ProductProjectionState =
             serde_json::from_value(value).expect("deserialize connection gate projection");

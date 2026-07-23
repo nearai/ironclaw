@@ -168,8 +168,10 @@ const SLACK_OOO_STATUS_FIXTURE: &str = "slack_ooo_status";
 const SLACK_THREAD_REPLIES_FIXTURE: &str = "slack_thread_replies";
 #[derive(serde::Deserialize)]
 struct LiveCanaryManifest {
+    schema_version: u64,
     selected_cases: Vec<String>,
     no_model_cases: Vec<String>,
+    quarantined_model_cases: Vec<String>,
 }
 
 fn load_live_canary_manifest() -> LiveCanaryManifest {
@@ -673,8 +675,12 @@ async fn contract_slack_thread_replies_expands_the_recent_thread() {
 }
 
 #[test]
-fn contract_live_canary_harvested_traces_cover_every_model_case() {
+fn contract_live_canary_harvested_traces_cover_active_and_quarantined_model_cases() {
     let manifest = load_live_canary_manifest();
+    assert_eq!(
+        manifest.schema_version, 2,
+        "live-canary manifest schema must explicitly account for quarantined traces"
+    );
     let selected = manifest
         .selected_cases
         .iter()
@@ -693,6 +699,24 @@ fn contract_live_canary_harvested_traces_cover_every_model_case() {
     assert!(
         no_model.is_subset(&selected),
         "every no-model case must belong to the selected live-QA inventory"
+    );
+    let quarantined = manifest
+        .quarantined_model_cases
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        quarantined.len(),
+        manifest.quarantined_model_cases.len(),
+        "live-canary manifest must not contain duplicate quarantined cases"
+    );
+    assert!(
+        quarantined.is_subset(&selected),
+        "every quarantined case must belong to the selected live-QA inventory"
+    );
+    assert!(
+        quarantined.is_disjoint(&no_model),
+        "a case cannot both have no model trace and quarantine a model trace"
     );
 
     let fixture_dir = qa_fixture_path("live_canary/case-manifest")
@@ -713,6 +737,7 @@ fn contract_live_canary_harvested_traces_cover_every_model_case() {
         .collect::<std::collections::BTreeSet<_>>();
     let expected_model_cases = selected
         .difference(&no_model)
+        .filter(|case| !quarantined.contains(*case))
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
@@ -735,6 +760,12 @@ fn contract_live_canary_harvested_traces_cover_every_model_case() {
         );
 
         let calls = recorded_tool_calls(&trace);
+        assert!(
+            calls
+                .iter()
+                .all(|(name, _)| name != "builtin.extension_activate"),
+            "{case} invokes retired builtin.extension_activate and must be quarantined"
+        );
         for required_tool in &trace.expects.tools_used {
             assert!(
                 calls.iter().any(|(name, _)| name == required_tool),
@@ -747,6 +778,38 @@ fn contract_live_canary_harvested_traces_cover_every_model_case() {
         assert!(
             !qa_fixture_path(&format!("live_canary/{case}")).exists(),
             "{case} is a preflight/connect probe and should not invent a model trace"
+        );
+    }
+
+    let quarantine_dir = fixture_dir.join("quarantined_retired_activation");
+    let actual_quarantined_cases = std::fs::read_dir(&quarantine_dir)
+        .expect("read quarantined live-canary fixture directory")
+        .map(|entry| entry.expect("read quarantined fixture entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .filter_map(|path| path.file_stem()?.to_str().map(ToString::to_string))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        actual_quarantined_cases, quarantined,
+        "quarantined fixture files must exactly match the promoted manifest"
+    );
+
+    for case in quarantined {
+        assert!(
+            !qa_fixture_path(&format!("live_canary/{case}")).exists(),
+            "{case} is quarantined and must not remain in the active fixture directory"
+        );
+        let trace = load_qa_trace(&format!(
+            "live_canary/quarantined_retired_activation/{case}"
+        ));
+        let calls = recorded_tool_calls(&trace);
+        assert!(
+            calls
+                .iter()
+                .any(|(name, _)| name == "builtin.extension_activate"),
+            "{case} must contain the retired call that justifies its quarantine"
         );
     }
 }

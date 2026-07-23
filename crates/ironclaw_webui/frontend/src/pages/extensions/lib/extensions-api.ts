@@ -3,8 +3,7 @@
 // - The v2 backend owns the registry/list/install/remove/setup
 //   projection and maps those operations to the extension registry.
 
-import { apiFetch, setupExtension } from "../../../lib/api";
-import { redeemPairingCode } from "./pairing-api";
+import { apiFetch, clientActionId, setupExtension } from "../../../lib/api";
 
 const OAUTH_START_TTL_MS = 5 * 60 * 1000;
 
@@ -17,7 +16,10 @@ export function fetchExtensionRegistry() {
 export function installExtension(packageRef) {
   return apiFetch("/api/webchat/v2/extensions/install", {
     method: "POST",
-    body: JSON.stringify({ package_ref: packageRef }),
+    body: JSON.stringify({
+      package_ref: packageRef,
+      idempotency_key: clientActionId(),
+    }),
   });
 }
 export function removeExtension(packageRef) {
@@ -76,12 +78,6 @@ export function importExtension(file) {
     headers: { "Content-Type": "application/zip" },
     body: file,
   });
-}
-export function fetchPairingRequests() {
-  return Promise.resolve({ requests: [] });
-}
-export function approvePairingCode(channel, code) {
-  return redeemPairingCode(channel, code);
 }
 
 function packageId(packageRef) {

@@ -681,6 +681,34 @@ impl HostRuntime for DefaultHostRuntime {
         }
     }
 
+    async fn decline_auth_capability(
+        &self,
+        request: crate::RuntimeAuthDecline,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        let (context, capability_id) = request;
+        let registry = self.registry.snapshot();
+        let host = self.capability_host(&registry);
+        match host.decline_auth_json(context, capability_id.clone()).await {
+            Ok(()) => Ok(RuntimeCapabilityOutcome::Failed(
+                RuntimeCapabilityFailure::new(
+                    capability_id,
+                    RuntimeFailureKind::GateDeclined,
+                    Some("auth gate denied by user".to_string()),
+                ),
+            )),
+            Err(CapabilityInvocationError::RunState(error)) => {
+                Err(unavailable_from_run_state(*error))
+            }
+            Err(CapabilityInvocationError::ResumeStoreMissing { .. }) => {
+                Err(HostRuntimeError::unavailable("run-state store unavailable"))
+            }
+            Err(error) => Ok(RuntimeCapabilityOutcome::Failed(failure_from(
+                error,
+                capability_id,
+            ))),
+        }
+    }
+
     async fn resume_spawn_capability(
         &self,
         request: RuntimeApprovalResume,

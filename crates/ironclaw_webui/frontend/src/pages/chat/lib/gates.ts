@@ -4,15 +4,12 @@
 // browser must hold `run_id` + `gate_ref` so a follow-up
 // `resolve_gate` call can fill them into the v2 path params.
 
-// Challenge kinds describe the interaction modality, not the provider:
-// `manual_token` covers a GitHub PAT / API key AND a channel pairing code
-// (paste a secret), while `oauth_url` is a browser OAuth relay. The pairing
-// card vs token card split for a `manual_token` gate is decided by the
-// presence of `connection`, below.
+// Challenge kinds describe interaction modality, not provider:
+// `manual_token` is a pasted credential, `oauth_url` is a browser relay, and
+// `pairing` presents a host-issued code/deep link/QR flow.
 
-// Optional `ChannelConnectionPromptContext` carried only on channel-pairing
-// gates (a `manual_token` gate whose paste is a pair code for a connectable
-// channel). Present on the live `auth_required` prompt as `prompt.connection`
+// Optional `ChannelConnectionPromptContext` carried on channel authentication
+// gates. Present on the live `auth_required` prompt as `prompt.connection`
 // and on the projection gate as `gate.auth_context.connection`. Normalized to
 // camelCase so the pairing card can render `{ channel, strategy, instructions,
 // inputPlaceholder, submitLabel, errorMessage }` straight off the gate.

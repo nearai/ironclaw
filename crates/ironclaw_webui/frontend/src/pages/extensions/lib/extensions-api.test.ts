@@ -11,8 +11,33 @@ function extensionsApiSourceForTest() {
     if (line.startsWith("import ")) continue;
     lines.push(line.replace(/^export function /, "function "));
   }
-  return `${lines.join("\n")}\nglobalThis.__testExports = { startExtensionOauth };`;
+  return `${lines.join("\n")}\nglobalThis.__testExports = { installExtension, startExtensionOauth };`;
 }
+
+test("installExtension assigns a fresh client idempotency key to each gesture", async () => {
+  const apiCalls = [];
+  const ids = ["install-gesture-one", "install-gesture-two"];
+  const context = {
+    apiFetch: async (url, options) => {
+      apiCalls.push({ url, options });
+      return { success: true };
+    },
+    clientActionId: () => ids.shift(),
+    encodeURIComponent,
+    globalThis: {},
+    setupExtension: () => {},
+  };
+  vm.runInNewContext(extensionsApiSourceForTest(), context);
+
+  const packageRef = { kind: "extension", id: "notion" };
+  await context.globalThis.__testExports.installExtension(packageRef);
+  await context.globalThis.__testExports.installExtension(packageRef);
+
+  assert.equal(apiCalls.length, 2);
+  assert.equal(JSON.parse(apiCalls[0].options.body).idempotency_key, "install-gesture-one");
+  assert.equal(JSON.parse(apiCalls[1].options.body).idempotency_key, "install-gesture-two");
+  assert.deepEqual(JSON.parse(apiCalls[0].options.body).package_ref, packageRef);
+});
 
 test("startExtensionOauth sends an expiry safely below the backend max TTL", async () => {
   const apiCalls = [];
@@ -23,7 +48,6 @@ test("startExtensionOauth sends an expiry safely below the backend max TTL", asy
     },
     encodeURIComponent,
     globalThis: {},
-    redeemPairingCode: () => {},
     setupExtension: () => {},
   };
   vm.runInNewContext(extensionsApiSourceForTest(), context);
@@ -63,7 +87,6 @@ test("startExtensionOauth does not crash while a requirement projection is refre
     },
     encodeURIComponent,
     globalThis: {},
-    redeemPairingCode: () => {},
     setupExtension: () => {},
   };
   vm.runInNewContext(extensionsApiSourceForTest(), context);

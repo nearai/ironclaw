@@ -466,23 +466,19 @@ test("Chat keeps the new-conversation composer sendable while a prior run is set
 
 test("Chat renders the pairing card from a channel-connection gate and blocks composer sends", async () => {
   // A connectable channel that needs connection blocks the turn as a standard
-  // auth gate: a `manual_token` challenge that also carries a `connection`
-  // requirement. Chat renders the pairing card off that gate — no timeline
-  // heuristic — wired to a redeem submit and a run-cancel dismiss.
+  // auth gate. Chat renders the manifest-selected host-issued pairing panel
+  // off that gate — no timeline heuristic or pasted-code redeem route.
   const pendingGate = {
     kind: "auth_required",
-    challengeKind: "manual_token",
+    challengeKind: "pairing",
     runId: "run-1",
     gateRef: "gate-1",
     connection: {
       channel: "telegram",
-      instructions: "Message the Telegram bot and paste the code here.",
-      inputPlaceholder: "Enter code",
-      submitLabel: "Connect",
-      errorMessage: "Pairing failed.",
+      strategy: "web_generated_code",
+      instructions: "Open Telegram with the generated link.",
     },
   };
-  const submissions = [];
   const cancelReasons = [];
   const threadStateUpdates = [];
   let sendCount = 0;
@@ -511,25 +507,22 @@ test("Chat renders the pairing card from a channel-connection gate and blocks co
       loadMore: () => {},
       setSuggestions: () => {},
       submitAuthToken: async () => {},
-      submitChannelConnectionPairing: async (code) => submissions.push(code),
     },
   });
 
   const pairingCard = findComponent(tree, components.OnboardingPairingCard);
-  assert.ok(pairingCard, "pairing card should render off the manual_token+connection gate");
+  assert.ok(pairingCard, "pairing card should render off the pairing+connection gate");
   const pairingProps = componentProps(pairingCard, components.OnboardingPairingCard);
   // The gate's connection context is normalized onto an onboarding-shaped prop.
   assert.equal(pairingProps.onboarding.extensionName, "telegram");
   assert.equal(
     pairingProps.onboarding.instructions,
-    "Message the Telegram bot and paste the code here.",
+    "Open Telegram with the generated link.",
   );
   assert.deepEqual(threadStateUpdates, [
     { threadId: "thread-1", state: "needs_attention" },
   ]);
-  // Submit redeems through the pairing handler (no resolveGate here).
-  await pairingProps.onSubmit("A1B2C3");
-  assert.deepEqual(submissions, ["A1B2C3"]);
+  assert.equal(pairingProps.onSubmit, undefined);
   // Cancel abandons the parked turn via the run-cancel endpoint.
   await pairingProps.onCancel();
   assert.deepEqual(cancelReasons, ["user_requested"]);

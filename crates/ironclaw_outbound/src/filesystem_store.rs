@@ -51,8 +51,9 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FileType, FilesystemError, Filter, IndexKey, IndexKind,
-    IndexName, IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
+    CasApply, CasExpectation, CasUpdateError, ContentType, Entry, FileType, FilesystemError,
+    Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page, RootFilesystem,
+    ScopedFilesystem, VersionedEntry, cas_update,
 };
 use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId, UserId};
 use ironclaw_turns::{EventCursor as TurnEventCursor, TurnActor, TurnScope};
@@ -68,9 +69,10 @@ use crate::{
     AdvanceSubscriptionCursorRequest, CommunicationPreferenceKey, CommunicationPreferenceRecord,
     CommunicationPreferenceRepository, CommunicationPreferenceVersion, DeliveredGateRouteRecord,
     DeliveredGateRouteStore, DeliveryDefaultScope, LoadSubscriptionCursorRequest,
-    MAX_RUN_FINAL_REPLY_HANDOFF_PAGE, OutboundDeliveryAttempt, OutboundDeliveryId,
-    OutboundDeliveryStatus, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
-    ProjectionSubscriptionRecord, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
+    MAX_RUN_DELIVERY_CLEANUP_RECORDS, MAX_RUN_FINAL_REPLY_HANDOFF_PAGE, OutboundDeliveryAttempt,
+    OutboundDeliveryId, OutboundDeliveryStatus, OutboundError, OutboundStateStore,
+    ProjectionSubscriptionId, ProjectionSubscriptionRecord, RunDeliveryCleanupRecord,
+    RunDeliveryCleanupRequest, RunFinalReplyHandoffRecord, RunFinalReplyTargetRecord,
     RunFinalReplyTargetRequest, ThreadNotificationPolicy, TriggeredRunDeliveryRecord,
     TriggeredRunDeliveryStore, UpdateDeliveryStatusRequest, VersionedCommunicationPreferenceRecord,
     WriteCommunicationPreferenceRequest,
@@ -116,16 +118,23 @@ const SUBSCRIPTIONS_ROOT: &str = "/outbound/subscriptions";
 const TRIGGERED_RUN_DELIVERY_ROOT: &str = "/outbound/triggered-run-delivery";
 const DELIVERED_GATE_ROUTES_ROOT: &str = "/outbound/delivered-gate-routes";
 const DELIVERED_GATE_ROUTES_CONV_IDX_ROOT: &str = "/outbound/delivered-gate-routes/conv-idx";
+const RUN_DELIVERY_CLEANUP_ROOT: &str = "/outbound/run-delivery-cleanup";
 const RUN_FINAL_REPLY_TARGETS_ROOT: &str = "/outbound/run-final-reply-targets";
 const RUN_FINAL_REPLY_HANDOFFS_ROOT: &str = "/outbound/run-final-reply-handoffs";
 const RUN_FINAL_REPLY_HANDOFF_CURSOR_PATH: &str =
     "/outbound/run-final-reply-handoff-meta/cursor.json";
-const RUN_FINAL_REPLY_HANDOFF_CURSOR_INDEX_KEY: &str = "event_cursor";
-const RUN_FINAL_REPLY_HANDOFF_CURSOR_INDEX_NAME: &str = "run_final_reply_handoff_cursor";
+const RUN_FINAL_REPLY_HANDOFF_ORDER_INDEX_KEY: &str = "handoff_order";
+const RUN_FINAL_REPLY_HANDOFF_ORDER_INDEX_NAME: &str = "run_final_reply_handoff_order";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct RunFinalReplyHandoffCursorRecord {
     event_cursor: TurnEventCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RunDeliveryCleanupSnapshot {
+    request: RunDeliveryCleanupRequest,
+    records: Vec<RunDeliveryCleanupRecord>,
 }
 
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
@@ -182,11 +191,11 @@ where
 
     async fn ensure_run_final_reply_handoff_index(&self) -> Result<(), OutboundError> {
         let root = run_final_reply_handoffs_root()?;
-        let name = IndexName::new(RUN_FINAL_REPLY_HANDOFF_CURSOR_INDEX_NAME)
+        let name = IndexName::new(RUN_FINAL_REPLY_HANDOFF_ORDER_INDEX_NAME)
             .map_err(|_| OutboundError::Backend)?;
         let spec = IndexSpec::new(
             name,
-            vec![run_final_reply_handoff_cursor_index_key()?],
+            vec![run_final_reply_handoff_order_index_key()?],
             IndexKind::Exact,
         );
         self.filesystem
@@ -536,6 +545,117 @@ impl<F> OutboundStateStore for FilesystemOutboundStateStore<F>
 where
     F: RootFilesystem,
 {
+    async fn put_run_delivery_cleanup(
+        &self,
+        record: RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        record
+            .validate()
+            .map_err(|reason| OutboundError::InvalidRequest { reason })?;
+        let request = record.request();
+        let path = run_delivery_cleanup_path(&request)?;
+        let resource_scope = request.scope.to_resource_scope();
+        self.ensure_tenant_id_index(&resource_scope, &run_delivery_cleanup_root()?)
+            .await?;
+        cas_update(
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
+            decode_run_delivery_cleanup_snapshot,
+            encode_run_delivery_cleanup_snapshot,
+            move |current: Option<RunDeliveryCleanupSnapshot>| {
+                let request = request.clone();
+                let record = record.clone();
+                async move {
+                    let mut snapshot = current.unwrap_or_else(|| RunDeliveryCleanupSnapshot {
+                        request: request.clone(),
+                        records: Vec::new(),
+                    });
+                    validate_run_delivery_cleanup_snapshot(&snapshot, &request)?;
+                    if snapshot.records.contains(&record) {
+                        return Ok(CasApply::new(snapshot, ()));
+                    }
+                    if snapshot.records.len() >= MAX_RUN_DELIVERY_CLEANUP_RECORDS {
+                        return Err(OutboundError::InvalidRequest {
+                            reason: "run delivery cleanup record limit exceeded",
+                        });
+                    }
+                    snapshot.records.push(record);
+                    Ok(CasApply::new(snapshot, ()))
+                }
+            },
+        )
+        .await
+        .map_err(map_cleanup_cas_error)
+    }
+
+    async fn load_run_delivery_cleanup(
+        &self,
+        request: RunDeliveryCleanupRequest,
+    ) -> Result<Vec<RunDeliveryCleanupRecord>, OutboundError> {
+        let path = run_delivery_cleanup_path(&request)?;
+        let resource_scope = request.scope.to_resource_scope();
+        let Some(snapshot) = self
+            .get_json::<RunDeliveryCleanupSnapshot>(&resource_scope, &path)
+            .await?
+        else {
+            return Ok(Vec::new());
+        };
+        if snapshot.request != request {
+            return Err(OutboundError::AccessDenied);
+        }
+        validate_run_delivery_cleanup_snapshot(&snapshot, &request)?;
+        Ok(snapshot.records)
+    }
+
+    async fn complete_run_delivery_cleanup(
+        &self,
+        record: &RunDeliveryCleanupRecord,
+    ) -> Result<(), OutboundError> {
+        record
+            .validate()
+            .map_err(|reason| OutboundError::InvalidRequest { reason })?;
+        let request = record.request();
+        let path = run_delivery_cleanup_path(&request)?;
+        let resource_scope = request.scope.to_resource_scope();
+        self.ensure_tenant_id_index(&resource_scope, &run_delivery_cleanup_root()?)
+            .await?;
+        let record = record.clone();
+        cas_update(
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
+            decode_run_delivery_cleanup_snapshot,
+            encode_run_delivery_cleanup_snapshot,
+            move |current: Option<RunDeliveryCleanupSnapshot>| {
+                let request = request.clone();
+                let record = record.clone();
+                async move {
+                    let Some(mut snapshot) = current else {
+                        return Ok(CasApply::no_op(
+                            RunDeliveryCleanupSnapshot {
+                                request,
+                                records: Vec::new(),
+                            },
+                            (),
+                        ));
+                    };
+                    validate_run_delivery_cleanup_snapshot(&snapshot, &request)?;
+                    if !snapshot.records.contains(&record) {
+                        return Ok(CasApply::no_op(snapshot, ()));
+                    }
+                    snapshot.records.retain(|existing| existing != &record);
+                    if snapshot.records.is_empty() {
+                        return Ok(CasApply::delete(snapshot, ()));
+                    }
+                    Ok(CasApply::new(snapshot, ()))
+                }
+            },
+        )
+        .await
+        .map_err(map_cleanup_cas_error)
+    }
+
     async fn put_run_final_reply_target(
         &self,
         record: RunFinalReplyTargetRecord,
@@ -926,12 +1046,11 @@ where
                 };
             }
             let body = serde_json::to_vec(&record).map_err(|_| OutboundError::Serialization)?;
-            let cursor = i64::try_from(record.event_cursor.0).unwrap_or(i64::MAX);
             let entry = Entry::bytes(body)
                 .with_content_type(ContentType::json())
                 .with_indexed(
-                    run_final_reply_handoff_cursor_index_key()?,
-                    IndexValue::I64(cursor),
+                    run_final_reply_handoff_order_index_key()?,
+                    IndexValue::Text(run_final_reply_handoff_order_key(&record)),
                 )
                 .with_indexed(
                     tenant_id_index_key(),
@@ -956,6 +1075,15 @@ where
         &self,
         limit: usize,
     ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError> {
+        self.list_pending_run_final_reply_handoffs_after(None, limit)
+            .await
+    }
+
+    async fn list_pending_run_final_reply_handoffs_after(
+        &self,
+        after: Option<&RunFinalReplyHandoffRecord>,
+        limit: usize,
+    ) -> Result<Vec<RunFinalReplyHandoffRecord>, OutboundError> {
         if limit == 0 || limit > MAX_RUN_FINAL_REPLY_HANDOFF_PAGE {
             return Err(OutboundError::InvalidRequest {
                 reason: "final reply handoff page limit is invalid",
@@ -964,11 +1092,17 @@ where
         self.ensure_run_final_reply_handoff_index().await?;
         let root = run_final_reply_handoffs_root()?;
         let filter = Filter::Range {
-            key: run_final_reply_handoff_cursor_index_key()?,
-            lo: IndexValue::I64(0),
-            hi: IndexValue::I64(i64::MAX),
+            key: run_final_reply_handoff_order_index_key()?,
+            lo: IndexValue::Text(
+                after
+                    .map(run_final_reply_handoff_order_key)
+                    .unwrap_or_else(|| "00000000000000000000-".to_string()),
+            ),
+            hi: IndexValue::Text("~".to_string()),
         };
-        let page_limit = u32::try_from(limit).map_err(|_| OutboundError::InvalidRequest {
+        let continuation_row = if after.is_some() { 1 } else { 0 };
+        let query_limit = limit.saturating_add(continuation_row);
+        let page_limit = u32::try_from(query_limit).map_err(|_| OutboundError::InvalidRequest {
             reason: "final reply handoff page limit is invalid",
         })?;
         let entries = self
@@ -989,6 +1123,12 @@ where
             })
             .collect::<Result<Vec<_>, _>>()?;
         records.sort_by_key(|record| (record.event_cursor, record.run_id));
+        if let Some(after) = after {
+            records.retain(|record| {
+                (record.event_cursor, record.run_id) > (after.event_cursor, after.run_id)
+            });
+        }
+        records.truncate(limit);
         Ok(records)
     }
 
@@ -1077,6 +1217,65 @@ fn run_final_reply_target_path(
         .map_err(|_| OutboundError::Backend)
 }
 
+fn run_delivery_cleanup_path(
+    request: &RunDeliveryCleanupRequest,
+) -> Result<ScopedPath, OutboundError> {
+    let serialized = serde_json::to_vec(request).map_err(|_| OutboundError::Serialization)?;
+    let digest = hex::encode(Sha256::digest(serialized));
+    ScopedPath::new(format!("{RUN_DELIVERY_CLEANUP_ROOT}/{digest}.json"))
+        .map_err(|_| OutboundError::Backend)
+}
+
+fn run_delivery_cleanup_root() -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(RUN_DELIVERY_CLEANUP_ROOT).map_err(|_| OutboundError::Backend)
+}
+
+fn decode_run_delivery_cleanup_snapshot(
+    bytes: &[u8],
+) -> Result<RunDeliveryCleanupSnapshot, OutboundError> {
+    serde_json::from_slice(bytes).map_err(|_| OutboundError::Serialization)
+}
+
+fn validate_run_delivery_cleanup_snapshot(
+    snapshot: &RunDeliveryCleanupSnapshot,
+    request: &RunDeliveryCleanupRequest,
+) -> Result<(), OutboundError> {
+    if &snapshot.request != request {
+        return Err(OutboundError::AccessDenied);
+    }
+    if snapshot.records.len() > MAX_RUN_DELIVERY_CLEANUP_RECORDS
+        || snapshot
+            .records
+            .iter()
+            .any(|record| record.request() != snapshot.request || record.validate().is_err())
+    {
+        return Err(OutboundError::Serialization);
+    }
+    Ok(())
+}
+
+fn encode_run_delivery_cleanup_snapshot(
+    snapshot: &RunDeliveryCleanupSnapshot,
+) -> Result<Entry, OutboundError> {
+    let body = serde_json::to_vec(snapshot).map_err(|_| OutboundError::Serialization)?;
+    Ok(Entry::bytes(body)
+        .with_content_type(ContentType::json())
+        .with_indexed(
+            tenant_id_index_key(),
+            tenant_id_index_value(&snapshot.request.scope.tenant_id),
+        ))
+}
+
+fn map_cleanup_cas_error(error: CasUpdateError<OutboundError>) -> OutboundError {
+    match error {
+        CasUpdateError::Apply(error) => error,
+        CasUpdateError::Timeout
+        | CasUpdateError::RetriesExhausted
+        | CasUpdateError::CasUnsupported
+        | CasUpdateError::Backend(_) => OutboundError::Backend,
+    }
+}
+
 fn run_final_reply_handoffs_root() -> Result<ScopedPath, OutboundError> {
     ScopedPath::new(RUN_FINAL_REPLY_HANDOFFS_ROOT).map_err(|_| OutboundError::Backend)
 }
@@ -1095,8 +1294,12 @@ fn run_final_reply_handoff_path(
     .map_err(|_| OutboundError::Backend)
 }
 
-fn run_final_reply_handoff_cursor_index_key() -> Result<IndexKey, OutboundError> {
-    IndexKey::new(RUN_FINAL_REPLY_HANDOFF_CURSOR_INDEX_KEY).map_err(|_| OutboundError::Backend)
+fn run_final_reply_handoff_order_index_key() -> Result<IndexKey, OutboundError> {
+    IndexKey::new(RUN_FINAL_REPLY_HANDOFF_ORDER_INDEX_KEY).map_err(|_| OutboundError::Backend)
+}
+
+fn run_final_reply_handoff_order_key(record: &RunFinalReplyHandoffRecord) -> String {
+    format!("{:020}-{}", record.event_cursor.0, record.run_id)
 }
 
 fn subscription_path(

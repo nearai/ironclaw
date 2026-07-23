@@ -433,8 +433,9 @@ mod tests {
 
     use super::*;
     use crate::{OAuthClientConfig, RebornBuildInput, RebornServices, build_reborn_services};
-    use ironclaw_host_api::InstallationState;
-    use ironclaw_product_workflow::{ChannelConnectionRequirement, RebornChannelConnectStrategy};
+    use ironclaw_product_workflow::{
+        ChannelConnectionRequirement, LifecyclePublicState, RebornChannelConnectStrategy,
+    };
 
     /// Dummy but well-formed Google OAuth backend config for tests below that
     /// exercise PER-ACCOUNT credential gating (scope coalescing, shared
@@ -465,7 +466,7 @@ mod tests {
         };
         LifecycleProductResponse {
             package_ref: None,
-            phase: InstallationState::Active,
+            phase: LifecyclePublicState::Active,
             blockers: Vec::new(),
             message: Some("activation guidance".to_string()),
             payload: Some(LifecycleProductPayload::ExtensionInstall {
@@ -573,7 +574,7 @@ mod tests {
         };
         let channel_activation = LifecycleProductResponse {
             package_ref: None,
-            phase: InstallationState::Active,
+            phase: LifecyclePublicState::Active,
             blockers: Vec::new(),
             message: Some("activation guidance".to_string()),
             payload: Some(LifecycleProductPayload::ExtensionInstall {
@@ -593,7 +594,7 @@ mod tests {
 
         let tool_activation = LifecycleProductResponse {
             package_ref: None,
-            phase: InstallationState::Active,
+            phase: LifecyclePublicState::Active,
             blockers: Vec::new(),
             message: None,
             payload: Some(LifecycleProductPayload::ExtensionInstall {
@@ -1044,7 +1045,7 @@ mod tests {
             )
             .await
             .expect("internal readiness reconciliation succeeds");
-        assert_eq!(reconciled.phase, InstallationState::Active);
+        assert_eq!(reconciled.phase, LifecyclePublicState::Active);
 
         let active_search = invoke_json(
             &services,
@@ -1343,6 +1344,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hosted_mcp_restart_reconciles_ready_tools_and_isolates_missing_credentials() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage_root = dir.path().join("local-dev");
+        let owner = "extension-tool-test-user";
+        let initial_script = Arc::new(
+            crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name(
+                "notion-before-restart",
+            ),
+        );
+        let initial = build_reborn_services(
+            RebornBuildInput::local_dev(owner, storage_root.clone())
+                .with_network_http_egress_for_test(initial_script),
+        )
+        .await
+        .expect("initial services build");
+        let install_context = production_local_context([EXTENSION_INSTALL_CAPABILITY_ID]);
+        let install_scope = install_context.resource_scope.clone();
+        seed_configured_account(&initial, &install_scope, "notion").await;
+        let owner_scope = AuthProductScope::credential_owner(&install_scope, AuthSurface::Api);
+        initial
+            .secret_store()
+            .put(
+                owner_scope.resource,
+                SecretHandle::new("notion-test-token").expect("secret handle"),
+                ironclaw_secrets::SecretMaterial::from("notion-access-token"),
+                None,
+            )
+            .await
+            .expect("seed durable Notion token");
+
+        let installed = crate::approval_test_support::invoke_json_with_local_dev_approval(
+            &initial,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            install_context,
+            serde_json::json!({"extension_id": "notion"}),
+        )
+        .await
+        .expect("install credential-ready Notion");
+        assert_eq!(installed["phase"], "active");
+        let missing = crate::approval_test_support::invoke_with_local_dev_approval(
+            &initial,
+            EXTENSION_INSTALL_CAPABILITY_ID,
+            production_local_context([EXTENSION_INSTALL_CAPABILITY_ID]),
+            serde_json::json!({"extension_id": "nearai"}),
+        )
+        .await;
+        assert!(
+            matches!(missing, RuntimeCapabilityOutcome::AuthRequired(_)),
+            "credential-missing hosted MCP install should remain setup-needed: {missing:?}"
+        );
+        drop(initial);
+
+        let restart_script = Arc::new(
+            crate::extension_host::extension_lifecycle::hosted_mcp_test_support::HostedMcpDiscoveryNetworkScript::with_tool_name(
+                "notion-after-restart",
+            ),
+        );
+        let restarted = build_reborn_services(
+            RebornBuildInput::local_dev(owner, storage_root)
+                .with_network_http_egress_for_test(restart_script.clone()),
+        )
+        .await
+        .expect("services restart over the same durable root");
+        let extension_management = restarted
+            .local_runtime
+            .as_ref()
+            .expect("local runtime substrate")
+            .extension_management
+            .as_ref()
+            .expect("extension management");
+        let active = active_extension_capability_ids(extension_management).await;
+        assert!(
+            active.iter().any(|id| id == "notion.notion-after-restart"),
+            "startup must republish the newly discovered Notion contract: {active:?}"
+        );
+        assert!(
+            !active.iter().any(|id| id == "nearai.web_search"),
+            "missing NEAR AI credentials must not publish a static hosted-MCP fallback: {active:?}"
+        );
+
+        let mut dispatch_context = production_local_context(["notion.notion-after-restart"]);
+        let dispatch_grant = dispatch_context
+            .grants
+            .grants
+            .first_mut()
+            .expect("Notion capability grant");
+        dispatch_grant
+            .constraints
+            .allowed_effects
+            .push(EffectKind::UseSecret);
+        dispatch_grant
+            .constraints
+            .secrets
+            .push(SecretHandle::new("notion_access_token").expect("credential handle"));
+        let outcome = crate::approval_test_support::invoke_with_local_dev_approval(
+            &restarted,
+            "notion.notion-after-restart",
+            dispatch_context,
+            serde_json::json!({"query": "restart proof"}),
+        )
+        .await;
+        assert!(
+            matches!(outcome, RuntimeCapabilityOutcome::Completed(_)),
+            "the republished capability must resolve and dispatch through the generic host: {outcome:?}"
+        );
+        let calls = restart_script.authorized_methods();
+        assert!(
+            calls
+                .iter()
+                .any(|(method, authorized)| method == "tools/call" && *authorized),
+            "generic runtime dispatch must reach the hosted MCP provider with credentials: {calls:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn local_dev_extension_lifecycle_tool_lists_all_and_rejects_malformed_inputs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let services = build_reborn_services(RebornBuildInput::local_dev(
@@ -1483,6 +1599,35 @@ mod tests {
         capability_ids: impl IntoIterator<Item = &'a str>,
     ) -> ExecutionContext {
         execution_context_for_user("extension-tool-test-user", capability_ids)
+    }
+
+    fn production_local_context<'a>(
+        capability_ids: impl IntoIterator<Item = &'a str>,
+    ) -> ExecutionContext {
+        let mut context = execution_context_for_user("extension-tool-test-user", capability_ids);
+        let scope = production_local_scope(context.user_id.clone());
+        context.invocation_id = scope.invocation_id;
+        context.tenant_id = scope.tenant_id.clone();
+        context.agent_id = scope.agent_id.clone();
+        context.project_id = scope.project_id.clone();
+        context.resource_scope = scope;
+        context
+    }
+
+    fn production_local_scope(user_id: UserId) -> ResourceScope {
+        ResourceScope {
+            tenant_id: ironclaw_host_api::TenantId::new("reborn-cli")
+                .expect("production local tenant"),
+            user_id,
+            agent_id: Some(
+                ironclaw_host_api::AgentId::new("reborn-cli-agent")
+                    .expect("production local agent"),
+            ),
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        }
     }
 
     fn execution_context_for_user<'a>(

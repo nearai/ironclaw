@@ -235,6 +235,17 @@ refresh error; stale-authority discovery can never become the active catalog.
 Successful discovery atomically replaces the provider package's capability
 declarations in the active `SharedExtensionRegistry`.
 
+The published hosted-MCP catalog is provider-global runtime state; callable
+authority is caller-scoped product state. Before projecting any discovered
+definition, capability grant, provider trust, one-shot approval lease, or
+persistent approval eligibility, the host reads the exact caller's canonical
+extension-list projection and retains only packages whose public lifecycle
+state is `active`. Installation membership with missing, revoked, or expired
+personal setup remains `setup_needed` and receives none of that authority,
+even when another ready member has already published—or later replaces—the
+provider-global catalog. Catalog replacement therefore changes schema, never
+caller readiness.
+
 Failure has two distinct snapshot outcomes:
 
 - If no catalog has ever published, failed, empty, or stale-authority discovery

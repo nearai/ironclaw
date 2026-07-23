@@ -122,7 +122,7 @@ pub use trace_credits::{
     TRACE_CREDITS_VIEW,
 };
 
-pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW};
+pub use extensions::{EXTENSION_REGISTRY_VIEW, EXTENSIONS_VIEW, install_extension_on_surface};
 pub use fs_browse::{
     FilesystemBrowseReader, FsMount, RebornFsListRequest, RebornFsListResponse, RebornFsMountInfo,
     RebornFsMountsRequest, RebornFsMountsResponse, RebornFsReadRequest, RebornFsStatRequest,
@@ -189,14 +189,14 @@ pub use types::{
     RebornChannelConnectAction, RebornChannelConnectStrategy, RebornCreateThreadResponse,
     RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornExtensionActionResponse,
     RebornExtensionCredentialSetup, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornExtensionOnboardingPayload, RebornExtensionOnboardingState, RebornExtensionRegistryEntry,
-    RebornExtensionRegistryResponse, RebornExtensionSetupSecret,
-    RebornExtensionSurface, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
-    RebornListThreadsResponse, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornOperatorArea, RebornOperatorCommandPlaneResponse,
-    RebornOperatorConfigDiagnostic, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigEntry, RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
+    RebornExtensionOnboardingPayload, RebornExtensionRegistryEntry,
+    RebornExtensionRegistryResponse, RebornExtensionSetupSecret, RebornExtensionSurface,
+    RebornGetRunStateRequest, RebornGetRunStateResponse, RebornGlobalAutoApproveRequest,
+    RebornGlobalAutoApproveResponse, RebornListAutomationsResponse, RebornListThreadsResponse,
+    RebornLogEntry, RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
+    RebornOperatorArea, RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnostic,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigEntry,
+    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
     RebornOperatorConfigSetProductRequest, RebornOperatorConfigSetRequest,
     RebornOperatorConfigValidateRequest, RebornOperatorConfigValidateResponse,
     RebornOperatorLogsQuery, RebornOperatorServiceLifecycleAction,
@@ -517,11 +517,13 @@ fn rejected_busy_notice(status: TurnStatus) -> String {
 /// last error, instead of the connected/disconnected collapse the
 /// [`ChannelConnectionFacade::caller_channel_connections`] bool alone permits.
 ///
-/// Both inputs are optional. A facade that only knows the caller holds a live
-/// grant leaves both `None` and the projection falls back to the connection
-/// bool (a live grant backfills to `connected`, MIG-1); a facade that reads the
-/// durable credential-account status supplies `account_status` (and, mid-flow,
-/// `active_flow_status`) so the wire surfaces the real state.
+/// Both inputs are optional. Absence of an entry means the facade cannot read
+/// durable account state and permits the legacy connection-bool fallback. A
+/// present entry whose fields are both `None` is an authoritative "no account"
+/// result and must fail closed instead of being backfilled from a stale binding.
+/// A facade that reads durable credential-account status supplies
+/// `account_status` (and, mid-flow, `active_flow_status`) so the wire surfaces
+/// the real state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChannelAuthAccountState {
     /// The caller's durable credential-account status for the extension's

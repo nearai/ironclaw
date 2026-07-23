@@ -1419,7 +1419,6 @@ registerPack("uk", {
   "pairing.connectFromExtensions": "Підключіть {name} на сторінці Розширення, щоб продовжити.",
   "pairing.checkCodeAndRetry": "Сполучення не вдалося. Перевірте код і спробуйте ще раз.",
   "pairing.resumeFailed": "{name} підключено, але цей чат не вдалося продовжити. Перезавантажте сторінку, щоб продовжити.",
-  "extensions.channelInstalledSetup": "{name} встановлено. Підключіть обліковий запис за допомогою панелі налаштування нижче.",
   "extensions.authUrlHttpsRequired": "URL автентифікації має використовувати HTTPS.",
   "tools.available": "Available tools",
   "slackSetup.placeholder.keepSecret": "Налаштовано; залиште порожнім, щоб зберегти",

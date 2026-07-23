@@ -126,7 +126,6 @@ impl ProductOperationHandler {
                 lifecycle_setup::submit_extension_setup_capability(
                     services.lifecycle_facade.as_ref(),
                     services.extension_credentials.as_deref(),
-                    services.channel_config_facade.as_deref(),
                     caller,
                     input.into_json()?,
                 )
@@ -312,7 +311,6 @@ mod tests {
     fn runtime_backed_capabilities_stay_out_of_product_operation_registry() {
         for id in [
             EXTENSION_INSTALL_CAPABILITY_ID,
-            EXTENSION_ACTIVATE_CAPABILITY_ID,
             EXTENSION_REMOVE_CAPABILITY_ID,
             SKILL_INSTALL_CAPABILITY_ID,
             SKILL_UPDATE_CAPABILITY_ID,

@@ -1,10 +1,10 @@
 use std::{sync::Arc, time::Duration};
 
-use ironclaw_host_api::{CapabilitySurfaceKind, InstallationState};
+use ironclaw_host_api::CapabilitySurfaceKind;
 use ironclaw_product_workflow::{
     LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-    LifecycleProductPayload, LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
-    RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
+    LifecycleProductPayload, LifecycleProductSurfaceContext, LifecyclePublicState,
+    OutboundPreferencesProductFacade, RebornOutboundDeliveryTargetStatus, WebUiAuthenticatedCaller,
 };
 use ironclaw_turns::{
     run_profile::{
@@ -183,7 +183,7 @@ async fn fetch_communication_context(
             let channels: Vec<ConnectedChannelSummary> = extensions
                 .into_iter()
                 .filter(|ext| {
-                    extension_is_channel_surface(ext) && ext.phase == InstallationState::Active
+                    extension_is_channel_surface(ext) && ext.phase == LifecyclePublicState::Active
                 })
                 .map(|ext| ConnectedChannelSummary {
                     name: ext.summary.name.clone(),
@@ -230,19 +230,17 @@ mod tests {
     use std::sync::Arc;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::{
-        AgentId, CapabilitySurfaceKind, InstallationState, ProjectId, TenantId, UserId,
-    };
+    use ironclaw_host_api::{AgentId, CapabilitySurfaceKind, ProjectId, TenantId, UserId};
     use ironclaw_product_workflow::{
         LifecycleExtensionRuntimeKind, LifecycleExtensionSource, LifecycleExtensionSummary,
         LifecycleInstalledExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
         LifecycleProductAction, LifecycleProductContext, LifecycleProductFacade,
-        LifecycleProductPayload, LifecycleProductResponse, OutboundPreferencesProductFacade,
-        ProductWorkflowError, RebornOutboundDeliveryTargetId,
+        LifecycleProductPayload, LifecycleProductResponse, LifecyclePublicState,
+        OutboundPreferencesProductFacade, ProductWorkflowError, RebornOutboundDeliveryTargetId,
         RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetStatus,
         RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
-        RebornServicesError, RebornServicesErrorCode,
-        RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
+        RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+        RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
     };
     use ironclaw_turns::{
         run_profile::{CommunicationContextProvider, ConnectedChannelsState, DeliveryTargetState},
@@ -308,7 +306,6 @@ mod tests {
                         next_cursor: None,
                     })
                 }
-
             }
         };
     }
@@ -358,7 +355,7 @@ mod tests {
             _action: LifecycleProductAction,
         ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
             Ok(LifecycleProductResponse {
-                phase: InstallationState::Active,
+                phase: LifecyclePublicState::Active,
                 package_ref: None,
                 blockers: Vec::new(),
                 message: None,
@@ -393,7 +390,7 @@ mod tests {
         ) -> Result<LifecycleProductResponse, ProductWorkflowError> {
             let count = self.extensions.len();
             Ok(LifecycleProductResponse {
-                phase: InstallationState::Active,
+                phase: LifecyclePublicState::Active,
                 package_ref: None,
                 blockers: Vec::new(),
                 message: None,
@@ -459,7 +456,7 @@ mod tests {
                 credential_requirements: Vec::new(),
                 onboarding: None,
             },
-            phase: InstallationState::Active,
+            phase: LifecyclePublicState::Active,
             install_scope: None,
         }
     }
@@ -483,14 +480,14 @@ mod tests {
                 credential_requirements: Vec::new(),
                 onboarding: None,
             },
-            phase: InstallationState::Active,
+            phase: LifecyclePublicState::Active,
             install_scope: None,
         }
     }
 
     fn inactive_channel_extension(name: &str) -> LifecycleInstalledExtensionSummary {
         let mut ext = channel_extension(name);
-        ext.phase = InstallationState::Installed;
+        ext.phase = LifecyclePublicState::SetupNeeded;
         ext
     }
 
@@ -542,7 +539,6 @@ mod tests {
                 next_cursor: None,
             })
         }
-
     }
 
     #[tokio::test]
@@ -776,7 +772,6 @@ mod tests {
                 next_cursor: None,
             })
         }
-
     }
 
     /// A preferences facade whose `get_outbound_preferences` panics immediately.
@@ -811,7 +806,6 @@ mod tests {
                 next_cursor: None,
             })
         }
-
     }
 
     #[tokio::test]

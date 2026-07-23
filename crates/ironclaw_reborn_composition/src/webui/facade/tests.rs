@@ -109,7 +109,6 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
         .expect("manifest record")
     }
 
-    let operator = UserId::new("operator").expect("operator id");
     let alice = UserId::new("alice").expect("alice id");
     let bob = UserId::new("bob").expect("bob id");
 
@@ -173,7 +172,6 @@ async fn operator_tool_catalog_hides_foreign_private_tools() {
             Arc::new(ironclaw_trust::InvalidationBus::new()),
         ),
         None,
-        operator,
     ));
 
     let catalog = ActiveRegistryOperatorToolCatalog::new(registry, Vec::new(), Some(port));

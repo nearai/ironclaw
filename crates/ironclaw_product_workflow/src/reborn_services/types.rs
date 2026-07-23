@@ -2,7 +2,7 @@
 use chrono::{DateTime, Utc};
 use ironclaw_auth::{AuthAccountLastError, AuthAccountState};
 use ironclaw_common::llm_costs::RunCost;
-use ironclaw_host_api::{InstallationState, ThreadId};
+use ironclaw_host_api::ThreadId;
 use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 use ironclaw_threads::{SessionThreadRecord, SummaryArtifact, ThreadMessageRecord};
 use ironclaw_turns::run_profile::LoopModelUsage;
@@ -227,10 +227,8 @@ pub struct RebornServiceLifecycleResponse {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebornChannelConnectStrategy {
-    InboundProofCode,
     AdminManagedChannels,
     WebGeneratedCode,
-    QrCode,
     #[serde(rename = "oauth")]
     OAuth,
 }
@@ -238,10 +236,8 @@ pub enum RebornChannelConnectStrategy {
 impl RebornChannelConnectStrategy {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::InboundProofCode => "inbound_proof_code",
             Self::AdminManagedChannels => "admin_managed_channels",
             Self::WebGeneratedCode => "web_generated_code",
-            Self::QrCode => "qr_code",
             Self::OAuth => "oauth",
         }
     }
@@ -962,7 +958,7 @@ pub enum RebornOutboundDeliveryModality {
 }
 
 /// Product-facing name for the outbound domain's canonical opaque target id.
-pub use ironclaw_outbound::OutboundDeliveryTargetId as RebornOutboundDeliveryTargetId;
+pub use ironclaw_host_api::OutboundDeliveryTargetId as RebornOutboundDeliveryTargetId;
 
 fn validate_outbound_delivery_display_field(
     field_name: &str,
@@ -1406,12 +1402,8 @@ pub struct RebornExtensionInfo {
     /// Implementation detail — product taxonomy lives in `surfaces`.
     pub runtime: String,
     pub description: String,
-    pub authenticated: bool,
-    pub active: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
-    pub needs_setup: bool,
-    pub has_auth: bool,
     /// Exactly `setup_needed` or `active`; absence from this response means
     /// uninstalled. Internal activation failures stay attached to
     /// `setup_needed` through `activation_error`, never as a fourth state.
@@ -1421,8 +1413,6 @@ pub struct RebornExtensionInfo {
     pub activation_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding_state: Option<RebornExtensionOnboardingState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onboarding: Option<RebornExtensionOnboardingPayload>,
     /// Per-vendor connected accounts (§6.4, ADR 0001). Length ≤ 1 today; the
@@ -1444,25 +1434,6 @@ pub struct RebornExtensionInfo {
 pub struct RebornExtensionActionResponse {
     pub success: bool,
     pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub awaiting_token: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instructions: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding_state: Option<RebornExtensionOnboardingState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarding: Option<RebornExtensionOnboardingPayload>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RebornExtensionOnboardingState {
-    AuthRequired,
-    SetupRequired,
-    Installed,
-    Failed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1477,18 +1448,12 @@ pub struct RebornExtensionOnboardingPayload {
 
 /// WebUI v2 setup projection for extension lifecycle.
 ///
-/// This intentionally uses the v2 `phase`/`blockers` lifecycle contract and
-/// omits the legacy `status` field from the earlier unimplemented route shape.
-/// The live browser consumer still uses the v1 setup route, so this v2 contract
-/// can become lifecycle-native before it has compatibility consumers.
+/// This uses the v2 `phase`/`blockers` lifecycle contract and omits the legacy
+/// `status` field from the retired route shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornSetupExtensionResponse {
     pub package_ref: LifecyclePackageRef,
-    #[serde(
-        serialize_with = "crate::lifecycle::serialize_public_state",
-        deserialize_with = "crate::lifecycle::deserialize_public_state"
-    )]
-    pub phase: InstallationState,
+    pub phase: crate::LifecyclePublicState,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blockers: Vec<LifecycleReadinessBlocker>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1,8 +1,8 @@
-use ironclaw_host_api::InstallationState;
 use ironclaw_product_workflow::{
     LifecycleExtensionSource, LifecyclePackageKind, LifecyclePackageRef, LifecycleProductAction,
     LifecycleProductContext, LifecycleProductFacade, LifecycleProductPayload,
-    LifecycleProductResponse, LifecycleSearchExtensionSummary, ProductWorkflowError,
+    LifecycleProductResponse, LifecyclePublicState, LifecycleSearchExtensionSummary,
+    ProductWorkflowError,
 };
 use thiserror::Error;
 
@@ -82,7 +82,7 @@ pub fn render_reborn_extension_lifecycle_response(
             push_line(&mut output, format_args!("installed: {installed}"));
             push_line(
                 &mut output,
-                format_args!("active: {}", response.phase == InstallationState::Active),
+                format_args!("active: {}", response.phase == LifecyclePublicState::Active),
             );
             render_string_array(&mut output, visible_capability_ids, "visible_capability");
             push_line(&mut output, format_args!("next_step: {next_step}"));
@@ -171,9 +171,7 @@ mod tests {
     use ironclaw_auth::{
         AuthContinuationRef, AuthProductScope, AuthProviderId, AuthSurface, CredentialAccountLabel,
     };
-    use ironclaw_host_api::{
-        AgentId, InstallationState, InvocationId, ResourceScope, TenantId, UserId,
-    };
+    use ironclaw_host_api::{AgentId, InvocationId, ResourceScope, TenantId, UserId};
     use ironclaw_product_workflow::LifecycleExtensionSummary;
     use secrecy::SecretString;
 
@@ -261,7 +259,7 @@ mod tests {
         .await
         .expect("install credentialed extension");
 
-        assert_eq!(install.phase, InstallationState::Active);
+        assert_eq!(install.phase, LifecyclePublicState::Active);
         let Some(LifecycleProductPayload::ExtensionInstall {
             visible_capability_ids,
             ..
@@ -285,7 +283,7 @@ mod tests {
     fn human_renderer_escapes_terminal_control_characters() {
         let response = LifecycleProductResponse {
             package_ref: None,
-            phase: InstallationState::Installed,
+            phase: LifecyclePublicState::SetupNeeded,
             blockers: Vec::new(),
             message: None,
             payload: Some(LifecycleProductPayload::ExtensionSearch {

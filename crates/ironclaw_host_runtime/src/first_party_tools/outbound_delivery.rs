@@ -41,7 +41,7 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     )
 }
 
-pub fn insert_handler(
+pub(super) fn insert_handler(
     registry: &mut FirstPartyCapabilityRegistry,
     router: Arc<dyn RouteCurrentRunFinalReply>,
 ) -> Result<(), HostApiError> {
