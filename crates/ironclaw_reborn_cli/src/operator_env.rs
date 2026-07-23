@@ -35,7 +35,7 @@ pub(crate) fn install_legacy_env_aliases() {
         // or any worker thread is started. No concurrent environment access
         // exists at this point.
         unsafe {
-            std::env::set_var(name, value);
+            std::env::set_var(name, value); // env-hermetic: single-threaded startup shim
         }
     }
 }
