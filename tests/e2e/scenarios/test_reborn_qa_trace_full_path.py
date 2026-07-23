@@ -16,7 +16,6 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-
 from emulate_provider import (
     github_headers,
     github_json,
@@ -193,20 +192,34 @@ async def reborn_qa_emulate_runtime(
     rewrite_map = ",".join(
         (
             f"oauth2.googleapis.com={mock_llm_address.hostname}:{mock_llm_address.port}",
-            f"www.googleapis.com={emulate_google_address.hostname}:"
-            f"{emulate_google_address.port}",
-            f"gmail.googleapis.com={emulate_google_address.hostname}:"
-            f"{emulate_google_address.port}",
-            f"docs.googleapis.com={emulate_google_address.hostname}:"
-            f"{emulate_google_address.port}",
-            f"sheets.googleapis.com={emulate_google_address.hostname}:"
-            f"{emulate_google_address.port}",
-            f"slides.googleapis.com={emulate_google_address.hostname}:"
-            f"{emulate_google_address.port}",
-            f"api.github.com={emulate_github_address.hostname}:"
-            f"{emulate_github_address.port}",
-            f"slack.com={emulate_slack_address.hostname}:"
-            f"{emulate_slack_address.port}",
+            (
+                f"www.googleapis.com={emulate_google_address.hostname}:"
+                f"{emulate_google_address.port}"
+            ),
+            (
+                f"gmail.googleapis.com={emulate_google_address.hostname}:"
+                f"{emulate_google_address.port}"
+            ),
+            (
+                f"docs.googleapis.com={emulate_google_address.hostname}:"
+                f"{emulate_google_address.port}"
+            ),
+            (
+                f"sheets.googleapis.com={emulate_google_address.hostname}:"
+                f"{emulate_google_address.port}"
+            ),
+            (
+                f"slides.googleapis.com={emulate_google_address.hostname}:"
+                f"{emulate_google_address.port}"
+            ),
+            (
+                f"api.github.com={emulate_github_address.hostname}:"
+                f"{emulate_github_address.port}"
+            ),
+            (
+                f"slack.com={emulate_slack_address.hostname}:"
+                f"{emulate_slack_address.port}"
+            ),
         )
     )
     proc, base_url = await start_reborn_webui_v2_server(
@@ -1506,8 +1519,9 @@ async def test_provider_fault_profile_preserves_safe_operation_outcomes(
     }
     source = f"provider-fault-{fault_case.case_id}.json"
     await _install_inline_trace(mock_llm_server, source, trace)
+    profile = PROVIDER_FAULT_PROFILES[fault_case.profile]
     proxy.arm(
-        PROVIDER_FAULT_PROFILES[fault_case.profile],
+        profile,
         method=fault_case.method,
         path=fault_case.path,
     )
@@ -1545,12 +1559,7 @@ async def test_provider_fault_profile_preserves_safe_operation_outcomes(
     ]
     assert len(attempts) == 1, attempts
     assert attempts[0]["forwarded"] is fault_case.expected_forwarded
-    expected_responded = (
-        False
-        if fault_case.expected_forwarded
-        else fault_case.profile not in {"connection_reset", "timeout"}
-    )
-    assert attempts[0]["responded"] is expected_responded
+    assert attempts[0]["responded"] is (profile.action == "respond")
 
     async with httpx.AsyncClient(timeout=15) as provider_client:
         issues = await github_json(

@@ -20,7 +20,8 @@ FaultAction = Literal[
     "respond",
     "disconnect_before_forward",
     "disconnect_after_forward",
-    "delay_before_forward",
+    "delay_before_disconnect",
+    "truncate_response",
 ]
 
 
@@ -108,7 +109,7 @@ PROVIDER_FAULT_PROFILES = {
     ),
     "timeout": ProviderFaultProfile(
         name="timeout",
-        action="delay_before_forward",
+        action="delay_before_disconnect",
         delay_seconds=30.0,
     ),
     "connection_reset": ProviderFaultProfile(
@@ -123,7 +124,7 @@ PROVIDER_FAULT_PROFILES = {
     ),
     "truncated_response": ProviderFaultProfile(
         name="truncated_response",
-        action="respond",
+        action="truncate_response",
         status=200,
         body='{"id":"provider-object"',
     ),
@@ -151,6 +152,7 @@ class ProviderFaultProxy:
         self._session: ClientSession | None = None
         self._rules: list[dict] = []
         self._requests: list[dict] = []
+        self._delayed_requests: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         self._session = ClientSession(
@@ -159,9 +161,6 @@ class ProviderFaultProxy:
         )
         try:
             app = web.Application()
-            app.router.add_post("/__mock/provider_faults", self._arm_http)
-            app.router.add_get("/__mock/provider_faults", self._state_http)
-            app.router.add_post("/__mock/provider_faults/reset", self._reset_http)
             app.router.add_route("*", "/{path:.*}", self._proxy)
             self._runner = web.AppRunner(app)
             await self._runner.setup()
@@ -176,6 +175,11 @@ class ProviderFaultProxy:
             raise
 
     async def close(self) -> None:
+        delayed_requests = tuple(self._delayed_requests)
+        for task in delayed_requests:
+            task.cancel()
+        if delayed_requests:
+            await asyncio.gather(*delayed_requests, return_exceptions=True)
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -200,6 +204,8 @@ class ProviderFaultProxy:
         )
 
     def reset(self) -> None:
+        for task in tuple(self._delayed_requests):
+            task.cancel()
         self._rules.clear()
         self._requests.clear()
 
@@ -209,30 +215,6 @@ class ProviderFaultProxy:
             "rules": [dict(rule) for rule in self._rules],
             "requests": [dict(request) for request in self._requests],
         }
-
-    async def _arm_http(self, request: web.Request) -> web.Response:
-        payload = await request.json()
-        profile_name = payload.pop("profile", None)
-        if not isinstance(profile_name, str):
-            raise web.HTTPBadRequest(text="provider fault profile is required")
-        try:
-            profile = PROVIDER_FAULT_PROFILES[profile_name]
-        except KeyError as exc:
-            raise web.HTTPBadRequest(
-                text=f"unknown provider fault profile: {profile_name}"
-            ) from exc
-        try:
-            self.arm(profile, **payload)
-        except (TypeError, ValueError) as exc:
-            raise web.HTTPBadRequest(text=str(exc)) from exc
-        return web.json_response(self.state)
-
-    async def _state_http(self, _request: web.Request) -> web.Response:
-        return web.json_response(self.state)
-
-    async def _reset_http(self, _request: web.Request) -> web.Response:
-        self.reset()
-        return web.json_response({"ok": True})
 
     def _take_rule(self, method: str, path: str) -> dict | None:
         for index, rule in enumerate(self._rules):
@@ -251,6 +233,47 @@ class ProviderFaultProxy:
         if authorization is None:
             return None
         return hashlib.sha256(authorization.encode()).hexdigest()[:12]
+
+    @staticmethod
+    def _abort_transport(request: web.Request) -> None:
+        transport = request.transport
+        if transport is not None:
+            transport.abort()
+
+    async def _delay_then_disconnect(
+        self,
+        request: web.Request,
+        delay_seconds: float,
+    ) -> None:
+        task = asyncio.current_task()
+        if task is not None:
+            self._delayed_requests.add(task)
+        try:
+            await asyncio.sleep(delay_seconds)
+            self._abort_transport(request)
+            raise asyncio.CancelledError
+        finally:
+            if task is not None:
+                self._delayed_requests.discard(task)
+
+    async def _truncate_response(
+        self,
+        request: web.Request,
+        rule: dict,
+    ) -> None:
+        body = rule["body"].encode()
+        response = web.StreamResponse(
+            status=int(rule["status"]),
+            headers={
+                **rule["headers"],
+                "Content-Type": rule["content_type"],
+                "Content-Length": str(len(body) + 1),
+            },
+        )
+        await response.prepare(request)
+        await response.write(body)
+        self._abort_transport(request)
+        raise asyncio.CancelledError
 
     async def _proxy(self, request: web.Request) -> web.StreamResponse:
         body = await request.read()
@@ -271,11 +294,16 @@ class ProviderFaultProxy:
 
         if rule is not None:
             action = rule["action"]
-            if action == "delay_before_forward":
-                await asyncio.sleep(float(rule["delay_seconds"]))
+            if action == "delay_before_disconnect":
+                await self._delay_then_disconnect(
+                    request,
+                    float(rule["delay_seconds"]),
+                )
             elif action == "disconnect_before_forward":
-                request.transport.abort()
+                self._abort_transport(request)
                 raise asyncio.CancelledError
+            elif action == "truncate_response":
+                await self._truncate_response(request, rule)
             elif action == "respond":
                 entry["responded"] = True
                 return web.Response(
@@ -290,7 +318,7 @@ class ProviderFaultProxy:
         entry["upstream_status"] = upstream.status
 
         if rule is not None and rule["action"] == "disconnect_after_forward":
-            request.transport.abort()
+            self._abort_transport(request)
             raise asyncio.CancelledError
 
         entry["responded"] = True
@@ -319,7 +347,6 @@ class ProviderFaultProxy:
                 if name.lower()
                 not in {
                     "content-length",
-                    "content-encoding",
                     "transfer-encoding",
                     "connection",
                 }

@@ -6,11 +6,6 @@ from typing import Literal
 from provider_operation_cases import PROVIDER_OPERATION_CASES
 from provider_operation_types import ProviderOperationCase
 
-ProviderOperationClass = Literal[
-    "read",
-    "idempotent_write",
-    "non_idempotent_write",
-]
 ProviderFaultOutcome = Literal["unchanged", "committed_without_ack"]
 
 
@@ -25,7 +20,6 @@ class ProviderFaultCase:
     """One fault applied to a representative provider operation class."""
 
     case_id: str
-    operation_class: ProviderOperationClass
     operation: ProviderOperationCase
     profile: str
     method: str
@@ -39,7 +33,6 @@ class ProviderFaultCase:
 PROVIDER_FAULT_CASES = (
     ProviderFaultCase(
         case_id="read_forbidden",
-        operation_class="read",
         operation=_operation("github_get_issue"),
         profile="http_403",
         method="GET",
@@ -50,7 +43,6 @@ PROVIDER_FAULT_CASES = (
     ),
     ProviderFaultCase(
         case_id="read_rate_limited",
-        operation_class="read",
         operation=_operation("github_get_issue"),
         profile="http_429",
         method="GET",
@@ -61,7 +53,6 @@ PROVIDER_FAULT_CASES = (
     ),
     ProviderFaultCase(
         case_id="read_unavailable",
-        operation_class="read",
         operation=_operation("github_get_issue"),
         profile="http_503",
         method="GET",
@@ -72,7 +63,6 @@ PROVIDER_FAULT_CASES = (
     ),
     ProviderFaultCase(
         case_id="read_malformed_json",
-        operation_class="read",
         operation=_operation("github_get_issue"),
         profile="malformed_json",
         method="GET",
@@ -82,7 +72,6 @@ PROVIDER_FAULT_CASES = (
     ),
     ProviderFaultCase(
         case_id="read_connection_reset",
-        operation_class="read",
         operation=_operation("github_get_issue"),
         profile="connection_reset",
         method="GET",
@@ -91,8 +80,17 @@ PROVIDER_FAULT_CASES = (
         expected_outcome="unchanged",
     ),
     ProviderFaultCase(
+        case_id="read_timeout",
+        operation=_operation("github_get_issue"),
+        profile="timeout",
+        method="GET",
+        path="/repos/nearai/ironclaw/issues/1",
+        expected_tool_result="github_api_request_failed",
+        expected_preview_error="github_api_request_failed",
+        expected_outcome="unchanged",
+    ),
+    ProviderFaultCase(
         case_id="idempotent_write_unavailable",
-        operation_class="idempotent_write",
         operation=_operation("github_update_issue"),
         profile="http_503",
         method="PATCH",
@@ -103,7 +101,6 @@ PROVIDER_FAULT_CASES = (
     ),
     ProviderFaultCase(
         case_id="non_idempotent_write_lost_acknowledgement",
-        operation_class="non_idempotent_write",
         operation=_operation("github_create_issue"),
         profile="lost_acknowledgement",
         method="POST",

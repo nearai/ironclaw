@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 
 import httpx
 import pytest
 from aiohttp import web
-
 from provider_fault_proxy import (
     PROVIDER_FAULT_PROFILES,
     ProviderFaultProfile,
@@ -28,8 +28,23 @@ async def _start_upstream() -> tuple[str, list[dict], web.AppRunner]:
                 "body": body,
             }
         )
+        response_body = {
+            "id": "provider-object",
+            "method": request.method,
+        }
+        if request.path == "/compressed":
+            return web.Response(
+                body=gzip.compress(
+                    b'{"id":"provider-object","method":"GET"}'
+                ),
+                headers={
+                    "Content-Encoding": "gzip",
+                    "Content-Type": "application/json",
+                    "X-Upstream": "emulate",
+                },
+            )
         return web.json_response(
-            {"id": "provider-object", "method": request.method},
+            response_body,
             status=201 if request.method == "POST" else 200,
             headers={"X-Upstream": "emulate"},
         )
@@ -88,6 +103,17 @@ async def test_provider_fault_proxy_is_transparent_and_redacts_credentials(
     assert "never-record-this-token" not in str(proxy.state)
 
 
+async def test_provider_fault_proxy_preserves_compressed_responses(fault_proxy):
+    proxy, upstream_requests = fault_proxy
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(f"{proxy.url}/compressed")
+
+    assert response.json() == {"id": "provider-object", "method": "GET"}
+    assert response.headers["Content-Encoding"] == "gzip"
+    assert len(upstream_requests) == 1
+
+
 @pytest.mark.parametrize(
     "profile_name",
     (
@@ -100,7 +126,6 @@ async def test_provider_fault_proxy_is_transparent_and_redacts_credentials(
         "http_500",
         "http_503",
         "malformed_json",
-        "truncated_response",
         "missing_field",
     ),
 )
@@ -121,24 +146,44 @@ async def test_response_fault_profiles_do_not_reach_provider(
     assert proxy.state["requests"][0]["forwarded"] is False
 
 
-async def test_delay_profile_is_bounded_and_then_forwards(fault_proxy):
+async def test_timeout_profile_never_forwards_after_caller_times_out(fault_proxy):
     proxy, upstream_requests = fault_proxy
     proxy.arm(
         ProviderFaultProfile(
             name="short_timeout",
-            action="delay_before_forward",
-            delay_seconds=0.02,
+            action="delay_before_disconnect",
+            delay_seconds=0.05,
         ),
-        method="GET",
-        path="/objects/1",
+        method="POST",
+        path="/objects",
     )
 
-    async with httpx.AsyncClient(timeout=1) as client:
-        response = await client.get(f"{proxy.url}/objects/1")
+    async with httpx.AsyncClient(timeout=0.01) as client:
+        with pytest.raises(httpx.ReadTimeout):
+            await client.post(f"{proxy.url}/objects", json={"name": "never-created"})
 
-    assert response.status_code == 200
-    assert len(upstream_requests) == 1
-    assert proxy.state["requests"][0]["fault"] == "short_timeout"
+    await asyncio.sleep(0.06)
+    assert upstream_requests == []
+    request = proxy.state["requests"][0]
+    assert request["fault"] == "short_timeout"
+    assert request["forwarded"] is False
+    assert request["responded"] is False
+
+
+async def test_truncated_response_aborts_before_declared_body_length(fault_proxy):
+    proxy, upstream_requests = fault_proxy
+    profile = PROVIDER_FAULT_PROFILES["truncated_response"]
+    proxy.arm(profile, method="GET", path="/objects/1")
+
+    async with httpx.AsyncClient() as client:
+        with pytest.raises(httpx.RemoteProtocolError):
+            await client.get(f"{proxy.url}/objects/1")
+
+    assert upstream_requests == []
+    request = proxy.state["requests"][0]
+    assert request["fault"] == "truncated_response"
+    assert request["forwarded"] is False
+    assert request["responded"] is False
 
 
 async def test_connection_reset_before_forward_never_reaches_provider(fault_proxy):
@@ -177,48 +222,32 @@ async def test_lost_acknowledgement_commits_once_then_disconnects(fault_proxy):
     assert request["responded"] is False
 
 
-async def test_control_reset_clears_faults_and_request_ledger(fault_proxy):
-    proxy, _ = fault_proxy
+async def test_counted_fifo_rules_fire_then_restore_transparency(fault_proxy):
+    proxy, upstream_requests = fault_proxy
+    proxy.arm(
+        PROVIDER_FAULT_PROFILES["http_400"],
+        method="GET",
+        path="/objects/1",
+        count=2,
+    )
+    proxy.arm(
+        PROVIDER_FAULT_PROFILES["http_503"],
+        method="GET",
+        path="/objects/1",
+    )
+
     async with httpx.AsyncClient() as client:
-        armed = await client.post(
-            f"{proxy.url}/__mock/provider_faults",
-            json={
-                "profile": "http_503",
-                "method": "GET",
-                "path": "/objects",
-                "count": 1,
-            },
-        )
-        armed.raise_for_status()
-        assert len(armed.json()["rules"]) == 1
-        await client.get(f"{proxy.url}/unmatched")
-        reset = await client.post(f"{proxy.url}/__mock/provider_faults/reset")
+        responses = [
+            await client.get(f"{proxy.url}/objects/1")
+            for _ in range(4)
+        ]
 
-    reset.raise_for_status()
-    assert proxy.state == {"rules": [], "requests": []}
-
-
-async def test_control_rejects_invalid_profile_and_matcher(fault_proxy):
-    proxy, _ = fault_proxy
-    async with httpx.AsyncClient() as client:
-        unknown = await client.post(
-            f"{proxy.url}/__mock/provider_faults",
-            json={
-                "profile": "not-a-profile",
-                "method": "GET",
-                "path": "/objects",
-            },
-        )
-        invalid_count = await client.post(
-            f"{proxy.url}/__mock/provider_faults",
-            json={
-                "profile": "http_503",
-                "method": "GET",
-                "path": "/objects",
-                "count": 0,
-            },
-        )
-
-    assert unknown.status_code == 400
-    assert invalid_count.status_code == 400
-    assert proxy.state == {"rules": [], "requests": []}
+    assert [response.status_code for response in responses] == [400, 400, 503, 200]
+    assert [request["fault"] for request in proxy.state["requests"]] == [
+        "http_400",
+        "http_400",
+        "http_503",
+        None,
+    ]
+    assert proxy.state["rules"] == []
+    assert len(upstream_requests) == 1
