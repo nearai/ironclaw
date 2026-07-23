@@ -444,16 +444,18 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
 
     let alice_id = UserId::new("alice").expect("alice id");
     let bob_id = UserId::new("bob").expect("bob id");
-    let install_request = serde_json::json!({
-        "package_ref": {"kind": "extension", "id": "legacy-members"}
-    });
     for (name, user_id) in [("Alice", alice_id.clone()), ("Bob", bob_id.clone())] {
         let caller =
             ProductSurfaceCaller::new(tenant_id.clone(), user_id, Some(agent_id.clone()), None);
+        // #6520: install requires a client gesture id on the wire.
+        let install_request = serde_json::json!({
+            "package_ref": {"kind": "extension", "id": "legacy-members"},
+            "client_action_id": format!("legacy-canonicalize-install-{name}")
+        });
         let (status, body) = post_json(
             mount_webui_v2_router(Arc::clone(&webui.product_surface), caller),
             "/api/webchat/v2/extensions/install",
-            install_request.clone(),
+            install_request,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{name} install response: {body}");

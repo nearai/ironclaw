@@ -19,9 +19,9 @@ use ironclaw_extensions::{
 };
 use ironclaw_filesystem::{DiskFilesystem, InMemoryBackend};
 use ironclaw_host_api::{
-    ActivityId, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions,
-    MountView, ProductSurfaceCaller, ProductSurfaceError, Resolution, TenantId, UserId,
-    VirtualPath,
+    ActivityId, Blocked, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant,
+    MountPermissions, MountView, ProductSurfaceCaller, ProductSurfaceError, Resolution, TenantId,
+    UserId, VirtualPath,
 };
 use ironclaw_product::{
     EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY, OPERATOR_SERVICE_LIFECYCLE_COMMAND,
