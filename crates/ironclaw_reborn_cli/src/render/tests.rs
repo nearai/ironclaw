@@ -59,6 +59,12 @@ fn sample_doctor() -> DoctorDto {
                 detail: "missing".to_string(),
             },
             DoctorCheck {
+                name: "llm_provider".to_string(),
+                category: CheckCategory::Dependencies,
+                outcome: CheckOutcome::Pass,
+                detail: "configured".to_string(),
+            },
+            DoctorCheck {
                 name: "text_only_driver".to_string(),
                 category: CheckCategory::Drivers,
                 outcome: CheckOutcome::Pass,
@@ -72,7 +78,7 @@ fn sample_doctor() -> DoctorDto {
             },
         ],
         summary: DoctorSummary {
-            pass: 2,
+            pass: 3,
             fail: 1,
             skip: 1,
         },
@@ -208,9 +214,9 @@ fn doctor_json_round_trips() {
     assert_eq!(parsed["checks"][0]["name"], "reborn_home");
     assert_eq!(parsed["checks"][0]["outcome"], "pass");
     assert_eq!(parsed["checks"][1]["outcome"], "fail");
-    assert_eq!(parsed["checks"][3]["outcome"], "skip");
-    assert_eq!(parsed["checks"][3]["category"], "drivers");
-    assert_eq!(parsed["summary"]["pass"], 2);
+    assert_eq!(parsed["checks"][4]["outcome"], "skip");
+    assert_eq!(parsed["checks"][4]["category"], "drivers");
+    assert_eq!(parsed["summary"]["pass"], 3);
     assert_eq!(parsed["summary"]["fail"], 1);
     assert_eq!(parsed["summary"]["skip"], 1);
 }
@@ -224,7 +230,7 @@ fn doctor_render_text_contains_all_three_outcome_icons() {
         text.contains("- subagent_planned_driver"),
         "missing skip icon -"
     );
-    assert!(text.contains("2 passed, 1 failed, 1 skipped"));
+    assert!(text.contains("3 passed, 1 failed, 1 skipped"));
 }
 
 #[test]

@@ -100,6 +100,7 @@ pub(crate) struct DoctorCheck {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CheckCategory {
     Core,
+    Dependencies,
     Drivers,
 }
 

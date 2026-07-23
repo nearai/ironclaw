@@ -47,7 +47,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Bonjour/mDNS discovery | ✅ | ❌ | |
 | Tailscale integration | ✅ | ❌ | |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status + /healthz + /readyz, with channel-backed readiness probes |
-| `doctor` diagnostics | ✅ | 🚧 | 16 checks: settings, LLM, DB, embeddings, routines, gateway, MCP, skills, secrets, service, Docker daemon, tunnel binaries |
+| `doctor` diagnostics | ✅ | 🚧 | Reborn validates boot files, driver readiness, LLM/provider credentials, and opt-in live storage, secrets, and runtime-wiring readiness; MCP, extensions, skills, hooks, channels, service, Docker, and tunnel checks remain |
 | Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager). Reborn has a transport-neutral projection EventStreamManager with access/admission/rebase/lag/redaction contracts, product-safe capability activity events plus bounded display-preview events, live thinking projection updates, and the local-dev WebUI serve path now wires it into `/events` and `/ws` through the WebUI product facade; local-dev WebUI also persists terminal tool previews as ordered transcript items and includes their timeline message ids on live preview events. Production durable/live fanout remains follow-up work. |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
@@ -240,7 +240,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `message send` | ✅ | ❌ | P2 | Send to channels |
 | `browser` | ✅ | ❌ | P3 | Browser automation |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
-| `doctor` | ✅ | 🚧 | P2 | 16 subsystem checks |
+| `doctor` | ✅ | 🚧 | P2 | Boot/driver checks plus LLM credentials and `--live` storage, secrets, and runtime-wiring readiness; remaining subsystem packs tracked above |
 | `logs` | ✅ | 🚧 | P3 | Reborn CLI `logs` stays visible but exits nonzero as unimplemented (stub disabled). v1: `logs` (gateway.log tail), `--follow` (SSE live stream), `--level` (get/set). WebUI v2 exposes bounded in-memory log projection at `/api/webchat/v2/logs` for non-operators and `/api/webchat/v2/operator/logs` for operators, both with level/target and run/thread/turn/tool/source scoped filters. No DB-persisted log history. |
 | `traces` | ➖ | 🚧 | - | <ul><li>IronClaw-native Trace Commons client MVP, not an OpenClaw parity feature.</li><li>Local opt-in capture, redaction, queueing, queue-status diagnostics, scoped web APIs, revocation, and periodic credit notices.</li><li>CLI opt-in writes the runtime/web user-scope policy that autonomous capture reads, and credentialed submit/status/revoke calls use bounded no-redirect HTTP.</li><li>Authenticated web paths are user-scoped and keep ingestion endpoint/credential settings out of user-managed policy updates.</li><li>Private TraceDAO server ingest/review/export/audit/retention/vector/credit infrastructure now lives in the standalone `tracedao-server` repository, with IronClaw retaining CLI/client integration wrappers.</li></ul> |
 | `update` | ✅ | ❌ | P3 | Self-update; `OPENCLAW_NO_AUTO_UPDATE=1` kill-switch |

@@ -3830,6 +3830,44 @@ fn doctor_json_reports_checks_and_summary() {
     );
 }
 
+#[test]
+fn doctor_live_initializes_production_wired_storage_and_secrets() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("isolated-home")).expect("isolated workspace HOME");
+
+    let output = isolated_no_llm_command(&workspace, &reborn_home)
+        .args(["doctor", "--live", "--json"])
+        .output()
+        .expect("ironclaw-reborn doctor --live --json should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("doctor live JSON");
+    let checks = json["checks"].as_array().expect("checks array");
+    let outcome = |name: &str| {
+        checks
+            .iter()
+            .find(|check| check["name"] == name)
+            .unwrap_or_else(|| panic!("missing {name} check: {json}"))["outcome"]
+            .as_str()
+            .expect("outcome string")
+    };
+
+    assert_eq!(outcome("llm_provider"), "fail");
+    assert_eq!(outcome("storage_backend"), "pass", "doctor output: {json}");
+    assert_eq!(outcome("secrets_store"), "pass", "doctor output: {json}");
+    assert_eq!(outcome("runtime_wiring"), "pass", "doctor output: {json}");
+    assert!(
+        reborn_home.exists(),
+        "--live explicitly opts into initializing Reborn-owned state"
+    );
+}
+
 // ─── Boot-config TOML + provider catalog (epic #3036 prep) ───────────────────
 
 #[test]

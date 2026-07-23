@@ -65,6 +65,11 @@ Use `ironclaw status` to check the service and print the login link again.
 Windows users can start the WebUI in the foreground with `ironclaw serve`.
 See [Installation](#installation) for Windows installers and source builds.
 
+`ironclaw config path` and `ironclaw doctor` (without `--live`) are safe
+diagnostics: they do not create Reborn state or seed configuration files.
+`ironclaw doctor --live` explicitly opts into initializing storage and secrets
+backends, which may create or migrate Reborn-owned local state.
+
 ## Philosophy
 
 IronClaw is built on a simple principle: **your AI assistant should work for you, not against you**.
