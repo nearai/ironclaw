@@ -204,6 +204,7 @@ export function useChatEvents({
           setPendingGate(null);
           setIsProcessing(false);
           setActiveRun?.(null);
+          settleRun(settledRunsRef, onRunSettled, turnRunId, true);
           return;
         }
 

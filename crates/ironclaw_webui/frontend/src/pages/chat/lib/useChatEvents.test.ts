@@ -1045,6 +1045,53 @@ test("useChatEvents: final_reply clears the active run", () => {
   assert.equal(harness.messages[0].content, "Done.");
 });
 
+test("useChatEvents: retryable stream errors after a final reply preserve the completed run", () => {
+  const runId = "run-replay-complete";
+  const callerStreamErrors = [];
+  const harness = createUseChatEventsHarness({
+    onStreamError: (input) => callerStreamErrors.push(input),
+  });
+
+  harness.setCurrentActiveRun({
+    runId,
+    threadId: "thread-1",
+    status: "running",
+  });
+  harness.handleEvent({
+    type: "final_reply",
+    frame: {
+      reply: {
+        turn_run_id: runId,
+        text: "The completed answer.",
+        generated_at: "2026-07-20T00:00:00Z",
+      },
+    },
+  });
+  harness.handleEvent({
+    type: "error",
+    frame: {
+      error: "unavailable",
+      kind: "replay_unavailable",
+      retryable: true,
+    },
+  });
+
+  assert.equal(harness.isProcessing, false);
+  assert.equal(harness.activeRun, null);
+  assert.deepEqual(harness.settledRuns, [{ runId, success: true }]);
+  assert.deepEqual(plain(callerStreamErrors), []);
+  assert.deepEqual(plain(harness.messages), [
+    {
+      id: `reply-${runId}`,
+      role: "assistant",
+      content: "The completed answer.",
+      timestamp: "2026-07-20T00:00:00Z",
+      turnRunId: runId,
+      isFinalReply: true,
+    },
+  ]);
+});
+
 test("useChatEvents: observed run ids are passed to the connection observer", () => {
   const notedRunIds = [];
   const harness = createUseChatEventsHarness({
