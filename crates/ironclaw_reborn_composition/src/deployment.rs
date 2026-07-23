@@ -657,7 +657,18 @@ pub(crate) fn hosted_single_tenant_volume_build_input(
 /// resolves its runtime policy through `local_dev_from_deployment`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn local_dev_build_input(owner_id: impl Into<String>, root: PathBuf) -> RebornHostBindings {
-    RebornHostBindings::local_dev_from_deployment(DeploymentConfig::local_dev(), owner_id, root)
+    let bindings =
+        RebornHostBindings::local_dev_from_deployment(DeploymentConfig::local_dev(), owner_id, root);
+    // Composition's own unit tests expect the first-party extension surface
+    // (catalog + capability handlers) the production binary injects; mirror that
+    // assembly from the dev-dependency inventory so a test can install /
+    // activate / dispatch first-party extensions through the production seam. In
+    // a downstream `test-support` build the dev-dependency is absent, so the
+    // injection is `#[cfg(test)]`-only (composition's own tests) — a
+    // `test-support` consumer supplies bundles itself, exactly like the binary.
+    #[cfg(test)]
+    let bindings = bindings.with_bundled_first_party_for_test();
+    bindings
 }
 
 /// Test-support constructor for a local-dev-shaped build input on a specific
@@ -669,11 +680,16 @@ pub fn local_dev_build_input_with_profile(
     owner_id: impl Into<String>,
     root: PathBuf,
 ) -> RebornHostBindings {
-    RebornHostBindings::local_dev_from_deployment(
+    let bindings = RebornHostBindings::local_dev_from_deployment(
         DeploymentConfig::for_profile(profile, false),
         owner_id,
         root,
-    )
+    );
+    // See `local_dev_build_input`: inject the production first-party surface for
+    // composition's own unit tests (dev-dependency), absent in `test-support`.
+    #[cfg(test)]
+    let bindings = bindings.with_bundled_first_party_for_test();
+    bindings
 }
 
 /// Resolved policy for the standalone local development runtime profile.

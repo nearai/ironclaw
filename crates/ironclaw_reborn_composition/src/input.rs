@@ -904,6 +904,29 @@ impl RebornHostBindings {
         self.credential_account_visibility_policy = Some(policy);
         self
     }
+
+    /// Test-support: inject the full first-party extension surface (catalog
+    /// bundles, capability-handler registrars, and the Google-account visibility
+    /// policy) exactly as the `ironclaw_reborn_cli` binary does in production.
+    ///
+    /// Composition names no concrete first-party extension in production
+    /// (extension-runtime DEL-7); the binary supplies these on the build input.
+    /// Composition's own unit tests need the same surface to install / activate /
+    /// dispatch first-party extensions through the production seam, so this
+    /// mirrors the binary's assembly from the dev-dependency inventory. Gated
+    /// `#[cfg(test)]` for the same reason as `first_party_bundles_from_inventory`.
+    #[cfg(test)]
+    pub(crate) fn with_bundled_first_party_for_test(self) -> Self {
+        self.with_first_party_bundles(
+            crate::extension_host::first_party::first_party_bundles_from_inventory(),
+        )
+        .with_first_party_registrars(
+            crate::extension_host::first_party::test_support::bundled_first_party_registrars(),
+        )
+        .with_credential_account_visibility_policy(
+            crate::extension_host::first_party::test_support::bundled_credential_account_visibility_policy(),
+        )
+    }
 }
 
 struct ResolvedPostgresStorage {
