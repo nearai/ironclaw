@@ -859,3 +859,97 @@ test("Chat does not double-navigate when a stale send resolves after the first n
     "a stale send resolving after the first navigation's rerender must not navigate again"
   );
 });
+
+test("Chat does not let a stale send from an earlier empty-thread cycle hijack a new cycle started by \"+ New\"", async () => {
+  // Regression test for PR #6592 review comment (chat.tsx:201, Medium):
+  // the previous reset rule cleared the navigation claim on *any*
+  // truthy->falsy transition of activeThreadId without regard to which
+  // batch of sends the transition belonged to. Sequence: A and B are both
+  // fired from the landing composer (both closures capture
+  // activeThreadId = null). A resolves first and claims/navigates to
+  // threadA. The user clicks "+ New" -- a genuine new empty-thread cycle
+  // begins, and the old code reset the claim unconditionally. B, a stale
+  // closure from the *original* batch, then resolves and -- because the
+  // claim was reset and its captured activeThreadId is still null --
+  // hijacks the brand-new empty cycle by navigating to threadB.
+  const selections = [];
+  let resolveFirst;
+  let resolveSecond;
+  const hookState = {
+    messages: [],
+    isProcessing: false,
+    pendingGate: null,
+    suggestions: [],
+    sseStatus: "closed",
+    historyLoading: false,
+    hasMore: false,
+    cooldownSeconds: 0,
+    recoveryNotice: null,
+    activeRun: null,
+    send: async (content) =>
+      content === "weather in NY"
+        ? new Promise((resolve) => {
+            resolveFirst = resolve;
+          })
+        : new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+    cancelRun: async () => {},
+    retryMessage: () => {},
+    approve: () => {},
+    recoverHistory: () => {},
+    loadMore: () => {},
+    setSuggestions: () => {},
+    submitAuthToken: async () => {},
+  };
+  const refs = [];
+
+  // Render 1: the empty-thread landing view (activeThreadId = null). Both
+  // sends are fired from this render, so both handleSend closures capture
+  // activeThreadId = null.
+  const render1 = renderChat({
+    activeThreadId: null,
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState,
+    refs,
+  });
+  const emptyState1 = findComponent(render1.tree, render1.components.EmptyState);
+  const { onSend } = componentProps(emptyState1, render1.components.EmptyState);
+
+  const firstSend = onSend("weather in NY");
+  const secondSend = onSend("weather in LA");
+
+  // A resolves and claims the navigation.
+  resolveFirst({ thread_id: "thread-for-weather in NY" });
+  await firstSend;
+  assert.equal(selections.length, 1, "first send should navigate");
+  assert.equal(selections[0].threadId, "thread-for-weather in NY");
+
+  // Render 2: the post-navigation rerender, activeThreadId is now truthy.
+  renderChat({
+    activeThreadId: "thread-for-weather in NY",
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState,
+    refs,
+  });
+
+  // Render 3: the user clicks "+ New" -- activeThreadId goes back to null,
+  // a genuinely new empty-thread cycle begins.
+  renderChat({
+    activeThreadId: null,
+    onSelectThread: (threadId, options) => selections.push({ threadId, options }),
+    hookState,
+    refs,
+  });
+
+  // B -- still holding its stale render-1 closure with activeThreadId =
+  // null from the *original* batch -- resolves after the "+ New" reset.
+  resolveSecond({ thread_id: "thread-for-weather in LA" });
+  await secondSend;
+
+  assert.equal(
+    selections.length,
+    1,
+    "a stale send from the original batch must not hijack the new empty-thread cycle started by \"+ New\""
+  );
+});

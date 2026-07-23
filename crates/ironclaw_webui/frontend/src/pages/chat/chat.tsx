@@ -179,27 +179,19 @@ export function Chat({
     cooldownSeconds > 0;
   const composerSendBlockedRef = React.useRef(composerSendDisabled);
   composerSendBlockedRef.current = composerSendDisabled;
-  // Claims the right to navigate away from the empty-thread view once, for
-  // whichever concurrent send resolves first while no thread is active yet
-  // (e.g. several quick sends fired from the landing composer before the
-  // first response lands). Without this, every one of those sends' stale
-  // "no active thread" closures independently navigates as its own
-  // response arrives, thrashing the URL and tearing down/reopening the
-  // single app-wide SSE stream on each flip.
-  //
-  // The claim must survive the rerender the navigation itself causes: once
-  // a send claims it and calls onSelectThread, activeThreadId flips to
-  // truthy on the very next render, but other sends from the same
-  // empty-thread batch are still in flight and still hold a closure over
-  // the old null activeThreadId. Only clear the claim when a *new*
-  // empty-thread cycle actually begins -- i.e. when activeThreadId
-  // transitions from truthy back to falsy (e.g. "+ New") -- never merely
-  // because it happens to be truthy on this render, or a later resolver
-  // from the same batch can reclaim it and navigate a second time.
-  const hasNavigatedToNewThreadRef = React.useRef(false);
+  // Identifies which "empty-thread cycle" may navigate away from the
+  // landing view. It's bumped on every truthy->falsy transition of
+  // activeThreadId (a genuine new cycle, e.g. "+ New") and by whichever
+  // send wins the navigation for the current cycle -- so a captured id
+  // only matches while its cycle is still current and unclaimed. That one
+  // comparison is enough to stop every stale closure from a batch of
+  // concurrent landing-composer sends from re-navigating, whether its
+  // cycle was already claimed by an earlier winner or superseded by a
+  // "+ New" before it settled.
   const previousActiveThreadIdRef = React.useRef(activeThreadId);
+  const emptyThreadCycleIdRef = React.useRef(0);
   if (previousActiveThreadIdRef.current && !activeThreadId) {
-    hasNavigatedToNewThreadRef.current = false;
+    emptyThreadCycleIdRef.current += 1;
   }
   previousActiveThreadIdRef.current = activeThreadId;
   const composerStatusText =
@@ -226,6 +218,7 @@ export function Chat({
         throw new Error(approvalSubmitWarning);
       }
       if (composerSendBlockedRef.current) return null;
+      const sendCycleId = emptyThreadCycleIdRef.current;
       const response = await send(content, {
         images,
         attachments,
@@ -235,11 +228,11 @@ export function Chat({
       const responseThreadId = response?.thread_id || activeThreadId;
       if (
         !activeThreadId &&
-        !hasNavigatedToNewThreadRef.current &&
         responseThreadId &&
-        onSelectThread
+        onSelectThread &&
+        emptyThreadCycleIdRef.current === sendCycleId
       ) {
-        hasNavigatedToNewThreadRef.current = true;
+        emptyThreadCycleIdRef.current += 1;
         onSelectThread(responseThreadId, { replace: true });
       }
       return response;

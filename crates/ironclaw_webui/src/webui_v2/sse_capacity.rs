@@ -103,14 +103,22 @@ impl SseCapacity {
         tenant_id: &TenantId,
         user_id: &UserId,
     ) -> SseCapacityOutcome {
-        // Reject before touching the HashMap so a configured cap of 0
-        // (SSE disabled) does not leak a zero-count entry per rejected
-        // open. With the insert-before-check order we used to use, every
-        // 429 under a configured cap of 0 would
-        // store the caller's `(tenant, user)` key indefinitely.
-        if self.max_per_caller == 0 {
-            return SseCapacityOutcome::Rejected { refundable: true };
-        }
+        // A configured cap of 0 (SSE disabled) is not special-cased: with
+        // `open` starting at 0, `entry.open >= self.max_per_caller` is
+        // immediately true, so cap-zero callers fall straight into the
+        // same saturated-rejection branch below and get the same
+        // `rejected_streak` / `REJECTION_REFUND_LIMIT` bookkeeping as any
+        // other saturated caller. An earlier version special-cased
+        // `max_per_caller == 0` with an early return before this
+        // bookkeeping ran, which meant every cap-zero rejection was
+        // reported refundable forever — see [`REJECTION_REFUND_LIMIT`]'s
+        // doc comment. Cap-zero callers can never successfully acquire
+        // (the `open >= max_per_caller` check never lets them through), so
+        // their per-caller entry is never released and its
+        // `rejected_streak` accumulates for the life of the process; that
+        // is the intended trade-off to keep this rejection path free of
+        // free 429s, and no production profile configures a cap of 0
+        // today.
         let key = CallerKey {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
@@ -255,19 +263,23 @@ mod tests {
     }
 
     #[test]
-    fn zero_capacity_rejects_without_creating_caller_entry() {
-        // Regression for the review point that `try_acquire` used to call
-        // `state.entry(...).or_insert(0)` *before* the cap check. With
-        // max_per_caller=0 every rejected open would leave a zero-count
-        // entry in the HashMap that nothing ever cleared. With the early
-        // return the rejected open touches no state.
+    fn zero_capacity_rejects_without_incrementing_open_count() {
+        // With max_per_caller=0 the caller can never successfully
+        // acquire, so `open` must stay 0 across any number of rejected
+        // opens — only `rejected_streak` bookkeeping (covered by
+        // `zero_cap_rejections_stop_being_refundable_past_the_burst_limit`)
+        // advances. Note this *does* leave a per-caller entry in the
+        // HashMap (needed so the streak persists across calls) — that is
+        // an intentional trade-off, not a leak this test guards against;
+        // see the comment on the `entry.open >= self.max_per_caller`
+        // check in `try_acquire`.
         let cap = Arc::new(SseCapacity::new(0));
         let alice = user("alice");
         assert!(cap.try_acquire(&tenant(), &alice).acquired().is_none());
         assert_eq!(
             cap.open_count(&tenant(), &alice),
             0,
-            "rejected open must not store a HashMap entry"
+            "rejected open must never increment the open-slot counter"
         );
     }
 
@@ -366,6 +378,43 @@ mod tests {
         // to drain the caller's real rate-limit budget like any other
         // request, or a saturated caller could hammer this endpoint
         // forever for free.
+        for attempt in 1..=3 {
+            let outcome = cap.try_acquire(&tenant(), &alice);
+            assert_eq!(
+                outcome.rejected_refundable(),
+                Some(false),
+                "attempt {attempt} past the burst limit must not be refundable"
+            );
+        }
+    }
+
+    /// Regression for the PR review finding that the `max_per_caller == 0`
+    /// early return bypassed `rejected_streak` bookkeeping entirely: with a
+    /// configured cap of 0 (always saturated), every rejection was reported
+    /// refundable forever, so an authenticated caller could hammer SSE
+    /// opens without ever draining `enforce_rate_limit`'s request-volume
+    /// budget. Cap-zero must go through the same streak accounting as an
+    /// ordinary saturated cap.
+    #[test]
+    fn zero_cap_rejections_stop_being_refundable_past_the_burst_limit() {
+        let cap = Arc::new(SseCapacity::new(0));
+        let alice = user("alice");
+
+        // The first REJECTION_REFUND_LIMIT consecutive rejections while
+        // saturated (cap=0 is always saturated) are all refundable.
+        for attempt in 1..=REJECTION_REFUND_LIMIT {
+            let outcome = cap.try_acquire(&tenant(), &alice);
+            assert_eq!(
+                outcome.rejected_refundable(),
+                Some(true),
+                "attempt {attempt} is within the burst limit and must stay refundable"
+            );
+        }
+
+        // Every rejection past the limit must NOT be refundable — it has
+        // to drain the caller's real rate-limit budget like any other
+        // request, or a caller could hammer a cap-zero (SSE disabled)
+        // endpoint forever for free.
         for attempt in 1..=3 {
             let outcome = cap.try_acquire(&tenant(), &alice);
             assert_eq!(
