@@ -268,7 +268,12 @@ fn parse_hash(s: &str) -> Result<ApprovedTxHash, AttestedContinuationRejection> 
 fn parse_hex(s: &str) -> Result<Vec<u8>, AttestedContinuationRejection> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     let bytes = s.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
+    // Empty input (`""` or a bare `"0x"`) is a malformed proof field, not a
+    // valid zero-length byte string: a signature / public key / nonce always
+    // carries bytes. Fail closed rather than decode to an empty `Vec`. The
+    // `is_ascii` guard keeps the per-nibble decode over raw bytes safe for any
+    // (even multibyte-Unicode) caller-supplied value.
+    if s.is_empty() || !s.is_ascii() || !bytes.len().is_multiple_of(2) {
         return Err(AttestedContinuationRejection::MalformedProof);
     }
     bytes
@@ -296,6 +301,12 @@ fn hex_nibble(byte: u8) -> Result<u8, AttestedContinuationRejection> {
 #[derive(Debug, Deserialize)]
 struct InjectedWalletProofInput {
     scheme: String,
+    // The established browser wire contract (see `src/channels/web/types.rs`
+    // and the legacy `attested.rs` resolve path) names this field `signer`;
+    // accept it as an alias so the durable v2 ingress decodes the same payload
+    // the browser already produces, while keeping the unambiguous
+    // `claimed_signer` as the canonical name.
+    #[serde(alias = "signer")]
     claimed_signer: String,
     signature: String,
     approved_tx_hash: String,
@@ -374,13 +385,14 @@ fn map_continuation_error(error: ContinuationError) -> AttestedContinuationRejec
         ContinuationError::Ledger(_) | ContinuationError::LedgerRowExists { .. } => {
             AttestedContinuationRejection::LedgerGuard
         }
-        ContinuationError::ChainSigning(_) => AttestedContinuationRejection::ProofRejected,
-        // A broadcast failure is a POST-verification, server-side (recoverable)
-        // infrastructure failure: the proof was already verified and the grant
-        // claimed. Surfacing it as ProofRejected (400) would wrongly imply the
-        // client's proof was bad; map it to Unavailable (503) so the client can
-        // retry the broadcast tail instead.
-        ContinuationError::Broadcast { .. } => AttestedContinuationRejection::Unavailable,
+        // Chain-signing backend errors and broadcast/RPC failures are
+        // infrastructure/runtime failures, not client input failures. Surface
+        // them as a service-health (503, retryable) signal rather than a 400
+        // proof rejection, which would both mislead the client and suppress the
+        // backend-health signal during an RPC outage / backend misconfiguration.
+        ContinuationError::ChainSigning(_) | ContinuationError::Broadcast { .. } => {
+            AttestedContinuationRejection::BackendUnavailable
+        }
     }
 }
 
@@ -414,7 +426,21 @@ mod tests {
     fn parse_hex_accepts_valid_hex_with_optional_prefix() {
         assert_eq!(parse_hex("00ff").unwrap(), vec![0x00, 0xff]);
         assert_eq!(parse_hex("0xDEAD").unwrap(), vec![0xde, 0xad]);
-        assert_eq!(parse_hex("").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn parse_hex_rejects_empty_proof_field() {
+        // An empty proof field (`""` or a bare `"0x"`) is malformed: a
+        // signature / public key / nonce always carries bytes. Fail closed
+        // rather than decode to an empty `Vec`.
+        assert_eq!(
+            parse_hex(""),
+            Err(AttestedContinuationRejection::MalformedProof)
+        );
+        assert_eq!(
+            parse_hex("0x"),
+            Err(AttestedContinuationRejection::MalformedProof)
+        );
     }
 
     fn hash_hex_64() -> String {
@@ -516,30 +542,34 @@ mod tests {
     }
 
     #[test]
-    fn broadcast_failure_maps_to_unavailable_not_proof_rejected() {
+    fn broadcast_failure_maps_to_backend_unavailable_not_proof_rejected() {
         // A broadcast / RPC failure is a post-verification, server-side
         // (recoverable) infrastructure failure — it must NOT be surfaced as
         // ProofRejected (which implies the proof was bad and maps to 400). It
-        // maps to Unavailable (503) so clients can retry.
+        // maps to BackendUnavailable (503, retryable) so clients can retry and
+        // the backend-health signal is preserved during an RPC outage.
         let rejection = map_continuation_error(ContinuationError::Broadcast {
             reason: "rpc timeout".to_string(),
         });
         assert!(matches!(
             rejection,
-            AttestedContinuationRejection::Unavailable
+            AttestedContinuationRejection::BackendUnavailable
         ));
     }
 
     #[test]
-    fn custodial_signing_failure_still_maps_to_proof_rejected() {
-        // A custodial signer failure happens during verification/signing (before
-        // broadcast) and remains a client-facing rejection.
+    fn custodial_signing_failure_maps_to_backend_unavailable() {
+        // A custodial signer / chain-signing backend failure is an
+        // infrastructure/runtime failure, not a client input failure: surface it
+        // as a service-health (503, retryable) signal rather than a 400 proof
+        // rejection, which would mislead the client and mask the backend-health
+        // signal during a backend misconfiguration / outage.
         let rejection = map_continuation_error(ContinuationError::ChainSigning(
             ironclaw_chain_signing::ChainSigningError::SignerMismatch,
         ));
         assert!(matches!(
             rejection,
-            AttestedContinuationRejection::ProofRejected
+            AttestedContinuationRejection::BackendUnavailable
         ));
     }
 
@@ -599,5 +629,285 @@ mod tests {
             parse_hash("00ff"),
             Err(AttestedContinuationRejection::MalformedProof)
         ));
+    }
+}
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::*;
+    use ironclaw_attested_runtime::ContinuationError;
+    use ironclaw_wallet_external::decode_injected_proof;
+
+    fn injected_claim(proof_json: serde_json::Value) -> AttestedProofClaim {
+        AttestedProofClaim {
+            kind: AttestedProofKind::InjectedWallet,
+            approved_tx_hash_hex: "ab".repeat(32),
+            proof_json,
+        }
+    }
+
+    #[test]
+    fn injected_decoder_accepts_legacy_signer_alias() {
+        // The established browser wire contract names the field `signer`; the
+        // durable v2 ingress must decode the same payload the browser produces.
+        let claim = injected_claim(serde_json::json!({
+            "scheme": "evm",
+            "signer": "0x00000000000000000000000000000000000000aa",
+            "signature": "00".repeat(65),
+            "approved_tx_hash": "ab".repeat(32),
+        }));
+        let proof = decode_proof(&claim).expect("legacy `signer` key must decode");
+        let SigningProof::InjectedProof(bytes) = proof else {
+            panic!("expected injected proof");
+        };
+        let payload = decode_injected_proof(&bytes).expect("payload");
+        assert_eq!(
+            payload.claimed_signer,
+            "0x00000000000000000000000000000000000000aa"
+        );
+    }
+
+    #[test]
+    fn injected_decoder_accepts_canonical_claimed_signer() {
+        let claim = injected_claim(serde_json::json!({
+            "scheme": "evm",
+            "claimed_signer": "0x00000000000000000000000000000000000000aa",
+            "signature": "00".repeat(65),
+            "approved_tx_hash": "ab".repeat(32),
+        }));
+        decode_proof(&claim).expect("canonical `claimed_signer` key must decode");
+    }
+
+    #[test]
+    fn parse_hex_rejects_non_ascii_without_panicking() {
+        // A multi-byte UTF-8 value must fail closed, not panic on a non-char
+        // boundary slice.
+        assert_eq!(
+            parse_hex("00é0"),
+            Err(AttestedContinuationRejection::MalformedProof)
+        );
+    }
+
+    #[test]
+    fn parse_hex_rejects_odd_length() {
+        assert_eq!(
+            parse_hex("abc"),
+            Err(AttestedContinuationRejection::MalformedProof)
+        );
+    }
+
+    #[test]
+    fn backend_failures_map_to_backend_unavailable_not_proof_rejected() {
+        assert_eq!(
+            map_continuation_error(ContinuationError::Broadcast {
+                reason: "rpc timeout".to_string(),
+            }),
+            AttestedContinuationRejection::BackendUnavailable
+        );
+    }
+
+    #[test]
+    fn parse_hex_rejects_empty_and_bare_prefix() {
+        // Empty / `0x`-only is a malformed field, not a valid empty byte string.
+        assert_eq!(
+            parse_hex(""),
+            Err(AttestedContinuationRejection::MalformedProof)
+        );
+        assert_eq!(
+            parse_hex("0x"),
+            Err(AttestedContinuationRejection::MalformedProof)
+        );
+    }
+
+    #[test]
+    fn parse_hex_accepts_prefixed_and_unprefixed() {
+        assert_eq!(parse_hex("0xab").unwrap(), vec![0xab]);
+        assert_eq!(parse_hex("ab").unwrap(), vec![0xab]);
+    }
+
+    #[test]
+    fn map_continuation_error_covers_all_variants() {
+        use ironclaw_attestation::LedgerError;
+        use ironclaw_chain_signing::ChainSigningError;
+        use ironclaw_signing_provider::{ProviderId, SigningProviderError};
+
+        // MissingBinding -> MissingBinding
+        assert_eq!(
+            map_continuation_error(ContinuationError::MissingBinding),
+            AttestedContinuationRejection::MissingBinding
+        );
+        // ProviderMismatch -> ProviderMismatch
+        assert_eq!(
+            map_continuation_error(ContinuationError::ProviderMismatch {
+                bound: ProviderId::Injected,
+            }),
+            AttestedContinuationRejection::ProviderMismatch
+        );
+        // ProofRejected(GrantClaimFailed) -> LedgerGuard (idempotency replay)
+        assert_eq!(
+            map_continuation_error(ContinuationError::ProofRejected(
+                SigningProviderError::GrantClaimFailed
+            )),
+            AttestedContinuationRejection::LedgerGuard
+        );
+        // ProofRejected(other) -> ProofRejected
+        assert_eq!(
+            map_continuation_error(ContinuationError::ProofRejected(
+                SigningProviderError::SignerMismatch
+            )),
+            AttestedContinuationRejection::ProofRejected
+        );
+        // ApprovedHashMismatch -> ProofRejected
+        assert_eq!(
+            map_continuation_error(ContinuationError::ApprovedHashMismatch),
+            AttestedContinuationRejection::ProofRejected
+        );
+        // Ledger -> LedgerGuard
+        assert_eq!(
+            map_continuation_error(ContinuationError::Ledger(LedgerError::NotFound)),
+            AttestedContinuationRejection::LedgerGuard
+        );
+        // ChainSigning -> BackendUnavailable
+        assert_eq!(
+            map_continuation_error(ContinuationError::ChainSigning(
+                ChainSigningError::ApprovedHashMismatch
+            )),
+            AttestedContinuationRejection::BackendUnavailable
+        );
+        // Broadcast -> BackendUnavailable
+        assert_eq!(
+            map_continuation_error(ContinuationError::Broadcast {
+                reason: "rpc 503".to_string(),
+            }),
+            AttestedContinuationRejection::BackendUnavailable
+        );
+    }
+
+    #[test]
+    fn near_redirect_proof_decode_covers_full_access_and_function_call() {
+        use ironclaw_wallet_external::{NearAccessKeyScope, decode_near_redirect_proof};
+
+        // FullAccess variant.
+        let claim = AttestedProofClaim {
+            kind: AttestedProofKind::NearRedirect,
+            approved_tx_hash_hex: "cd".repeat(32),
+            proof_json: serde_json::json!({
+                "account_id": "alice.near",
+                "public_key": "11".repeat(32),
+                "signature": "22".repeat(64),
+                "approved_tx_hash": "cd".repeat(32),
+                "access_key_scope": { "kind": "full_access" },
+                "state": "state-token",
+            }),
+        };
+        let SigningProof::NearRedirectProof(bytes) =
+            decode_proof(&claim).expect("full_access near proof decodes")
+        else {
+            panic!("expected near redirect proof");
+        };
+        let payload = decode_near_redirect_proof(&bytes).expect("payload");
+        assert_eq!(payload.account_id, "alice.near");
+        assert!(matches!(
+            payload.access_key_scope,
+            NearAccessKeyScope::FullAccess
+        ));
+
+        // FunctionCall variant with method names.
+        let claim = AttestedProofClaim {
+            kind: AttestedProofKind::NearRedirect,
+            approved_tx_hash_hex: "cd".repeat(32),
+            proof_json: serde_json::json!({
+                "account_id": "alice.near",
+                "public_key": "11".repeat(32),
+                "signature": "22".repeat(64),
+                "approved_tx_hash": "cd".repeat(32),
+                "access_key_scope": {
+                    "kind": "function_call",
+                    "receiver_id": "contract.near",
+                    "method_names": ["ft_transfer", "nft_transfer"],
+                },
+                "state": "state-token",
+            }),
+        };
+        let SigningProof::NearRedirectProof(bytes) =
+            decode_proof(&claim).expect("function_call near proof decodes")
+        else {
+            panic!("expected near redirect proof");
+        };
+        let payload = decode_near_redirect_proof(&bytes).expect("payload");
+        match payload.access_key_scope {
+            NearAccessKeyScope::FunctionCall {
+                receiver_id,
+                method_names,
+            } => {
+                assert_eq!(receiver_id, "contract.near");
+                assert_eq!(method_names, vec!["ft_transfer", "nft_transfer"]);
+            }
+            NearAccessKeyScope::FullAccess => panic!("expected function_call scope"),
+        }
+    }
+
+    #[test]
+    fn walletconnect_proof_decode_covers_with_and_without_public_key() {
+        use ironclaw_wallet_external::decode_walletconnect_proof;
+
+        // Without optional public_key.
+        let claim = AttestedProofClaim {
+            kind: AttestedProofKind::WalletConnect,
+            approved_tx_hash_hex: "ef".repeat(32),
+            proof_json: serde_json::json!({
+                "session_topic": "topic-abc",
+                "claimed_signer": "0x00000000000000000000000000000000000000bb",
+                "nonce": "33".repeat(16),
+                "signed_payload": "cafe",
+                "signature": "44".repeat(65),
+                "approved_tx_hash": "ef".repeat(32),
+            }),
+        };
+        let SigningProof::WalletConnectProof(bytes) =
+            decode_proof(&claim).expect("wc proof without public_key decodes")
+        else {
+            panic!("expected walletconnect proof");
+        };
+        let payload = decode_walletconnect_proof(&bytes).expect("payload");
+        assert_eq!(payload.session_topic, "topic-abc");
+        assert!(payload.public_key.is_none());
+
+        // With optional public_key.
+        let claim = AttestedProofClaim {
+            kind: AttestedProofKind::WalletConnect,
+            approved_tx_hash_hex: "ef".repeat(32),
+            proof_json: serde_json::json!({
+                "session_topic": "topic-abc",
+                "claimed_signer": "0x00000000000000000000000000000000000000bb",
+                "nonce": "33".repeat(16),
+                "signed_payload": "cafe",
+                "signature": "44".repeat(65),
+                "approved_tx_hash": "ef".repeat(32),
+                "public_key": "55".repeat(33),
+            }),
+        };
+        let SigningProof::WalletConnectProof(bytes) =
+            decode_proof(&claim).expect("wc proof with public_key decodes")
+        else {
+            panic!("expected walletconnect proof");
+        };
+        let payload = decode_walletconnect_proof(&bytes).expect("payload");
+        assert!(payload.public_key.is_some());
+    }
+
+    #[test]
+    fn decode_proof_rejects_empty_signature_field() {
+        // Regression for the parse_hex empty guard reaching a real field.
+        let claim = injected_claim(serde_json::json!({
+            "scheme": "evm",
+            "claimed_signer": "0x00000000000000000000000000000000000000aa",
+            "signature": "",
+            "approved_tx_hash": "ab".repeat(32),
+        }));
+        assert_eq!(
+            decode_proof(&claim),
+            Err(AttestedContinuationRejection::MalformedProof)
+        );
     }
 }

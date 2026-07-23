@@ -80,8 +80,10 @@ pub(crate) type ComposedCustodialSigner<G, L> = CustodialSigner<SecretsKeyStore,
 pub(crate) type ComposedContinuationDriver<B, G, L> =
     AttestedSignerContinuationDriver<B, L, ComposedCustodialSigner<G, L>>;
 
-/// The local-dev / test monomorphization of [`RebornAttestedComposition`] the
-/// `RebornRuntime` holds (in-memory stores + no-op broadcaster).
+/// The local-dev / test monomorphization of [`ComposedContinuationDriver`]
+/// (in-memory stores + no-op broadcaster). This is the concrete driver type the
+/// composition-layer continuation port ([`crate::RebornAttestedContinuation`])
+/// holds, matching the [`LocalDevAttestedComposition`] the runtime assembles.
 pub(crate) type LocalDevContinuationDriver =
     ComposedContinuationDriver<NoopBroadcaster, InMemorySealedGrantStore, InMemorySigningLedger>;
 

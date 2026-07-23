@@ -89,7 +89,6 @@ use ironclaw_turns::{
     events::EventCursor,
     run_profile::{LoopHostMilestoneSink, LoopRunContext},
 };
-use ironclaw_wallet_external::InjectedSigningProvider;
 
 use ironclaw_host_runtime::MemoryBackedUserProfileSource;
 #[cfg(any(test, feature = "test-support"))]

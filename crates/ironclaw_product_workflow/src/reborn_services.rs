@@ -7780,6 +7780,17 @@ fn map_attested_continuation_rejection(
             RebornServicesErrorKind::ServiceUnavailable,
             503,
         ),
+        // A chain-signing / broadcast backend failure is an infrastructure
+        // health failure, so it must surface as 503 (not a 400 proof rejection
+        // that would mislead the client and suppress the backend-health
+        // signal). It stays non-retryable like every other category here: the
+        // resume guard already consumed the one-shot, so a client retry would
+        // be rejected at the CAS rather than re-driving the sign/broadcast.
+        AttestedContinuationRejection::BackendUnavailable => (
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+        ),
     };
     RebornServicesError::from_status_kind(code, kind, status, false)
 }

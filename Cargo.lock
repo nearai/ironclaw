@@ -4456,7 +4456,7 @@ dependencies = [
  "ironclaw_chain_signing",
  "ironclaw_host_api",
  "ironclaw_signing_provider",
- "libsql 0.6.0",
+ "libsql",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4763,7 +4763,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_observability",
  "ironclaw_safety",
- "libsql 0.9.30",
+ "libsql",
  "serde",
  "serde_json",
  "tempfile",
@@ -4835,7 +4835,7 @@ dependencies = [
  "ironclaw_prompt_envelope",
  "ironclaw_turns",
  "ironclaw_wasm_limiter",
- "libsql 0.9.30",
+ "libsql",
  "lru",
  "rust_decimal",
  "serde",
@@ -4918,7 +4918,7 @@ dependencies = [
  "ironclaw_wasm",
  "jsonschema",
  "libc",
- "libsql 0.9.30",
+ "libsql",
  "rust_decimal",
  "secrecy",
  "serde",
@@ -5224,7 +5224,7 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_trust",
  "ironclaw_turns",
- "libsql 0.9.30",
+ "libsql",
  "secrecy",
  "serde",
  "serde_json",
@@ -5339,7 +5339,7 @@ dependencies = [
  "ironclaw_webui",
  "k256",
  "libc",
- "libsql 0.9.30",
+ "libsql",
  "lru",
  "nix",
  "rand 0.10.1",
@@ -5353,6 +5353,7 @@ dependencies = [
  "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
  "toml 1.1.2+spec-1.1.0",
@@ -5390,7 +5391,7 @@ dependencies = [
  "ironclaw_events",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "libsql 0.9.30",
+ "libsql",
  "rustls 0.23.41",
  "rustls-native-certs 0.8.4",
  "secrecy",
@@ -5480,7 +5481,7 @@ dependencies = [
  "ironclaw_turns",
  "ironclaw_wasm",
  "ironclaw_webui",
- "libsql 0.9.30",
+ "libsql",
  "pretty_assertions",
  "regex",
  "reqwest 0.12.28",
@@ -5639,7 +5640,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turns",
  "jsonschema",
- "libsql 0.9.30",
+ "libsql",
  "parking_lot",
  "rust_decimal",
  "serde",
@@ -5786,7 +5787,7 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_turns",
  "libc",
- "libsql 0.9.30",
+ "libsql",
  "reqwest 0.12.28",
  "rig-core",
  "rust_decimal",
@@ -5865,7 +5866,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_host_api",
  "ironclaw_turns",
- "libsql 0.9.30",
+ "libsql",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -5904,7 +5905,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_observability",
  "ironclaw_turns",
- "libsql 0.9.30",
+ "libsql",
  "rand 0.10.1",
  "serde",
  "serde_jcs",
@@ -6350,44 +6351,6 @@ dependencies = [
 
 [[package]]
 name = "libsql"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe18646e4ef8db446bc3e3f5fb96131483203bc5f4998ff149f79a067530c01c"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "base64 0.21.7",
- "bincode",
- "bitflags 2.13.0",
- "bytes",
- "fallible-iterator 0.3.0",
- "futures",
- "http 0.2.12",
- "hyper 0.14.32",
- "hyper-rustls 0.25.0",
- "libsql-hrana 0.2.0",
- "libsql-sqlite3-parser",
- "libsql-sys 0.8.0",
- "libsql_replication 0.6.0",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tonic-web",
- "tower 0.4.13",
- "tower-http 0.4.4",
- "tracing",
- "uuid",
- "zerocopy 0.7.35",
-]
-
-[[package]]
-name = "libsql"
 version = "0.9.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "30fe980ac5693ed1f3db490559fb578885e913a018df64af8a1a46e1959a78df"
@@ -6404,10 +6367,10 @@ dependencies = [
  "http 0.2.12",
  "hyper 0.14.32",
  "hyper-rustls 0.25.0",
- "libsql-hrana 0.9.30",
+ "libsql-hrana",
  "libsql-sqlite3-parser",
- "libsql-sys 0.9.30",
- "libsql_replication 0.9.30",
+ "libsql-sys",
+ "libsql_replication",
  "parking_lot",
  "serde",
  "serde_json",
@@ -6426,16 +6389,6 @@ dependencies = [
 
 [[package]]
 name = "libsql-ffi"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f2a50a585a1184a43621a9133b7702ba5cb7a87ca5e704056b19d8005de6faf"
-dependencies = [
- "bindgen",
- "cc",
-]
-
-[[package]]
-name = "libsql-ffi"
 version = "0.9.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0be1da6f123ceb2cd23f469883415cab9ee963286a85d61e22afb8b12e15e681"
@@ -6444,18 +6397,6 @@ dependencies = [
  "cc",
  "cmake",
  "glob",
-]
-
-[[package]]
-name = "libsql-hrana"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aeaf5d19e365465e1c23d687a28c805d7462531b3f619f0ba49d3cf369890a3e"
-dependencies = [
- "base64 0.21.7",
- "bytes",
- "prost",
- "serde",
 ]
 
 [[package]]
@@ -6480,21 +6421,7 @@ dependencies = [
  "fallible-iterator 0.2.0",
  "fallible-streaming-iterator",
  "hashlink",
- "libsql-ffi 0.9.30",
- "smallvec",
-]
-
-[[package]]
-name = "libsql-rusqlite"
-version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae65c66088dcd309abbd5617ae046abac2a2ee0a7fdada5127353bd68e0a27ea"
-dependencies = [
- "bitflags 2.13.0",
- "fallible-iterator 0.2.0",
- "fallible-streaming-iterator",
- "hashlink",
- "libsql-ffi 0.5.0",
+ "libsql-ffi",
  "smallvec",
 ]
 
@@ -6518,55 +6445,15 @@ dependencies = [
 
 [[package]]
 name = "libsql-sys"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c05b61c226781d6f5e26e3e7364617f19c0c1d5332035802e9229d6024cec05"
-dependencies = [
- "bytes",
- "libsql-ffi 0.5.0",
- "libsql-rusqlite 0.33.0",
- "once_cell",
- "tracing",
- "zerocopy 0.7.35",
-]
-
-[[package]]
-name = "libsql-sys"
 version = "0.9.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90725458cc4461bc82f8f7983e80b002ea4f64b5184e1462f252d0dd74b122f5"
 dependencies = [
  "bytes",
- "libsql-ffi 0.9.30",
- "libsql-rusqlite 0.9.30",
+ "libsql-ffi",
+ "libsql-rusqlite",
  "once_cell",
  "tracing",
- "zerocopy 0.7.35",
-]
-
-[[package]]
-name = "libsql_replication"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9cf40c4c2c01462da758272976de0a23d19b4e9c714db08efecf262d896655b5"
-dependencies = [
- "aes",
- "async-stream",
- "async-trait",
- "bytes",
- "cbc",
- "libsql-rusqlite 0.33.0",
- "libsql-sys 0.8.0",
- "parking_lot",
- "prost",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tonic",
- "tracing",
- "uuid",
  "zerocopy 0.7.35",
 ]
 
@@ -6581,8 +6468,8 @@ dependencies = [
  "async-trait",
  "bytes",
  "cbc",
- "libsql-rusqlite 0.9.30",
- "libsql-sys 0.9.30",
+ "libsql-rusqlite",
+ "libsql-sys",
  "parking_lot",
  "prost",
  "serde",

@@ -54,7 +54,7 @@ deadpool-postgres = { version = "0.14", optional = true }
 tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
 
 # libSQL / Turso (rustls-backed; no openssl).
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+libsql = { version = "0.9", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 
 [dev-dependencies]
 ironclaw_attestation = { path = "../ironclaw_attestation", features = ["contract-tests"] }
