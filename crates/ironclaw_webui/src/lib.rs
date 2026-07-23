@@ -178,12 +178,15 @@ struct DeferredWebuiRouterState {
 struct DeferredWebuiHealthResponse {
     status: &'static str,
     channel: &'static str,
+    product: &'static str,
 }
 
 async fn deferred_webui_health_handler() -> Json<DeferredWebuiHealthResponse> {
     Json(DeferredWebuiHealthResponse {
         status: "healthy",
-        channel: "ironclaw",
+        // Keep this payload aligned with the ready router's public contract.
+        channel: "reborn",
+        product: "ironclaw",
     })
 }
 

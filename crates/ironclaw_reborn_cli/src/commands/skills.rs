@@ -51,6 +51,7 @@ impl SkillsListCommand {
             if self.verbose {
                 output["details"] = serde_json::json!({
                     "profile": config.profile.to_string(),
+                    "reborn_home": context.boot_config().home().path(),
                     "ironclaw_home": context.boot_config().home().path(),
                     "local_dev_root": config.local_dev_root,
                     "owner_id": config.owner_id,
@@ -62,10 +63,14 @@ impl SkillsListCommand {
 
         println!("IronClaw skills");
         println!("configured: {}", skills.len());
-        println!("source: ironclaw-local");
+        println!("source: reborn-local-dev");
 
         if self.verbose {
             println!("profile: {}", config.profile);
+            println!(
+                "reborn_home: {}",
+                context.boot_config().home().path().display()
+            );
             println!(
                 "ironclaw_home: {}",
                 context.boot_config().home().path().display()
@@ -147,7 +152,8 @@ fn skills_json(skills: &[RebornSkillSummary]) -> serde_json::Value {
     serde_json::json!({
         "configured": skills.len(),
         "skills": skills.iter().map(reborn_skill_summary_json).collect::<Vec<_>>(),
-        "source": "ironclaw-local",
+        "source": "reborn-local-dev",
+        "product": "ironclaw",
     })
 }
 

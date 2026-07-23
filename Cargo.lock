@@ -4311,6 +4311,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "deadpool-postgres",
+ "fs4",
  "hex",
  "hmac 0.13.0",
  "http-body-util",

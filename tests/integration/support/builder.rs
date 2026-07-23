@@ -19,6 +19,7 @@
 // Module-level allow matches `assertions.rs`/`test_channel.rs`/`live_mission_helpers.rs`.
 #![allow(dead_code)]
 
+use std::fs::{File, OpenOptions};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -119,6 +120,10 @@ pub(crate) enum StorageReopen {
                 testcontainers_modules::postgres::Postgres,
             >,
         >,
+        // Held until after `_container` is dropped so every PostgreSQL-backed
+        // harness on this host serializes Docker startup, migrations, and use,
+        // including harnesses running in separate Cargo test processes.
+        _test_lock: File,
     },
 }
 
@@ -1987,6 +1992,7 @@ pub(crate) async fn build_storage_composite(
     mode: StorageMode,
     dir: &Path,
 ) -> HarnessResult<(Arc<CompositeRootFilesystem>, StorageReopen)> {
+    let postgres_test_lock = acquire_storage_test_lock_at(mode, postgres_test_lock_path()).await?;
     let mut composite = CompositeRootFilesystem::new();
     let reopen = match mode {
         StorageMode::InMemory => {
@@ -2008,6 +2014,8 @@ pub(crate) async fn build_storage_composite(
             }
         }
         StorageMode::Postgres => {
+            let test_lock = postgres_test_lock
+                .ok_or("PostgreSQL storage mode did not acquire its test lock")?;
             let (container, database_url) = start_postgres_testcontainer().await?;
             let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
                 postgres_pool(&database_url)?,
@@ -2023,10 +2031,62 @@ pub(crate) async fn build_storage_composite(
             StorageReopen::Postgres {
                 database_url,
                 _container: Box::new(container),
+                _test_lock: test_lock,
             }
         }
     };
     Ok((Arc::new(composite), reopen))
+}
+
+const POSTGRES_TEST_LOCK_FILENAME: &str = "ironclaw-integration-postgres-testcontainer.lock";
+
+fn postgres_test_lock_path() -> PathBuf {
+    std::env::temp_dir().join(POSTGRES_TEST_LOCK_FILENAME)
+}
+
+fn open_postgres_test_lock(path: &Path) -> HarnessResult<File> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "failed to open PostgreSQL integration-test lock {}: {error}",
+                path.display()
+            )
+            .into()
+        })
+}
+
+fn lock_postgres_test_file(file: File) -> HarnessResult<File> {
+    fs4::FileExt::lock(&file)
+        .map_err(|error| format!("failed to acquire PostgreSQL integration-test lock: {error}"))?;
+    Ok(file)
+}
+
+/// Acquire the host-wide PostgreSQL testcontainer lock without blocking a
+/// Tokio worker. The file lock is visible to every Cargo test process on the
+/// runner; non-PostgreSQL storage modes bypass it.
+async fn acquire_storage_test_lock_at(
+    mode: StorageMode,
+    path: PathBuf,
+) -> HarnessResult<Option<File>> {
+    match mode {
+        StorageMode::Postgres => {
+            let file = tokio::task::spawn_blocking(move || {
+                let file = open_postgres_test_lock(&path)?;
+                lock_postgres_test_file(file)
+            })
+            .await
+            .map_err(|error| {
+                format!("PostgreSQL integration-test lock task failed to join: {error}")
+            })??;
+            Ok(Some(file))
+        }
+        StorageMode::InMemory | StorageMode::LibSql => Ok(None),
+    }
 }
 
 /// Start a per-`build()` PostgreSQL testcontainer. A provisioning failure is
@@ -2186,6 +2246,8 @@ pub(crate) fn thread_scope_from_binding(binding: &ResolvedBinding) -> HarnessRes
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+
     use super::*;
 
     #[test]
@@ -2209,6 +2271,71 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn postgres_storage_lock_serializes_while_other_modes_bypass_it() {
+        let tempdir = tempfile::tempdir().expect("temporary lock directory");
+        let lock_path = tempdir.path().join("postgres.lock");
+        let first = acquire_storage_test_lock_at(StorageMode::Postgres, lock_path.clone())
+            .await
+            .expect("first PostgreSQL lock acquisition")
+            .expect("PostgreSQL mode returns a lock");
+
+        for mode in [StorageMode::InMemory, StorageMode::LibSql] {
+            let acquired = tokio::time::timeout(
+                Duration::from_secs(1),
+                acquire_storage_test_lock_at(mode, lock_path.clone()),
+            )
+            .await
+            .expect("non-PostgreSQL mode must not wait")
+            .expect("non-PostgreSQL lock selection succeeds");
+            assert!(
+                acquired.is_none(),
+                "non-PostgreSQL mode must not acquire the shared lock"
+            );
+        }
+
+        let probe = open_postgres_test_lock(&lock_path).expect("open lock contention probe");
+        assert!(
+            matches!(
+                fs4::FileExt::try_lock(&probe),
+                Err(fs4::TryLockError::WouldBlock)
+            ),
+            "a second file descriptor must observe the held host-wide lock"
+        );
+        drop(probe);
+
+        let second_file = open_postgres_test_lock(&lock_path).expect("open second lock file");
+        let (started_tx, started_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let second = std::thread::spawn(move || {
+            started_tx
+                .send(())
+                .expect("signal second acquisition started");
+            let guard =
+                lock_postgres_test_file(second_file).expect("second PostgreSQL lock acquisition");
+            acquired_tx
+                .send(())
+                .expect("signal second acquisition completed");
+            guard
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second acquisition starts");
+        assert!(
+            acquired_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "second PostgreSQL acquisition must wait while the first guard is held"
+        );
+
+        drop(first);
+        acquired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second PostgreSQL acquisition proceeds after the first guard drops");
+        drop(second.join().expect("second lock thread joins"));
     }
 }
 
