@@ -67,9 +67,13 @@ pub mod state;
 pub mod surface;
 pub mod tool_adapter;
 pub mod trust;
+pub mod turn;
 
 mod credential_redaction;
 pub mod model_result_preview;
+pub mod product_adapter;
+pub mod product_adapter_error;
+pub mod product_surface;
 
 // Flat re-exports are intentional: downstream Reborn service crates consume
 // `ironclaw_host_api` as a contract prelude, while module docs remain the
@@ -96,6 +100,9 @@ pub use lane::*;
 pub use model_result_preview::*;
 pub use mount::*;
 pub use path::*;
+pub use product_adapter::*;
+pub use product_adapter_error::*;
+pub use product_surface::*;
 pub use recipe::*;
 pub use resolution::*;
 pub use resource::*;
@@ -108,6 +115,7 @@ pub use state::*;
 pub use surface::*;
 pub use tool_adapter::*;
 pub use trust::*;
+pub use turn::*;
 
 /// Canonical timestamp type for host API wire contracts.
 pub type Timestamp = chrono::DateTime<chrono::Utc>;

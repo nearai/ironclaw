@@ -10,15 +10,15 @@ use async_trait::async_trait;
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityId, ProjectId, TenantId, ThreadId, Timestamp, UserId,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionScope, ApprovalInteractionService,
     AutomationListRequest, AutomationProductFacade, ListPendingApprovalsRequest,
     ListPendingApprovalsResponse, PendingApprovalInteractionView, ProductAgentBoundCaller,
-    ProductSurface, ProductWorkflowError, RebornAutomationHoldReason,
-    RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornListThreadsResponse, RebornServices, RebornServicesErrorCode,
-    RebornServicesErrorKind, ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
-    THREADS_VIEW, WebUiAuthenticatedCaller, WebUiListThreadsRequest, approval_gate_ref,
+    ProductSurface, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ProductWorkflowError,
+    RebornAutomationHoldReason, RebornAutomationRecentRunStatus, RebornAutomationRunStatus,
+    RebornAutomationSource, RebornAutomationState, RebornListThreadsResponse, RebornServices,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse, THREADS_VIEW,
+    WebUiAuthenticatedCaller, WebUiListThreadsRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
 };
 use ironclaw_threads::{
@@ -826,8 +826,8 @@ async fn automation_facade_maps_backend_error_to_unavailable() {
         .await
         .expect_err("backend error should propagate as 503");
 
-    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-    assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
     assert_eq!(error.status_code, 503);
     assert!(error.retryable);
 
@@ -860,8 +860,8 @@ async fn automation_facade_times_out_stalled_repository() {
     .expect("facade timeout should complete promptly")
     .expect_err("stalled repository should time out");
 
-    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-    assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
     assert_eq!(error.status_code, 503);
     assert!(error.retryable);
 }
@@ -888,8 +888,8 @@ async fn automation_facade_maps_backend_error_on_run_history_batch_to_unavailabl
         .await
         .expect_err("batch backend error should propagate as 503");
 
-    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-    assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
     assert_eq!(error.status_code, 503);
     assert!(error.retryable);
 
@@ -929,8 +929,8 @@ async fn automation_facade_times_out_stalled_run_history_batch() {
     .expect("facade timeout should complete promptly")
     .expect_err("stalled batch call should time out");
 
-    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
-    assert_eq!(error.kind, RebornServicesErrorKind::ServiceUnavailable);
+    assert_eq!(error.code, ProductSurfaceErrorCode::Unavailable);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::ServiceUnavailable);
     assert_eq!(error.status_code, 503);
     assert!(error.retryable);
 }
@@ -949,8 +949,8 @@ async fn automation_facade_maps_not_found_trigger_error_to_404() {
         .await
         .expect_err("not-found error should propagate as 404");
 
-    assert_eq!(error.code, RebornServicesErrorCode::NotFound);
-    assert_eq!(error.kind, RebornServicesErrorKind::NotFound);
+    assert_eq!(error.code, ProductSurfaceErrorCode::NotFound);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::NotFound);
     assert_eq!(error.status_code, 404);
     assert!(!error.retryable);
 }
@@ -961,8 +961,8 @@ fn map_trigger_error_preserves_blocked_materialization_semantics() {
         reason: "trusted trigger inbound request blocked".to_string(),
     });
 
-    assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
-    assert_eq!(error.kind, RebornServicesErrorKind::ParticipantDenied);
+    assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
+    assert_eq!(error.kind, ProductSurfaceErrorKind::ParticipantDenied);
     assert_eq!(error.status_code, 403);
     assert!(!error.retryable);
 }

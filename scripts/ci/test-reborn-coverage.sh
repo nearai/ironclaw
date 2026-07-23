@@ -189,7 +189,7 @@ DA:3,0
 LF:3
 LH:1
 end_of_record
-SF:/work/ironclaw/crates/ironclaw_product_workflow/src/lib.rs
+SF:/work/ironclaw/crates/ironclaw_product/src/lib.rs
 DA:1,1
 DA:2,1
 LF:2
@@ -203,7 +203,7 @@ assert_exit_code "M1: merge exits 0" 0 "${CAP_RC}"
 m1_merged_body="$(cat "${tmp_root}/m1_merged.lcov")"
 assert_contains "M1: merged output keeps crates/ironclaw_runner" "${m1_merged_body}" "SF:/work/ironclaw/crates/ironclaw_runner/src/runtime.rs"
 assert_not_contains "M1: merged output drops non-crates/ src/main.rs" "${m1_merged_body}" "src/main.rs"
-assert_contains "M1: merged output keeps crates/ironclaw_product_workflow" "${m1_merged_body}" "ironclaw_product_workflow"
+assert_contains "M1: merged output keeps crates/ironclaw_product" "${m1_merged_body}" "ironclaw_product"
 assert_contains "M1: per-line DA counts are SUMMED across lanes (line1: 1+0=1)" "${m1_merged_body}" "DA:1,1"
 assert_contains "M1: per-line DA counts are SUMMED across lanes (line2: 0+1=1)" "${m1_merged_body}" "DA:2,1"
 assert_contains "M1: per-line DA counts are SUMMED across lanes (line3: 1+0=1)" "${m1_merged_body}" "DA:3,1"
@@ -237,7 +237,7 @@ DA:1,1
 LF:100
 LH:80
 end_of_record
-SF:/work/ironclaw/crates/ironclaw_product_workflow/src/lib.rs
+SF:/work/ironclaw/crates/ironclaw_product/src/lib.rs
 LF:50
 LH:50
 end_of_record
@@ -248,8 +248,8 @@ assert_exit_code "A1: summary exits 0 for a mixed-crate fixture" 0 "${CAP_RC}"
 assert_contains "A1: aggregate matches hand-computed 86.67% (130/150)" "${CAP_OUT}" \
   '**Line coverage (Reborn crates): 86.67%** — 130 / 150 lines'
 assert_contains "A1: table includes ironclaw_runner row" "${CAP_OUT}" "| \`ironclaw_runner\` | 80% | 80 / 100 |"
-assert_contains "A1: table includes ironclaw_product_workflow row" "${CAP_OUT}" \
-  "| \`ironclaw_product_workflow\` | 100% | 50 / 50 |"
+assert_contains "A1: table includes ironclaw_product row" "${CAP_OUT}" \
+  "| \`ironclaw_product\` | 100% | 50 / 50 |"
 
 # A2: no data at all -> exit 0, "no data" message.
 : > "${fixtures_dir}/a2_empty.lcov"

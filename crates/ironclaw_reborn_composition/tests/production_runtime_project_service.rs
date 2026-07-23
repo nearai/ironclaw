@@ -31,7 +31,7 @@ use ironclaw_host_runtime::{
     CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, SandboxCommandTransport,
     TenantSandboxProcessPort,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     PROJECT_CREATE_OPERATION, PROJECTS_VIEW, RebornCreateProjectRequest, RebornListProjectsRequest,
     WebUiAuthenticatedCaller,
 };

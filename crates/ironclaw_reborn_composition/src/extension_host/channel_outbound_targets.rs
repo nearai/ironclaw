@@ -27,10 +27,10 @@ use ironclaw_extension_host::SnapshotWatch;
 use ironclaw_extension_host::active::ActiveExtension;
 use ironclaw_host_api::{AgentId, ExtensionId, ProjectId, TenantId, UserId};
 use ironclaw_outbound::OutboundError;
-use ironclaw_product_adapters::{
+use ironclaw_product::PreferenceTargetCodec;
+use ironclaw_product::{
     AdapterInstallationId, ExternalConversationRef, PreferenceTargetEncodeRequest,
 };
-use ironclaw_product_workflow::PreferenceTargetCodec;
 use ironclaw_turns::ReplyTargetBindingRef;
 
 use crate::extension_host::channel_config::ChannelConfigService;

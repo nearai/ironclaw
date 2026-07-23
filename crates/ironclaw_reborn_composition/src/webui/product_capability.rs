@@ -18,7 +18,7 @@ use ironclaw_host_api::{
     TerminateHint, ToolVerdict, TrustClass,
 };
 use ironclaw_host_runtime::{HostRuntime, RuntimeCapabilityOutcome, RuntimeFailureKind};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     EXTENSION_ACTIVATE_CAPABILITY_ID, EXTENSION_INSTALL_CAPABILITY_ID,
     EXTENSION_REMOVE_CAPABILITY_ID, ProductCapabilityInvoker, RebornServicesError,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY_ID, SKILL_INSTALL_CAPABILITY_ID, SKILL_REMOVE_CAPABILITY_ID,

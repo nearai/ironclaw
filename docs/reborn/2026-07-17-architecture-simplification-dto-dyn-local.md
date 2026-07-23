@@ -829,7 +829,7 @@ the kernel through exactly two interfaces (`ProductSurface`, `AgentLoopHost`).
 Every product talks to the system through **one** narrow interface. An earlier
 draft of this section claimed six conversation methods could carry the whole
 product; that fails by inspection — the proto-`ProductSurface` this replaces
-(`RebornServicesApi`, `ironclaw_product_workflow/src/reborn_services.rs`) has
+(`RebornServicesApi`, `ironclaw_product/src/reborn_services.rs`) has
 **87 frozen trait methods** as of 2026-07-22 (the original 2026-07-17 audit
 counted 88 before the first shrink/additive conduit reconciliation; file-wide
 `async fn` counts include impls and tests), and most
@@ -2333,7 +2333,7 @@ open PR not yet on `main`.
 | Origin→gate matrix | **Live, tightening remains** — matrices are descriptor data and ratcheted; `LoopRun` ungated set is a reviewed 17-id seed to shrink. | `crates/ironclaw_host_api/src/capability.rs` (`OriginGatePolicy`, `OriginGateMatrix`, `UNGATED_LOOP_RUN_CAPABILITIES`); `crates/ironclaw_architecture/tests/reborn_origin_gate_matrix_ratchet.rs`. |
 | `InMemory*Store` mirror deletion | **Done for tracked domain stores** — the ratchet was deleted after the allowlist reached empty. | Deletion landed in #6430; replacement write sites include `crates/ironclaw_secrets/src/filesystem_store.rs`, `crates/ironclaw_resources/src/gate.rs`, `crates/ironclaw_authorization/src/lib.rs`, and `crates/ironclaw_outbound/src/delivered_gate_routes.rs`. |
 | Generic extension/channel runtime | **Landed** — `ChannelAdapter` + `ironclaw_extension_host`; Slack/Telegram are extension adapters, not bespoke product trees. | `crates/ironclaw_product_adapters/src/channel_adapter.rs::ChannelAdapter`; `crates/ironclaw_extension_host/src/lib.rs::ExtensionHost`; `crates/ironclaw_slack_extension/src/channel.rs::SlackChannelAdapter`; `crates/ironclaw_telegram_extension/src/channel.rs::TelegramChannelAdapter`; `crates/ironclaw_architecture/tests/reborn_extension_specificity.rs`. |
-| Product facade collapse | **Started, mostly remaining** — `invoke`/`query` exist and the facade is frozen at 87 methods; migrations to descriptors/views remain. | `crates/ironclaw_product_workflow/src/reborn_services.rs` (`RebornServicesApi::invoke`, `RebornServicesApi::query`, `ProductSurface`, `ProductView`, `ProductCapabilityDescriptor`); `crates/ironclaw_architecture/tests/reborn_facade_method_freeze_ratchet.rs`. |
+| Product facade collapse | **Started, mostly remaining** — `invoke`/`query` exist and the facade is frozen at 87 methods; migrations to descriptors/views remain. | `crates/ironclaw_product/src/reborn_services.rs` (`RebornServicesApi::invoke`, `RebornServicesApi::query`, `ProductSurface`, `ProductView`, `ProductCapabilityDescriptor`); `crates/ironclaw_architecture/tests/reborn_facade_method_freeze_ratchet.rs`. |
 | Deployment mode as data | **Partial** — renames/ratchets are live, but profile enums and profile-edge branching still exist. | `crates/ironclaw_architecture/tests/reborn_localdev_typename_ratchet.rs`; remaining mode vocabulary in `crates/ironclaw_host_api/src/runtime_policy.rs`. |
 | Causal routing / product terminal path | **Design added here, implementation pending** — no first-class duct/path contract yet. | §5.2.10 is the design target; no event-schema/path-contract/conformance write site exists yet. |
 | Recoverability endgame | **Partial** — vocabulary and model-visible recovery base are live; conformance/diagnostic observation remain. | `crates/ironclaw_host_api/src/resolution.rs`; `crates/ironclaw_host_api/src/result_meta.rs`; `crates/ironclaw_runner/src/failure_classification.rs`; §11.7 still names the missing conformance matrix. |
@@ -2524,7 +2524,7 @@ mint broken-links
 - `docs/reborn/2026-05-11-trust-boundary-stack-note.md` — trust-boundary baseline invariants.
 - `docs/reborn/2026-04-25-storage-catalog-and-placement.md` — storage placement.
 - `crates/ironclaw_host_api/` — the neutral vocabulary crate (target home for `Invocation`/`Authorized`/`Outcome`); ~124 public types across 21 files (§4.5).
-- `crates/ironclaw_product_workflow/src/reborn_services.rs` — `RebornServicesApi`: the frozen 87-method proto-`ProductSurface` trait that §5.2's `invoke`/`query` conduits replace (methods → matrix-declared capability descriptors + view descriptors).
+- `crates/ironclaw_product/src/reborn_services.rs` — `RebornServicesApi`: the frozen 87-method proto-`ProductSurface` trait that §5.2's `invoke`/`query` conduits replace (methods → matrix-declared capability descriptors + view descriptors).
 - `crates/ironclaw_host_api/src/runtime_policy.rs` — `DeploymentMode` / `RuntimeProfile`: the deployment-mode enums that leaked into the kernel vocabulary (§4.4–§4.5).
 - `crates/ironclaw_runtime_policy/` — `EffectiveRuntimePolicy`: the resolved policy *data* the kernel should consume instead of a mode enum.
 - `crates/ironclaw_filesystem/src/in_memory.rs` — `InMemoryBackend: RootFilesystem`: the existing seam that makes every `InMemory*Store` deletable (§4.3).

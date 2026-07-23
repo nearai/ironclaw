@@ -83,7 +83,7 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// Binary-parity account-setup declarations (extension-runtime §5.5),
     /// the `RebornHostBindings::with_account_setup_descriptors` seam.
     pub(crate) account_setup_descriptors:
-        Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+        Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
     /// Typed handle for the recording network egress when the profile wants
     /// `captured_network_requests` assertions (the dyn seam alone loses the
     /// recorder type).
@@ -260,7 +260,7 @@ impl HostRuntimeHarnessOptions {
     /// way the native factories mirror the CLI assembly.
     pub(crate) fn with_account_setup_descriptor(
         mut self,
-        descriptor: ironclaw_product_workflow::ExtensionAccountSetupDescriptor,
+        descriptor: ironclaw_product::ExtensionAccountSetupDescriptor,
     ) -> Self {
         self.account_setup_descriptors.push(descriptor);
         self

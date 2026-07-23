@@ -4,9 +4,9 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ironclaw_product_workflow::{
-    OperatorLogsService, RebornLogEntry, RebornLogLevel, RebornLogQueryRequest,
-    RebornLogQueryResponse, RebornServicesError, WebUiAuthenticatedCaller,
+use ironclaw_product::{
+    OperatorLogsService, ProductSurfaceError, RebornLogEntry, RebornLogLevel,
+    RebornLogQueryRequest, RebornLogQueryResponse, WebUiAuthenticatedCaller,
     normalize_operator_log_context_value,
 };
 use ironclaw_safety::{LeakDetector, sensitive_paths::is_sensitive_path_str};
@@ -577,7 +577,7 @@ impl OperatorLogsService for OperatorLogBuffer {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: RebornLogQueryRequest,
-    ) -> Result<RebornLogQueryResponse, RebornServicesError> {
+    ) -> Result<RebornLogQueryResponse, ProductSurfaceError> {
         Ok(self.query(request))
     }
 }

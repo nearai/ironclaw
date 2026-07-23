@@ -122,7 +122,7 @@ need host-only client metadata; the Google setup route builds the Google
 authorization URL from configured Reborn product-auth client metadata and keeps
 the static redirect URI aligned with the provider exchange client.
 
-`ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher` is the
+`ironclaw_product::ProductAuthTurnGateResumeDispatcher` is the
 product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It converts
 that specific typed auth continuation into a `TurnCoordinator::resume_turn` call
 using the canonical turn scope, actor, run id, and gate ref carried by the auth
@@ -131,7 +131,7 @@ continuation dispatch. Setup-only, lifecycle-activation, and product-action
 continuations remain explicit cases for their owning continuation dispatchers.
 The provider callback route itself never owns those side effects.
 
-`ironclaw_product_workflow::AuthInteractionService` owns the product/WebUI
+`ironclaw_product::AuthInteractionService` owns the product/WebUI
 blocked-auth interaction loop from #3094. It reads auth-required gates from
 scoped blocked run-state plus auth-flow records, returns redacted
 adapter/UI-safe DTOs, and routes credential/callback/cancel decisions back

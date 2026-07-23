@@ -10,13 +10,14 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_product_workflow::{
-    OutboundPreferencesProductFacade, RebornOutboundDeliveryModality,
+use ironclaw_product::{
+    OutboundPreferencesProductFacade, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, RebornOutboundDeliveryModality,
     RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetId,
     RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
     RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, WebUiAuthenticatedCaller,
+    RebornOutboundPreferencesResponse, RebornSetOutboundPreferencesRequest,
+    WebUiAuthenticatedCaller,
 };
 
 /// Bundled behind ONE mutex (not two) so a reader never observes `set_calls`
@@ -77,7 +78,7 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
     async fn get_outbound_preferences(
         &self,
         _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         let last_accepted = self
             .state
             .lock()
@@ -98,7 +99,7 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
         &self,
         _caller: WebUiAuthenticatedCaller,
         request: RebornSetOutboundPreferencesRequest,
-    ) -> Result<RebornOutboundPreferencesResponse, RebornServicesError> {
+    ) -> Result<RebornOutboundPreferencesResponse, ProductSurfaceError> {
         let Some(target_id) = request.final_reply_target_id else {
             return Err(target_not_found());
         };
@@ -123,7 +124,7 @@ impl OutboundPreferencesProductFacade for FakeOutboundPreferencesFacade {
     async fn list_outbound_delivery_targets(
         &self,
         _caller: WebUiAuthenticatedCaller,
-    ) -> Result<RebornOutboundDeliveryTargetListResponse, RebornServicesError> {
+    ) -> Result<RebornOutboundDeliveryTargetListResponse, ProductSurfaceError> {
         Ok(RebornOutboundDeliveryTargetListResponse {
             targets: self.targets.clone(),
             next_cursor: None,
@@ -151,10 +152,10 @@ fn target_option(target_id: &str, display_name: &str) -> RebornOutboundDeliveryT
 /// The `NotFound` the production handler maps to `Failed(InvalidInput)` — see
 /// `OutboundDeliveryTargetSetHandler`'s `NotFound` arm in
 /// `runtime/local_dev/outbound_delivery.rs`.
-fn target_not_found() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::NotFound,
-        kind: RebornServicesErrorKind::NotFound,
+fn target_not_found() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::NotFound,
+        kind: ProductSurfaceErrorKind::NotFound,
         status_code: 404,
         retryable: false,
         field: None,

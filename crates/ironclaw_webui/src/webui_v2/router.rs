@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::routing::{delete, get, post, put};
-use ironclaw_product_workflow::ProductSurface;
+use ironclaw_product::ProductSurface;
 use serde::Serialize;
 
 use crate::webui_v2::descriptors::{

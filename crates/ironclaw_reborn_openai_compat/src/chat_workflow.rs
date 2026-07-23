@@ -34,11 +34,11 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine as _;
 use ironclaw_attachments::InboundAttachment;
 use ironclaw_host_api::ThreadId;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ProductInboundAck, ProductRejection, ProductTriggerReason, ProjectionReadRequest,
     ProjectionSubscriptionRequest, ProtocolAuthEvidence, UserMessagePayload,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProductSurface, WebUiAuthenticatedCaller, WebUiCreateThreadRequest, WebUiInboundAttachment,
     WebUiSendMessageRequest,
 };
@@ -744,7 +744,7 @@ fn chat_user_message_and_attachments(
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::ProductInboundAck;
+    use ironclaw_product::ProductInboundAck;
     use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
     use super::accepted_ack_from_ack;

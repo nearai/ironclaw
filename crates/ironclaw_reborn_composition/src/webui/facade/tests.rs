@@ -22,7 +22,7 @@ use ironclaw_host_api::{
     ActivityId, ExtensionId, HostPath, HostPortCatalog, MountAlias, MountGrant, MountPermissions,
     MountView, Resolution, TenantId, UserId, VirtualPath,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_INSTALL_CAPABILITY, EXTENSION_REMOVE_CAPABILITY,
     OPERATOR_SERVICE_LIFECYCLE_OPERATION, ProductCapabilityDescriptor, RebornOperatorToolCatalog,
     RebornOperatorToolInfo,
@@ -384,14 +384,14 @@ async fn build_webui_services_wires_lifecycle_owner_identity() {
         .execute_on(
             bundle.api.as_ref(),
             caller("bob"),
-            ironclaw_product_workflow::RebornOperatorServiceLifecycleRequest {
-                action: ironclaw_product_workflow::RebornOperatorServiceLifecycleAction::Status,
+            ironclaw_product::RebornOperatorServiceLifecycleRequest {
+                action: ironclaw_product::RebornOperatorServiceLifecycleAction::Status,
             },
         )
         .await
         .expect_err("non-owner caller is rejected before lifecycle dispatch");
 
-    assert_eq!(error.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(error.code, ProductSurfaceErrorCode::Forbidden);
     assert_eq!(error.status_code, 403);
 }
 

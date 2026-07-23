@@ -1,5 +1,5 @@
 use super::*;
-use ironclaw_product_adapters::ProductOutboundPayload;
+use ironclaw_product::ProductOutboundPayload;
 use ironclaw_turns::run_profile::CapabilityInputRef;
 
 fn preview_input_ref(label: &str) -> CapabilityInputRef {

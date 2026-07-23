@@ -1,6 +1,6 @@
-use ironclaw_product_adapters::{ProductAdapterError, ProductWorkflowRejectionKind};
-use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
-use ironclaw_product_workflow::{RebornServicesError, RebornServicesErrorCode};
+use ironclaw_product::{ProductAdapterError, ProductWorkflowRejectionKind};
+use ironclaw_product::{ProductRejection, ProductRejectionKind};
+use ironclaw_product::{ProductSurfaceError, ProductSurfaceErrorCode};
 use serde::{Deserialize, Serialize};
 
 use crate::OpenAiCompatRefError;
@@ -193,16 +193,16 @@ impl OpenAiCompatHttpError {
         }
     }
 
-    pub fn from_reborn_services_error(error: RebornServicesError) -> Self {
+    pub fn from_product_surface_error(error: ProductSurfaceError) -> Self {
         let kind = match error.code {
-            RebornServicesErrorCode::InvalidRequest => OpenAiCompatErrorKind::Validation,
-            RebornServicesErrorCode::Unauthenticated => OpenAiCompatErrorKind::Authentication,
-            RebornServicesErrorCode::Forbidden => OpenAiCompatErrorKind::PermissionDenied,
-            RebornServicesErrorCode::NotFound => OpenAiCompatErrorKind::NotFound,
-            RebornServicesErrorCode::Conflict => OpenAiCompatErrorKind::Conflict,
-            RebornServicesErrorCode::RateLimited => OpenAiCompatErrorKind::RateLimited,
-            RebornServicesErrorCode::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
-            RebornServicesErrorCode::Internal => OpenAiCompatErrorKind::Internal,
+            ProductSurfaceErrorCode::InvalidRequest => OpenAiCompatErrorKind::Validation,
+            ProductSurfaceErrorCode::Unauthenticated => OpenAiCompatErrorKind::Authentication,
+            ProductSurfaceErrorCode::Forbidden => OpenAiCompatErrorKind::PermissionDenied,
+            ProductSurfaceErrorCode::NotFound => OpenAiCompatErrorKind::NotFound,
+            ProductSurfaceErrorCode::Conflict => OpenAiCompatErrorKind::Conflict,
+            ProductSurfaceErrorCode::RateLimited => OpenAiCompatErrorKind::RateLimited,
+            ProductSurfaceErrorCode::Unavailable => OpenAiCompatErrorKind::ServiceUnavailable,
+            ProductSurfaceErrorCode::Internal => OpenAiCompatErrorKind::Internal,
         };
         Self::from_kind(error.status_code, error.retryable, kind, error.field)
     }
@@ -230,9 +230,9 @@ impl From<ProductAdapterError> for OpenAiCompatHttpError {
     }
 }
 
-impl From<RebornServicesError> for OpenAiCompatHttpError {
-    fn from(error: RebornServicesError) -> Self {
-        Self::from_reborn_services_error(error)
+impl From<ProductSurfaceError> for OpenAiCompatHttpError {
+    fn from(error: ProductSurfaceError) -> Self {
+        Self::from_product_surface_error(error)
     }
 }
 
@@ -475,7 +475,7 @@ fn contains_no_exposure_sentinel(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use ironclaw_product_adapters::{ProductRejection, ProductRejectionKind};
+    use ironclaw_product::{ProductRejection, ProductRejectionKind};
 
     use super::product_rejection_to_openai_error;
 

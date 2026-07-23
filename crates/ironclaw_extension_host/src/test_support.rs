@@ -16,7 +16,7 @@ use ironclaw_host_api::{
     RestrictedEgress, RestrictedEgressError, RestrictedEgressRequest, RestrictedEgressResponse,
     ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
     VerifiedInbound,
 };

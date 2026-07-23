@@ -18,7 +18,7 @@ mod reborn_support;
 #[path = "../support/mod.rs"]
 mod support;
 
-use ironclaw_product_workflow::{ProjectCaller, RebornListProjectsRequest};
+use ironclaw_product::{ProjectCaller, RebornListProjectsRequest};
 use reborn_support::assertions::ToolErrorClass;
 use reborn_support::group::RebornIntegrationGroup;
 use reborn_support::project_service_fault::FAULT_INJECT_DENIED_PROJECT_NAME;

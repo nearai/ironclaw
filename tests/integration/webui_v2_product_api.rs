@@ -30,8 +30,8 @@ use ironclaw_filesystem::{CompositeRootFilesystem, LibSqlRootFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityId, EffectKind, ExtensionId, PermissionMode, TenantId, UserId,
 };
-use ironclaw_product_adapters::ProductOutboundPayload;
-use ironclaw_product_workflow::{
+use ironclaw_product::ProductOutboundPayload;
+use ironclaw_product::{
     ProductSurface, RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices,
     RebornStreamEventsRequest, WebUiAuthenticatedCaller,
 };
@@ -319,12 +319,8 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
     .await
     .expect("production Reborn runtime builds");
     let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
-    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-        tenant_id,
-        user_id,
-        Some(agent_id),
-        None,
-    );
+    let caller =
+        ironclaw_product::WebUiAuthenticatedCaller::new(tenant_id, user_id, Some(agent_id), None);
     let bundle = importable_extension_zip("webui-uploaded");
 
     let (status, body) = post_raw(
@@ -363,7 +359,7 @@ async fn operator_can_import_extension_bundle_through_production_webui_facade() 
     let (status, body) = get_json(
         mount_webui_v2_router(
             Arc::clone(&webui.api),
-            ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+            ironclaw_product::WebUiAuthenticatedCaller::new(
                 caller.tenant_id.clone(),
                 caller.user_id.clone(),
                 caller.agent_id.clone(),
@@ -431,7 +427,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     .await
     .expect("production Reborn runtime builds");
     let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
-    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let operator_caller = ironclaw_product::WebUiAuthenticatedCaller::new(
         tenant_id.clone(),
         operator_id,
         Some(agent_id.clone()),
@@ -459,17 +455,11 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
 
     let alice_id = UserId::new("alice").expect("alice id");
     let bob_id = UserId::new("bob").expect("bob id");
-    let install_request = |client_action_id: &str| {
-        serde_json::json!({
-            "package_ref": {"kind": "extension", "id": "legacy-members"},
-            "client_action_id": client_action_id
-        })
-    };
-    for (name, user_id, client_action_id) in [
-        ("Alice", alice_id.clone(), "webui-api2-legacy-members-alice"),
-        ("Bob", bob_id.clone(), "webui-api2-legacy-members-bob"),
-    ] {
-        let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let install_request = serde_json::json!({
+        "package_ref": {"kind": "extension", "id": "legacy-members"}
+    });
+    for (name, user_id) in [("Alice", alice_id.clone()), ("Bob", bob_id.clone())] {
+        let caller = ironclaw_product::WebUiAuthenticatedCaller::new(
             tenant_id.clone(),
             user_id,
             Some(agent_id.clone()),
@@ -478,7 +468,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
         let (status, body) = post_json(
             mount_webui_v2_router(Arc::clone(&webui.api), caller),
             "/api/webchat/v2/extensions/install",
-            install_request(client_action_id),
+            install_request.clone(),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{name} install response: {body}");
@@ -585,7 +575,7 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
     );
     assert!(members.contains(&bob_id), "canonical owner contains Bob");
 
-    let alice_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let alice_caller = ironclaw_product::WebUiAuthenticatedCaller::new(
         tenant_id.clone(),
         alice_id,
         Some(agent_id.clone()),
@@ -607,12 +597,8 @@ async fn production_runtime_canonicalizes_legacy_multi_row_extension_installs() 
         .unwrap_or_else(|| panic!("Alice should see private legacy-members: {body}"));
     assert_eq!(alice_extension["install_scope"], "private");
 
-    let bob_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-        tenant_id,
-        bob_id,
-        Some(agent_id),
-        None,
-    );
+    let bob_caller =
+        ironclaw_product::WebUiAuthenticatedCaller::new(tenant_id, bob_id, Some(agent_id), None);
     let (status, body) = get_json(
         mount_webui_v2_router(Arc::clone(&rebuilt_webui.api), bob_caller),
         "/api/webchat/v2/extensions",
@@ -680,7 +666,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
     .await
     .expect("production Reborn runtime builds");
     let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
-    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let operator_caller = ironclaw_product::WebUiAuthenticatedCaller::new(
         tenant_id.clone(),
         operator_id.clone(),
         Some(agent_id.clone()),
@@ -835,7 +821,7 @@ async fn production_runtime_restart_skips_installation_row_absent_from_catalog()
 
     // The catalog-present installation still restores and is reachable
     // through the real WebUI facade.
-    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let operator_caller = ironclaw_product::WebUiAuthenticatedCaller::new(
         tenant_id,
         operator_id,
         Some(agent_id),
@@ -910,7 +896,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
 
     let extension_id = "member-eviction-fixture";
-    let operator_caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+    let operator_caller = ironclaw_product::WebUiAuthenticatedCaller::new(
         tenant_id.clone(),
         operator_id.clone(),
         Some(agent_id.clone()),
@@ -939,7 +925,7 @@ async fn member_installs_join_then_operator_install_evicts_to_tenant_shared_thro
     let bob_id = UserId::new("bob").expect("bob id");
     let carol_id = UserId::new("carol").expect("carol id");
     let caller_for = |user_id: UserId| {
-        ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
+        ironclaw_product::WebUiAuthenticatedCaller::new(
             tenant_id.clone(),
             user_id,
             Some(agent_id.clone()),
@@ -1134,12 +1120,8 @@ async fn operator_lists_uninstalled_manifest_admin_configuration_with_secrets_re
     .await
     .expect("production Reborn runtime builds");
     let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
-    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-        tenant_id,
-        user_id,
-        Some(agent_id),
-        None,
-    );
+    let caller =
+        ironclaw_product::WebUiAuthenticatedCaller::new(tenant_id, user_id, Some(agent_id), None);
     let operator_router = webui_v2_router(WebUiV2State::new(
         Arc::clone(&webui.api),
         DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
@@ -1212,13 +1194,9 @@ async fn operator_saves_admin_configuration_and_reads_back_new_redacted_revision
     .await
     .expect("production Reborn runtime builds");
     let webui = build_webui_services(&runtime, None).expect("production WebUI facade builds");
-    let caller = ironclaw_product_workflow::WebUiAuthenticatedCaller::new(
-        tenant_id,
-        user_id,
-        Some(agent_id),
-        None,
-    )
-    .with_operator_webui_config(true);
+    let caller =
+        ironclaw_product::WebUiAuthenticatedCaller::new(tenant_id, user_id, Some(agent_id), None)
+            .with_operator_webui_config(true);
     let operator_router = || {
         webui_v2_router(WebUiV2State::new(
             Arc::clone(&webui.api),

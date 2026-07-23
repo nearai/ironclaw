@@ -37,7 +37,7 @@ use ironclaw_loop_host::{
     CapabilityResultWrite, CapabilityWriteResult, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProjectCaller, ProjectService, ProjectServiceError, RebornAddMemberRequest,
     RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornGetProjectRequest,
     RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,

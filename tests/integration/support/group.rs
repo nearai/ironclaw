@@ -64,8 +64,8 @@ use ironclaw_loop_host::{
     HostUserProfileSource, JsonSpawnSubagentInputCodec, ModelCostTable, SubagentSpawnLimits,
     ZeroCostTable,
 };
-use ironclaw_product_adapters::ProductTriggerReason;
-use ironclaw_product_workflow::{
+use ironclaw_product::ProductTriggerReason;
+use ironclaw_product::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductSurface,
     IdempotencyLedger, InboundTurnService, ResolvedBinding,
 };

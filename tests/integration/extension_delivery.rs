@@ -66,12 +66,12 @@ use ironclaw_loop_host::{
     HostManagedModelResponse,
 };
 use ironclaw_outbound::OutboundDeliveryStatus;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, ChannelAdapter, InboundOutcome, ParsedProductInbound, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProtocolAuthEvidence,
     UserMessagePayload, VerifiedInbound,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ChannelConnectionNoticePolicy, ConversationBindingService, ProductSurface,
     ResolveBindingRequest, RunDeliveryObserver, RunDeliveryServices, RunDeliverySettings,
 };
@@ -220,7 +220,7 @@ impl PostAdmissionObserver for RecordingForwardObserver {
     async fn observe_error(
         &self,
         envelope: ProductInboundEnvelope,
-        error: ironclaw_product_adapters::ProductAdapterError,
+        error: ironclaw_product::ProductAdapterError,
     ) {
         self.errors
             .lock()
@@ -311,7 +311,7 @@ async fn preresolve_vendor_turn_scope(
     };
     let message = messages.first().expect("one normalized message");
     // Mirror of the sink's envelope assembly (`extension_ingress.rs::admit`).
-    let context = ironclaw_product_adapters::TrustedInboundContext::from_verified_evidence(
+    let context = ironclaw_product::TrustedInboundContext::from_verified_evidence(
         ProductAdapterId::new(adapter_id).expect("adapter id"),
         AdapterInstallationId::new(installation_id).expect("installation id"),
         Utc::now(),
@@ -995,7 +995,7 @@ async fn slack_final_reply_flows_through_the_real_delivery_coordinator(
     .to_string();
     // The run's scope is the vendor conversation's binding, not this harness
     // thread's — register its scripted model before the POST admits the turn.
-    let evidence = ironclaw_product_adapters::auth::mark_request_signature_verified(
+    let evidence = ironclaw_product::auth::mark_request_signature_verified(
         "X-Slack-Signature".to_string(),
         Some("X-Slack-Request-Timestamp".to_string()),
         SLACK_INSTALLATION,
@@ -1379,7 +1379,7 @@ async fn telegram_update_becomes_a_turn_and_a_coordinated_reply(#[case] storage:
         }
     })
     .to_string();
-    let evidence = ironclaw_product_adapters::auth::mark_shared_secret_header_verified(
+    let evidence = ironclaw_product::auth::mark_shared_secret_header_verified(
         "X-Telegram-Bot-Api-Secret-Token".to_string(),
         TELEGRAM_INSTALLATION,
     );
@@ -1681,7 +1681,7 @@ async fn unbound_telegram_actor_pairs_via_web_minted_code_then_turns_attribute_t
             .extension_ingress_parts()
             .expect("composition built the generic ingress"),
     );
-    let evidence = ironclaw_product_adapters::auth::mark_shared_secret_header_verified(
+    let evidence = ironclaw_product::auth::mark_shared_secret_header_verified(
         "X-Telegram-Bot-Api-Secret-Token".to_string(),
         TELEGRAM_INSTALLATION,
     );

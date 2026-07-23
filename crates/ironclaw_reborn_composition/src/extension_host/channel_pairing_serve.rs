@@ -28,7 +28,7 @@ use ironclaw_host_api::ingress::{
     IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
-use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use ironclaw_product::WebUiAuthenticatedCaller;
 use serde::Serialize;
 
 use crate::extension_host::channel_pairing::{

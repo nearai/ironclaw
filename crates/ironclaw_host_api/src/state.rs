@@ -6,7 +6,7 @@
 //! wire already depend on — so both the `ExtensionHost` (in
 //! `ironclaw_extension_host`, which re-exports this type and writes the record
 //! subset `{Installed, Active, Failed}`) and the product-facing extensions wire
-//! (`ironclaw_product_workflow`) name the *same* enum without a new dependency
+//! (`ironclaw_product`) name the *same* enum without a new dependency
 //! edge. No extension or vendor may introduce a state, so the definition is
 //! generic and nothing downstream extends it.
 //!

@@ -25,11 +25,11 @@ use ironclaw_host_api::{
     AgentId, InstallationState, InvocationId, ProjectId, ResourceScope, SecretHandle, TenantId,
     UserId,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     EXTENSIONS_VIEW, LifecyclePackageKind, LifecyclePackageRef, ProductOperationRequest,
-    ProductOperationResponse, ProductSurface, RebornExtensionInfo, RebornExtensionListResponse,
-    RebornServicesError, RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
-    rejecting_reborn_services_error,
+    ProductOperationResponse, ProductSurface, ProductSurfaceError, RebornExtensionInfo,
+    RebornExtensionListResponse, RebornViewPage, RebornViewQuery, WebUiAuthenticatedCaller,
+    rejecting_product_surface_error,
 };
 use ironclaw_reborn_composition::{
     RebornAuthContinuationDispatcher, RebornProductAuthServices, RebornReadiness, RebornWebuiBundle,
@@ -282,7 +282,7 @@ impl ProductSurface for UnusedServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         query: RebornViewQuery,
-    ) -> Result<RebornViewPage, RebornServicesError> {
+    ) -> Result<RebornViewPage, ProductSurfaceError> {
         match query.view_id.as_str() {
             id if id == EXTENSIONS_VIEW.id => Ok(RebornViewPage {
                 payload: serde_json::to_value(RebornExtensionListResponse {
@@ -291,7 +291,7 @@ impl ProductSurface for UnusedServices {
                 .expect("extension list payload"),
                 next_cursor: None,
             }),
-            _ => Err(rejecting_reborn_services_error()),
+            _ => Err(rejecting_product_surface_error()),
         }
     }
 
@@ -299,8 +299,8 @@ impl ProductSurface for UnusedServices {
         &self,
         _caller: WebUiAuthenticatedCaller,
         _request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
-        Err(rejecting_reborn_services_error())
+    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
+        Err(rejecting_product_surface_error())
     }
 }
 

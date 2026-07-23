@@ -66,7 +66,7 @@ use crate::webui_operator_auth::{
 };
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
-use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use ironclaw_product::WebUiAuthenticatedCaller;
 use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
@@ -186,7 +186,7 @@ pub struct WebuiServeConfig {
     /// Host installation tenant id. Stamped onto every
     /// [`WebUiAuthenticatedCaller`]; the browser body cannot influence
     /// it. Matches the trusted host config rule documented in
-    /// `crates/ironclaw_product_workflow/CLAUDE.md`.
+    /// `crates/ironclaw_product/CLAUDE.md`.
     pub(crate) tenant_id: TenantId,
     /// Bearer-token verifier supplied by host composition.
     pub(crate) authenticator: Arc<dyn WebuiAuthenticator>,

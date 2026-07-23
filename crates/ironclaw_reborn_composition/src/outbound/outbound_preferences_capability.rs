@@ -15,9 +15,9 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     OUTBOUND_PREFERENCES_SET_CAPABILITY_ID, OutboundPreferencesProductFacade,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetOutboundPreferencesRequest,
+    ProductSurfaceErrorCode, ProductSurfaceErrorKind, RebornSetOutboundPreferencesRequest,
     WebUiAuthenticatedCaller,
 };
 
@@ -130,18 +130,16 @@ fn ensure_declared(
     }
 }
 
-fn map_services_error(
-    error: ironclaw_product_workflow::RebornServicesError,
-) -> RuntimeDispatchErrorKind {
+fn map_services_error(error: ironclaw_product::ProductSurfaceError) -> RuntimeDispatchErrorKind {
     match (error.code, error.kind) {
-        (RebornServicesErrorCode::InvalidRequest, _) | (RebornServicesErrorCode::NotFound, _) => {
+        (ProductSurfaceErrorCode::InvalidRequest, _) | (ProductSurfaceErrorCode::NotFound, _) => {
             RuntimeDispatchErrorKind::InputEncode
         }
-        (RebornServicesErrorCode::Forbidden, _) => RuntimeDispatchErrorKind::PolicyDenied,
-        (RebornServicesErrorCode::Unavailable, RebornServicesErrorKind::ServiceUnavailable) => {
+        (ProductSurfaceErrorCode::Forbidden, _) => RuntimeDispatchErrorKind::PolicyDenied,
+        (ProductSurfaceErrorCode::Unavailable, ProductSurfaceErrorKind::ServiceUnavailable) => {
             RuntimeDispatchErrorKind::Backend
         }
-        (RebornServicesErrorCode::Conflict, _) => RuntimeDispatchErrorKind::OperationFailed,
+        (ProductSurfaceErrorCode::Conflict, _) => RuntimeDispatchErrorKind::OperationFailed,
         _ => RuntimeDispatchErrorKind::Backend,
     }
 }

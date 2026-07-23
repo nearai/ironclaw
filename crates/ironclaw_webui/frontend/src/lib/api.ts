@@ -10,9 +10,9 @@
 // stands for v1 gateway routes that lack a v2 counterpart.
 //
 // Request/response shapes mirror the Rust DTOs in
-// `ironclaw_product_workflow::webui_inbound` and
-// `ironclaw_product_workflow::reborn_services::types`. The error
-// envelope mirrors `RebornServicesError`.
+// `ironclaw_product::product_surface_inbound` and
+// `ironclaw_product::reborn_services::types`. The error
+// envelope mirrors `ProductSurfaceError`.
 
 const TOKEN_KEY = "ironclaw_token";
 const V2_BASE = "/api/webchat/v2";
@@ -25,7 +25,7 @@ export class ApiError extends Error {
     this.statusText = statusText;
     this.body = body;
     this.headers = headers;
-    // Parsed RebornServicesError when the server returned JSON in
+    // Parsed ProductSurfaceError when the server returned JSON in
     // the documented shape. Undefined for non-JSON 5xx / proxy errors.
     this.payload = payload;
   }
@@ -45,7 +45,7 @@ export function storeToken(token) {
 
 // Generate a client action id (idempotency key) for mutating requests.
 // Must be a non-empty token with no control characters; `crypto.randomUUID`
-// satisfies the validator in `webui_inbound::parse_client_action_id`.
+// satisfies the validator in `product_surface_inbound::parse_client_action_id`.
 export function clientActionId() {
   if (typeof crypto !== "undefined" && crypto && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();

@@ -33,9 +33,9 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
-    RebornCreateThreadResponse, RebornServicesError, WebUiAuthenticatedCaller,
+    ProductSurfaceError, RebornCreateThreadResponse, WebUiAuthenticatedCaller,
     WebUiCreateThreadRequest,
 };
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
@@ -72,7 +72,7 @@ impl StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         _request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
         self.create_thread_callers
             .lock()
             .expect("lock")
@@ -104,16 +104,16 @@ impl ProductSurface for StubServices {
         &self,
         caller: WebUiAuthenticatedCaller,
         request: ProductOperationRequest,
-    ) -> Result<ProductOperationResponse, RebornServicesError> {
+    ) -> Result<ProductOperationResponse, ProductSurfaceError> {
         let operation_id = ProductOperationId::parse(request.operation_id.as_str())
-            .ok_or_else(|| RebornServicesError::internal_from("unsupported product operation"))?;
+            .ok_or_else(|| ProductSurfaceError::internal_from("unsupported product operation"))?;
         match operation_id {
             ProductOperationId::CreateThread => {
                 let request = serde_json::from_value(request.input)
-                    .map_err(RebornServicesError::internal_from)?;
+                    .map_err(ProductSurfaceError::internal_from)?;
                 ProductOperationResponse::json(self.create_thread(caller, request).await?)
             }
-            _ => Err(RebornServicesError::internal_from(
+            _ => Err(ProductSurfaceError::internal_from(
                 "unsupported product operation",
             )),
         }
