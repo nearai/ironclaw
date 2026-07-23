@@ -3432,6 +3432,8 @@ async def google_oauth_token(request: web.Request) -> web.Response:
             "https://www.googleapis.com/auth/documents.readonly",
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/spreadsheets.readonly",
+            "https://www.googleapis.com/auth/presentations",
+            "https://www.googleapis.com/auth/presentations.readonly",
         )
     )
     scopes_by_code = {
@@ -3444,6 +3446,7 @@ async def google_oauth_token(request: web.Request) -> web.Response:
         "mock_auth_code_google_drive": all_reborn_google_scopes,
         "mock_auth_code_google_docs": all_reborn_google_scopes,
         "mock_auth_code_google_sheets": all_reborn_google_scopes,
+        "mock_auth_code_google_slides": all_reborn_google_scopes,
     }
     code = data.get("code")
     scope = scopes_by_code.get(code)

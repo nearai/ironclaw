@@ -1,7 +1,11 @@
-"""GitHub repository, branch, release, search, and Actions cases."""
+"""GitHub repository, Contents, branch, release, and search cases."""
 
+import base64
 import json
 
+import httpx
+
+from emulate_provider import github_headers
 from provider_operation_github_common import (
     BRANCH,
     CODE_MARKER,
@@ -19,6 +23,11 @@ CREATED_REPO = "reborn-provider-case-repo"
 SEEDED_REPO = "reborn-provider-case-seeded-repo"
 FORK_NAME = "reborn-provider-case-fork"
 RELEASE_TAG = "provider-case-v1"
+CREATED_FILE_PATH = "docs/provider-operation-created.md"
+CREATED_FILE_CONTENT = "REBORN_PROVIDER_CASE_CONTENTS_CREATED"
+DELETED_FILE_PATH = "docs/provider-operation-delete.md"
+DELETED_FILE_CONTENT = "REBORN_PROVIDER_CASE_CONTENTS_DELETE"
+STATUS_CONTEXT = "provider-contract"
 BASE_ARGS = {"owner": OWNER, "repo": REPO}
 
 
@@ -46,6 +55,69 @@ async def _seeded_user_repo(emulate_url: str) -> None:
 
 async def _seed_code(emulate_url: str) -> None:
     await seed_branch(emulate_url)
+
+
+def _decode_content(resource: dict) -> str:
+    return base64.b64decode(resource["content"]).decode("utf-8")
+
+
+async def _missing_file(emulate_url: str, path: str) -> None:
+    async with httpx.AsyncClient(
+        headers=github_headers(), timeout=15
+    ) as client:
+        response = await client.get(f"{emulate_url}{REPO_PATH}/contents/{path}")
+    assert response.status_code == 404, response.text
+
+
+async def _seed_delete_file(emulate_url: str) -> None:
+    await _missing_file(emulate_url, DELETED_FILE_PATH)
+    result = await github_request(
+        emulate_url,
+        "PUT",
+        f"{REPO_PATH}/contents/{DELETED_FILE_PATH}",
+        payload={
+            "message": "test: seed file for deletion",
+            "content": base64.b64encode(DELETED_FILE_CONTENT.encode()).decode(),
+            "branch": "main",
+        },
+        expected_status=201,
+    )
+    assert isinstance(result, dict)
+    assert result["content"]["path"] == DELETED_FILE_PATH, result
+
+
+async def _delete_file_arguments(emulate_url: str) -> dict:
+    resource = await github_request(
+        emulate_url, "GET", f"{REPO_PATH}/contents/{DELETED_FILE_PATH}"
+    )
+    assert isinstance(resource, dict)
+    return {
+        **BASE_ARGS,
+        "path": DELETED_FILE_PATH,
+        "message": "test: delete provider operation file",
+        "sha": resource["sha"],
+        "branch": "main",
+    }
+
+
+async def _seed_status(emulate_url: str) -> None:
+    ref = await github_request(
+        emulate_url, "GET", f"{REPO_PATH}/git/ref/heads/main"
+    )
+    assert isinstance(ref, dict)
+    status = await github_request(
+        emulate_url,
+        "POST",
+        f"{REPO_PATH}/statuses/{ref['object']['sha']}",
+        payload={
+            "state": "success",
+            "context": STATUS_CONTEXT,
+            "description": "Provider contract passed",
+        },
+        expected_status=201,
+    )
+    assert isinstance(status, dict)
+    assert status["context"] == STATUS_CONTEXT, status
 
 
 async def _create_branch_outcome(emulate_url: str, preview: dict) -> None:
@@ -117,14 +189,44 @@ async def _search_code_outcome(emulate_url: str, preview: dict) -> None:
     assert CODE_PATH in rendered, preview
 
 
-async def _workflow_runs_outcome(emulate_url: str, preview: dict) -> None:
-    result = await github_request(
-        emulate_url, "GET", f"{REPO_PATH}/actions/runs"
+async def _get_file_outcome(emulate_url: str, preview: dict) -> None:
+    resource = await github_request(
+        emulate_url,
+        "GET",
+        f"{REPO_PATH}/contents/{CODE_PATH}",
+        params={"ref": BRANCH},
     )
-    assert result == {"total_count": 0, "workflow_runs": []}, result
-    rendered = json.dumps(preview)
-    assert "workflow_runs" in rendered, preview
-    assert "total_count" in rendered, preview
+    assert isinstance(resource, dict)
+    assert _decode_content(resource) == CODE_MARKER, resource
+    assert (
+        base64.b64decode(preview["output_preview"]).decode() == CODE_MARKER
+    ), preview
+
+
+async def _create_file_outcome(emulate_url: str, preview: dict) -> None:
+    resource = await github_request(
+        emulate_url, "GET", f"{REPO_PATH}/contents/{CREATED_FILE_PATH}"
+    )
+    assert isinstance(resource, dict)
+    assert _decode_content(resource) == CREATED_FILE_CONTENT, resource
+    assert CREATED_FILE_PATH in json.dumps(preview), preview
+
+
+async def _delete_file_outcome(emulate_url: str, preview: dict) -> None:
+    await _missing_file(emulate_url, DELETED_FILE_PATH)
+    assert json.loads(preview["output_preview"])["content"] is None, preview
+
+
+async def _status_outcome(emulate_url: str, preview: dict) -> None:
+    status = await github_request(
+        emulate_url, "GET", f"{REPO_PATH}/commits/main/status"
+    )
+    assert isinstance(status, dict)
+    assert status["state"] == "success", status
+    assert [item["context"] for item in status["statuses"]] == [
+        STATUS_CONTEXT
+    ], status
+    assert STATUS_CONTEXT in json.dumps(preview), preview
 
 
 GITHUB_REPO_PROVIDER_OPERATION_CASES = (
@@ -207,11 +309,43 @@ GITHUB_REPO_PROVIDER_OPERATION_CASES = (
         assert_outcome=_search_code_outcome,
     ),
     ProviderOperationCase(
-        case_id="github_get_workflow_runs",
+        case_id="github_get_file_content",
         provider_service="github",
-        capability_id="github.get_workflow_runs",
-        arguments=BASE_ARGS,
-        assert_baseline=_repo_baseline,
-        assert_outcome=_workflow_runs_outcome,
+        capability_id="github.get_file_content",
+        arguments={**BASE_ARGS, "path": CODE_PATH, "ref": BRANCH},
+        assert_baseline=seed_branch,
+        assert_outcome=_get_file_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="github_create_or_update_file",
+        provider_service="github",
+        capability_id="github.create_or_update_file",
+        arguments={
+            **BASE_ARGS,
+            "path": CREATED_FILE_PATH,
+            "message": "test: create provider operation file",
+            "content": CREATED_FILE_CONTENT,
+            "branch": "main",
+        },
+        assert_baseline=lambda emulate_url: _missing_file(
+            emulate_url, CREATED_FILE_PATH
+        ),
+        assert_outcome=_create_file_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="github_delete_file",
+        provider_service="github",
+        capability_id="github.delete_file",
+        arguments=_delete_file_arguments,
+        assert_baseline=_seed_delete_file,
+        assert_outcome=_delete_file_outcome,
+    ),
+    ProviderOperationCase(
+        case_id="github_get_combined_status",
+        provider_service="github",
+        capability_id="github.get_combined_status",
+        arguments={**BASE_ARGS, "ref": "main"},
+        assert_baseline=_seed_status,
+        assert_outcome=_status_outcome,
     ),
 )
