@@ -506,6 +506,11 @@ and select an outbound delivery target before calling `trigger_create`.
 
 V1 acceptance does not require external delivery. A valid V1 trigger fire is one that submits a cron-backed synthetic inbound turn and persists through the normal Reborn turn path.
 
+The system-managed heartbeat specialization is defined in
+[`heartbeat.md`](heartbeat.md). It remains backed by an ordinary scheduled
+trigger and this poller/trusted-ingress path; it does not add a source kind or a
+parallel scheduler.
+
 ---
 
 ## 10. Verification

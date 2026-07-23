@@ -267,7 +267,9 @@ Kernel-mediated safety rules:
   primary-scope only and excluded unless the resolved run profile explicitly
   allows personal context;
 - `HEARTBEAT.md` is volatile routine/proactive context, not stable default-loop
-  identity context;
+  identity context; the opt-in heartbeat flow reads it at fire time through the
+  scoped memory document service as specified by
+  [`heartbeat.md`](heartbeat.md);
 - admin `SYSTEM.md` is admin-scope only and may be cached;
 - `MEMORY.md` and daily logs may read configured secondary scopes only through explicit read-scope policy;
 - group chat contexts exclude personal memory/profile/directives unless explicit policy allows them;

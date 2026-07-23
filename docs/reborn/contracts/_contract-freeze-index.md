@@ -52,6 +52,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 | Migration | Reuse existing schemas where viable; bridge only when necessary. |
 | Runtime lanes | WASM, Script, and MCP are all first-class V1 lanes. |
 | Triggers | Trigger intake is a planned Reborn substrate slice. V1 is cron/schedule-only, enters through host-trusted ingress, and must not introduce a parallel agent loop. |
+| Heartbeat | Heartbeat is an opt-in thin service backed by one ordinary durable scheduled trigger per exact owner scope. It reuses trusted trigger ingress, the canonical runner, scoped memory reads, and triggered delivery; it must not introduce a second scheduler or direct delivery path. See [`heartbeat.md`](heartbeat.md). |
 
 ---
 
@@ -93,6 +94,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 - [`turn-runner.md`](turn-runner.md)
 - [`conversation-binding.md`](conversation-binding.md)
 - [`triggers.md`](triggers.md)
+- [`heartbeat.md`](heartbeat.md)
 - [`migration-compatibility.md`](migration-compatibility.md)
 - [`product-adapters.md`](product-adapters.md) (issue #3269 first-slice)
 - [`telegram-v2.md`](telegram-v2.md) (Telegram channel host, single `telegram` extension; supersedes the issue #3285 first-slice tracer)

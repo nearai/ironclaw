@@ -164,7 +164,8 @@ Kernel-mediated prompt safety rules:
 - group chat must not receive personal memory/profile context unless explicit policy allows it;
 - `HEARTBEAT.md` is not part of the default planned or interactive loop prompt
   prefix; routine, mission, or proactive profiles must own any volatile
-  heartbeat injection semantics;
+  heartbeat injection semantics; the system heartbeat profile follows
+  [`heartbeat.md`](heartbeat.md) and still enters through the canonical runner;
 - writes to prompt-injected files are guarded by prompt-injection write-safety policy;
 - assembled prompts are not emitted in events/audit by default;
 - prompt read/build failures are explicit turn failures unless a contract marks a missing optional doc as ignorable;
