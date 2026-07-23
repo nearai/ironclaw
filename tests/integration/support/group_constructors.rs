@@ -524,11 +524,9 @@ impl RebornIntegrationGroupBuilder {
     }
 
     /// Build a skill-activation group. See
-    /// [`RebornIntegrationGroup::skill_activation_tools`]. Seeds a `greet` system
-    /// skill BEFORE `into_group` so the runtime's `skill_context_source` (and the
-    /// `skill_activate` capability's `activate_skills_for_run`) resolve it at
-    /// activation time. A system skill is used so resolution is independent of the
-    /// run's scope owner — the seam only needs the skill to exist.
+    /// [`RebornIntegrationGroup::skill_activation_tools`]. The skill profile
+    /// pre-seeds the system fixtures before runtime construction so the warmed
+    /// system-skill descriptor cache sees them.
     pub async fn skill_activation_tools(self) -> HarnessResult<RebornIntegrationGroup> {
         let base = self.build_base().await?;
         // Pass the group's ACTUAL run-scope tenant (resolved by `build_base`
@@ -539,11 +537,6 @@ impl RebornIntegrationGroupBuilder {
             &base.canonical_binding.tenant_id,
         )
         .await?;
-        host_runtime.seed_system_skill_for_test(
-            "greet",
-            "greets the user warmly",
-            "GREET_SKILL_PROMPT_SENTINEL",
-        )?;
         let capability = GroupCapability::HostRuntime(Arc::new(host_runtime));
         self.into_group(base, capability).await
     }

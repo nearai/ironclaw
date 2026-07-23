@@ -494,6 +494,11 @@ impl RebornProductAuthServicePorts {
         self.provider_client = provider_client;
         self
     }
+
+    pub fn with_current_provider_client(self) -> Self {
+        let provider_client = self.provider_client.clone();
+        self.with_provider_client(provider_client)
+    }
 }
 
 /// RAII guard for the process-local continuation-dispatch single-flight lease.

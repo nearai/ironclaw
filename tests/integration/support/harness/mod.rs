@@ -87,6 +87,21 @@ pub(crate) type HarnessCapabilityParts = (
 pub(crate) type HarnessTurnStorageBackend = BlockingTurnStatePutFilesystem<InMemoryBackend>;
 pub(crate) type HarnessTurnBackend = CompositeRootFilesystem;
 
+fn write_system_skill_fixture(
+    storage_root: &std::path::Path,
+    name: &str,
+    description: &str,
+    prompt: &str,
+) -> HarnessResult<()> {
+    let dir = storage_root.join("system").join("skills").join(name);
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+    );
+    std::fs::write(dir.join("SKILL.md"), body)?;
+    Ok(())
+}
+
 pub(crate) enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
@@ -622,6 +637,7 @@ impl HostRuntimeCapabilityHarness {
             local_runtime_identity,
             seed_extension_credentials,
             skill_activation_tenant,
+            system_skill_fixtures,
             outbound_target_facade,
             network_http_egress_for_test,
             activate_bundled_extensions_for_test,
@@ -639,6 +655,14 @@ impl HostRuntimeCapabilityHarness {
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
+        for fixture in &system_skill_fixtures {
+            write_system_skill_fixture(
+                &storage_root,
+                &fixture.name,
+                &fixture.description,
+                &fixture.prompt,
+            )?;
+        }
         let has_fixture_extensions = !fixture_extension_dirs.is_empty();
         for (source, extension_id) in fixture_extension_dirs {
             copy_dir_recursive(
@@ -1445,16 +1469,7 @@ impl HostRuntimeCapabilityHarness {
         description: &str,
         prompt: &str,
     ) -> HarnessResult<()> {
-        let dir = self
-            .storage_root_for_test()
-            .join("system")
-            .join("skills")
-            .join(name);
-        std::fs::create_dir_all(&dir)?;
-        let body = format!(
-            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
-        );
-        std::fs::write(dir.join("SKILL.md"), body)?;
+        write_system_skill_fixture(&self.storage_root_for_test(), name, description, prompt)?;
         Ok(())
     }
 

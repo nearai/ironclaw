@@ -101,7 +101,7 @@ async fn runtime_rejects_migration_dry_run_before_live_traffic() {
 }
 
 #[tokio::test]
-async fn runtime_requires_resolved_runtime_policy_for_local_dev() {
+async fn local_dev_build_input_carries_resolved_runtime_policy() {
     let root = tempfile::tempdir().unwrap();
     let input =
         RebornRuntimeInput::from_build_input(ironclaw_reborn_composition::local_dev_build_input(
@@ -109,15 +109,10 @@ async fn runtime_requires_resolved_runtime_policy_for_local_dev() {
             root.path().join("local-dev"),
         ));
 
-    let error = match build_reborn_runtime(input).await {
-        Ok(_) => panic!("local-dev runtime should require a resolved runtime policy"),
-        Err(error) => error,
-    };
-
-    let RebornRuntimeError::InvalidArgument { reason } = error else {
-        panic!("expected invalid argument, got {error:?}");
-    };
-    assert!(reason.contains("resolved runtime policy"));
+    let runtime = build_reborn_runtime(input)
+        .await
+        .expect("local-dev build input carries a resolved runtime policy");
+    runtime.shutdown().await.expect("runtime shutdown");
 }
 
 #[tokio::test]

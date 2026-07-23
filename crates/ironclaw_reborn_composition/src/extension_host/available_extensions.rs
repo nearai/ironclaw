@@ -450,6 +450,21 @@ impl AvailableExtensionCatalog {
         ))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn from_trusted_fixture_filesystem_root<F>(
+        fs: &F,
+        root: &VirtualPath,
+        reserved_bundled_ids: &[String],
+    ) -> Result<Self, ProductWorkflowError>
+    where
+        F: RootFilesystem + ?Sized,
+    {
+        Ok(Self::from_packages(
+            load_filesystem_packages(fs, root, ManifestSource::HostBundled, reserved_bundled_ids)
+                .await?,
+        ))
+    }
+
     pub(crate) fn search<'a>(
         &'a self,
         query: &str,

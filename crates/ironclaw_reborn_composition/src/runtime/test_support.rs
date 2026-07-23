@@ -58,9 +58,17 @@ impl RebornRuntime {
     #[cfg(feature = "test-support")]
     pub fn local_dev_approval_interaction_service_for_test(
         &self,
-        _turn_coordinator: Arc<dyn TurnCoordinator>,
+        turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError> {
-        Ok(Some(Arc::clone(&self.approval_interaction_service)))
+        let Some(parts) = self.interaction_service_test_parts.as_ref() else {
+            return Ok(Some(Arc::clone(&self.approval_interaction_service)));
+        };
+        build_approval_interaction_service_with_parts(
+            parts,
+            turn_coordinator,
+            Arc::clone(&self.turn_run_snapshot_source),
+        )
+        .map(Some)
     }
 
     /// Auth-interaction service owned by this runtime.
@@ -69,9 +77,13 @@ impl RebornRuntime {
     #[cfg(feature = "test-support")]
     pub fn local_dev_auth_interaction_service_for_test(
         &self,
-        _turn_coordinator: Arc<dyn TurnCoordinator>,
+        turn_coordinator: Arc<dyn TurnCoordinator>,
     ) -> Option<Arc<dyn AuthInteractionService>> {
-        Some(Arc::clone(&self.auth_interaction_service))
+        Some(build_webui_auth_interaction_service_with_turn_run_source(
+            self.product_auth.as_ref(),
+            Arc::clone(&self.turn_run_snapshot_source),
+            turn_coordinator,
+        ))
     }
 
     /// Like [`local_dev_approval_interaction_service_for_test`], but lets

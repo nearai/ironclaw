@@ -769,8 +769,10 @@ fn compose_product_auth_services(
         credential_account_visibility_policy,
         flow_record_source,
     } = input;
+    let builder_owned_durable_auth = flow_record_source.is_some();
     let ports = match provider_composition.client {
         Some(provider_client) => ports.with_provider_client(provider_client),
+        None if builder_owned_durable_auth => ports.with_current_provider_client(),
         None => ports,
     };
     let mut services = ports.into_services(
@@ -2382,6 +2384,8 @@ async fn build_production_shaped(
         credential_account_visibility_policy,
         #[cfg(any(test, feature = "test-support"))]
         network_http_egress_for_test,
+        #[cfg(any(test, feature = "test-support"))]
+        trust_fixture_extensions_for_test,
         ..
     } = input;
     // The declarative DATA now lives on the deployment (Phase A). Clone the
@@ -2461,6 +2465,8 @@ async fn build_production_shaped(
                 default_system_prompt_path: None,
                 #[cfg(any(test, feature = "test-support"))]
                 network_http_egress_for_test: network_http_egress_for_test.clone(),
+                #[cfg(any(test, feature = "test-support"))]
+                trust_fixture_extensions_for_test,
             };
             build_local_storage_production_shaped(
                 context,
@@ -2519,6 +2525,8 @@ async fn build_production_shaped(
                 default_system_prompt_path: None,
                 #[cfg(any(test, feature = "test-support"))]
                 network_http_egress_for_test: network_http_egress_for_test.clone(),
+                #[cfg(any(test, feature = "test-support"))]
+                trust_fixture_extensions_for_test,
             };
             build_local_storage_production_shaped(
                 context,
@@ -2588,6 +2596,8 @@ async fn build_production_shaped(
                 default_system_prompt_path: None,
                 #[cfg(any(test, feature = "test-support"))]
                 network_http_egress_for_test: network_http_egress_for_test.clone(),
+                #[cfg(any(test, feature = "test-support"))]
+                trust_fixture_extensions_for_test,
             };
             build_libsql_production(
                 context,
@@ -2646,6 +2656,8 @@ async fn build_production_shaped(
                 default_system_prompt_path: None,
                 #[cfg(any(test, feature = "test-support"))]
                 network_http_egress_for_test: network_http_egress_for_test.clone(),
+                #[cfg(any(test, feature = "test-support"))]
+                trust_fixture_extensions_for_test,
             };
             build_postgres_production(
                 context,
@@ -2866,6 +2878,10 @@ struct RebornProductionBuildContext {
     /// unified production-shaped build honors an injected fake transport.
     #[cfg(any(test, feature = "test-support"))]
     network_http_egress_for_test: Option<Arc<dyn ironclaw_network::NetworkHttpEgress>>,
+    /// Test-support only: allow trusted fixture packages copied into
+    /// `/system/extensions` to validate as host-bundled.
+    #[cfg(any(test, feature = "test-support"))]
+    trust_fixture_extensions_for_test: bool,
 }
 
 fn production_wiring(
@@ -3472,6 +3488,8 @@ async fn build_backend_production(
         default_system_prompt_path,
         #[cfg(any(test, feature = "test-support"))]
         network_http_egress_for_test,
+        #[cfg(any(test, feature = "test-support"))]
+        trust_fixture_extensions_for_test,
     } = context;
     // Select the non-validating local-testing host runtime for a local-dev
     // deployment. The pre-`975bcd2ce` dedicated local-dev builder always used
@@ -3886,6 +3904,23 @@ async fn build_backend_production(
             })?;
     }
     let extensions_root = VirtualPath::new("/system/extensions")?;
+    #[cfg(any(test, feature = "test-support"))]
+    let filesystem_catalog = if trust_fixture_extensions_for_test {
+        AvailableExtensionCatalog::from_trusted_fixture_filesystem_root(
+            stores.filesystem.as_ref(),
+            &extensions_root,
+            &first_party_reserved_ids,
+        )
+        .await
+    } else {
+        AvailableExtensionCatalog::from_filesystem_root(
+            stores.filesystem.as_ref(),
+            &extensions_root,
+            &first_party_reserved_ids,
+        )
+        .await
+    };
+    #[cfg(not(any(test, feature = "test-support")))]
     let filesystem_catalog = AvailableExtensionCatalog::from_filesystem_root(
         stores.filesystem.as_ref(),
         &extensions_root,

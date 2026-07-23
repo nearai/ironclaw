@@ -587,18 +587,19 @@ async fn configure_admin_group(
         .expect("admin configuration capability id");
     let product_ingress = ExtensionId::new("ironclaw_webui").expect("product ingress id");
     let invocation_id = InvocationId::new();
+    let runtime_scope = &group.shared.product_harness.scope;
+    let runtime_agent_id = runtime_scope
+        .agent_id
+        .clone()
+        .expect("delivery profile runtime scope has an agent id");
     let scope = ResourceScope {
-        // Admin configuration is deployment/tenant shared. The delivery
-        // profile uses the default Reborn runtime identity; the separate
-        // scripted turn harness intentionally lives under `tenant-itest` and
-        // must not select which deployment receives operator configuration.
-        tenant_id: ironclaw_host_api::TenantId::new("reborn-cli")
-            .expect("delivery profile deployment tenant id"),
+        // Admin configuration is deployment/tenant shared. The delivery group
+        // aligns the composed runtime's tenant/agent with the product harness
+        // scope, so write through that runtime identity rather than a
+        // hardcoded local-dev default.
+        tenant_id: runtime_scope.tenant_id.clone(),
         user_id: operator_user_id.clone(),
-        agent_id: Some(
-            ironclaw_host_api::AgentId::new("reborn-cli-agent")
-                .expect("delivery profile deployment agent id"),
-        ),
+        agent_id: Some(runtime_agent_id),
         project_id: None,
         mission_id: None,
         thread_id: None,

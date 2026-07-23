@@ -30,6 +30,10 @@ pub(crate) struct HostRuntimeHarnessOptions {
     /// so `skill_activate` resolves the seeded user skill against the same
     /// tenant the turn runs under. `None` for every other harness variant.
     pub(crate) skill_activation_tenant: Option<TenantId>,
+    /// System-skill fixtures copied into the local-dev storage root before
+    /// runtime construction. The runtime warms the system-skill descriptor cache
+    /// during build, so system fixtures must exist before `build_runtime`.
+    pub(crate) system_skill_fixtures: Vec<SystemSkillFixture>,
     /// Injected outbound-delivery facade double + `target_set` approval flag,
     /// when this harness surfaces the synthetic `outbound_delivery_*`
     /// capabilities (C-SYNTH outbound seam). Only `outbound_target_tools()` sets
@@ -134,6 +138,7 @@ impl HostRuntimeHarnessOptions {
             local_runtime_identity: None,
             seed_extension_credentials: false,
             skill_activation_tenant: None,
+            system_skill_fixtures: Vec::new(),
             outbound_target_facade: None,
             network_http_egress_for_test: None,
             activate_bundled_extensions_for_test: Vec::new(),
@@ -173,6 +178,20 @@ impl HostRuntimeHarnessOptions {
 
     pub(crate) fn with_skill_activation_tenant(mut self, tenant: TenantId) -> Self {
         self.skill_activation_tenant = Some(tenant);
+        self
+    }
+
+    pub(crate) fn with_system_skill_fixture(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        prompt: impl Into<String>,
+    ) -> Self {
+        self.system_skill_fixtures.push(SystemSkillFixture {
+            name: name.into(),
+            description: description.into(),
+            prompt: prompt.into(),
+        });
         self
     }
 
@@ -284,6 +303,13 @@ impl HostRuntimeHarnessOptions {
         self.google_oauth_backend_for_test = true;
         self
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct SystemSkillFixture {
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) prompt: String,
 }
 
 /// Typed capture of a `HostRuntimeCapabilityHarness::new_with_options(..)` call
