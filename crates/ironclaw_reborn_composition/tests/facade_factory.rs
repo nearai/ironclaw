@@ -648,8 +648,8 @@ async fn hosted_single_tenant_volume_hides_process_capabilities() {
     );
     assert_process_capabilities_unavailable_for_processless_runtime(
         &services,
-        RuntimeFailureKind::Authorization,
-        "process execution is disabled",
+        RuntimeFailureKind::MissingRuntime,
+        "unknown capability",
     )
     .await;
 }
@@ -823,9 +823,40 @@ async fn local_dev_runtime_policy_hides_http_capability() {
 }
 
 #[tokio::test]
-async fn production_requires_configured_trust_policy() {
+async fn production_defaults_first_party_trust_policy() {
     let dir = tempfile::tempdir().unwrap();
     let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_runtime_for_test(
+        RebornHostBindings::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_runtime_process_binding(test_sandbox_process_binding()),
+    )
+    .await
+    .expect("production services should default first-party trust policy from injected bundles");
+
+    handle.shutdown().await;
+    assert_eq!(
+        services.readiness().state,
+        RebornReadinessState::ProductionValidated
+    );
+    assert!(services.host_runtime_for_test().is_some());
+}
+
+#[tokio::test]
+async fn production_requires_process_binding_for_defaulted_first_party_trust_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
 
     let result = build_runtime_for_test(
         RebornHostBindings::libsql(
@@ -836,14 +867,20 @@ async fn production_requires_configured_trust_policy() {
             None,
             test_master_key(),
         )
-        .with_runtime_policy(production_runtime_policy()),
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier),
     )
     .await;
 
-    assert!(matches!(
-        result,
-        Err(RebornBuildError::MissingProductionTrustPolicy)
-    ));
+    handle.shutdown().await;
+
+    let Err(RebornBuildError::InvalidConfig { reason }) = result else {
+        panic!("expected production first-party runtime to require a process binding");
+    };
+    assert!(
+        reason.contains("tenant sandbox process binding"),
+        "production first-party trust default should still keep process binding fail-closed: {reason}"
+    );
 }
 
 #[tokio::test]
@@ -1075,13 +1112,14 @@ async fn production_rejects_local_only_runtime_policy() {
         RebornCompositionProfile::Production,
         &report,
     );
-    assert!(
+    assert_eq!(
         RebornReadinessDiagnostic::from_production_wiring_report(
             RebornCompositionProfile::LocalDev,
             &report,
         )
-        .is_empty(),
-        "production wiring reports should not produce production diagnostics for local-dev profiles"
+        .len(),
+        report.issues().len(),
+        "active profiles should map production wiring reports through the public readiness entrypoint"
     );
     assert!(
         diagnostics.contains(
@@ -1629,15 +1667,14 @@ async fn migration_dry_run_validates_libsql_shape() {
 
     handle.shutdown().await;
 
-    let services = result
-        .expect("migration dry-run libsql services should build with a sandbox process binding");
-    assert_eq!(
-        services.readiness().state,
-        RebornReadinessState::MigrationDryRunValidated
+    let Err(RebornBuildError::InvalidConfig { reason }) = result else {
+        panic!("expected migration dry-run to reject live runtime startup");
+    };
+    assert!(
+        reason.contains("profile=migration-dry-run")
+            && reason.contains("must not start live Reborn runtime traffic"),
+        "migration dry-run must validate only through the substrate seam, not start a live runtime: {reason}"
     );
-    assert!(services.readiness().diagnostics.is_empty());
-    assert!(services.host_runtime_for_test().is_some());
-    let _turn_coordinator = services.turn_coordinator_for_test();
 }
 
 #[tokio::test]
@@ -1672,11 +1709,12 @@ async fn migration_dry_run_requires_libsql_process_port_for_first_party_runtime(
     handle.shutdown().await;
 
     let Err(RebornBuildError::InvalidConfig { reason }) = result else {
-        panic!("expected migration dry-run to require a process port, ");
+        panic!("expected migration dry-run to reject live runtime startup");
     };
     assert!(
-        reason.contains("tenant sandbox process binding"),
-        "migration dry-run should keep production-shaped first-party wiring fail-closed until a tenant sandbox process port is configured: {reason}"
+        reason.contains("profile=migration-dry-run")
+            && reason.contains("must not start live Reborn runtime traffic"),
+        "migration dry-run must reject live runtime startup before serving: {reason}"
     );
 }
 
@@ -1704,10 +1742,11 @@ async fn migration_dry_run_requires_postgres_process_port_for_first_party_runtim
     handle.shutdown().await;
 
     let Err(RebornBuildError::InvalidConfig { reason }) = result else {
-        panic!("expected postgres migration dry-run to require a process port, ");
+        panic!("expected postgres migration dry-run to reject live runtime startup");
     };
     assert!(
-        reason.contains("tenant sandbox process binding"),
-        "postgres migration dry-run should keep production-shaped first-party wiring fail-closed until a tenant sandbox process port is configured: {reason}"
+        reason.contains("profile=migration-dry-run")
+            && reason.contains("must not start live Reborn runtime traffic"),
+        "postgres migration dry-run must reject live runtime startup before serving: {reason}"
     );
 }

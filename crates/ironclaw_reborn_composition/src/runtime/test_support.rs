@@ -7,6 +7,50 @@
 
 use super::*;
 
+fn build_approval_interaction_service_with_parts(
+    parts: &LocalDevInteractionServiceTestParts,
+    turn_coordinator: Arc<dyn TurnCoordinator>,
+    turn_run_source: Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+) -> Result<Arc<dyn ApprovalInteractionService>, RebornRuntimeError> {
+    let approval_turn_runs = Arc::new(SnapshotApprovalTurnRunLocator::new(turn_run_source));
+    let approval_read_model = Arc::new(RunStateApprovalInteractionReadModel::new(
+        parts.approval_requests.clone(),
+        approval_turn_runs,
+    ));
+    let approval_resolver = Arc::new(ApprovalResolverPort::new(
+        parts.approval_requests.clone(),
+        parts.capability_leases.clone(),
+    ));
+    let persistent_approval_policies: Arc<dyn ironclaw_approvals::PersistentApprovalPolicyStore> =
+        parts.persistent_approval_policies.clone();
+    let tool_permission_overrides: Arc<dyn ironclaw_approvals::ToolPermissionOverrideStore> =
+        parts.tool_permission_overrides.clone();
+
+    Ok(Arc::new(
+        DefaultApprovalInteractionService::new(
+            approval_read_model,
+            Arc::new(approval::PolicyApprovalLeaseTermsProvider::new(
+                Arc::clone(&parts.builtin_capability_policy),
+                Arc::clone(&parts.extension_registry),
+                parts.workspace_mounts.clone(),
+                parts.skill_mounts.clone(),
+                parts.memory_mounts.clone(),
+                parts.system_extensions_lifecycle_mounts.clone(),
+                local_dev::extension_surface::ExtensionCapabilitySurfaceSource::new(Some(
+                    Arc::clone(&parts.extension_management),
+                )),
+            )),
+            approval_resolver,
+            turn_coordinator,
+        )
+        .with_persistent_policy_store(persistent_approval_policies)
+        .with_persistent_grantee_resolver(Arc::new(RegistryPersistentApprovalGranteeResolver::new(
+            Arc::clone(&parts.extension_registry),
+        )?))
+        .with_tool_permission_override_store(tool_permission_overrides),
+    ))
+}
+
 impl RebornRuntime {
     /// Real approval interaction service owned by this runtime.
     ///
@@ -51,16 +95,21 @@ impl RebornRuntime {
     #[cfg(feature = "test-support")]
     pub fn local_dev_approval_interaction_service_with_turn_state_for_test<F>(
         &self,
-        _turn_coordinator: Arc<dyn TurnCoordinator>,
-        _turn_state: Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
+        turn_coordinator: Arc<dyn TurnCoordinator>,
+        turn_state: Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
     ) -> Result<Option<Arc<dyn ApprovalInteractionService>>, RebornRuntimeError>
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
     {
-        if false {
+        let Some(parts) = self.local_dev_interaction_service_parts.as_ref() else {
             return Ok(None);
-        }
-        Ok(Some(Arc::clone(&self.approval_interaction_service)))
+        };
+        build_approval_interaction_service_with_parts(
+            parts,
+            turn_coordinator,
+            turn_state as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+        )
+        .map(Some)
     }
 
     /// Auth-side counterpart of
@@ -74,12 +123,16 @@ impl RebornRuntime {
     #[cfg(feature = "test-support")]
     pub fn local_dev_auth_interaction_service_with_turn_state_for_test<F>(
         &self,
-        _turn_coordinator: Arc<dyn TurnCoordinator>,
-        _turn_state: Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
+        turn_coordinator: Arc<dyn TurnCoordinator>,
+        turn_state: Arc<ironclaw_turns::FilesystemTurnStateRowStore<F>>,
     ) -> Option<Arc<dyn AuthInteractionService>>
     where
         F: ironclaw_filesystem::RootFilesystem + Send + Sync + 'static,
     {
-        Some(Arc::clone(&self.auth_interaction_service))
+        Some(build_webui_auth_interaction_service_with_turn_run_source(
+            self.product_auth.as_ref(),
+            turn_state as Arc<dyn crate::turn_run_snapshot::TurnRunSnapshotSource>,
+            turn_coordinator,
+        ))
     }
 }

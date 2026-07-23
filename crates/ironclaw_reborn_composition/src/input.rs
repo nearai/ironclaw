@@ -995,6 +995,7 @@ fn resolve_postgres_storage_from_config_and_env(
         "resolved Reborn PostgreSQL pool size"
     );
     let tls_options = postgres_pool_tls_options_from_env()?;
+    ironclaw_reborn_event_store::validate_postgres_pool_tls_options(&database_url, tls_options)?;
 
     // Phase B: resolve the declarative connection config only. The live pool is
     // opened later, at build time, inside `build_production_shaped` — construction

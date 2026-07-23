@@ -624,6 +624,8 @@ pub struct RebornRuntime {
     projection_services: RebornProjectionServices,
     approval_interaction_service: Arc<dyn ApprovalInteractionService>,
     auth_interaction_service: Arc<dyn AuthInteractionService>,
+    #[cfg(any(test, feature = "test-support"))]
+    local_dev_interaction_service_parts: Option<LocalDevInteractionServiceTestParts>,
     webui_event_log: Arc<dyn DurableEventLog>,
     default_run_profile_id: String,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
@@ -636,6 +638,21 @@ pub struct RebornRuntime {
     boot: Option<ironclaw_reborn_config::RebornBootConfig>,
     /// Hot-swap handle for the live LLM provider, when one was wired at boot.
     llm_reload: Option<RebornLlmReloadParts>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct LocalDevInteractionServiceTestParts {
+    approval_requests: Arc<crate::factory::ComposedApprovalRequestStore>,
+    capability_leases: Arc<crate::factory::ComposedCapabilityLeaseStore>,
+    extension_registry: Arc<ExtensionRegistry>,
+    workspace_mounts: MountView,
+    skill_mounts: MountView,
+    memory_mounts: MountView,
+    system_extensions_lifecycle_mounts: MountView,
+    persistent_approval_policies: Arc<ComposedPersistentApprovalPolicyStore>,
+    tool_permission_overrides: Arc<ComposedToolPermissionOverrideStore>,
+    extension_management: Arc<RebornLocalExtensionManagementPort>,
+    builtin_capability_policy: Arc<BuiltinCapabilityPolicy>,
 }
 
 struct RegistryPersistentApprovalGranteeResolver {
@@ -4033,6 +4050,28 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
 
     let scheduler_notifier = composition.scheduler_handle.wake_notifier();
 
+    #[cfg(any(test, feature = "test-support"))]
+    let local_dev_interaction_service_parts =
+        local_runtime.zip(builtin_capability_policy.as_ref()).map(
+            |(local_runtime, builtin_capability_policy)| LocalDevInteractionServiceTestParts {
+                approval_requests: Arc::clone(&local_runtime.approval_requests),
+                capability_leases: Arc::clone(&local_runtime.capability_leases),
+                extension_registry: Arc::clone(&local_runtime.extension_registry),
+                workspace_mounts: local_runtime.workspace_mounts.clone(),
+                skill_mounts: local_runtime.skill_mounts.clone(),
+                memory_mounts: local_runtime.memory_mounts.clone(),
+                system_extensions_lifecycle_mounts: local_runtime
+                    .system_extensions_lifecycle_mounts
+                    .clone(),
+                persistent_approval_policies: Arc::clone(
+                    &local_runtime.persistent_approval_policies,
+                ),
+                tool_permission_overrides: Arc::clone(&local_runtime.tool_permission_overrides),
+                extension_management: Arc::clone(&local_runtime.extension_management),
+                builtin_capability_policy: Arc::clone(builtin_capability_policy),
+            },
+        );
+
     // Spawn the engine-owned credential keepalive sweep (B4;
     // `ironclaw_auth::keepalive`). The factory reports whether the durable
     // candidate source, recipe data, leader lock, and refresh port are ready
@@ -4162,6 +4201,8 @@ pub async fn build_runtime(input: RebornRuntimeInput) -> Result<RebornRuntime, R
         projection_services,
         approval_interaction_service,
         auth_interaction_service,
+        #[cfg(any(test, feature = "test-support"))]
+        local_dev_interaction_service_parts,
         webui_event_log: event_log,
         default_run_profile_id,
         send_locks: Mutex::new(HashMap::new()),

@@ -97,7 +97,8 @@ use ironclaw_filesystem::{
 };
 use ironclaw_filesystem::{DiskFilesystem, ScopedFilesystem};
 use ironclaw_host_api::runtime_policy::{
-    DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, ProcessBackendKind, SecretMode,
+    DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
+    SecretMode,
 };
 use ironclaw_host_api::{HostApiError, MountAlias, MountGrant};
 use ironclaw_host_api::{
@@ -2428,6 +2429,7 @@ async fn build_production_shaped(
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let runtime_policy_for_local_process = runtime_policy.clone();
             let production_wiring = production_wiring(
+                profile,
                 production_trust_policy,
                 runtime_policy,
                 scheduler_wake_wiring.notifier(),
@@ -2485,6 +2487,7 @@ async fn build_production_shaped(
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let runtime_policy_for_local_process = runtime_policy.clone();
             let production_wiring = production_wiring(
+                profile,
                 production_trust_policy,
                 runtime_policy,
                 scheduler_wake_wiring.notifier(),
@@ -2546,6 +2549,7 @@ async fn build_production_shaped(
             //    ensuring the coordinator's notifier and the scheduler share a live queue.
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
+                profile,
                 production_trust_policy,
                 runtime_policy,
                 scheduler_wake_wiring.notifier(),
@@ -2609,6 +2613,7 @@ async fn build_production_shaped(
             //    ensuring the coordinator's notifier and the scheduler share a live queue.
             let scheduler_wake_wiring = ironclaw_runner::runtime::SchedulerWakeWiring::channel();
             let production_wiring = production_wiring(
+                profile,
                 production_trust_policy,
                 runtime_policy,
                 scheduler_wake_wiring.notifier(),
@@ -2862,6 +2867,7 @@ struct RebornProductionBuildContext {
 }
 
 fn production_wiring(
+    profile: RebornCompositionProfile,
     trust_policy: Option<Arc<HostTrustPolicy>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
     turn_run_wake_notifier: Arc<ironclaw_runner::turn_scheduler::SchedulerTurnRunWakeNotifier>,
@@ -2872,6 +2878,12 @@ fn production_wiring(
         return Err(RebornBuildError::EmptyProductionTrustPolicy);
     }
     let runtime_policy = runtime_policy.ok_or(RebornBuildError::MissingRuntimePolicy)?;
+    if matches!(
+        profile,
+        RebornCompositionProfile::Production | RebornCompositionProfile::MigrationDryRun
+    ) {
+        validate_production_runtime_policy(&runtime_policy)?;
+    }
     validate_production_process_binding(&runtime_policy, &runtime_process_binding)?;
     let turn_run_wake_notifier: Arc<dyn ironclaw_turns::TurnRunWakeNotifier> =
         turn_run_wake_notifier;
@@ -2881,6 +2893,58 @@ fn production_wiring(
         turn_run_wake_notifier,
         runtime_process_binding,
     })
+}
+
+fn validate_production_runtime_policy(
+    runtime_policy: &EffectiveRuntimePolicy,
+) -> Result<(), RebornBuildError> {
+    let mut issues = Vec::new();
+    if let Some(reason) = local_only_runtime_policy_reason(runtime_policy) {
+        issues.push(ironclaw_host_runtime::ProductionWiringIssue::new(
+            ironclaw_host_runtime::ProductionWiringComponent::RuntimePolicy,
+            ironclaw_host_runtime::ProductionWiringIssueKind::LocalOnlyImplementation,
+            Some(reason),
+        ));
+    }
+    if runtime_policy.process_backend == ProcessBackendKind::LocalHost {
+        issues.push(ironclaw_host_runtime::ProductionWiringIssue::new(
+            ironclaw_host_runtime::ProductionWiringComponent::RuntimeProcessPort,
+            ironclaw_host_runtime::ProductionWiringIssueKind::LocalOnlyImplementation,
+            Some("local_host_process"),
+        ));
+    }
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(RebornBuildError::ProductionWiring {
+            report: ironclaw_host_runtime::ProductionWiringReport::new(issues),
+        })
+    }
+}
+
+fn local_only_runtime_policy_reason(policy: &EffectiveRuntimePolicy) -> Option<&'static str> {
+    if matches!(policy.deployment, DeploymentMode::LocalSingleUser) {
+        return Some("local_single_user_deployment");
+    }
+    if matches!(
+        policy.filesystem_backend,
+        FilesystemBackendKind::HostWorkspace | FilesystemBackendKind::HostWorkspaceAndHome
+    ) {
+        return Some("host_workspace_filesystem");
+    }
+    if matches!(policy.process_backend, ProcessBackendKind::LocalHost) {
+        return Some("local_host_process");
+    }
+    if matches!(policy.network_mode, NetworkMode::Direct) {
+        return Some("direct_network");
+    }
+    if matches!(
+        policy.secret_mode,
+        SecretMode::ScrubbedEnv | SecretMode::InheritedEnv
+    ) {
+        return Some("local_secret_environment");
+    }
+    None
 }
 
 fn validate_production_process_binding(
