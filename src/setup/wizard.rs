@@ -361,7 +361,7 @@ impl SetupWizard {
                     let default = registry
                         .find("anthropic")
                         .map(|d| d.default_model.as_str())
-                        .unwrap_or("claude-sonnet-4-20250514");
+                        .unwrap_or("claude-sonnet-4-6");
                     self.settings.selected_model = Some(default.to_string());
                     print_info(&format!("Using default model: {default}"));
                 }

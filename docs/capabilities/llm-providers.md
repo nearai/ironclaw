@@ -58,7 +58,7 @@ LLM_BACKEND=anthropic
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Popular models: `claude-sonnet-4-20250514`, `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022`
+Popular models: `claude-sonnet-4-6`, `claude-3-5-sonnet-20241022`, `claude-3-5-haiku-20241022`
 
 ---
 

@@ -136,7 +136,7 @@ API-key providers it records that provider's credential env-var name in
 | --- | --- | --- | --- |
 | NEAR AI | `nearai` | `NEARAI_API_KEY` | `deepseek-ai/DeepSeek-V4-Flash` |
 | OpenAI | `openai` | `OPENAI_API_KEY` | `gpt-5-mini` |
-| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
 | Ollama (local) | `ollama` | _(none — runs locally)_ | `llama3` |
 
 So to use Anthropic instead of the quick-start example, swap step 2 for:
