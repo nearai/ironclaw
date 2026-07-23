@@ -27,7 +27,7 @@ host-owned counterpart that binds the `TcpListener` and drives the serve loop.
 
 Path A of `docs/reborn/how-to-port-channel-to-reborn.md` rules apply: host auth
 stays host-owned in this crate, no `src/` (v1) imports, no v1 secrets / settings
-/ DB, and no direct `ironclaw_product_adapters` edge (reach it through
+/ DB, and no direct `ironclaw_product` edge (reach it through
 composition's facade). Enforced by `ironclaw_architecture`
 (`tests/reborn_dependency_boundaries.rs`).
 
@@ -70,9 +70,9 @@ turning the `webui_v2_routes()` descriptors into tower layers.
 
 ## WebChat v2 route surface (folded from `ironclaw_webui_v2`)
 
-Handlers consume only `ironclaw_product_workflow::ProductSurface`. The bearer
+Handlers consume only `ironclaw_host_api::ProductSurface`. The bearer
 middleware (in this crate's `webui_v2_app`) constructs the
-`WebUiAuthenticatedCaller`, carries the matched token's `WebUiV2Capabilities`,
+`ProductSurfaceCaller`, carries the matched token's `WebUiV2Capabilities`,
 and injects both as axum `Extension`s before the handler runs; handlers fail
 closed (`500`) if that layer is missing (locked by
 `missing_caller_extension_returns_500`).

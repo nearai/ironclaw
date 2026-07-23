@@ -1040,53 +1040,56 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/ironclaw_host_runtime/src/first_party_tools/http.rs",
         "github",
     ),
+    ("crates/ironclaw_product/src/adapter_registry.rs", "github"),
+    ("crates/ironclaw_product/src/adapter_registry.rs", "slack"),
     (
-        "crates/ironclaw_product_adapter_registry/src/lib.rs",
+        "crates/ironclaw_product/src/adapter_registry.rs",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_host_api/src/product_adapter/identity.rs",
+        "slack",
+    ),
+    (
+        "crates/ironclaw_host_api/src/product_adapter/identity.rs",
+        "telegram",
+    ),
+    (
+        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
         "github",
     ),
     (
-        "crates/ironclaw_product_adapter_registry/src/lib.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_product_adapter_registry/src/lib.rs",
-        "telegram",
-    ),
-    ("crates/ironclaw_product_adapters/src/identity.rs", "slack"),
-    (
-        "crates/ironclaw_product_adapters/src/identity.rs",
-        "telegram",
-    ),
-    ("crates/ironclaw_product_adapters/src/outbound.rs", "github"),
-    ("crates/ironclaw_product_adapters/src/outbound.rs", "google"),
-    ("crates/ironclaw_product_adapters/src/outbound.rs", "notion"),
-    (
-        "crates/ironclaw_product_adapters/src/outbound.rs",
-        "telegram",
-    ),
-    ("crates/ironclaw_product_workflow/Cargo.toml", "telegram"),
-    (
-        "crates/ironclaw_product_workflow/src/conversation_binding.rs",
-        "slack",
-    ),
-    ("crates/ironclaw_product_workflow/src/lib.rs", "telegram"),
-    (
-        "crates/ironclaw_product_workflow/src/reborn_services.rs",
-        "slack",
-    ),
-    (
-        "crates/ironclaw_product_workflow/src/reborn_services/llm_config.rs",
-        "github",
-    ),
-    (
-        "crates/ironclaw_product_workflow/src/reborn_services/llm_config.rs",
+        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
         "google",
     ),
     (
-        "crates/ironclaw_product_workflow/src/reborn_services/projects.rs",
+        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "notion",
+    ),
+    (
+        "crates/ironclaw_host_api/src/product_adapter/outbound.rs",
+        "telegram",
+    ),
+    ("crates/ironclaw_product/Cargo.toml", "telegram"),
+    (
+        "crates/ironclaw_product/src/conversation_binding.rs",
+        "slack",
+    ),
+    ("crates/ironclaw_product/src/lib.rs", "telegram"),
+    ("crates/ironclaw_product/src/reborn_services.rs", "slack"),
+    (
+        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
         "github",
     ),
-    ("crates/ironclaw_product_workflow/src/workflow.rs", "slack"),
+    (
+        "crates/ironclaw_product/src/reborn_services/llm_config.rs",
+        "google",
+    ),
+    (
+        "crates/ironclaw_product/src/reborn_services/projects.rs",
+        "github",
+    ),
+    ("crates/ironclaw_product/src/workflow.rs", "slack"),
     ("crates/ironclaw_host_api/src/dispatch.rs", "slack"),
     (
         "crates/ironclaw_host_runtime/src/first_party_tools/schemas.rs",
@@ -1267,7 +1270,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "google",
     ),
     (
-        "crates/ironclaw_product_workflow/src/reborn_services/outbound_delivery_capability_surface.rs",
+        "crates/ironclaw_product/src/reborn_services/outbound_delivery_capability_surface.rs",
         "slack",
     ),
     (

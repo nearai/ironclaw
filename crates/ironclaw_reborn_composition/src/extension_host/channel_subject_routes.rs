@@ -28,8 +28,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_extensions::ExtensionAdminConfigurationDescriptor;
 use ironclaw_host_api::{ExtensionId, TenantId, UserId};
-use ironclaw_product_adapters::{AdapterInstallationId, ProductAdapterId};
-use ironclaw_product_workflow::{
+use ironclaw_product::{AdapterInstallationId, ProductAdapterId};
+use ironclaw_product::{
     ProductConversationSubjectRouteResolutionRequest, ProductConversationSubjectRouteResolver,
     ProductWorkflowError,
 };
@@ -239,7 +239,7 @@ mod tests {
     use ironclaw_extensions::{ExtensionManifestRecord, ManifestSource};
     use ironclaw_filesystem::{InMemoryBackend, RootFilesystem, ScopedFilesystem};
     use ironclaw_host_api::{InvocationId, ResourceScope};
-    use ironclaw_product_workflow::ProductConversationRouteKey;
+    use ironclaw_product::ProductConversationRouteKey;
     use ironclaw_secrets::{FilesystemSecretStore, SecretStore};
 
     use super::*;

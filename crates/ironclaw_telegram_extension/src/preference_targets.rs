@@ -8,7 +8,7 @@
 //! belong to; that protocol invariant supplies the personal-DM actor carried
 //! by the ref. Group, supergroup, and channel chat ids are negative.
 
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ExternalConversationRef, PreferenceTargetCodec, PreferenceTargetEncodeRequest,
 };
 use ironclaw_telegram_v2_adapter::{
@@ -103,7 +103,7 @@ fn parse_canonical_i64(value: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use ironclaw_host_api::{AgentId, ProjectId};
-    use ironclaw_product_adapters::AdapterInstallationId;
+    use ironclaw_product::AdapterInstallationId;
 
     use super::*;
 

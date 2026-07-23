@@ -3,16 +3,16 @@
 // The browser stages files locally (reads them to base64 + a preview data
 // URL), validates them against the server-advertised inline-attachment
 // contract (`session.attachments` — see `useAttachmentConfig`), and hands
-// `useChat.send` the wire shape `WebUiInboundAttachment` expects:
+// `useChat.send` the wire shape `ProductInboundAttachment` expects:
 // `{ mime_type, filename, data_base64 }`. The server-side decode in
-// `webui_inbound::decode_attachments` remains the sole authority — these
+// `product_surface_inbound::decode_attachments` remains the sole authority — these
 // client checks are UX hints that fail fast before a doomed upload.
 
 let stagedSeq = 0;
 
 // Default budgets used only as a fallback when the session has not yet
 // resolved the server contract. They mirror `MAX_INLINE_*` in
-// `crates/ironclaw_product_workflow/src/webui_inbound.rs`; the server still
+// `crates/ironclaw_product/src/product_surface_inbound.rs`; the server still
 // re-validates, so a drift here only changes how early the UX warns.
 export const FALLBACK_ATTACHMENT_LIMITS = {
   accept: [],
@@ -208,7 +208,7 @@ export async function stageFiles(files, { limits, existing = [], t }) {
   return { staged, errors };
 }
 
-// Map a staged attachment into the `WebUiInboundAttachment` wire shape the
+// Map a staged attachment into the `ProductInboundAttachment` wire shape the
 // v2 send-message endpoint accepts.
 export function toWireAttachment(att) {
   return {

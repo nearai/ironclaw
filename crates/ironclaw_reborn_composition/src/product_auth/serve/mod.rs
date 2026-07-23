@@ -50,12 +50,13 @@ use ironclaw_host_api::ingress::{
     RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{
-    AgentId, ExtensionId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+    AgentId, BoundProductSurface, ExtensionId, InvocationId, ProductSurface, ProductSurfaceCaller,
+    ProductSurfaceError, ProductSurfaceQueryRequest, ProjectId, ResourceScope, TenantId, ThreadId,
+    UserId,
 };
-use ironclaw_product_workflow::{
-    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, ProductSurface,
-    RebornExtensionCredentialSetup, RebornExtensionListResponse, RebornServicesError,
-    RebornSetupExtensionResponse, RebornViewQuery, WebUiAuthenticatedCaller,
+use ironclaw_product::{
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, LifecyclePackageKind, RebornExtensionCredentialSetup,
+    RebornExtensionListResponse, RebornSetupExtensionResponse,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -210,24 +211,27 @@ enum InstalledExtensionLookup {
 impl InstalledExtensionLookup {
     async fn is_installed(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         extension_id: &ExtensionId,
-    ) -> Result<bool, RebornServicesError> {
+    ) -> Result<bool, ProductSurfaceError> {
         match self {
             Self::ProductSurface(api) => {
-                let page = api
-                    .query(
-                        caller.clone(),
-                        RebornViewQuery {
-                            view_id: EXTENSIONS_VIEW.id.to_string(),
-                            params: json!({}),
-                            cursor: None,
-                        },
-                    )
+                let surface = BoundProductSurface::new(Arc::clone(api), caller.clone());
+                let page = surface
+                    .query(ProductSurfaceQueryRequest {
+                        view_id: EXTENSIONS_VIEW.id.to_string(),
+                        input: json!({}),
+                        cursor: None,
+                        limit: None,
+                    })
                     .await?;
+                let payload = page
+                    .items
+                    .into_iter()
+                    .next()
+                    .ok_or_else(ProductSurfaceError::internal)?;
                 let inventory: RebornExtensionListResponse =
-                    serde_json::from_value(page.payload)
-                        .map_err(RebornServicesError::internal_from)?;
+                    serde_json::from_value(payload).map_err(ProductSurfaceError::internal_from)?;
                 Ok(inventory.extensions.iter().any(|extension| {
                     extension.package_ref.kind == LifecyclePackageKind::Extension
                         && extension.package_ref.id.as_str() == extension_id.as_str()
@@ -250,24 +254,28 @@ impl InstalledExtensionLookup {
 
     async fn oauth_requirement(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         extension_id: &ExtensionId,
         requirement_name: &str,
-    ) -> Result<Option<InstalledExtensionOAuthRequirement>, RebornServicesError> {
+    ) -> Result<Option<InstalledExtensionOAuthRequirement>, ProductSurfaceError> {
         match self {
             Self::ProductSurface(api) => {
-                let page = api
-                    .query(
-                        caller.clone(),
-                        RebornViewQuery {
-                            view_id: EXTENSION_SETUP_VIEW.id.to_string(),
-                            params: json!({ "package_id": extension_id.as_str() }),
-                            cursor: None,
-                        },
-                    )
+                let surface = BoundProductSurface::new(Arc::clone(api), caller.clone());
+                let page = surface
+                    .query(ProductSurfaceQueryRequest {
+                        view_id: EXTENSION_SETUP_VIEW.id.to_string(),
+                        input: json!({ "package_id": extension_id.as_str() }),
+                        cursor: None,
+                        limit: None,
+                    })
                     .await?;
-                let setup: RebornSetupExtensionResponse = serde_json::from_value(page.payload)
-                    .map_err(RebornServicesError::internal_from)?;
+                let payload = page
+                    .items
+                    .into_iter()
+                    .next()
+                    .ok_or_else(ProductSurfaceError::internal)?;
+                let setup: RebornSetupExtensionResponse =
+                    serde_json::from_value(payload).map_err(ProductSurfaceError::internal_from)?;
                 Ok(setup.secrets.into_iter().find_map(|secret| {
                     if secret.name != requirement_name {
                         return None;
@@ -329,11 +337,11 @@ impl ProductAuthRouteState {
         }
     }
 
-    /// Wire the WebUI facade as the installed-extension inventory source for
+    /// Wire the product surface as the installed-extension inventory source for
     /// the extension OAuth start guard.
-    pub fn with_webui_api(mut self, webui_api: Arc<dyn ProductSurface>) -> Self {
+    pub fn with_product_surface(mut self, product_surface: Arc<dyn ProductSurface>) -> Self {
         self.installed_extension_lookup = Some(Arc::new(InstalledExtensionLookup::ProductSurface(
-            webui_api,
+            product_surface,
         )));
         self
     }
@@ -358,7 +366,7 @@ impl ProductAuthRouteState {
     /// with the terminal not-installed conflict.
     pub(super) async fn require_installed_extension(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         requester_extension: &ExtensionId,
     ) -> Result<(), ProductAuthRouteFailure> {
         let Some(lookup) = self.installed_extension_lookup.as_ref() else {
@@ -389,7 +397,7 @@ impl ProductAuthRouteState {
     /// provider, label, and scopes remain server-owned data.
     async fn resolve_extension_oauth_requirement(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         requester_extension: &ExtensionId,
         requirement_name: &str,
     ) -> Result<InstalledExtensionOAuthRequirement, ProductAuthRouteFailure> {
@@ -1140,7 +1148,7 @@ pub(super) fn route_failure_from_callback_error(
 }
 
 pub(super) fn scope_from_authenticated_caller(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     request: &OAuthStartRequest,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
     scope_from_authenticated_caller_parts(
@@ -1162,7 +1170,7 @@ pub(super) fn scope_from_authenticated_caller(
 /// host owns the canonical id and the browser carries it forward across
 /// follow-up calls.
 pub(super) fn scope_from_authenticated_caller_parts(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     fields: &ScopeFields,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
     let thread_id = fields
@@ -1210,7 +1218,7 @@ pub(super) fn scope_from_authenticated_caller_parts(
 /// MUST carry back the id minted by a prior setup/start response so the host
 /// can re-derive the matching scope without minting a fresh, unmatched one.
 pub(super) fn scope_from_authenticated_caller_parts_requiring_invocation(
-    caller: &WebUiAuthenticatedCaller,
+    caller: &ProductSurfaceCaller,
     fields: &ScopeFields,
 ) -> Result<AuthProductScope, ProductAuthRouteFailure> {
     if fields.invocation_id.is_none() {
@@ -1709,7 +1717,7 @@ mod tests {
         NetworkMethod, RuntimeCredentialAuthRequirement, RuntimeHttpEgress,
         RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, SecretHandle, VendorId,
     };
-    use ironclaw_product_workflow::AuthChallengeProvider;
+    use ironclaw_product::AuthChallengeProvider;
     use ironclaw_secrets::{FilesystemSecretStore, SecretMaterial, SecretStore};
     use ironclaw_turns::{TurnRunId, TurnScope};
     use std::sync::Mutex;
@@ -1975,7 +1983,7 @@ mod tests {
         }
 
         let foreign = completed_reconcile_flow(shared.as_ref(), &scope, "foreign").await;
-        let foreign_caller = WebUiAuthenticatedCaller::new(
+        let foreign_caller = ProductSurfaceCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("user-beta").expect("user"),
             None,
@@ -2061,8 +2069,8 @@ mod tests {
         }
     }
 
-    fn test_caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn test_caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("user-alpha").expect("user"),
             None,

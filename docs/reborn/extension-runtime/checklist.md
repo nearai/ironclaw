@@ -797,7 +797,7 @@ Rules — kept short on purpose:
   keeps the `xoxb-`/`xoxp-`/`xapp-` prefixes.
 - [x] DEL-4 Slack cleanup constants in product workflow and Slack connection
   copy in lifecycle are deleted (standard pipeline + manifest display data).
-  — no non-test slack constant remains in `ironclaw_product_workflow`
+  — no non-test slack constant remains in `ironclaw_product`
   (removal cleanup rides the vendor-blind removable-channel path); P7a
   deletes the hardcoded `slack` OAuth branch in
   `channel_connection_requirement` (`extension_lifecycle.rs`). The connect
@@ -818,7 +818,7 @@ Rules — kept short on purpose:
   remainder: the `ProductAdapter` trait + `ProductAdapterHealth` +
   metadata getters (`crates/ironclaw_product_adapters/src/adapter.rs`); the
   production-dead `prepare_and_render_product_outbound` + its
-  request/outcome/error types (`ironclaw_product_workflow/src/outbound_delivery.rs`,
+  request/outcome/error types (`ironclaw_product/src/outbound_delivery.rs`,
   keeping the LIVE `VerifiedProductOutboundTargetMetadata` +
   `ProductOutboundTargetResolver` + `delivery_failure_kind_for_workflow_error`
   the coordinator uses); the concrete `SlackV2Adapter`/`TelegramV2Adapter`

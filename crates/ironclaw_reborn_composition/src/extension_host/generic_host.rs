@@ -44,7 +44,7 @@ use ironclaw_host_api::{
     RestrictedEgressResponse, ToolAdapter, ToolCall, ToolError, ToolPorts, ToolResult, VirtualPath,
 };
 use ironclaw_host_runtime::{ExtensionLaneToolBinder, ExtensionToolBindError};
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     ChannelAdapter, ChannelContext, ChannelError, DeliveryReport, InboundOutcome, OutboundEnvelope,
     VerifiedInbound,
 };

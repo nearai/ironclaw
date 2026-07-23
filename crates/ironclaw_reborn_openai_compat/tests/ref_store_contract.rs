@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RecordKind, RootFilesystem};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId, VirtualPath};
-use ironclaw_product_adapters::ProductInboundAck;
+use ironclaw_product::ProductInboundAck;
 use ironclaw_reborn_openai_compat::FilesystemOpenAiCompatRefStore;
 use ironclaw_reborn_openai_compat::{
     OpenAiCompatActorScope, OpenAiCompatBindInternalRefs, OpenAiCompatIdempotencyKey,

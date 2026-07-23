@@ -1,14 +1,14 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use ironclaw_host_api::ThreadId;
-use ironclaw_host_api::Timestamp;
-use ironclaw_product_workflow::{
+use ironclaw_host_api::{
+    ProductSurfaceError, ProductSurfaceErrorCode, ProductSurfaceErrorKind, ThreadId, Timestamp,
+};
+use ironclaw_product::{
     AutomationListRequest, AutomationName, AutomationProductFacade, ProductAgentBoundCaller,
     RebornAutomationActiveHold, RebornAutomationHoldReason, RebornAutomationInfo,
     RebornAutomationMutationResponse, RebornAutomationRecentRunInfo,
     RebornAutomationRecentRunStatus, RebornAutomationRunStatus, RebornAutomationSource,
-    RebornAutomationState, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    TriggerRunThreadScope,
+    RebornAutomationState, TriggerRunThreadScope,
 };
 use ironclaw_triggers::{
     ActiveHoldProjection, ActiveHoldReason, TriggerActiveRunLookup, TriggerError, TriggerId,
@@ -121,7 +121,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         &self,
         caller: ProductAgentBoundCaller,
         request: AutomationListRequest,
-    ) -> Result<Vec<RebornAutomationInfo>, RebornServicesError> {
+    ) -> Result<Vec<RebornAutomationInfo>, ProductSurfaceError> {
         // Both repository calls share one deadline so the panel read budget is
         // backend_timeout total, not per call.
         let deadline = tokio::time::Instant::now() + self.backend_timeout;
@@ -198,7 +198,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         &self,
         caller: ProductAgentBoundCaller,
         automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
         self.set_automation_state(caller, automation_id, TriggerState::Paused)
             .await
     }
@@ -207,7 +207,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         &self,
         caller: ProductAgentBoundCaller,
         automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
         self.set_automation_state(caller, automation_id, TriggerState::Scheduled)
             .await
     }
@@ -217,7 +217,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         caller: ProductAgentBoundCaller,
         automation_id: String,
         name: AutomationName,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
         let trigger_id = parse_trigger_id(&automation_id)?;
         let record = tokio::time::timeout(
             self.backend_timeout,
@@ -244,7 +244,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         &self,
         caller: ProductAgentBoundCaller,
         automation_id: String,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
         let trigger_id = parse_trigger_id(&automation_id)?;
         let removed = tokio::time::timeout(
             self.backend_timeout,
@@ -270,7 +270,7 @@ impl AutomationProductFacade for RebornAutomationProductFacade {
         &self,
         caller: ProductAgentBoundCaller,
         thread_id: &ThreadId,
-    ) -> Result<Option<TriggerRunThreadScope>, RebornServicesError> {
+    ) -> Result<Option<TriggerRunThreadScope>, ProductSurfaceError> {
         let deadline = tokio::time::Instant::now() + self.backend_timeout;
 
         // Direct thread-id-keyed lookup — O(1) repository query instead of the
@@ -310,7 +310,7 @@ impl RebornAutomationProductFacade {
         caller: ProductAgentBoundCaller,
         automation_id: String,
         state: TriggerState,
-    ) -> Result<RebornAutomationMutationResponse, RebornServicesError> {
+    ) -> Result<RebornAutomationMutationResponse, ProductSurfaceError> {
         let trigger_id = parse_trigger_id(&automation_id)?;
         let record = tokio::time::timeout(
             self.backend_timeout,
@@ -491,7 +491,7 @@ fn map_recent_run(run: &TriggerRunRecord) -> Option<RebornAutomationRecentRunInf
     })
 }
 
-fn parse_trigger_id(automation_id: &str) -> Result<TriggerId, RebornServicesError> {
+fn parse_trigger_id(automation_id: &str) -> Result<TriggerId, ProductSurfaceError> {
     TriggerId::parse(automation_id).map_err(|parse_error| {
         tracing::debug!(
             automation_id,
@@ -499,8 +499,8 @@ fn parse_trigger_id(automation_id: &str) -> Result<TriggerId, RebornServicesErro
             "failed to parse automation trigger id"
         );
         services_error(
-            RebornServicesErrorCode::InvalidRequest,
-            RebornServicesErrorKind::Validation,
+            ProductSurfaceErrorCode::InvalidRequest,
+            ProductSurfaceErrorKind::Validation,
             400,
             false,
         )
@@ -508,26 +508,26 @@ fn parse_trigger_id(automation_id: &str) -> Result<TriggerId, RebornServicesErro
 }
 
 /// Shared 503 for repository calls that exceed the panel read deadline.
-fn backend_timeout_error() -> RebornServicesError {
+fn backend_timeout_error() -> ProductSurfaceError {
     services_error(
-        RebornServicesErrorCode::Unavailable,
-        RebornServicesErrorKind::ServiceUnavailable,
+        ProductSurfaceErrorCode::Unavailable,
+        ProductSurfaceErrorKind::ServiceUnavailable,
         503,
         true,
     )
 }
 
-fn map_trigger_error(error: TriggerError) -> RebornServicesError {
+fn map_trigger_error(error: TriggerError) -> ProductSurfaceError {
     match error {
         TriggerError::Backend { .. } => services_error(
-            RebornServicesErrorCode::Unavailable,
-            RebornServicesErrorKind::ServiceUnavailable,
+            ProductSurfaceErrorCode::Unavailable,
+            ProductSurfaceErrorKind::ServiceUnavailable,
             503,
             true,
         ),
         TriggerError::NotFound => services_error(
-            RebornServicesErrorCode::NotFound,
-            RebornServicesErrorKind::NotFound,
+            ProductSurfaceErrorCode::NotFound,
+            ProductSurfaceErrorKind::NotFound,
             404,
             false,
         ),
@@ -538,8 +538,8 @@ fn map_trigger_error(error: TriggerError) -> RebornServicesError {
         | TriggerError::InvalidSchedule { .. }
         | TriggerError::InvalidMaterialization { .. } => internal_invariant(),
         TriggerError::BlockedMaterialization { .. } => services_error(
-            RebornServicesErrorCode::Forbidden,
-            RebornServicesErrorKind::ParticipantDenied,
+            ProductSurfaceErrorCode::Forbidden,
+            ProductSurfaceErrorKind::ParticipantDenied,
             403,
             false,
         ),
@@ -547,12 +547,12 @@ fn map_trigger_error(error: TriggerError) -> RebornServicesError {
 }
 
 fn services_error(
-    code: RebornServicesErrorCode,
-    kind: RebornServicesErrorKind,
+    code: ProductSurfaceErrorCode,
+    kind: ProductSurfaceErrorKind,
     status_code: u16,
     retryable: bool,
-) -> RebornServicesError {
-    RebornServicesError {
+) -> ProductSurfaceError {
+    ProductSurfaceError {
         code,
         kind,
         status_code,
@@ -562,10 +562,10 @@ fn services_error(
     }
 }
 
-fn internal_invariant() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Internal,
-        kind: RebornServicesErrorKind::Internal,
+fn internal_invariant() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Internal,
+        kind: ProductSurfaceErrorKind::Internal,
         status_code: 500,
         retryable: false,
         field: None,

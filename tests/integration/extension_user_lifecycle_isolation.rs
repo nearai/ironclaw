@@ -22,8 +22,8 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
 use ironclaw_extensions::{ExtensionInstallation, ExtensionInstallationStore, InstallationOwner};
+use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_host_api::{AgentId, TenantId, UserId};
-use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
     RebornRuntime, RebornRuntimeIdentity, RebornRuntimeInput, RebornWebuiBundle,
@@ -302,8 +302,8 @@ impl LifecycleIsolationFixture {
         }
     }
 
-    fn caller(&self, user_id: UserId) -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn caller(&self, user_id: UserId) -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             self.tenant_id.clone(),
             user_id,
             Some(self.agent_id.clone()),
@@ -324,17 +324,19 @@ impl LifecycleIsolationFixture {
     }
 
     fn member_router(&self, user_id: UserId) -> Router {
-        mount_webui_v2_router(Arc::clone(&self.webui.api), self.caller(user_id))
+        mount_webui_v2_router(
+            Arc::clone(&self.webui.product_surface),
+            self.caller(user_id),
+        )
     }
 
     fn operator_router(&self) -> Router {
         webui_v2_router(WebUiV2State::new(
-            Arc::clone(&self.webui.api),
+            Arc::clone(&self.webui.product_surface),
             DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
         ))
         .layer(axum::Extension(
-            self.caller(self.operator())
-                .with_operator_webui_config(true),
+            self.caller(self.operator()).with_operator_config(true),
         ))
         .layer(axum::Extension(WebUiV2Capabilities {
             operator_webui_config: true,

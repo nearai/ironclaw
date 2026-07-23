@@ -14,16 +14,15 @@ use ironclaw_conversations::{
 };
 use ironclaw_extension_host::ingress::{InboundAdmission, InboundAdmissionAck, InboundSink};
 use ironclaw_filesystem::InMemoryBackend;
-use ironclaw_product_adapters::{
-    ExternalActorRef, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
-    ProductAdapterId, ProductTriggerReason,
-};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelPairingCode, ChannelPairingConsumeOutcome,
     ChannelPairingError, ChannelPairingInstallationSource, ChannelPairingInterception,
     ChannelPairingInterceptor, ChannelPairingService, ChannelPairingServiceDependencies,
     ChannelPairingTemplateValues, ExtensionAccountSetupDescriptor, FilesystemChannelPairingStore,
-    ProductSurface,
+};
+use ironclaw_product::{
+    ExternalActorRef, ExternalConversationRef, ExternalEventId, NormalizedInboundMessage,
+    ProductAdapterId, ProductTriggerReason,
 };
 use tokio::sync::Notify;
 
@@ -229,7 +228,15 @@ impl RebornAuthContinuationDispatcher for FailOnceIdempotentFanout {
 
 struct UnexpectedWorkflow;
 
-impl ProductSurface for UnexpectedWorkflow {}
+#[async_trait::async_trait]
+impl ironclaw_host_api::ChannelInboundProductSurface for UnexpectedWorkflow {
+    async fn admit_channel_inbound(
+        &self,
+        _request: ironclaw_host_api::ChannelInboundSurfaceRequest,
+    ) -> ironclaw_host_api::ChannelInboundSurfaceOutcome {
+        panic!("pairing tests must not reach channel admission");
+    }
+}
 
 #[derive(Default)]
 struct RecordingActorPairings {
@@ -332,10 +339,10 @@ fn fixture_with_prefixes(
             provider_scopes: Vec::new(),
         },
         connection_notices: ChannelConnectionNoticePolicy::generic("Vendor X"),
-        connection_requirement: ironclaw_product_workflow::ChannelConnectionRequirement {
+        connection_requirement: ironclaw_product::ChannelConnectionRequirement {
             channel: EXT.to_string(),
             display_name: "Vendor X".to_string(),
-            strategy: ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode,
+            strategy: ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode,
             instructions: "Send /start <code> to the bot or open the link.".to_string(),
             input_placeholder: String::new(),
             submit_label: "Connect".to_string(),

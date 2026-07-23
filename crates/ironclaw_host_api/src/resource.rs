@@ -55,7 +55,7 @@ pub struct ResourceScope {
     // and the caller scope is stamped host-side from trusted installation config
     // plus the authenticator's verified `UserId` (see
     // `webui_serve::authenticate_request` and the rule in
-    // `crates/ironclaw_product_workflow/CLAUDE.md`), so a browser body cannot
+    // `crates/ironclaw_product/CLAUDE.md`), so a browser body cannot
     // influence it. Do not add a `ResourceScope` (or bare `TenantId`/`UserId`)
     // field to any untrusted request DTO.
     //

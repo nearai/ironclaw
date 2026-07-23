@@ -20,7 +20,7 @@ use ironclaw_loop_host::{
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter,
     loop_driver_execution_extension_id,
 };
-use ironclaw_product_workflow::{OutboundPreferencesProductFacade, ProjectService};
+use ironclaw_product::{OutboundPreferencesProductFacade, ProjectService};
 use ironclaw_runner::thread_scope::ThreadScopeResolver;
 
 use ironclaw_run_state::ApprovalRequestStore;

@@ -122,7 +122,7 @@ use ironclaw_outbound::CommunicationPreferenceRepository;
 use ironclaw_outbound::FilesystemOutboundStateStore;
 use ironclaw_outbound::{DeliveredGateRouteStore, OutboundStateStore, TriggeredRunDeliveryStore};
 use ironclaw_processes::ProcessServices;
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ChannelPairingRegistry, ChannelPairingService, ChannelPairingServiceDependencies,
     CurrentDeliveryTargetResolver, ExtensionAccountSetupRegistry, FilesystemChannelPairingStore,
     LifecycleProductSurfaceContext, OutboundPreferencesProductFacade,
@@ -421,7 +421,7 @@ pub(crate) struct RebornRuntimeStores {
     pub(crate) channel_dm_target_store:
         Arc<crate::extension_host::channel_dm_targets::FilesystemChannelDmTargetStore>,
     pub(crate) channel_disconnect_slot:
-        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>,
+        Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) skill_mounts: MountView,
     pub(crate) memory_mounts: MountView,
@@ -492,14 +492,14 @@ pub(crate) struct RebornRuntimeStores {
     /// policy egress from deployment bindings or the active compatibility
     /// snapshot. `None` when the composition path builds no channel egress
     /// transport.
-    pub(crate) delivery_coordinator: Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>>,
+    pub(crate) delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
     /// The deployment-first channel delivery resolver behind the coordinator,
     /// exposed separately for host flows (e.g. DM target provisioning) that
     /// need one stable adapter + egress read outside a delivery.
     // Consumed by the DM-provisioning re-point in the deletion slice.
     #[allow(dead_code)]
     pub(crate) channel_delivery_resolver:
-        Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>>,
+        Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
     /// Registry of beta-era channel credential bridges (§11 compatibility):
     /// channel hosts whose secrets predate the extension-config store
     /// register resolution ports here.
@@ -511,8 +511,8 @@ pub(crate) struct RebornRuntimeStores {
 
 struct ChannelHostWiring {
     extension_ingress: Option<crate::extension_host::extension_ingress::ExtensionIngressParts>,
-    delivery_coordinator: Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>>,
-    channel_delivery_resolver: Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>>,
+    delivery_coordinator: Option<Arc<ironclaw_product::DeliveryCoordinator>>,
+    channel_delivery_resolver: Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>>,
     #[cfg(feature = "test-support")]
     channel_egress_credential_bridges:
         Option<Arc<crate::extension_host::channel_egress::BridgedChannelEgressCredentials>>,
@@ -552,17 +552,13 @@ pub(crate) enum CredentialRefreshWorkerReady {
 pub(crate) struct ChannelHostAssemblyWiring {
     pub(crate) thread_service: Arc<dyn SessionThreadService>,
     pub(crate) turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
-    pub(crate) approval_interaction:
-        Option<Arc<dyn ironclaw_product_workflow::ApprovalInteractionService>>,
-    pub(crate) auth_interaction: Option<Arc<dyn ironclaw_product_workflow::AuthInteractionService>>,
+    pub(crate) approval_interaction: Option<Arc<dyn ironclaw_product::ApprovalInteractionService>>,
+    pub(crate) auth_interaction: Option<Arc<dyn ironclaw_product::AuthInteractionService>>,
     pub(crate) identity: crate::extension_host::channel_host::ChannelHostIdentity,
-    pub(crate) approval_context:
-        Option<Arc<dyn ironclaw_product_workflow::ApprovalPromptContextSource>>,
-    pub(crate) blocked_auth_prompts:
-        Option<Arc<dyn ironclaw_product_workflow::BlockedAuthPromptSource>>,
-    pub(crate) auth_flow_cancel:
-        Option<Arc<dyn ironclaw_product_workflow::BlockedAuthFlowCanceller>>,
-    pub(crate) run_delivery_events: Arc<ironclaw_product_workflow::RunDeliveryEventRouter>,
+    pub(crate) approval_context: Option<Arc<dyn ironclaw_product::ApprovalPromptContextSource>>,
+    pub(crate) blocked_auth_prompts: Option<Arc<dyn ironclaw_product::BlockedAuthPromptSource>>,
+    pub(crate) auth_flow_cancel: Option<Arc<dyn ironclaw_product::BlockedAuthFlowCanceller>>,
+    pub(crate) run_delivery_events: Arc<ironclaw_product::RunDeliveryEventRouter>,
 }
 
 impl RebornRuntimeStores {
@@ -595,7 +591,7 @@ impl RebornRuntimeStores {
         let ingress = self.extension_ingress.as_ref()?;
         let admin_configuration_resolver = self.admin_configuration_resolver.clone();
         let workflow_filesystem: Arc<dyn RootFilesystem> = self.extension_filesystem.clone();
-        let workflow_state = Arc::new(ironclaw_product_workflow::ChannelWorkflowStateService::new(
+        let workflow_state = Arc::new(ironclaw_product::ChannelWorkflowStateService::new(
             workflow_filesystem,
         ));
         let outbound_state = Arc::clone(&self.outbound_state);
@@ -775,7 +771,7 @@ fn compose_product_auth_services(
 ) -> Result<
     (
         RebornProductAuthServices,
-        Arc<dyn ironclaw_product_workflow::ProductAuthContinuationDispatcher>,
+        Arc<dyn ironclaw_product::ProductAuthContinuationDispatcher>,
     ),
     RebornBuildError,
 > {
@@ -2874,7 +2870,7 @@ struct RebornProductionBuildContext {
     /// `build_reborn_runtime` can hand it to `build_default_planned_runtime` via
     /// `DefaultPlannedRuntimeParts.scheduler_wake_wiring`.
     scheduler_wake_wiring: ironclaw_runner::runtime::SchedulerWakeWiring,
-    account_setup_descriptors: Vec<ironclaw_product_workflow::ExtensionAccountSetupDescriptor>,
+    account_setup_descriptors: Vec<ironclaw_product::ExtensionAccountSetupDescriptor>,
     nearai_mcp_bootstrap_config: Option<crate::llm_admin::nearai_mcp::NearAiMcpBootstrapConfig>,
     native_extension_factories: Vec<Arc<dyn ironclaw_extension_host::NativeExtensionFactory>>,
     channel_extension_bindings: Vec<crate::input::ChannelExtensionBinding>,
@@ -4115,7 +4111,7 @@ async fn build_backend_production(
     );
     let account_setups = ExtensionAccountSetupRegistry::default();
     let channel_disconnect_slot: Arc<
-        std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>,
+        std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>,
     > = Arc::new(std::sync::OnceLock::new());
     let extension_management = Arc::new(
         RebornLocalExtensionManagementPort::new(
@@ -4154,20 +4150,19 @@ async fn build_backend_production(
     // completions re-enter the canonical lifecycle command (readiness
     // reconciliation) before the provider-blocked-run fan-out, instead of
     // being durably fenced un-activated.
-    let lifecycle_continuation_facade: Arc<dyn ironclaw_product_workflow::LifecycleProductFacade> =
-        Arc::new(
-            crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
-                &skill_management,
-            ))
-            .with_extension_management(Arc::clone(&extension_management))
-            .with_admin_configuration_resolver(Arc::clone(&admin_configuration_resolver))
-            .with_runtime_http_egress(product_auth_runtime_ports.runtime_http_egress())
-            .with_runtime_credential_accounts(
-                product_auth_dependencies.runtime_credential_account_selection_service(),
-            ),
-        );
+    let lifecycle_continuation_facade: Arc<dyn ironclaw_product::LifecycleProductFacade> = Arc::new(
+        crate::extension_host::lifecycle::RebornLocalLifecycleFacade::new(Arc::clone(
+            &skill_management,
+        ))
+        .with_extension_management(Arc::clone(&extension_management))
+        .with_admin_configuration_resolver(Arc::clone(&admin_configuration_resolver))
+        .with_runtime_http_egress(product_auth_runtime_ports.runtime_http_egress())
+        .with_runtime_credential_accounts(
+            product_auth_dependencies.runtime_credential_account_selection_service(),
+        ),
+    );
     let product_auth_services = Arc::new(product_auth_core.with_continuation_dispatcher(
-        ironclaw_product_workflow::lifecycle_auth_continuation_dispatcher(
+        ironclaw_product::lifecycle_auth_continuation_dispatcher(
             lifecycle_continuation_facade,
             base_auth_continuation,
         ),
@@ -4249,7 +4244,7 @@ async fn build_backend_production(
             })?,
         ]
     };
-    let operator_tool_catalog: Arc<dyn ironclaw_product_workflow::RebornOperatorToolCatalog> =
+    let operator_tool_catalog: Arc<dyn ironclaw_product::RebornOperatorToolCatalog> =
         Arc::new(ActiveRegistryOperatorToolCatalog::new(
             services.shared_extension_registry(),
             operator_synthetic_tools,
@@ -4382,7 +4377,7 @@ async fn build_backend_production(
                     });
                 }
                 if descriptor.connection_requirement.strategy
-                    != ironclaw_product_workflow::RebornChannelConnectStrategy::WebGeneratedCode
+                    != ironclaw_product::RebornChannelConnectStrategy::WebGeneratedCode
                 {
                     continue;
                 }
@@ -4407,9 +4402,7 @@ async fn build_backend_production(
                 );
                 let workflow_filesystem: Arc<dyn RootFilesystem> = stores.filesystem.clone();
                 let workflow_state_service =
-                    ironclaw_product_workflow::ChannelWorkflowStateService::new(
-                        workflow_filesystem,
-                    );
+                    ironclaw_product::ChannelWorkflowStateService::new(workflow_filesystem);
                 let workflow_state = workflow_state_service
                     .build_for_extension(&extension_id, channel_egress_scope.clone())
                     .await
@@ -4465,7 +4458,7 @@ async fn build_backend_production(
                 if !account_setups.connect(
                     &descriptor.extension_id,
                     Arc::clone(&service)
-                        as Arc<dyn ironclaw_product_workflow::AccountConnectionStatusSource>,
+                        as Arc<dyn ironclaw_product::AccountConnectionStatusSource>,
                 ) {
                     return Err(RebornBuildError::InvalidConfig {
                         reason: format!(
@@ -4489,15 +4482,14 @@ async fn build_backend_production(
         channel_pairing_registry = Some(channel_pairing_registry_built);
         let (delivery_coordinator, channel_delivery_resolver) = match channel_egress_transport {
             Some(transport) => {
-                let resolver: Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver> =
-                    Arc::new(
-                        crate::extension_host::channel_delivery::SnapshotChannelDeliveryResolver::new(
-                            generic.host.snapshot_watch(),
-                            transport,
-                        )
-                        .with_deployment_channels(Arc::clone(&deployment_channels)),
-                    );
-                let coordinator = Arc::new(ironclaw_product_workflow::DeliveryCoordinator::new(
+                let resolver: Arc<dyn ironclaw_product::ChannelDeliveryResolver> = Arc::new(
+                    crate::extension_host::channel_delivery::SnapshotChannelDeliveryResolver::new(
+                        generic.host.snapshot_watch(),
+                        transport,
+                    )
+                    .with_deployment_channels(Arc::clone(&deployment_channels)),
+                );
+                let coordinator = Arc::new(ironclaw_product::DeliveryCoordinator::new(
                     Arc::clone(&outbound_stores.outbound_state)
                         as Arc<dyn ironclaw_outbound::OutboundStateStore>,
                     Arc::clone(&resolver),
@@ -4506,7 +4498,7 @@ async fn build_backend_production(
                             Arc::clone(&ingress_parts.reply_context),
                         ),
                     ),
-                    ironclaw_product_workflow::DeliveryRetryPolicy::default(),
+                    ironclaw_product::DeliveryRetryPolicy::default(),
                 ));
                 (Some(coordinator), Some(resolver))
             }

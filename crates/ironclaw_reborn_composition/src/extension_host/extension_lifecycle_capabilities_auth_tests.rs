@@ -105,8 +105,8 @@ async fn local_dev_extension_readiness_accepts_manual_token_from_webui_gate_scop
     let caller = activate_scope.user_id.clone();
     let reconciled = extension_management
         .activate_with_credential_gate(
-            ironclaw_product_workflow::LifecyclePackageRef::new(
-                ironclaw_product_workflow::LifecyclePackageKind::Extension,
+            ironclaw_product::LifecyclePackageRef::new(
+                ironclaw_product::LifecyclePackageKind::Extension,
                 "github",
             )
             .expect("package ref"),
@@ -118,7 +118,7 @@ async fn local_dev_extension_readiness_accepts_manual_token_from_webui_gate_scop
         .expect("internal readiness reconciliation uses submitted manual token");
     assert_eq!(
         reconciled.phase,
-        ironclaw_product_workflow::LifecyclePublicState::Active
+        ironclaw_product::LifecyclePublicState::Active
     );
 
     let active = active_extension_capability_ids(&extension_management).await;

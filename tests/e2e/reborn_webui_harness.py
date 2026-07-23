@@ -447,7 +447,7 @@ async def fetch_extension_oauth_requirement(
 
 
 def client_action_id() -> str:
-    """Idempotency key accepted by ``webui_inbound::parse_client_action_id``."""
+    """Idempotency key accepted by ``product_surface_inbound::parse_client_action_id``."""
     return str(uuid.uuid4())
 
 

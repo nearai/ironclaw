@@ -10,11 +10,11 @@
 //! `from` we can't actor-ref) return `ParsedProductInbound { payload:
 //! ProductInboundPayload::NoOp, .. }` with synthetic external refs for
 //! the slots we genuinely have no source for. This matches the
-//! `ironclaw_product_adapters` contract that says NoOps must be a
+//! `ironclaw_product` contract that says NoOps must be a
 //! parsed inbound with the explicit `NoOp` payload variant, NOT an
 //! out-of-band `None` path.
 
-use ironclaw_product_adapters::{
+use ironclaw_host_api::product_adapter::{
     AdapterInstallationId, AttachmentRef, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, NormalizedInboundMessage, ParsedProductInbound,
     ProductAdapterError, ProductAttachmentDescriptor, ProductAttachmentKind, ProductInboundPayload,
@@ -580,7 +580,7 @@ fn build_payload(
     // messages that also contained a `/command`.
     if let Some((command, arguments)) = extract_first_bot_command(&message, policy) {
         // Route through `InboundCommandPayload::new` so the shared
-        // `ironclaw_product_adapters` validation fires on the
+        // `ironclaw_product` validation fires on the
         // untrusted Telegram text: command-token shape and byte limit,
         // arguments byte limit, control-character rejection. A struct
         // literal here would bypass those checks and let oversized or
@@ -608,8 +608,8 @@ fn build_payload(
     // shared delivery driver posts to this chat advertises these commands,
     // so they must resolve gates here instead of bouncing off a busy thread
     // as plain user messages (Ben's 2026-07-17 phantom-affordance loop).
-    if let Some(resolution) = ironclaw_product_adapters::parse_interaction_resolution_text(
-        ironclaw_product_adapters::strip_wrapping_inline_code(&text),
+    if let Some(resolution) = ironclaw_host_api::product_adapter::parse_interaction_resolution_text(
+        ironclaw_host_api::product_adapter::strip_wrapping_inline_code(&text),
         trigger,
     )
     .map_err(|err| PayloadParseError::InvalidExternalRef {
@@ -915,8 +915,8 @@ fn _suppress_unused_field_warnings(update: &TelegramUpdate) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_product_adapters::ProductAdapterId;
-    use ironclaw_product_adapters::auth::mark_shared_secret_header_verified;
+    use ironclaw_host_api::product_adapter::ProductAdapterId;
+    use ironclaw_host_api::product_adapter::auth::mark_shared_secret_header_verified;
 
     fn evidence() -> ProtocolAuthEvidence {
         mark_shared_secret_header_verified(
@@ -948,7 +948,7 @@ mod tests {
         // `ProtocolAuthEvidence` is now a sealed struct, not an enum;
         // `failed(failure)` constructs an unverified evidence.
         let evidence = ProtocolAuthEvidence::failed(
-            ironclaw_product_adapters::ProtocolAuthFailure::SharedSecretMismatch,
+            ironclaw_host_api::product_adapter::ProtocolAuthFailure::SharedSecretMismatch,
         );
         let err = parse_telegram_update(payload, &evidence, &install_id(), &policy())
             .expect_err("unauthenticated must error");
@@ -1061,7 +1061,7 @@ mod tests {
         // Henry's review (PR #3354, 2026-05-12T18:59:39Z) — Critical:
         // `build_payload` previously constructed `InboundCommandPayload`
         // with a struct literal, bypassing `InboundCommandPayload::new`
-        // and the shared `ironclaw_product_adapters` validation
+        // and the shared `ironclaw_product` validation
         // (token shape, byte limits, control-char rejection). Untrusted
         // Telegram webhook text could carry control characters into
         // the trusted inbound envelope.
@@ -1113,7 +1113,7 @@ mod tests {
     fn command_arguments_exceeding_byte_limit_rejected_via_shared_validation() {
         // Defense-in-depth for the same fix: synthesize a command with
         // arguments larger than `COMMAND_ARGUMENTS_MAX_BYTES` (64 KiB
-        // per `ironclaw_product_adapters::inbound`) and assert the
+        // per `ironclaw_host_api::product_adapter::inbound`) and assert the
         // shared validator rejects it through `InboundCommandPayload::new`.
         // 70_000 bytes is comfortably over the 64 * 1024 = 65_536 limit.
         let oversized = "a".repeat(70_000);
@@ -1522,7 +1522,7 @@ mod tests {
     /// parse treated that reply as a plain `UserMessage` — it bounced off
     /// the busy thread with the same hint, forever. The advertised
     /// interaction grammar (shared with Slack via
-    /// `ironclaw_product_adapters::interaction_commands`) must parse here.
+    /// `ironclaw_host_api::product_adapter::interaction_commands`) must parse here.
     #[test]
     fn dm_auth_deny_command_parses_to_auth_resolution_not_user_message() {
         let payload = br#"{
@@ -1538,7 +1538,9 @@ mod tests {
         let parsed =
             parse_telegram_update(payload, &evidence(), &install_id(), &policy()).expect("parses");
         match parsed.payload {
-            ironclaw_product_adapters::ProductInboundPayload::AuthResolution(resolution) => {
+            ironclaw_host_api::product_adapter::ProductInboundPayload::AuthResolution(
+                resolution,
+            ) => {
                 assert_eq!(resolution.auth_request_ref, "gate:auth-abc123");
             }
             other => panic!("expected AuthResolution, got {other:?}"),
@@ -1563,7 +1565,7 @@ mod tests {
         assert!(
             matches!(
                 parsed.payload,
-                ironclaw_product_adapters::ProductInboundPayload::ApprovalResolution(_)
+                ironclaw_host_api::product_adapter::ProductInboundPayload::ApprovalResolution(_)
             ),
             "got {:?}",
             parsed.payload
@@ -1589,7 +1591,7 @@ mod tests {
         assert!(
             matches!(
                 parsed.payload,
-                ironclaw_product_adapters::ProductInboundPayload::UserMessage(_)
+                ironclaw_host_api::product_adapter::ProductInboundPayload::UserMessage(_)
             ),
             "got {:?}",
             parsed.payload

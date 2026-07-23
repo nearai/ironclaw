@@ -10,14 +10,14 @@ use ironclaw_host_api::{
     ExtensionId, HostPortCatalog, RuntimeCredentialAccountSetup, RuntimeCredentialAuthRequirement,
     VendorId, VirtualPath,
 };
-use ironclaw_product_adapters::{ProductCapabilityFlag, ProductSurfaceKind};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ChannelConnectionNoticePolicy, ChannelConnectionRequirement, ExtensionAccountSetupDescriptor,
     LifecycleChannelDirections, LifecycleExtensionCredentialRequirement,
     LifecycleExtensionCredentialSetup, LifecycleExtensionOnboarding, LifecycleExtensionRuntimeKind,
     LifecycleExtensionSource, LifecycleExtensionSummary, LifecyclePackageKind, LifecyclePackageRef,
     ProductWorkflowError, RebornChannelConnectStrategy,
 };
+use ironclaw_product::{ProductCapabilityFlag, ProductSurfaceKind};
 use std::sync::Arc;
 use toml::Value;
 
@@ -920,7 +920,7 @@ fn channel_directions_from_manifest_record(
     }
     // Manifest v2: derive from the product-adapter section capability flags.
     let sections =
-        ironclaw_product_adapter_registry::product_adapter_sections(record).map_err(|error| {
+        ironclaw_product::adapter_registry::product_adapter_sections(record).map_err(|error| {
             ProductWorkflowError::InvalidBindingRequest {
                 reason: format!("{label} ProductAdapter manifest projection is invalid: {error}"),
             }

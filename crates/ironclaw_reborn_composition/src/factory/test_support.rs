@@ -16,7 +16,7 @@ pub struct ChannelHostAssemblyTestWiring {
     pub thread_service: Arc<dyn SessionThreadService>,
     pub turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator>,
     pub identity: crate::extension_host::channel_host::ChannelHostIdentity,
-    pub run_delivery_events: Arc<ironclaw_product_workflow::RunDeliveryEventRouter>,
+    pub run_delivery_events: Arc<ironclaw_product::RunDeliveryEventRouter>,
 }
 
 #[allow(dead_code)]
@@ -116,8 +116,7 @@ impl RebornRuntimeStores {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn channel_disconnect_slot_for_test(
         &self,
-    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_product_workflow::ChannelConnectionFacade>>>
-    {
+    ) -> &Arc<std::sync::OnceLock<Arc<dyn ironclaw_product::ChannelConnectionFacade>>> {
         &self.channel_disconnect_slot
     }
 
@@ -260,7 +259,7 @@ impl RebornRuntimeStores {
             return Ok(None);
         };
         let installation_id =
-            ironclaw_product_adapters::AdapterInstallationId::new(authenticated_installation_id)
+            ironclaw_product::AdapterInstallationId::new(authenticated_installation_id)
                 .map_err(|error| error.to_string())?;
         let outcome = service
             .consume(
@@ -274,12 +273,12 @@ impl RebornRuntimeStores {
             .await
             .map_err(|error| error.to_string())?;
         let paired_user = match outcome {
-            ironclaw_product_workflow::ChannelPairingConsumeOutcome::Paired { user_id }
-            | ironclaw_product_workflow::ChannelPairingConsumeOutcome::AlreadyPairedSameUser {
-                user_id,
-            } => Some(user_id),
-            ironclaw_product_workflow::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
-            | ironclaw_product_workflow::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
+            ironclaw_product::ChannelPairingConsumeOutcome::Paired { user_id }
+            | ironclaw_product::ChannelPairingConsumeOutcome::AlreadyPairedSameUser { user_id } => {
+                Some(user_id)
+            }
+            ironclaw_product::ChannelPairingConsumeOutcome::AlreadyBoundToOtherUser
+            | ironclaw_product::ChannelPairingConsumeOutcome::ExpiredOrUnknown => None,
         };
         if let Some(user_id) = paired_user.as_ref() {
             let (turn_coordinator, turn_state, tenant_id) = turn_world;
@@ -316,7 +315,7 @@ impl RebornRuntimeStores {
     /// composition path built the channel egress transport.
     pub(crate) fn delivery_coordinator(
         &self,
-    ) -> Option<Arc<ironclaw_product_workflow::DeliveryCoordinator>> {
+    ) -> Option<Arc<ironclaw_product::DeliveryCoordinator>> {
         self.delivery_coordinator.clone()
     }
 
@@ -349,7 +348,7 @@ impl RebornRuntimeStores {
     #[allow(dead_code)]
     pub(crate) fn channel_delivery_resolver(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::ChannelDeliveryResolver>> {
+    ) -> Option<Arc<dyn ironclaw_product::ChannelDeliveryResolver>> {
         self.channel_delivery_resolver.clone()
     }
 
@@ -588,9 +587,9 @@ impl RebornRuntimeStores {
     #[cfg(feature = "test-support")]
     pub(crate) fn local_dev_inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
         Some(self.local_dev_workspace_attachment_reader_for_test()?
-            as Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>)
+            as Arc<dyn ironclaw_product::InboundAttachmentReader>)
     }
 
     /// C-JOURNEY: publish a bundled first-party WASM extension package (e.g. a
@@ -610,7 +609,7 @@ impl RebornRuntimeStores {
         &self,
         package: &ironclaw_extensions::ExtensionPackage,
         resolved: Option<&ironclaw_extensions::ResolvedExtensionManifest>,
-    ) -> Option<Result<(), ironclaw_product_workflow::ProductWorkflowError>> {
+    ) -> Option<Result<(), ironclaw_product::ProductWorkflowError>> {
         let extension_management = &self.extension_management;
         Some(
             extension_management
@@ -671,9 +670,8 @@ impl RebornRuntimeStores {
     pub(crate) async fn local_dev_active_extension_authority_for_test(
         &self,
         grantee: &ExtensionId,
-    ) -> Option<
-        Result<ActiveExtensionAuthorityForTest, ironclaw_product_workflow::ProductWorkflowError>,
-    > {
+    ) -> Option<Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductWorkflowError>>
+    {
         let extension_management = &self.extension_management;
         Some(active_extension_authority_for_test(extension_management, grantee).await)
     }
@@ -689,7 +687,7 @@ pub struct ActiveExtensionAuthorityForTest {
 pub(crate) async fn active_extension_authority_for_test(
     extension_management: &RebornLocalExtensionManagementPort,
     grantee: &ExtensionId,
-) -> Result<ActiveExtensionAuthorityForTest, ironclaw_product_workflow::ProductWorkflowError> {
+) -> Result<ActiveExtensionAuthorityForTest, ironclaw_product::ProductWorkflowError> {
     let active_capabilities = extension_management
         .active_model_visible_capabilities()
         .await?;
@@ -777,7 +775,7 @@ fn active_extension_network_policy_for_test(
 #[derive(Clone)]
 pub struct AttachmentTestSupport {
     pub read_port: Arc<dyn ironclaw_loop_host::LoopAttachmentReadPort>,
-    pub lander: Arc<dyn ironclaw_product_workflow::InboundAttachmentLander>,
+    pub lander: Arc<dyn ironclaw_product::InboundAttachmentLander>,
 }
 
 #[cfg(feature = "test-support")]

@@ -7,7 +7,7 @@
 - Use these neighboring contracts before changing behavior:
   - `crates/ironclaw_turns/AGENTS.md`
   - `crates/ironclaw_threads/CLAUDE.md`
-  - `crates/ironclaw_product_adapters/CLAUDE.md`
+  - `crates/ironclaw_product/CLAUDE.md`
   - `docs/reborn/contracts/events-projections.md`
 
 ## What This Crate Owns

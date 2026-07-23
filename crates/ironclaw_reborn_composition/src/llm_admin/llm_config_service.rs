@@ -23,15 +23,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use ironclaw_host_api::ProductSurfaceCaller;
 use ironclaw_llm::registry::{ProviderDefinition, ProviderProtocol, ProviderRegistry};
 use ironclaw_llm::{
     NearWalletSignedMessage, OpenAiCodexConfig, OpenAiCodexSessionManager, default_nearai_base_url,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     CodexLoginStart, LlmActiveSelection, LlmConfigService, LlmConfigServiceError,
     LlmConfigSnapshot, LlmModelsResult, LlmProbeRequest, LlmProbeResult, LlmProviderView,
     NearAiLoginRequest, NearAiLoginStart, NearAiWalletLoginRequest, NearAiWalletLoginResult,
-    SetActiveLlmRequest, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
+    SetActiveLlmRequest, UpsertLlmProviderRequest,
 };
 use ironclaw_reborn_config::{LlmSlotSelection, RebornBootConfig};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -518,14 +519,14 @@ impl RebornLlmConfigService {
 impl LlmConfigService for RebornLlmConfigService {
     async fn snapshot(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         self.build_snapshot().await
     }
 
     async fn upsert_provider(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: UpsertLlmProviderRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let id = validate_provider_id(&request.id)?;
@@ -620,7 +621,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn delete_provider(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         provider_id: String,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let id = validate_provider_id(&provider_id)?;
@@ -660,7 +661,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn set_active(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
         request: SetActiveLlmRequest,
     ) -> Result<LlmConfigSnapshot, LlmConfigServiceError> {
         let id = validate_provider_id(&request.provider_id)?;
@@ -673,7 +674,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn test_connection(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmProbeResult, LlmConfigServiceError> {
         let endpoint = probe_endpoint_label(&request);
@@ -709,7 +710,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn list_models(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: LlmProbeRequest,
     ) -> Result<LlmModelsResult, LlmConfigServiceError> {
         let provider = self.probe_provider(&request).await?;
@@ -737,7 +738,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn start_nearai_login(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: NearAiLoginRequest,
     ) -> Result<NearAiLoginStart, LlmConfigServiceError> {
         let session = self
@@ -775,7 +776,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn start_codex_login(
         &self,
-        caller: WebUiAuthenticatedCaller,
+        caller: ProductSurfaceCaller,
     ) -> Result<CodexLoginStart, LlmConfigServiceError> {
         let attempt_key = codex_login_attempt_key(&caller);
         let attempt_id = uuid::Uuid::new_v4();
@@ -883,7 +884,7 @@ impl LlmConfigService for RebornLlmConfigService {
 
     async fn complete_nearai_wallet_login(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: NearAiWalletLoginRequest,
     ) -> Result<NearAiWalletLoginResult, LlmConfigServiceError> {
         let session = self
@@ -950,7 +951,7 @@ fn nonempty_env(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn codex_login_attempt_key(caller: &WebUiAuthenticatedCaller) -> String {
+fn codex_login_attempt_key(caller: &ProductSurfaceCaller) -> String {
     format!("{}:{}", caller.tenant_id.as_str(), caller.user_id.as_str())
 }
 
@@ -1410,8 +1411,8 @@ mod tests {
         Arc::new(FilesystemSecretStore::ephemeral_over(backend))
     }
 
-    fn caller() -> WebUiAuthenticatedCaller {
-        WebUiAuthenticatedCaller::new(
+    fn caller() -> ProductSurfaceCaller {
+        ProductSurfaceCaller::new(
             TenantId::new("tenant-alpha").expect("tenant"),
             UserId::new("user-alpha").expect("user"),
             Some(AgentId::new("agent-alpha").expect("agent")),

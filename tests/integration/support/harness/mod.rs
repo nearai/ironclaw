@@ -43,7 +43,7 @@ use ironclaw_loop_host::{
     LoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_network::{NetworkHttpRequest, NetworkTransportRequest};
-use ironclaw_product_workflow::{ProjectService, ResolvedBinding};
+use ironclaw_product::{ProjectService, ResolvedBinding};
 use ironclaw_reborn_composition::test_support::SkillActivationTestSource;
 use ironclaw_reborn_composition::{
     OAuthClientConfig, ProductLiveCapabilityIo, RebornApprovalTestParts, RebornProductAuthServices,
@@ -298,7 +298,7 @@ pub(crate) struct HostRuntimeCapabilityHarness {
     /// trait than `attachment_test_support`'s `LoopAttachmentReadPort`, though
     /// the same concrete reader implements both. `Some` only for
     /// `new_with_options`-built harnesses.
-    inbound_attachment_reader: Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>>,
+    inbound_attachment_reader: Option<Arc<dyn ironclaw_product::InboundAttachmentReader>>,
     /// Backing handles for the synthetic outbound target list/set test seam.
     /// `Some` only for `outbound_target_tools()`; route-current stays on the
     /// normal first-party lane and uses the composed product service/store.
@@ -1543,7 +1543,7 @@ impl HostRuntimeCapabilityHarness {
     /// `RebornServices::with_inbound_attachment_reader`.
     pub(crate) fn inbound_attachment_reader_for_test(
         &self,
-    ) -> Option<Arc<dyn ironclaw_product_workflow::InboundAttachmentReader>> {
+    ) -> Option<Arc<dyn ironclaw_product::InboundAttachmentReader>> {
         self.inbound_attachment_reader.clone()
     }
 
@@ -1702,8 +1702,7 @@ impl HostRuntimeCapabilityHarness {
                 )
             });
         let outbound_preferences_facade = self.outbound_target_tools.as_ref().map(|parts| {
-            Arc::clone(&parts.facade)
-                as Arc<dyn ironclaw_product_workflow::OutboundPreferencesProductFacade>
+            Arc::clone(&parts.facade) as Arc<dyn ironclaw_product::OutboundPreferencesProductFacade>
         });
         let outbound_delivery_target_set_requires_approval = self
             .outbound_target_tools

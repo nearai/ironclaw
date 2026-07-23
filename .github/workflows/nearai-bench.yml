@@ -113,10 +113,21 @@ jobs:
           PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # nearai/benchmarks is private, so reading its suites/ contents
+          # below (an ironclaw-repo-scoped GITHUB_TOKEN can't see another
+          # private repo) needs the same PAT the `bench` job uses to
+          # dispatch — it must also carry Contents: Read-only on
+          # nearai/benchmarks (in addition to Actions: Read and write) for
+          # this specific lookup. Scoped to just those two `gh api` calls
+          # below via a per-command GH_TOKEN override — everything else in
+          # this step (gh pr view/comment on THIS repo) still uses the
+          # ambient GITHUB_TOKEN above, since this PAT has no access to
+          # nearai/ironclaw at all.
+          BENCH_GH_TOKEN: ${{ secrets.BENCHMARKS_DISPATCH_TOKEN }}
           # Ref on nearai/benchmarks used to validate the requested suite
-          # exists. Must match the ref the `bench` job actually runs against
-          # (its `uses:` below) so the pre-dispatch check gives the same
-          # answer as the dispatched workflow. That `uses:` is `@main`, so a
+          # exists. Must match the ref the `bench` job actually dispatches
+          # against so the pre-dispatch check gives the same answer as the
+          # dispatched workflow. That dispatch targets `--ref main`, so a
           # pinned SHA here drifts stale and rejects suites that already exist
           # on main (e.g. pinchbench26, officeqa, terminal-bench-2). Track
           # `main` so the two stay in lock-step.
@@ -157,9 +168,10 @@ jobs:
           # Pre-dispatch suite check: refuse unknown suite names before
           # we acknowledge with 🚀 or spend any LLM credit. Cheap GitHub
           # API lookup against the pinned benchmarks SHA so the user gets
-          # the same answer the dispatched workflow would.
-          if ! gh api "repos/nearai/benchmarks/contents/suites/${suite}.toml?ref=${BENCH_PIN}" --silent >/dev/null 2>&1; then
-            available=$(gh api "repos/nearai/benchmarks/contents/suites?ref=${BENCH_PIN}" \
+          # the same answer the dispatched workflow would. Uses
+          # BENCH_GH_TOKEN (not the step's ambient GH_TOKEN) — see env block.
+          if ! GH_TOKEN="$BENCH_GH_TOKEN" gh api "repos/nearai/benchmarks/contents/suites/${suite}.toml?ref=${BENCH_PIN}" --silent >/dev/null 2>&1; then
+            available=$(GH_TOKEN="$BENCH_GH_TOKEN" gh api "repos/nearai/benchmarks/contents/suites?ref=${BENCH_PIN}" \
               --jq '[.[] | select(.name | endswith(".toml")) | .name | rtrimstr(".toml")] | sort | join(", ")')
             gh pr comment "$PR" --repo "$REPO" --body "Unknown suite \`${suite}\`. Available: ${available}"
             exit 0

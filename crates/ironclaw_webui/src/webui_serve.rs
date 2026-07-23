@@ -66,7 +66,7 @@ use crate::webui_operator_auth::{
 };
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use crate::webui_ws_origin::{build_websocket_origin_state, enforce_websocket_origin};
-use ironclaw_product_workflow::WebUiAuthenticatedCaller;
+use ironclaw_host_api::ProductSurfaceCaller;
 use serde::Serialize;
 
 /// Default per-request body limit (14 MiB) — sized to cover ~10 MiB of
@@ -184,9 +184,9 @@ fn reborn_projects_enabled() -> bool {
 #[derive(Clone)]
 pub struct WebuiServeConfig {
     /// Host installation tenant id. Stamped onto every
-    /// [`WebUiAuthenticatedCaller`]; the browser body cannot influence
+    /// [`ProductSurfaceCaller`]; the browser body cannot influence
     /// it. Matches the trusted host config rule documented in
-    /// `crates/ironclaw_product_workflow/CLAUDE.md`.
+    /// `crates/ironclaw_product/CLAUDE.md`.
     pub(crate) tenant_id: TenantId,
     /// Bearer-token verifier supplied by host composition.
     pub(crate) authenticator: Arc<dyn WebuiAuthenticator>,
@@ -215,7 +215,7 @@ pub struct WebuiServeConfig {
     /// `None` (fall back to Host-header comparison + allowlist).
     pub(crate) canonical_host: Option<String>,
     /// Trusted default agent id stamped onto every
-    /// [`WebUiAuthenticatedCaller`]. The browser body cannot influence
+    /// [`ProductSurfaceCaller`]. The browser body cannot influence
     /// this — it comes from host installation config / runtime
     /// identity. Required because the downstream `ProductSurface`
     /// facade builds `ThreadScope` from `caller.agent_id` for every
@@ -223,7 +223,7 @@ pub struct WebuiServeConfig {
     /// `400 InvalidRequest` before the handler reaches the workflow.
     pub(crate) default_agent_id: Option<AgentId>,
     /// Trusted default project id stamped onto every
-    /// [`WebUiAuthenticatedCaller`]. Optional at the type level
+    /// [`ProductSurfaceCaller`]. Optional at the type level
     /// because the v2 facade allows projectless scopes for some
     /// flows; supply it when the host installation has a single
     /// canonical project.
@@ -493,7 +493,7 @@ fn static_router_config_from_descriptors(
 ///   send_message, 4 KiB for cancel_run / resolve_gate, NoBody for
 ///   timeline / SSE / product-auth callback)
 /// - bearer auth (+ `?token=` on the v2 SSE path) → injects
-///   [`WebUiAuthenticatedCaller`]
+///   [`ProductSurfaceCaller`]
 /// - per-route rate limit, resolved from the
 ///   WebUI v2 descriptors plus product-auth descriptors when mounted
 ///   (authenticated WebUI routes are per caller; the public OAuth
@@ -546,7 +546,7 @@ pub fn webui_v2_app_with_lifecycle(
             config.default_agent_id.clone(),
             config.default_project_id.clone(),
         )
-        .with_webui_api(bundle.api.clone());
+        .with_product_surface(bundle.product_surface.clone());
         if let Some(channel_identity_binding) = config.channel_identity_binding.clone() {
             state = state.with_provider_identity_hook(channel_identity_binding_hook_factory(
                 channel_identity_binding,
@@ -611,8 +611,11 @@ pub fn webui_v2_app_with_lifecycle(
     } else {
         WebUiV2RouteOptions::without_operator_routes()
     };
-    let v2_state = WebUiV2State::new(bundle.api.clone(), DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
-        .with_reborn_projects_enabled(reborn_projects_enabled());
+    let v2_state = WebUiV2State::new(
+        bundle.product_surface.clone(),
+        DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER,
+    )
+    .with_reborn_projects_enabled(reborn_projects_enabled());
     let v2_inner: Router<()> = webui_v2_router_with_options(v2_state, route_options).with_state(());
 
     let mut protected_inner = Router::new().merge(v2_inner);
@@ -762,7 +765,7 @@ struct AuthLayerState {
 /// Resolve `Authorization: Bearer <token>` for any v2 route, OR the
 /// `?token=…` query parameter only on the v2 SSE stream endpoint
 /// (mirrors the browser's `EventSource` limitation — it cannot set
-/// custom headers). On success, insert a [`WebUiAuthenticatedCaller`]
+/// custom headers). On success, insert a [`ProductSurfaceCaller`]
 /// extension built from the host-installation tenant + the
 /// authenticated user. On failure, return 401 before the v2 handler
 /// runs.
@@ -796,13 +799,13 @@ async fn authenticate_request(
     // browser body cannot influence either of these identifiers — by
     // contract `WebuiServeConfig` is host-owned.
     let openai_user_id = auth.user_id.clone();
-    let caller = WebUiAuthenticatedCaller::new(
+    let caller = ProductSurfaceCaller::new(
         state.tenant_id.clone(),
         auth.user_id,
         state.default_agent_id.clone(),
         state.default_project_id.clone(),
     )
-    .with_operator_webui_config(auth.capabilities.operator_webui_config);
+    .with_operator_config(auth.capabilities.operator_webui_config);
     request.extensions_mut().insert(caller);
     request.extensions_mut().insert(auth.capabilities);
     {

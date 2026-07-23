@@ -50,13 +50,13 @@ use ironclaw_outbound::{
     CommunicationPreferenceRecord, CommunicationPreferenceRepository, DeliveredGateRouteStore,
     DeliveryDefaultScope, OutboundStateStore, WriteCommunicationPreferenceRequest,
 };
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, AuthResolutionPayload, AuthResolutionResult,
     ExternalActorRef, ExternalConversationRef, ExternalEventId, ParsedProductInbound,
     ProductAdapterId, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
     ProtocolAuthEvidence, TrustedInboundContext,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     ApprovalInteractionActionView, ApprovalInteractionDecision, ApprovalInteractionScope,
     ApprovalInteractionService, AuthInteractionDecision, AuthInteractionService,
     ConversationBindingService, CurrentDeliveryTarget, CurrentDeliveryTargetResolver,
@@ -146,8 +146,8 @@ use crate::extension_host::extension_ingress::{
 use crate::extension_host::run_delivery_ports::ProductAuthBlockedAuthPromptSource;
 use crate::webui::route_mounts::PublicRouteMount;
 use crate::{RebornUserIdentityLookup, RebornUserIdentityLookupError};
-use ironclaw_product_workflow::AuthChallengeProvider;
-use ironclaw_product_workflow::BlockedAuthPromptSource;
+use ironclaw_product::AuthChallengeProvider;
+use ironclaw_product::BlockedAuthPromptSource;
 
 #[path = "e2e_auth_challenge.rs"]
 mod e2e_auth_challenge;
@@ -512,7 +512,7 @@ async fn build_harness_with_options(options: HarnessOptions) -> Harness {
         deployment_channels: Arc::new(ironclaw_extension_host::DeploymentChannelRegistry::default()),
         registry: Arc::clone(&ingress.registry),
         admin_configuration_resolver: Arc::clone(&admin_configuration_resolver),
-        workflow_state: Arc::new(ironclaw_product_workflow::ChannelWorkflowStateService::new(
+        workflow_state: Arc::new(ironclaw_product::ChannelWorkflowStateService::new(
             Arc::new(InMemoryBackend::new()),
         )),
         thread_service: Arc::new(threads.clone()),
@@ -2217,8 +2217,7 @@ async fn shared_channel_admission_follows_saved_admin_configuration() {
         crate::extension_host::channel_subject_routes::managed_channel_subject_user_id(
             ADAPTER,
             &TenantId::new(TENANT).expect("tenant"), // safety: static test tenant id is valid.
-            &ironclaw_product_adapters::AdapterInstallationId::new(INSTALLATION)
-                .expect("installation"), // safety: static test installation id is valid.
+            &ironclaw_product::AdapterInstallationId::new(INSTALLATION).expect("installation"), // safety: static test installation id is valid.
             Some(TEAM),
             "C777",
         )
@@ -4958,7 +4957,7 @@ async fn generic_triggered_hook_leaves_web_app_target_in_run_history() {
         prompt: "scheduled result in WebApp".to_string(),
         delivery_target: Some(
             ironclaw_triggers::TriggerDeliveryTargetId::new(
-                ironclaw_product_workflow::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
+                ironclaw_product::WEB_APP_OUTBOUND_DELIVERY_TARGET_ID,
             )
             .expect("host WebApp target"),
         ),

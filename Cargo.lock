@@ -3481,7 +3481,6 @@ dependencies = [
  "chrono",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_product_context",
  "ironclaw_safety",
  "ironclaw_triggers",
  "ironclaw_turns",
@@ -3597,7 +3596,7 @@ dependencies = [
  "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_product_adapters",
+ "ironclaw_product",
  "ironclaw_secrets",
  "secrecy",
  "serde",
@@ -3754,6 +3753,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 1.1.2+spec-1.1.0",
+ "tracing",
  "uuid",
  "zeroize",
 ]
@@ -4042,47 +4042,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ironclaw_product_adapter_registry"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "ironclaw_extensions",
- "ironclaw_filesystem",
- "ironclaw_host_api",
- "ironclaw_product_adapters",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "toml 1.1.2+spec-1.1.0",
-]
-
-[[package]]
-name = "ironclaw_product_adapters"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "ironclaw_host_api",
- "ironclaw_turns",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "ironclaw_product_context"
-version = "0.1.0"
-dependencies = [
- "ironclaw_host_api",
- "ironclaw_turns",
-]
-
-[[package]]
-name = "ironclaw_product_workflow"
+name = "ironclaw_product"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -4099,14 +4059,13 @@ dependencies = [
  "ironclaw_conversations",
  "ironclaw_event_projections",
  "ironclaw_events",
+ "ironclaw_extensions",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_loop_host",
  "ironclaw_outbound",
- "ironclaw_product_adapters",
- "ironclaw_product_context",
- "ironclaw_product_workflow",
+ "ironclaw_product",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_traces",
  "ironclaw_run_state",
@@ -4127,6 +4086,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-util",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "url",
  "uuid",
@@ -4197,10 +4157,7 @@ dependencies = [
  "ironclaw_observability",
  "ironclaw_outbound",
  "ironclaw_processes",
- "ironclaw_product_adapter_registry",
- "ironclaw_product_adapters",
- "ironclaw_product_context",
- "ironclaw_product_workflow",
+ "ironclaw_product",
  "ironclaw_projects",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
@@ -4344,8 +4301,7 @@ dependencies = [
  "ironclaw_network",
  "ironclaw_outbound",
  "ironclaw_processes",
- "ironclaw_product_adapters",
- "ironclaw_product_workflow",
+ "ironclaw_product",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_openai_compat",
@@ -4407,8 +4363,7 @@ dependencies = [
  "ironclaw_common",
  "ironclaw_filesystem",
  "ironclaw_host_api",
- "ironclaw_product_adapters",
- "ironclaw_product_workflow",
+ "ironclaw_product",
  "ironclaw_reborn_openai_compat",
  "ironclaw_threads",
  "ironclaw_turns",
@@ -4637,8 +4592,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "ironclaw_host_api",
- "ironclaw_product_adapters",
- "ironclaw_turns",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4680,7 +4633,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "ironclaw_host_api",
- "ironclaw_product_adapters",
+ "ironclaw_product",
  "ironclaw_telegram_v2_adapter",
  "ironclaw_turns",
  "serde",
@@ -4696,8 +4649,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "ironclaw_product_adapters",
- "ironclaw_turns",
+ "ironclaw_host_api",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4843,8 +4795,7 @@ dependencies = [
  "http-body-util",
  "ironclaw_host_api",
  "ironclaw_loop_host",
- "ironclaw_product_adapters",
- "ironclaw_product_workflow",
+ "ironclaw_product",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_openai_compat",
  "ironclaw_threads",

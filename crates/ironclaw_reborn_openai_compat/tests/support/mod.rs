@@ -5,17 +5,20 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
-use ironclaw_host_api::ThreadId;
-use ironclaw_product_adapters::{
+use ironclaw_host_api::{
+    ProductSurface, ProductSurfaceCaller, ProductSurfaceError, ProductSurfaceErrorCode,
+    ProductSurfaceErrorKind, ThreadId,
+};
+use ironclaw_product::{
+    CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND, ProductCancelRunRequest, ProductCreateThreadRequest,
+    ProductSubmitTurnRequest, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    SUBMIT_TURN_COMMAND,
+};
+use ironclaw_product::{
     ExternalEventId, ProductAdapterId, ProductAttachmentDescriptor, ProductAttachmentKind,
     ProductInboundAck, ProductInboundPayload, ProductRejection, ProductRejectionKind,
     ProductTriggerReason, ProjectionReadRequest, UserMessagePayload,
-};
-use ironclaw_product_workflow::{
-    ProductSurface, RebornCancelRunResponse, RebornCreateThreadResponse, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiSendMessageRequest,
 };
 use ironclaw_reborn_openai_compat::{FilesystemOpenAiCompatRefStore, OPENAI_COMPAT_ADAPTER_ID};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -35,15 +38,15 @@ struct FakeProductSurfaceState {
     programmed: HashMap<String, ProductInboundAck>,
     fixed_outcome: Option<ProductInboundAck>,
     submitted: Vec<RecordedProductSurfaceSubmit>,
-    cancelled: Vec<WebUiCancelRunRequest>,
+    cancelled: Vec<ProductCancelRunRequest>,
     read_inputs: Vec<ProjectionReadRequest>,
     stream_events: Vec<RebornStreamEventsRequest>,
-    fail_with: Option<RebornServicesError>,
+    fail_with: Option<ProductSurfaceError>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct RecordedProductSurfaceSubmit {
-    request: WebUiSendMessageRequest,
+    request: ProductSubmitTurnRequest,
 }
 
 impl RecordedProductSurfaceSubmit {
@@ -106,7 +109,7 @@ impl FakeProductSurface {
         }
     }
 
-    pub(crate) fn with_error(error: RebornServicesError) -> Self {
+    pub(crate) fn with_error(error: ProductSurfaceError) -> Self {
         Self {
             state: Mutex::new(FakeProductSurfaceState {
                 fail_with: Some(error),
@@ -123,7 +126,7 @@ impl FakeProductSurface {
             .insert(event_id.as_str().to_string(), outcome);
     }
 
-    pub(crate) fn force_failure(&self, error: RebornServicesError) {
+    pub(crate) fn force_failure(&self, error: ProductSurfaceError) {
         self.state.lock().expect("surface state lock").fail_with = Some(error);
     }
 
@@ -131,7 +134,7 @@ impl FakeProductSurface {
 
     pub(crate) fn program_projection_resolution(
         &self,
-        _request: ironclaw_product_adapters::ProjectionSubscriptionRequest,
+        _request: ironclaw_product::ProjectionSubscriptionRequest,
     ) {
     }
 
@@ -163,7 +166,7 @@ impl FakeProductSurface {
             .len()
     }
 
-    pub(crate) fn cancel_requests(&self) -> Vec<WebUiCancelRunRequest> {
+    pub(crate) fn cancel_requests(&self) -> Vec<ProductCancelRunRequest> {
         self.state
             .lock()
             .expect("surface state lock")
@@ -194,13 +197,12 @@ impl Default for FakeProductSurface {
     }
 }
 
-#[async_trait]
-impl ProductSurface for FakeProductSurface {
+impl FakeProductSurface {
     async fn create_thread(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+        request: ProductCreateThreadRequest,
+    ) -> Result<RebornCreateThreadResponse, ProductSurfaceError> {
         if let Some(error) = self
             .state
             .lock()
@@ -222,9 +224,9 @@ impl ProductSurface for FakeProductSurface {
 
     async fn submit_turn(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+        request: ProductSubmitTurnRequest,
+    ) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
         if let Some(error) = self
             .state
             .lock()
@@ -269,9 +271,9 @@ impl ProductSurface for FakeProductSurface {
 
     async fn cancel_run(
         &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+        caller: ProductSurfaceCaller,
+        request: ProductCancelRunRequest,
+    ) -> Result<RebornCancelRunResponse, ProductSurfaceError> {
         if let Some(error) = self
             .state
             .lock()
@@ -302,15 +304,84 @@ impl ProductSurface for FakeProductSurface {
 
     async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
+        _caller: ProductSurfaceCaller,
         request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+    ) -> Result<RebornStreamEventsResponse, ProductSurfaceError> {
         self.state
             .lock()
             .expect("surface state lock")
             .stream_events
             .push(request);
         Ok(RebornStreamEventsResponse { events: Vec::new() })
+    }
+}
+
+#[async_trait]
+impl ProductSurface for FakeProductSurface {
+    async fn invoke(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceInvokeRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceInvokeResponse, ProductSurfaceError> {
+        let output = if request.operation_id.as_str() == CREATE_THREAD_COMMAND.id {
+            let input = serde_json::from_value::<ProductCreateThreadRequest>(request.input)
+                .map_err(ProductSurfaceError::internal_from)?;
+            serde_json::to_value(self.create_thread(caller, input).await?)
+                .map_err(ProductSurfaceError::internal_from)?
+        } else if request.operation_id.as_str() == SUBMIT_TURN_COMMAND.id {
+            let input = serde_json::from_value::<ProductSubmitTurnRequest>(request.input)
+                .map_err(ProductSurfaceError::internal_from)?;
+            serde_json::to_value(self.submit_turn(caller, input).await?)
+                .map_err(ProductSurfaceError::internal_from)?
+        } else if request.operation_id.as_str() == CANCEL_RUN_COMMAND.id {
+            let input = serde_json::from_value::<ProductCancelRunRequest>(request.input)
+                .map_err(ProductSurfaceError::internal_from)?;
+            serde_json::to_value(self.cancel_run(caller, input).await?)
+                .map_err(ProductSurfaceError::internal_from)?
+        } else {
+            return Err(invalid_request());
+        };
+        Ok(ironclaw_host_api::ProductSurfaceInvokeResponse { output })
+    }
+
+    async fn query(
+        &self,
+        _caller: ProductSurfaceCaller,
+        _request: ironclaw_host_api::ProductSurfaceQueryRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceQueryPage, ProductSurfaceError> {
+        Err(invalid_request())
+    }
+
+    async fn stream_events(
+        &self,
+        caller: ProductSurfaceCaller,
+        request: ironclaw_host_api::ProductSurfaceStreamRequest,
+    ) -> Result<ironclaw_host_api::ProductSurfaceStreamResponse, ProductSurfaceError> {
+        let thread_id = request.stream_id.ok_or_else(invalid_request)?;
+        let after_cursor = request
+            .after_cursor
+            .map(ironclaw_product::ProjectionCursor::new)
+            .transpose()
+            .map_err(|_| invalid_request())?;
+        let response = self
+            .stream_events(
+                caller,
+                RebornStreamEventsRequest {
+                    thread_id,
+                    after_cursor,
+                },
+            )
+            .await?;
+        let events = response
+            .events
+            .into_iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ProductSurfaceError::internal_from)?;
+        Ok(ironclaw_host_api::ProductSurfaceStreamResponse {
+            events,
+            next_cursor: None,
+        })
     }
 }
 
@@ -326,7 +397,7 @@ fn reborn_submit_from_ack(
     thread_id: ThreadId,
     mut ack: ProductInboundAck,
     rejection_param: &'static str,
-) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+) -> Result<RebornSubmitTurnResponse, ProductSurfaceError> {
     loop {
         match ack {
             ProductInboundAck::Accepted {
@@ -381,7 +452,7 @@ fn reborn_submit_from_ack(
     }
 }
 
-fn thread_record(caller: &WebUiAuthenticatedCaller, thread_id: ThreadId) -> SessionThreadRecord {
+fn thread_record(caller: &ProductSurfaceCaller, thread_id: ThreadId) -> SessionThreadRecord {
     SessionThreadRecord {
         scope: ThreadScope {
             tenant_id: caller.tenant_id.clone(),
@@ -403,10 +474,10 @@ fn thread_record(caller: &WebUiAuthenticatedCaller, thread_id: ThreadId) -> Sess
     }
 }
 
-pub(crate) fn service_unavailable() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Unavailable,
-        kind: RebornServicesErrorKind::ServiceUnavailable,
+pub(crate) fn service_unavailable() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Unavailable,
+        kind: ProductSurfaceErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: true,
         field: None,
@@ -414,10 +485,10 @@ pub(crate) fn service_unavailable() -> RebornServicesError {
     }
 }
 
-pub(crate) fn rate_limited() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::RateLimited,
-        kind: RebornServicesErrorKind::Busy,
+pub(crate) fn rate_limited() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::RateLimited,
+        kind: ProductSurfaceErrorKind::Busy,
         status_code: 429,
         retryable: false,
         field: None,
@@ -425,10 +496,10 @@ pub(crate) fn rate_limited() -> RebornServicesError {
     }
 }
 
-pub(crate) fn internal_error() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::Internal,
-        kind: RebornServicesErrorKind::Internal,
+pub(crate) fn internal_error() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::Internal,
+        kind: ProductSurfaceErrorKind::Internal,
         status_code: 500,
         retryable: false,
         field: None,
@@ -436,10 +507,10 @@ pub(crate) fn internal_error() -> RebornServicesError {
     }
 }
 
-fn invalid_request() -> RebornServicesError {
-    RebornServicesError {
-        code: RebornServicesErrorCode::InvalidRequest,
-        kind: RebornServicesErrorKind::Validation,
+fn invalid_request() -> ProductSurfaceError {
+    ProductSurfaceError {
+        code: ProductSurfaceErrorCode::InvalidRequest,
+        kind: ProductSurfaceErrorKind::Validation,
         status_code: 400,
         retryable: false,
         field: None,
@@ -458,20 +529,20 @@ fn rejection_param_for_content(content: Option<&str>) -> &'static str {
 fn service_error_from_rejection(
     rejection: &ProductRejection,
     param: &'static str,
-) -> RebornServicesError {
+) -> ProductSurfaceError {
     match rejection.kind {
-        ProductRejectionKind::BindingRequired => RebornServicesError {
-            code: RebornServicesErrorCode::NotFound,
-            kind: RebornServicesErrorKind::NotFound,
+        ProductRejectionKind::BindingRequired => ProductSurfaceError {
+            code: ProductSurfaceErrorCode::NotFound,
+            kind: ProductSurfaceErrorKind::NotFound,
             status_code: 404,
             retryable: false,
             field: Some(param.to_string()),
             validation_code: None,
         },
         ProductRejectionKind::AccessDenied | ProductRejectionKind::PolicyDenied => {
-            RebornServicesError {
-                code: RebornServicesErrorCode::Forbidden,
-                kind: RebornServicesErrorKind::ParticipantDenied,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Forbidden,
+                kind: ProductSurfaceErrorKind::ParticipantDenied,
                 status_code: 403,
                 retryable: false,
                 field: None,
@@ -479,18 +550,18 @@ fn service_error_from_rejection(
             }
         }
         ProductRejectionKind::UnknownInstallation => service_unavailable(),
-        ProductRejectionKind::InvalidRequest => RebornServicesError {
-            code: RebornServicesErrorCode::InvalidRequest,
-            kind: RebornServicesErrorKind::Validation,
+        ProductRejectionKind::InvalidRequest => ProductSurfaceError {
+            code: ProductSurfaceErrorCode::InvalidRequest,
+            kind: ProductSurfaceErrorKind::Validation,
             status_code: 400,
             retryable: false,
             field: Some(param.to_string()),
             validation_code: None,
         },
         ProductRejectionKind::AmbiguousResolution | ProductRejectionKind::StaleGate => {
-            RebornServicesError {
-                code: RebornServicesErrorCode::Conflict,
-                kind: RebornServicesErrorKind::Conflict,
+            ProductSurfaceError {
+                code: ProductSurfaceErrorCode::Conflict,
+                kind: ProductSurfaceErrorKind::Conflict,
                 status_code: 409,
                 retryable: false,
                 field: None,

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use ironclaw_product_adapters::{
+use ironclaw_product::{
     AdapterInstallationId, AuthRequirement, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, ProductAdapterError, ProductAdapterId,
     ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductTriggerReason,
     ProductWorkflowRejectionKind, ProtocolAuthEvidence, TrustedInboundContext,
 };
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     DefaultProductSurface, FakeConversationBindingService, FakeIdempotencyLedger,
     FakeInboundTurnService, ProductCommandAdmission, ProductCommandAdmissionService,
     ProductCommandContext, ProductWorkflowError,
@@ -35,7 +35,7 @@ fn sample_command_envelope(
         &evidence,
     )
     .expect("verified");
-    let parsed = ironclaw_product_adapters::ParsedProductInbound::new(
+    let parsed = ironclaw_product::ParsedProductInbound::new(
         ExternalEventId::new(format!("evt:{event_suffix}")).expect("valid event"),
         ExternalActorRef::new("test", "user1", Option::<String>::None).expect("valid actor"),
         ExternalConversationRef::new(None, "conv1", None, None).expect("valid conversation"),
@@ -56,7 +56,7 @@ impl ProductCommandAdmissionService for AllowingCommandAdmissionService {
     async fn admit(
         &self,
         _context: &ProductCommandContext,
-        _command: &ironclaw_product_workflow::ProductCommand,
+        _command: &ironclaw_product::ProductCommand,
     ) -> Result<ProductCommandAdmission, ProductWorkflowError> {
         Ok(ProductCommandAdmission::Allowed)
     }
@@ -197,7 +197,7 @@ async fn non_model_command_is_rejected_by_provider_admin_service() {
     };
     assert_eq!(
         rejection.kind,
-        ironclaw_product_adapters::ProductRejectionKind::PolicyDenied
+        ironclaw_product::ProductRejectionKind::PolicyDenied
     );
     assert_eq!(inbound.accepted_count(), 0);
 }

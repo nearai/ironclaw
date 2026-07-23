@@ -5,7 +5,7 @@ use ironclaw_filesystem::{
     Fault, FaultInjecting, FilesystemOperation, InMemoryBackend, RootFilesystem,
 };
 use ironclaw_host_api::{AgentId, UserId};
-use ironclaw_product_adapters::AdapterInstallationId;
+use ironclaw_product::AdapterInstallationId;
 
 use super::*;
 use crate::extension_host::host_api_contracts::product_extension_host_api_contract_registry;
@@ -21,8 +21,8 @@ fn tenant() -> TenantId {
     TenantId::new("tenant:test").expect("tenant")
 }
 
-fn caller() -> WebUiAuthenticatedCaller {
-    WebUiAuthenticatedCaller::new(
+fn caller() -> ProductSurfaceCaller {
+    ProductSurfaceCaller::new(
         tenant(),
         UserId::new("user:alice").expect("user"),
         None::<AgentId>,
@@ -336,7 +336,7 @@ async fn facade_ignores_foreign_tenants_and_unknown_channels() {
         identity_store.clone(),
         Some(credential_cleanup.clone()),
     );
-    let foreign_caller = WebUiAuthenticatedCaller::new(
+    let foreign_caller = ProductSurfaceCaller::new(
         TenantId::new("tenant:other").expect("tenant"),
         UserId::new("user:alice").expect("user"),
         None::<AgentId>,
@@ -408,7 +408,7 @@ async fn facade_projects_caller_account_status_per_vendor() {
         "the reader was consulted for the caller + vendor",
     );
 
-    let foreign = WebUiAuthenticatedCaller::new(
+    let foreign = ProductSurfaceCaller::new(
         TenantId::new("tenant:other").expect("tenant"),
         UserId::new("user:alice").expect("user"),
         None::<AgentId>,
@@ -479,9 +479,9 @@ impl RecordingAccountStatusReader {
 impl ChannelAccountStatusReader for RecordingAccountStatusReader {
     async fn account_status_for_caller(
         &self,
-        caller: &WebUiAuthenticatedCaller,
+        caller: &ProductSurfaceCaller,
         provider: &str,
-    ) -> Result<Option<CredentialAccountStatus>, RebornServicesError> {
+    ) -> Result<Option<CredentialAccountStatus>, ProductSurfaceError> {
         self.calls
             .lock()
             .expect("lock")
@@ -958,7 +958,7 @@ impl ChannelCredentialCleanup for RecordingCredentialCleanup {
     async fn cleanup_credentials_for_lifecycle(
         &self,
         request: SecretCleanupRequest,
-    ) -> Result<SecretCleanupReport, RebornServicesError> {
+    ) -> Result<SecretCleanupReport, ProductSurfaceError> {
         self.requests.lock().expect("lock").push(request);
         Ok(SecretCleanupReport::default())
     }
@@ -971,8 +971,8 @@ impl ChannelCredentialCleanup for FailingCredentialCleanup {
     async fn cleanup_credentials_for_lifecycle(
         &self,
         _request: SecretCleanupRequest,
-    ) -> Result<SecretCleanupReport, RebornServicesError> {
-        Err(RebornServicesError::internal_from(
+    ) -> Result<SecretCleanupReport, ProductSurfaceError> {
+        Err(ProductSurfaceError::internal_from(
             "credential cleanup unavailable",
         ))
     }

@@ -22,7 +22,7 @@ use ironclaw_host_runtime::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
-use ironclaw_product_workflow::ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID;
+use ironclaw_product::ADMIN_CONFIGURATION_REPLACE_CAPABILITY_ID;
 use ironclaw_secrets::SecretMaterial;
 use serde::Deserialize;
 

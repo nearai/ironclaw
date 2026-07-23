@@ -2,12 +2,12 @@
 //!
 //! Composition supplies current channel candidates and runtime ports. Target
 //! resolution, preference fallback, ambiguity, failure classification, and
-//! driver selection live in `ironclaw_product_workflow`.
+//! driver selection live in `ironclaw_product`.
 
 use std::sync::Arc;
 
 use ironclaw_outbound::{CommunicationPreferenceRepository, TriggeredRunDeliveryStore};
-use ironclaw_product_workflow::{
+use ironclaw_product::{
     CurrentDeliveryTargetResolver, RunDeliveryEventRouter, TriggeredRunDeliveryRouter,
 };
 use ironclaw_triggers::TriggerFire;

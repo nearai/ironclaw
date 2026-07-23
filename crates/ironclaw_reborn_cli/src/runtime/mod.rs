@@ -1201,7 +1201,7 @@ fn reject_unsupported_runtime_sections(
     // `[identity].default_project` is parsed but not yet wired into the
     // generic runtime slice — `run` / `repl` would silently drop the value,
     // so we fail-loud. The `serve` subcommand DOES consume it (stamped onto
-    // every `WebUiAuthenticatedCaller`), so for that caller the field is
+    // every `ProductSurfaceCaller`), so for that caller the field is
     // supported, not "parsed but not wired".
     if let Some(identity) = file.identity.as_ref()
         && identity.default_project.is_some()
