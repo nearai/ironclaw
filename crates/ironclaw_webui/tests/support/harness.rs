@@ -3,11 +3,11 @@
 //! `network_limits_contract.rs`).
 //!
 //! Each of those files used to carry its own byte-identical copy of the
-//! ~230-line `StubServices` `RebornServicesApi` impl plus the shared
+//! ~230-line `StubServices` `ProductSurface` impl plus the shared
 //! `with_peer` helper and tenant/agent/project constants. They are
 //! consolidated here and pulled in via
 //! `#[path = "support/harness.rs"] mod harness;` so a new
-//! `RebornServicesApi` method only has to be stubbed once. This file is
+//! `ProductSurface` method only has to be stubbed once. This file is
 //! NOT a test binary (it lives under `tests/support/`), and it is
 //! deliberately not referenced from `support/mod.rs`, so the OAuth-route
 //! tests' `mod support;` does not compile it.
@@ -27,13 +27,9 @@ use axum::extract::ConnectInfo;
 use axum::http::Request;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest,
+    ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
+    RebornCreateThreadResponse, RebornServicesError, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
 };
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
 
@@ -44,7 +40,7 @@ pub const AGENT: &str = "agent-default";
 /// Default project stamped onto every authenticated caller.
 pub const PROJECT: &str = "project-default";
 
-/// `RebornServicesApi` stub for the audit suite. `create_thread` and
+/// `ProductSurface` stub for the audit suite. `create_thread` and
 /// `stream_events` record their callers so a test can assert the facade
 /// was (or was not) reached and which `UserId` the bearer / `?token=`
 /// resolved to; `list_threads` returns an empty page defensively; every
@@ -59,8 +55,7 @@ pub struct StubServices {
     pub create_thread_panic: Option<&'static str>,
 }
 
-#[async_trait]
-impl RebornServicesApi for StubServices {
+impl StubServices {
     async fn create_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -93,22 +88,6 @@ impl RebornServicesApi for StubServices {
         })
     }
 
-    async fn submit_turn(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        unreachable!("audit suite does not drive submit_turn")
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        unreachable!("audit suite does not drive get_timeline")
-    }
-
     async fn stream_events(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -125,45 +104,35 @@ impl RebornServicesApi for StubServices {
             .push(caller);
         Ok(RebornStreamEventsResponse { events: Vec::new() })
     }
+}
 
-    async fn get_run_state(
+#[async_trait]
+impl ProductSurface for StubServices {
+    async fn stream_events(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        unreachable!("audit suite does not drive get_run_state")
+        caller: WebUiAuthenticatedCaller,
+        request: RebornStreamEventsRequest,
+    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+        StubServices::stream_events(self, caller, request).await
     }
 
-    async fn cancel_run(
+    async fn execute_command(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        unreachable!("audit suite does not drive cancel_run")
-    }
-
-    async fn retry_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
-        unreachable!("audit suite does not drive retry_run")
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        unreachable!("audit suite does not drive resolve_gate")
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        unreachable!("audit suite does not drive delete_thread")
+        caller: WebUiAuthenticatedCaller,
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
+            .ok_or_else(|| RebornServicesError::internal_from("unsupported product operation"))?;
+        match operation_id {
+            ProductOperationId::CreateThread => {
+                let request = serde_json::from_value(request.input)
+                    .map_err(RebornServicesError::internal_from)?;
+                ProductOperationResponse::json(self.create_thread(caller, request).await?)
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "unsupported product operation",
+            )),
+        }
     }
 }
 

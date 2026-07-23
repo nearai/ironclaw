@@ -30,7 +30,7 @@ hex = "0.4.3"
 hmac = "0.13"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 # Folded up from the former `ironclaw_webui_v2` crate: the v2 handlers consume
-# only the `RebornServicesApi` facade + ingress/error vocabulary.
+# only the `ProductSurface` facade + ingress/error vocabulary.
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition"}
 # The moved `webui_v2_app` auth middleware stamps an `OpenAiCompatActorScope`
@@ -67,7 +67,7 @@ axum = { version = "0.8", features = ["macros"] }
 http = "1"
 http-body-util = "0.1"
 # End-to-end session test (`tests/session_round_trip.rs`) drives the
-# composed `webui_v2_app` with a minimal `RebornServicesApi` stub so
+# composed `webui_v2_app` with a minimal `ProductSurface` stub so
 # the assertion covers SessionAuthenticator + the v2 route surface
 # together. The three crates below supply the trait + DTO shapes
 # the stub implements.

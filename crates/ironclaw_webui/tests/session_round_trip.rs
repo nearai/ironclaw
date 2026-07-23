@@ -10,7 +10,7 @@
 //!   sessions),
 //! - a `SessionAuthenticator` backed by the SAME
 //!   `SignedTokenSessionStore` (validates bearers),
-//! - a minimal `RebornServicesApi` stub that only implements
+//! - a minimal `ProductSurface` stub that only implements
 //!   `create_thread` for the round-trip assertion.
 //!
 //! The chain it locks: OAuth callback → SignedTokenSessionStore::create_session
@@ -34,13 +34,9 @@ use chrono::Duration as ChronoDuration;
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornDeleteThreadRequest,
-    RebornDeleteThreadResponse, RebornGetRunStateRequest, RebornGetRunStateResponse,
-    RebornResolveGateResponse, RebornRetryRunResponse, RebornServicesApi, RebornServicesError,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest,
+    ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
+    RebornCreateThreadResponse, RebornServicesError, WebUiAuthenticatedCaller,
+    WebUiCreateThreadRequest,
 };
 use ironclaw_reborn_composition::{RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -60,7 +56,7 @@ const PROJECT: &str = "project-default";
 
 // ─── stub facade ──────────────────────────────────────────────────────
 
-/// `RebornServicesApi` stub — only `create_thread` returns Ok with a
+/// `ProductSurface` stub — only `create_thread` returns Ok with a
 /// fake thread (the protected route this test exercises). Every
 /// other method panics with `unreachable!()` because the test
 /// deliberately drives a single mutation; a future expansion that
@@ -71,8 +67,7 @@ struct StubServices {
     create_thread_callers: Mutex<Vec<WebUiAuthenticatedCaller>>,
 }
 
-#[async_trait]
-impl RebornServicesApi for StubServices {
+impl StubServices {
     async fn create_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -101,69 +96,27 @@ impl RebornServicesApi for StubServices {
             },
         })
     }
+}
 
-    async fn submit_turn(
+#[async_trait]
+impl ProductSurface for StubServices {
+    async fn execute_command(
         &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiSendMessageRequest,
-    ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
-        unreachable!("test does not drive submit_turn")
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        unreachable!("test does not drive get_timeline")
-    }
-
-    async fn stream_events(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornStreamEventsRequest,
-    ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
-        unreachable!("test does not drive stream_events")
-    }
-
-    async fn get_run_state(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornGetRunStateRequest,
-    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
-        unreachable!("test does not drive get_run_state")
-    }
-
-    async fn cancel_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiCancelRunRequest,
-    ) -> Result<RebornCancelRunResponse, RebornServicesError> {
-        unreachable!("test does not drive cancel_run")
-    }
-
-    async fn retry_run(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiRetryRunRequest,
-    ) -> Result<RebornRetryRunResponse, RebornServicesError> {
-        unreachable!("test does not drive retry_run")
-    }
-
-    async fn resolve_gate(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: WebUiResolveGateRequest,
-    ) -> Result<RebornResolveGateResponse, RebornServicesError> {
-        unreachable!("test does not drive resolve_gate")
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        _request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        unreachable!("test does not drive delete_thread")
+        caller: WebUiAuthenticatedCaller,
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
+            .ok_or_else(|| RebornServicesError::internal_from("unsupported product operation"))?;
+        match operation_id {
+            ProductOperationId::CreateThread => {
+                let request = serde_json::from_value(request.input)
+                    .map_err(RebornServicesError::internal_from)?;
+                ProductOperationResponse::json(self.create_thread(caller, request).await?)
+            }
+            _ => Err(RebornServicesError::internal_from(
+                "unsupported product operation",
+            )),
+        }
     }
 }
 

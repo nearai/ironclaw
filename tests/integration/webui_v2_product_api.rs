@@ -33,7 +33,7 @@ use ironclaw_host_api::{
 use ironclaw_product_adapters::ProductOutboundPayload;
 use ironclaw_product_workflow::{
     ProductSurface, RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornServices,
-    RebornServicesApi, RebornStreamEventsRequest, WebUiAuthenticatedCaller,
+    RebornStreamEventsRequest, WebUiAuthenticatedCaller,
 };
 use ironclaw_reborn_composition::test_support::BudgetTestGateway;
 use ironclaw_reborn_composition::{
@@ -1735,7 +1735,7 @@ output_schema_ref = "schemas/run.output.json"
     writer.finish().expect("finish zip").into_inner()
 }
 
-/// W5-WEBUI-API-1 scenario 2: drives `RebornServicesApi::stream_events`
+/// W5-WEBUI-API-1 scenario 2: drives `ProductSurface::stream_events`
 /// directly (SSE handler is a polling wrapper over the same drain, per
 /// W5-WEBUI-SPIKE). Proves a lifecycle event delivers once and reconnect
 /// with `after_cursor` past it doesn't redeliver. Uses Enabler A's narrowed

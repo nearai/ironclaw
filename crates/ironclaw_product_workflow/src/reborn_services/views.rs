@@ -5,7 +5,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 
-use super::{ProductSurface, RebornServicesError, WebUiAuthenticatedCaller};
+use super::{
+    ProductSurface, ProjectFsFile, RebornAttachmentBytes, RebornServicesError,
+    WebUiAuthenticatedCaller,
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -127,6 +130,195 @@ pub struct RebornViewPage {
     pub next_cursor: Option<String>,
 }
 
+/// Stable identifier for one result-bearing product operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProductOperationId {
+    CreateThread,
+    SubmitTurn,
+    CancelRun,
+    ResolveGate,
+    RetryRun,
+    ProjectCreate,
+    ProjectFsRead,
+    FsRead,
+    AttachmentRead,
+    TraceAccountLoginLink,
+    TraceHoldAuthorize,
+    OperatorConfigSetKey,
+    OperatorServiceLifecycle,
+    LlmTestConnection,
+    LlmListModels,
+    LlmNearAiLogin,
+    LlmNearAiWalletLogin,
+    LlmCodexLogin,
+    AdminUserCreate,
+    AdminUserDeleteSecret,
+    AutomationPause,
+    AutomationResume,
+    AutomationRename,
+    AutomationDelete,
+}
+
+impl ProductOperationId {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateThread => "webui.create_thread",
+            Self::SubmitTurn => "webui.submit_turn",
+            Self::CancelRun => "webui.cancel_run",
+            Self::ResolveGate => "webui.resolve_gate",
+            Self::RetryRun => "webui.retry_run",
+            Self::ProjectCreate => "webui.project_create",
+            Self::ProjectFsRead => "webui.project_fs_read",
+            Self::FsRead => "webui.fs_read",
+            Self::AttachmentRead => "webui.attachment_read",
+            Self::TraceAccountLoginLink => "webui.trace_account_login_link",
+            Self::TraceHoldAuthorize => "webui.trace_hold_authorize",
+            Self::OperatorConfigSetKey => "webui.operator_config_set_key",
+            Self::OperatorServiceLifecycle => "webui.operator_service_lifecycle",
+            Self::LlmTestConnection => "webui.llm_test_connection",
+            Self::LlmListModels => "webui.llm_list_models",
+            Self::LlmNearAiLogin => "webui.llm_nearai_login",
+            Self::LlmNearAiWalletLogin => "webui.llm_nearai_wallet_login",
+            Self::LlmCodexLogin => "webui.llm_codex_login",
+            Self::AdminUserCreate => "webui.admin_user_create",
+            Self::AdminUserDeleteSecret => "webui.admin_user_delete_secret",
+            Self::AutomationPause => "webui.automation_pause",
+            Self::AutomationResume => "webui.automation_resume",
+            Self::AutomationRename => "webui.automation_rename",
+            Self::AutomationDelete => "webui.automation_delete",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "webui.create_thread" => Some(Self::CreateThread),
+            "webui.submit_turn" => Some(Self::SubmitTurn),
+            "webui.cancel_run" => Some(Self::CancelRun),
+            "webui.resolve_gate" => Some(Self::ResolveGate),
+            "webui.retry_run" => Some(Self::RetryRun),
+            "webui.project_create" => Some(Self::ProjectCreate),
+            "webui.project_fs_read" => Some(Self::ProjectFsRead),
+            "webui.fs_read" => Some(Self::FsRead),
+            "webui.attachment_read" => Some(Self::AttachmentRead),
+            "webui.trace_account_login_link" => Some(Self::TraceAccountLoginLink),
+            "webui.trace_hold_authorize" => Some(Self::TraceHoldAuthorize),
+            "webui.operator_config_set_key" => Some(Self::OperatorConfigSetKey),
+            "webui.operator_service_lifecycle" => Some(Self::OperatorServiceLifecycle),
+            "webui.llm_test_connection" => Some(Self::LlmTestConnection),
+            "webui.llm_list_models" => Some(Self::LlmListModels),
+            "webui.llm_nearai_login" => Some(Self::LlmNearAiLogin),
+            "webui.llm_nearai_wallet_login" => Some(Self::LlmNearAiWalletLogin),
+            "webui.llm_codex_login" => Some(Self::LlmCodexLogin),
+            "webui.admin_user_create" => Some(Self::AdminUserCreate),
+            "webui.admin_user_delete_secret" => Some(Self::AdminUserDeleteSecret),
+            "webui.automation_pause" => Some(Self::AutomationPause),
+            "webui.automation_resume" => Some(Self::AutomationResume),
+            "webui.automation_rename" => Some(Self::AutomationRename),
+            "webui.automation_delete" => Some(Self::AutomationDelete),
+            _ => None,
+        }
+    }
+}
+
+/// Typed declaration for one ProductSurface operation.
+///
+/// Operations are the result-bearing sibling of API-only capability invocation:
+/// the transport still sends an opaque command id plus JSON input, but handlers
+/// keep request/response DTOs tied to the declaration instead of calling a
+/// concrete facade method directly.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ProductOperation<Params, Output> {
+    pub id: ProductOperationId,
+    _types: PhantomData<fn(Params) -> Output>,
+}
+
+impl<Params, Output> Clone for ProductOperation<Params, Output> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Params, Output> Copy for ProductOperation<Params, Output> {}
+
+impl<Params, Output> ProductOperation<Params, Output> {
+    pub const fn new(id: ProductOperationId) -> Self {
+        Self {
+            id,
+            _types: PhantomData,
+        }
+    }
+
+    pub fn request(&self, input: Params) -> Result<ProductOperationRequest, RebornServicesError>
+    where
+        Params: Serialize,
+    {
+        Ok(ProductOperationRequest {
+            operation_id: self.id.as_str().to_string(),
+            input: serde_json::to_value(input).map_err(RebornServicesError::internal_from)?,
+        })
+    }
+}
+
+/// One registered, result-bearing product operation invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProductOperationRequest {
+    pub operation_id: String,
+    pub input: serde_json::Value,
+}
+
+/// One result-bearing product operation response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProductOperationResponse {
+    Json(serde_json::Value),
+    ProjectFile(ProjectFsFile),
+    Attachment(RebornAttachmentBytes),
+}
+
+impl ProductOperationResponse {
+    pub fn json<T: Serialize>(value: T) -> Result<Self, RebornServicesError> {
+        Ok(Self::Json(
+            serde_json::to_value(value).map_err(RebornServicesError::internal_from)?,
+        ))
+    }
+
+    pub fn project_file(file: ProjectFsFile) -> Self {
+        Self::ProjectFile(file)
+    }
+
+    pub fn attachment(bytes: RebornAttachmentBytes) -> Self {
+        Self::Attachment(bytes)
+    }
+
+    pub fn into_json<T: DeserializeOwned>(self) -> Result<T, RebornServicesError> {
+        match self {
+            Self::Json(value) => {
+                serde_json::from_value(value).map_err(RebornServicesError::internal_from)
+            }
+            Self::ProjectFile(_) | Self::Attachment(_) => Err(RebornServicesError::internal_from(
+                "operation returned bytes",
+            )),
+        }
+    }
+
+    pub fn into_project_file(self) -> Result<ProjectFsFile, RebornServicesError> {
+        match self {
+            Self::ProjectFile(file) => Ok(file),
+            Self::Json(_) | Self::Attachment(_) => Err(RebornServicesError::internal_from(
+                "operation returned JSON",
+            )),
+        }
+    }
+
+    pub fn into_attachment(self) -> Result<RebornAttachmentBytes, RebornServicesError> {
+        match self {
+            Self::Attachment(bytes) => Ok(bytes),
+            Self::Json(_) | Self::ProjectFile(_) => Err(RebornServicesError::internal_from(
+                "operation returned non-attachment bytes",
+            )),
+        }
+    }
+}
+
 pub(super) fn parse_empty_view_params(
     params: serde_json::Value,
 ) -> Result<(), RebornServicesError> {
@@ -171,7 +363,7 @@ pub(super) fn view_page_with_cursor<T: Serialize>(
 /// One composition-supplied implementation behind the generic view conduit.
 ///
 /// Product features register descriptors and providers instead of growing
-/// `RebornServicesApi` with feature-specific read methods.
+/// `ProductSurface` with feature-specific read methods.
 #[async_trait]
 pub trait RebornViewProvider: Send + Sync {
     fn descriptor(&self) -> RebornViewDescriptor;
