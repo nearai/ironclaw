@@ -15,6 +15,11 @@ use serde_json::json;
 
 const ONCE_AT: &str = "2999-01-01T00:00:00";
 
+/// The exact opaque id registered for the source conversation's reply route. The
+/// persisted trigger must capture *this* id, so a future fire delivers back to
+/// the originating channel — not merely "some" route.
+const SOURCE_TARGET_ID: &str = "external:test-source-chat";
+
 pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let creator = g
         .thread("external-source-trigger-captures-delivery")
@@ -50,7 +55,7 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
         .await?;
     g.register_source_delivery_target_for_test(
         "external-source-trigger-captures-delivery",
-        "external:test-source-chat",
+        SOURCE_TARGET_ID,
         setup_run.reply_target_binding_ref,
     )?;
 
@@ -67,11 +72,16 @@ pub async fn run(g: &RebornIntegrationGroup) -> HarnessResult<()> {
     let created = creator.tool_result_output("builtin.trigger_create").await?;
     let persisted_target = created["trigger"]["delivery_target_id"].as_str();
 
-    if persisted_target.is_none() {
+    // Assert EQUALITY, not merely presence: the host must capture the exact
+    // registered source route so a future fire delivers back to that same source
+    // conversation. `is_some()` alone would pass even if the resolver sealed the
+    // wrong (e.g. default) target.
+    if persisted_target != Some(SOURCE_TARGET_ID) {
         return Err(format!(
-            "trigger_create silently dropped the originating product reply target {}; \
-             a future fire has no host-owned route back to the source channel: {created}",
-            source_run.reply_target_binding_ref.as_str(),
+            "trigger_create must capture the originating product reply target \
+             {SOURCE_TARGET_ID:?} (source reply binding {binding}); got \
+             delivery_target_id {persisted_target:?}: {created}",
+            binding = source_run.reply_target_binding_ref.as_str(),
         )
         .into());
     }

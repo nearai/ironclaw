@@ -844,8 +844,21 @@ fn canonical_host_name(host: &str) -> &str {
 /// Resolve the fire-time trigger access policy for `serve` from the enabled
 /// surfaces (arch-simplification §4.4). Poller off → no authorizer. Poller on →
 /// the configured operator owner may fire, and any active canonical tenant
-/// member may fire regardless of whether their signed session originated from
-/// SSO or the administrator user API.
+/// member may fire.
+///
+/// Intentional access model — the auth method is not the gate; active canonical
+/// membership is. The `TenantMembership` grant is wired unconditionally whenever
+/// the poller is on (there is deliberately no `sso_enabled` condition): a
+/// member's signed session is equally valid whether it originated from SSO or
+/// the administrator user API, so gating on the auth method would wrongly lock
+/// out admin-API-authenticated members from firing their own routines. Safety
+/// does not rest on the auth method because the grant is enforced by active
+/// membership at fire time: `build_reborn_runtime` turns this `TenantMembership`
+/// grant into an `IdentityMembershipTriggerFireChecker` that resolves the
+/// creator against the canonical identity directory and denies a suspended,
+/// wrong-tenant, or unknown creator (see `crate::trigger_fire_access` in
+/// `ironclaw_reborn_composition`). A merely-authenticated non-member therefore
+/// cannot fire; only an active member can.
 fn trigger_fire_access_policy(
     trigger_poller_enabled: bool,
     user_id: &UserId,

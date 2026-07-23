@@ -254,7 +254,31 @@ impl FirstPartyCapabilityHandler for TriggerManagementToolHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        if matches!(request.origin, Some(InvocationOrigin::ScheduledLoopRun(_)))
+        // Defense-in-depth backstop (issue #5505): a scheduled/automation origin
+        // must never create, remove, pause, or resume a routine — that is
+        // self-referential automation that could silence or reschedule itself.
+        //
+        // The PRIMARY structural guarantees live one layer up, in the runner's
+        // capability surface (`ironclaw_runner::runtime`):
+        //   * a scheduled-trigger fire runs on the `scheduled_trigger` surface
+        //     profile, whose `PerSurfaceCapabilityDenyDecorator`
+        //     (`SCHEDULED_TRIGGER_DENIED_CAPABILITY_IDS`) strips the four mutation
+        //     capabilities before the model can see them (`trigger_list` stays);
+        //   * a subagent runs on the `subagent_tools` surface, whose per-flavor
+        //     tool allowlist (`BUILTIN_SUBAGENT_FLAVORS`) never includes any
+        //     trigger capability, so a subagent cannot reach these ids at all.
+        //
+        // This origin check is the belt to those suspenders: a caller that
+        // reaches dispatch directly (bypassing the model-visible surface) is
+        // still refused. Residual it cannot close on its own: a subagent spawned
+        // from a scheduled run inherits `product_context: None`, so its dispatch
+        // origin is `LoopRun`, not `ScheduledLoopRun` — the scheduled lineage is
+        // not visible here. The subagent *surface* exclusion above is what
+        // protects that path today (and `spawn_subagent` is globally disabled
+        // pending #4147); if a trigger capability is ever added to a subagent
+        // flavor, the parent's `ScheduledTrigger`/`ScheduledLoopRun` lineage must
+        // also be propagated onto spawned runs so this backstop catches them too.
+        if origin_forbids_routine_mutation(request.origin.as_ref())
             && is_trigger_mutation(request.capability_id.as_str())
         {
             return Err(FirstPartyCapabilityError::with_safe_summary(
@@ -328,6 +352,25 @@ fn is_trigger_mutation(capability_id: &str) -> bool {
             | TRIGGER_REMOVE_CAPABILITY_ID
             | TRIGGER_PAUSE_CAPABILITY_ID
             | TRIGGER_RESUME_CAPABILITY_ID
+    )
+}
+
+/// Origins that must never mutate routines. Both the model-initiated scheduled
+/// loop-run ([`InvocationOrigin::ScheduledLoopRun`]) and the non-model
+/// routine/heartbeat ([`InvocationOrigin::Automation`]) are refused: a scheduled
+/// routine editing routines is self-referential automation. This matches the
+/// builtin descriptors' declared `origin_gate_matrix`, which sets
+/// `automation = Forbidden` for every trigger-mutation capability — so an
+/// `Automation`-origin caller is already denied at the authorization gate; the
+/// runtime backstop refuses it too, independent of that gate having run.
+///
+/// Interactive `LoopRun` and direct-user `Product` origins are intentionally
+/// *not* here: creating a routine is a normal thing for an interactive turn or a
+/// settings action to do (subject to the per-capability gate).
+fn origin_forbids_routine_mutation(origin: Option<&InvocationOrigin>) -> bool {
+    matches!(
+        origin,
+        Some(InvocationOrigin::ScheduledLoopRun(_) | InvocationOrigin::Automation(_))
     )
 }
 
