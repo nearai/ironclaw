@@ -928,6 +928,165 @@ pub(crate) struct GeminiOauthProvider {
 /// Parsed Gemini response: (completion, tool_calls, thought_signatures_by_call_id).
 type GeminiParsedResponse = (CompletionResponse, Vec<ToolCall>, HashMap<String, String>);
 
+/// Result of accumulating a Cloud Code SSE response body across all `data:` chunks.
+#[derive(Debug, Default)]
+struct ParsedCloudCodeSse {
+    combined_text: String,
+    finish_reason: String,
+    prompt_tokens: i64,
+    candidates_tokens: i64,
+    tool_calls_parts: Vec<serde_json::Value>,
+    model_version: Option<String>,
+    prompt_feedback: Option<serde_json::Value>,
+    grounding_metadata: Option<serde_json::Value>,
+    citation_metadata: Option<serde_json::Value>,
+    cached_content_token_count: Option<u32>,
+    total_token_count: Option<u32>,
+    consumed_credits: Vec<GeminiCredits>,
+    remaining_credits: Vec<GeminiCredits>,
+}
+
+/// Parse a Cloud Code API SSE response body (`data: {...}` lines, each wrapping
+/// a `{"response": {...}}` chunk) into accumulated text, finish reason, tool
+/// calls, and metadata. Pure function — no I/O, no `&self` — for direct
+/// unit testing of the SSE accumulation logic independent of `send_request`.
+fn parse_cloud_code_sse_body(body_str: &str) -> ParsedCloudCodeSse {
+    let mut combined_text = String::new();
+    let mut finish_reason = "STOP".to_string();
+    let mut prompt_tokens: i64 = 0;
+    let mut candidates_tokens: i64 = 0;
+    let mut tool_calls_parts = Vec::<serde_json::Value>::new();
+
+    // Metadata (collected in the same pass)
+    let mut model_version: Option<String> = None;
+    let mut prompt_feedback: Option<serde_json::Value> = None;
+    let mut grounding_metadata: Option<serde_json::Value> = None;
+    let mut citation_metadata: Option<serde_json::Value> = None;
+    let mut cached_content_token_count: Option<u32> = None;
+    let mut total_token_count: Option<u32> = None;
+    let mut consumed_credits: Vec<GeminiCredits> = Vec::new();
+    let mut remaining_credits: Vec<GeminiCredits> = Vec::new();
+
+    for line in body_str.lines() {
+        let Some(json_str) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let json_str = json_str.trim();
+        let chunk: serde_json::Value = match serde_json::from_str(json_str) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Credits from Cloud Code wrapper (top-level, outside "response")
+        if let Some(cc) = chunk.get("consumedCredits").and_then(|c| c.as_array()) {
+            for c in cc {
+                if let Ok(credit) = serde_json::from_value::<GeminiCredits>(c.clone()) {
+                    consumed_credits.push(credit);
+                }
+            }
+        }
+        if let Some(rc) = chunk.get("remainingCredits").and_then(|c| c.as_array()) {
+            for c in rc {
+                if let Ok(credit) = serde_json::from_value::<GeminiCredits>(c.clone()) {
+                    remaining_credits.push(credit);
+                }
+            }
+        }
+
+        let resp = match chunk.get("response") {
+            Some(r) => r,
+            None => continue,
+        };
+
+        // Content extraction
+        if let Some(candidates) = resp.get("candidates").and_then(|c| c.as_array())
+            && let Some(first) = candidates.first()
+        {
+            if let Some(parts) = first
+                .get("content")
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.as_array())
+            {
+                for part in parts {
+                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                        let is_thought = part
+                            .get("thought")
+                            .and_then(|t| t.as_bool())
+                            .unwrap_or(false);
+                        if !is_thought {
+                            combined_text.push_str(text);
+                        }
+                    }
+                    if let Some(fc) = part.get("functionCall") {
+                        tool_calls_parts.push(serde_json::json!({
+                            "functionCall": fc
+                        }));
+                    }
+                }
+            }
+            if let Some(fr) = first.get("finishReason").and_then(|fr| fr.as_str()) {
+                finish_reason = fr.to_string();
+            }
+            // Per-candidate metadata
+            if grounding_metadata.is_none()
+                && let Some(gm) = first.get("groundingMetadata")
+            {
+                grounding_metadata = Some(gm.clone());
+            }
+            if citation_metadata.is_none()
+                && let Some(cm) = first.get("citationMetadata")
+            {
+                citation_metadata = Some(cm.clone());
+            }
+        }
+
+        // Response-level metadata
+        if model_version.is_none()
+            && let Some(mv) = resp.get("modelVersion").and_then(|v| v.as_str())
+        {
+            model_version = Some(mv.to_string());
+        }
+        if prompt_feedback.is_none()
+            && let Some(pf) = resp.get("promptFeedback")
+        {
+            prompt_feedback = Some(pf.clone());
+        }
+        if let Some(usage) = resp.get("usageMetadata") {
+            if let Some(pt) = usage.get("promptTokenCount").and_then(|pt| pt.as_i64()) {
+                prompt_tokens = pt;
+            }
+            if let Some(ct) = usage.get("candidatesTokenCount").and_then(|ct| ct.as_i64()) {
+                candidates_tokens = ct;
+            }
+            if let Some(ct) = usage
+                .get("cachedContentTokenCount")
+                .and_then(|t| t.as_u64())
+            {
+                cached_content_token_count = Some(ct as u32);
+            }
+            if let Some(tt) = usage.get("totalTokenCount").and_then(|t| t.as_u64()) {
+                total_token_count = Some(tt as u32);
+            }
+        }
+    }
+
+    ParsedCloudCodeSse {
+        combined_text,
+        finish_reason,
+        prompt_tokens,
+        candidates_tokens,
+        tool_calls_parts,
+        model_version,
+        prompt_feedback,
+        grounding_metadata,
+        citation_metadata,
+        cached_content_token_count,
+        total_token_count,
+        consumed_credits,
+        remaining_credits,
+    }
+}
+
 impl GeminiOauthProvider {
     pub(crate) fn new(config: GeminiOauthConfig) -> Result<Self, LlmError> {
         let cred_manager = CredentialManager::new(&config.credentials_path)?;
@@ -1373,143 +1532,24 @@ impl GeminiOauthProvider {
 
             let mut success = false;
             if self.uses_cloud_code_api() {
-                let mut combined_text = String::new();
-                let mut finish_reason = "STOP".to_string();
-                let mut prompt_tokens: i64 = 0;
-                let mut candidates_tokens: i64 = 0;
-                let mut tool_calls_parts = Vec::<serde_json::Value>::new();
-
-                // Metadata (collected in the same pass)
-                let mut model_version: Option<String> = None;
-                let mut prompt_feedback: Option<serde_json::Value> = None;
-                let mut grounding_metadata: Option<serde_json::Value> = None;
-                let mut citation_metadata: Option<serde_json::Value> = None;
-                let mut cached_content_token_count: Option<u32> = None;
-                let mut total_token_count: Option<u32> = None;
-                let mut consumed_credits: Vec<GeminiCredits> = Vec::new();
-                let mut remaining_credits: Vec<GeminiCredits> = Vec::new();
-
-                for line in body_str.lines() {
-                    let Some(json_str) = line.strip_prefix("data:") else {
-                        continue;
-                    };
-                    let json_str = json_str.trim();
-                    let chunk: serde_json::Value = match serde_json::from_str(json_str) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-
-                    // Credits from Cloud Code wrapper (top-level, outside "response")
-                    if let Some(cc) = chunk.get("consumedCredits").and_then(|c| c.as_array()) {
-                        for c in cc {
-                            if let Ok(credit) = serde_json::from_value::<GeminiCredits>(c.clone()) {
-                                consumed_credits.push(credit);
-                            }
-                        }
-                    }
-                    if let Some(rc) = chunk.get("remainingCredits").and_then(|c| c.as_array()) {
-                        for c in rc {
-                            if let Ok(credit) = serde_json::from_value::<GeminiCredits>(c.clone()) {
-                                remaining_credits.push(credit);
-                            }
-                        }
-                    }
-
-                    let resp = match chunk.get("response") {
-                        Some(r) => r,
-                        None => continue,
-                    };
-
-                    // Content extraction
-                    if let Some(candidates) = resp.get("candidates").and_then(|c| c.as_array())
-                        && let Some(first) = candidates.first()
-                    {
-                        if let Some(parts) = first
-                            .get("content")
-                            .and_then(|c| c.get("parts"))
-                            .and_then(|p| p.as_array())
-                        {
-                            for part in parts {
-                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    let is_thought = part
-                                        .get("thought")
-                                        .and_then(|t| t.as_bool())
-                                        .unwrap_or(false);
-                                    if !is_thought {
-                                        combined_text.push_str(text);
-                                    }
-                                }
-                                if let Some(fc) = part.get("functionCall") {
-                                    tool_calls_parts.push(serde_json::json!({
-                                        "functionCall": fc
-                                    }));
-                                }
-                            }
-                        }
-                        if let Some(fr) = first.get("finishReason").and_then(|fr| fr.as_str()) {
-                            finish_reason = fr.to_string();
-                        }
-                        // Per-candidate metadata
-                        if grounding_metadata.is_none()
-                            && let Some(gm) = first.get("groundingMetadata")
-                        {
-                            grounding_metadata = Some(gm.clone());
-                        }
-                        if citation_metadata.is_none()
-                            && let Some(cm) = first.get("citationMetadata")
-                        {
-                            citation_metadata = Some(cm.clone());
-                        }
-                    }
-
-                    // Response-level metadata
-                    if model_version.is_none()
-                        && let Some(mv) = resp.get("modelVersion").and_then(|v| v.as_str())
-                    {
-                        model_version = Some(mv.to_string());
-                    }
-                    if prompt_feedback.is_none()
-                        && let Some(pf) = resp.get("promptFeedback")
-                    {
-                        prompt_feedback = Some(pf.clone());
-                    }
-                    if let Some(usage) = resp.get("usageMetadata") {
-                        if let Some(pt) = usage.get("promptTokenCount").and_then(|pt| pt.as_i64()) {
-                            prompt_tokens = pt;
-                        }
-                        if let Some(ct) =
-                            usage.get("candidatesTokenCount").and_then(|ct| ct.as_i64())
-                        {
-                            candidates_tokens = ct;
-                        }
-                        if let Some(ct) = usage
-                            .get("cachedContentTokenCount")
-                            .and_then(|t| t.as_u64())
-                        {
-                            cached_content_token_count = Some(ct as u32);
-                        }
-                        if let Some(tt) = usage.get("totalTokenCount").and_then(|t| t.as_u64()) {
-                            total_token_count = Some(tt as u32);
-                        }
-                    }
-                }
+                let parsed = parse_cloud_code_sse_body(&body_str);
 
                 // Store metadata
                 if let Ok(mut meta) = self.last_response_meta.lock() {
                     *meta = GeminiResponseMeta {
-                        model_version,
-                        prompt_feedback: prompt_feedback.clone(),
-                        grounding_metadata,
-                        citation_metadata,
-                        consumed_credits,
-                        remaining_credits,
-                        cached_content_token_count,
-                        total_token_count,
+                        model_version: parsed.model_version,
+                        prompt_feedback: parsed.prompt_feedback.clone(),
+                        grounding_metadata: parsed.grounding_metadata,
+                        citation_metadata: parsed.citation_metadata,
+                        consumed_credits: parsed.consumed_credits,
+                        remaining_credits: parsed.remaining_credits,
+                        cached_content_token_count: parsed.cached_content_token_count,
+                        total_token_count: parsed.total_token_count,
                     };
                 }
 
                 // Log prompt feedback if request was blocked
-                if let Some(ref pf) = prompt_feedback
+                if let Some(ref pf) = parsed.prompt_feedback
                     && let Some(reason) = pf.get("blockReason").and_then(|r| r.as_str())
                 {
                     warn!(
@@ -1518,25 +1558,26 @@ impl GeminiOauthProvider {
                     );
                 }
 
-                let has_content = !combined_text.is_empty() || !tool_calls_parts.is_empty();
+                let has_content =
+                    !parsed.combined_text.is_empty() || !parsed.tool_calls_parts.is_empty();
 
                 if has_content {
                     let mut response_parts = Vec::new();
-                    if !combined_text.is_empty() {
-                        response_parts.push(serde_json::json!({"text": combined_text}));
+                    if !parsed.combined_text.is_empty() {
+                        response_parts.push(serde_json::json!({"text": parsed.combined_text}));
                     }
-                    response_parts.extend(tool_calls_parts);
+                    response_parts.extend(parsed.tool_calls_parts);
 
                     final_response = serde_json::json!({
                         "candidates": [{
                             "content": {
                                 "parts": response_parts
                             },
-                            "finishReason": finish_reason
+                            "finishReason": parsed.finish_reason
                         }],
                         "usageMetadata": {
-                            "promptTokenCount": prompt_tokens,
-                            "candidatesTokenCount": candidates_tokens
+                            "promptTokenCount": parsed.prompt_tokens,
+                            "candidatesTokenCount": parsed.candidates_tokens
                         }
                     });
                     success = true;
@@ -2007,6 +2048,7 @@ impl GeminiOauthProvider {
                 // Treat as Stop — the caller's retry layer will handle retries
                 FinishReason::Stop
             }
+            "SAFETY" | "RECITATION" => FinishReason::ContentFilter,
             _ => {
                 if !tool_calls.is_empty() {
                     FinishReason::ToolUse
@@ -2877,5 +2919,145 @@ mod tests {
         assert!(fc_part.get("functionCall").is_some());
         // No thoughtSignature should be present when there is no captured signature for this call ID.
         assert!(fc_part.get("thoughtSignature").is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // GAP 7: parse_cloud_code_sse_body (extracted pure SSE accumulator)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_parse_cloud_code_sse_body_multi_chunk_text_concat() {
+        let body = concat!(
+            "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello, \"}]}}]}}\n",
+            "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"world!\"}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":3,\"candidatesTokenCount\":2}}}\n",
+        );
+
+        let parsed = parse_cloud_code_sse_body(body);
+
+        assert_eq!(parsed.combined_text, "Hello, world!");
+        assert_eq!(parsed.finish_reason, "STOP");
+        assert_eq!(parsed.prompt_tokens, 3);
+        assert_eq!(parsed.candidates_tokens, 2);
+    }
+
+    #[test]
+    fn test_parse_cloud_code_sse_body_skips_comments_and_blank_lines() {
+        let body = concat!(
+            ": this is an SSE comment line\n",
+            "\n",
+            "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"foo\"}]}}]}}\n",
+            "\n",
+            ": another comment\n",
+            "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"bar\"}]},\"finishReason\":\"STOP\"}]}}\n",
+        );
+
+        let parsed = parse_cloud_code_sse_body(body);
+
+        assert_eq!(parsed.combined_text, "foobar");
+        assert_eq!(parsed.finish_reason, "STOP");
+    }
+
+    #[test]
+    fn test_parse_cloud_code_sse_body_captures_finish_reason_safety() {
+        let body = "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"SAFETY\"}]}}\n";
+
+        let parsed = parse_cloud_code_sse_body(body);
+
+        assert_eq!(parsed.finish_reason, "SAFETY");
+    }
+
+    #[test]
+    fn test_parse_cloud_code_sse_body_captures_finish_reason_recitation() {
+        let body = "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"RECITATION\"}]}}\n";
+
+        let parsed = parse_cloud_code_sse_body(body);
+
+        assert_eq!(parsed.finish_reason, "RECITATION");
+    }
+
+    #[test]
+    fn test_parse_cloud_code_sse_body_captures_finish_reason_max_tokens() {
+        let body = "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"MAX_TOKENS\"}]}}\n";
+
+        let parsed = parse_cloud_code_sse_body(body);
+
+        assert_eq!(parsed.finish_reason, "MAX_TOKENS");
+    }
+
+    #[test]
+    fn test_parse_cloud_code_sse_body_captures_finish_reason_malformed_function_call() {
+        let body = "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[]},\"finishReason\":\"MALFORMED_FUNCTION_CALL\"}]}}\n";
+
+        let parsed = parse_cloud_code_sse_body(body);
+
+        assert_eq!(parsed.finish_reason, "MALFORMED_FUNCTION_CALL");
+    }
+
+    #[test]
+    fn test_parse_cloud_code_sse_body_skips_thought_parts() {
+        let body = concat!(
+            "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[",
+            "{\"text\":\"secret reasoning\",\"thought\":true},",
+            "{\"text\":\"visible answer\"}",
+            "]},\"finishReason\":\"STOP\"}]}}\n",
+        );
+
+        let parsed = parse_cloud_code_sse_body(body);
+
+        assert_eq!(parsed.combined_text, "visible answer");
+    }
+
+    // -----------------------------------------------------------------
+    // GAP 7: from_gemini_response finishReason classification
+    // -----------------------------------------------------------------
+
+    fn gemini_body_with_finish_reason(finish_reason: &str) -> serde_json::Value {
+        serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{ "text": "some text" }]
+                },
+                "finishReason": finish_reason
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 5
+            }
+        })
+    }
+
+    #[test]
+    fn test_from_gemini_response_safety_maps_to_content_filter() {
+        let body = gemini_body_with_finish_reason("SAFETY");
+        let (resp, _tool_calls, _sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        assert_eq!(resp.finish_reason, FinishReason::ContentFilter);
+    }
+
+    #[test]
+    fn test_from_gemini_response_recitation_maps_to_content_filter() {
+        let body = gemini_body_with_finish_reason("RECITATION");
+        let (resp, _tool_calls, _sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        assert_eq!(resp.finish_reason, FinishReason::ContentFilter);
+    }
+
+    #[test]
+    fn test_from_gemini_response_max_tokens_maps_to_length() {
+        let body = gemini_body_with_finish_reason("MAX_TOKENS");
+        let (resp, _tool_calls, _sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        assert_eq!(resp.finish_reason, FinishReason::Length);
+    }
+
+    #[test]
+    fn test_from_gemini_response_malformed_function_call_maps_to_stop() {
+        let body = gemini_body_with_finish_reason("MALFORMED_FUNCTION_CALL");
+        let (resp, _tool_calls, _sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        assert_eq!(resp.finish_reason, FinishReason::Stop);
+    }
+
+    #[test]
+    fn test_from_gemini_response_stop_with_text_maps_to_stop() {
+        let body = gemini_body_with_finish_reason("STOP");
+        let (resp, _tool_calls, _sigs) = GeminiOauthProvider::from_gemini_response(body).unwrap();
+        assert_eq!(resp.finish_reason, FinishReason::Stop);
     }
 }
