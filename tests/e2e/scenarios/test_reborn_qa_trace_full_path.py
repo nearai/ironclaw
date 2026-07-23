@@ -115,9 +115,12 @@ MUTATING_PROVIDER_TOOLS = {
 def _provider_journey_cases() -> tuple[str, ...]:
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     no_model = set(manifest["no_model_cases"])
+    # Quarantined traces encode the retired activation flow; their fixtures
+    # live under quarantined_retired_activation/ and are not replayable here.
+    quarantined = set(manifest.get("quarantined_model_cases", []))
     cases = []
     for case in manifest["selected_cases"]:
-        if case in no_model:
+        if case in no_model or case in quarantined:
             continue
         trace = json.loads((TRACE_DIR / f"{case}.json").read_text(encoding="utf-8"))
         if any(
