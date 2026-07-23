@@ -24,17 +24,17 @@ use ironclaw_host_api::{
 };
 use ironclaw_product_workflow::{
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, LifecyclePackageKind,
-    LifecyclePackageRef, ProductCapabilityInput, ProductSurface, RebornCancelRunResponse,
-    RebornCommandId, RebornCommandRequest, RebornCommandResponse, RebornCreateThreadResponse,
-    RebornDeleteThreadRequest, RebornDeleteThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornRetryRunResponse, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    LifecyclePackageRef, ProductCapabilityInput, ProductOperationId, ProductOperationRequest,
+    ProductOperationResponse, ProductSurface, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornDeleteThreadRequest, RebornGetRunStateRequest, RebornGetRunStateResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornRetryRunResponse,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornSetupExtensionResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    RebornTraceCreditsResponse, RebornViewPage, RebornViewQuery, THREAD_DELETE_CAPABILITY_ID,
-    THREADS_VIEW, TRACE_CREDITS_VIEW, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
-    WebUiRetryRunRequest, WebUiSendMessageRequest,
+    RebornSubmitTurnResponse, RebornTimelineResponse, RebornTraceCreditsResponse, RebornViewPage,
+    RebornViewQuery, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_CREDITS_VIEW,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
+    WebUiSendMessageRequest,
 };
 use ironclaw_reborn_composition::{PublicRouteMount, RebornReadiness, RebornWebuiBundle};
 use ironclaw_threads::{SessionThreadRecord, ThreadScope};
@@ -906,9 +906,9 @@ impl ProductSurface for StubServices {
         activity_id: ActivityId,
     ) -> Result<Resolution, RebornServicesError> {
         if capability.as_str() == THREAD_DELETE_CAPABILITY_ID {
-            let request = serde_json::from_value(input.into_json()?)
+            let _request: RebornDeleteThreadRequest = serde_json::from_value(input.into_json()?)
                 .map_err(RebornServicesError::internal_from)?;
-            self.delete_thread(caller, request).await?;
+            let _ = caller;
             return Ok(successful_resolution(activity_id));
         }
         if capability.as_str() == EXTENSION_SETUP_SUBMIT_CAPABILITY_ID {
@@ -950,6 +950,37 @@ impl ProductSurface for StubServices {
                     .map_err(RebornServicesError::internal_from)?,
                 next_cursor: None,
             }),
+            id if id == TIMELINE_VIEW.id => {
+                let thread_id = query.params["thread_id"]
+                    .as_str()
+                    .ok_or_else(|| RebornServicesError::internal_from("missing thread_id"))?
+                    .to_string();
+                Ok(RebornViewPage {
+                    payload: serde_json::to_value(RebornTimelineResponse {
+                        thread: SessionThreadRecord {
+                            thread_id: ThreadId::new(thread_id).expect("thread id"),
+                            scope: ThreadScope {
+                                tenant_id: TenantId::new(TENANT).expect("tenant"),
+                                agent_id: AgentId::new("agent.fake").expect("agent"),
+                                project_id: Some(ProjectId::new("project.fake").expect("project")),
+                                owner_user_id: Some(UserId::new(USER).expect("user")),
+                                mission_id: None,
+                            },
+                            created_by_actor_id: USER.to_string(),
+                            title: None,
+                            metadata_json: None,
+                            goal: None,
+                            created_at: None,
+                            updated_at: None,
+                        },
+                        messages: Vec::new(),
+                        summary_artifacts: Vec::new(),
+                        next_cursor: None,
+                    })
+                    .map_err(RebornServicesError::internal_from)?,
+                    next_cursor: None,
+                })
+            }
             id if id == EXTENSION_SETUP_VIEW.id => {
                 let package_id = query.params["package_id"]
                     .as_str()
@@ -972,45 +1003,6 @@ impl ProductSurface for StubServices {
                 validation_code: None,
             }),
         }
-    }
-
-    async fn delete_thread(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornDeleteThreadRequest,
-    ) -> Result<RebornDeleteThreadResponse, RebornServicesError> {
-        Ok(RebornDeleteThreadResponse {
-            thread_id: ThreadId::new(request.thread_id).expect("thread id"),
-            deleted: true,
-        })
-    }
-
-    async fn get_timeline(
-        &self,
-        _caller: WebUiAuthenticatedCaller,
-        request: RebornTimelineRequest,
-    ) -> Result<RebornTimelineResponse, RebornServicesError> {
-        Ok(RebornTimelineResponse {
-            thread: SessionThreadRecord {
-                thread_id: ThreadId::new(request.thread_id.clone()).expect("thread id"),
-                scope: ThreadScope {
-                    tenant_id: TenantId::new(TENANT).expect("tenant"),
-                    agent_id: AgentId::new("agent.fake").expect("agent"),
-                    project_id: Some(ProjectId::new("project.fake").expect("project")),
-                    owner_user_id: Some(UserId::new(USER).expect("user")),
-                    mission_id: None,
-                },
-                created_by_actor_id: USER.to_string(),
-                title: None,
-                metadata_json: None,
-                goal: None,
-                created_at: None,
-                updated_at: None,
-            },
-            messages: Vec::new(),
-            summary_artifacts: Vec::new(),
-            next_cursor: None,
-        })
     }
 
     async fn stream_events(
@@ -1040,42 +1032,43 @@ impl ProductSurface for StubServices {
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
-        let command_id =
-            RebornCommandId::parse(request.command_id.as_str()).ok_or(RebornServicesError {
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        let command_id = ProductOperationId::parse(request.operation_id.as_str()).ok_or(
+            RebornServicesError {
                 code: RebornServicesErrorCode::Internal,
                 kind: RebornServicesErrorKind::Internal,
                 status_code: 500,
                 retryable: false,
                 field: None,
                 validation_code: None,
-            })?;
+            },
+        )?;
         match command_id {
-            RebornCommandId::CreateThread => {
+            ProductOperationId::CreateThread => {
                 let request = serde_json::from_value(request.input)
                     .map_err(RebornServicesError::internal_from)?;
-                RebornCommandResponse::json(self.create_thread(caller, request).await?)
+                ProductOperationResponse::json(self.create_thread(caller, request).await?)
             }
-            RebornCommandId::SubmitTurn => {
+            ProductOperationId::SubmitTurn => {
                 let request = serde_json::from_value(request.input)
                     .map_err(RebornServicesError::internal_from)?;
-                RebornCommandResponse::json(self.submit_turn(caller, request).await?)
+                ProductOperationResponse::json(self.submit_turn(caller, request).await?)
             }
-            RebornCommandId::CancelRun => {
+            ProductOperationId::CancelRun => {
                 let request = serde_json::from_value(request.input)
                     .map_err(RebornServicesError::internal_from)?;
-                RebornCommandResponse::json(self.cancel_run(caller, request).await?)
+                ProductOperationResponse::json(self.cancel_run(caller, request).await?)
             }
-            RebornCommandId::RetryRun => {
+            ProductOperationId::RetryRun => {
                 let request = serde_json::from_value(request.input)
                     .map_err(RebornServicesError::internal_from)?;
-                RebornCommandResponse::json(self.retry_run(caller, request).await?)
+                ProductOperationResponse::json(self.retry_run(caller, request).await?)
             }
-            RebornCommandId::ResolveGate => {
+            ProductOperationId::ResolveGate => {
                 let request = serde_json::from_value(request.input)
                     .map_err(RebornServicesError::internal_from)?;
-                RebornCommandResponse::json(self.resolve_gate(caller, request).await?)
+                ProductOperationResponse::json(self.resolve_gate(caller, request).await?)
             }
             _ => Err(RebornServicesError {
                 code: RebornServicesErrorCode::Internal,

@@ -32,7 +32,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    ProductSurface, RebornCommandId, RebornCommandRequest, RebornCommandResponse,
+    ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
     RebornCreateThreadResponse, RebornServicesError, WebUiAuthenticatedCaller,
     WebUiCreateThreadRequest, rejecting_reborn_services_error,
 };
@@ -84,15 +84,15 @@ impl ProductSurface for MinimalWebuiServices {
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
-        let command_id = RebornCommandId::parse(request.command_id.as_str())
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        let command_id = ProductOperationId::parse(request.operation_id.as_str())
             .ok_or_else(rejecting_reborn_services_error)?;
         match command_id {
-            RebornCommandId::CreateThread => {
+            ProductOperationId::CreateThread => {
                 let request = serde_json::from_value(request.input)
                     .map_err(RebornServicesError::internal_from)?;
-                RebornCommandResponse::json(self.create_thread(caller, request).await?)
+                ProductOperationResponse::json(self.create_thread(caller, request).await?)
             }
             _ => Err(rejecting_reborn_services_error()),
         }

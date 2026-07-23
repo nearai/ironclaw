@@ -49,7 +49,7 @@ use ironclaw_product_workflow::{
     ActiveModelReader, ApprovalInteractionActionView, ApprovalInteractionDecision,
     ApprovalInteractionScope, ApprovalInteractionService, AuthInteractionDecision,
     AuthInteractionService, AutomationListRequest, AutomationName, AutomationProductFacade,
-    CREATE_THREAD_COMMAND, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
+    CREATE_THREAD_OPERATION, ChannelAuthAccountState, ChannelConfigFacade, ChannelConnectionFacade,
     ChannelConnectionRequirement, CodexLoginStart, EXTENSION_IMPORT_CAPABILITY_ID,
     EXTENSION_SETUP_SUBMIT_CAPABILITY_ID, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW,
     ExtensionCredentialSetupService, ExtensionCredentialStatusRequest,
@@ -77,54 +77,53 @@ use ironclaw_product_workflow::{
     PROJECT_FS_LIST_VIEW, PROJECT_FS_STAT_VIEW, PROJECT_MEMBER_ADD_CAPABILITY_ID,
     PROJECT_MEMBER_REMOVE_CAPABILITY_ID, PROJECT_MEMBER_UPDATE_CAPABILITY_ID, PROJECT_MEMBERS_VIEW,
     PROJECT_UPDATE_CAPABILITY_ID, PROJECT_VIEW, PROJECTS_VIEW, PendingApprovalInteractionView,
-    ProductAgentBoundCaller, ProductCapabilityInput, ProductCapabilityInvoker, ProductSurface,
-    ProductWorkflowError, ProjectCaller, ProjectFilesystemReader, ProjectFsEntry,
+    ProductAgentBoundCaller, ProductCapabilityInput, ProductCapabilityInvoker, ProductOperationId,
+    ProductSurface, ProductWorkflowError, ProjectCaller, ProjectFilesystemReader, ProjectFsEntry,
     ProjectFsEntryKind, ProjectFsError, ProjectFsFile, ProjectFsStat, ProjectService,
     ProjectServiceError, RUN_ARTIFACT_VIEW, RebornAccountTracesResponse, RebornAddMemberRequest,
     RebornAttachmentRequest, RebornAutomationInfo, RebornAutomationMutationResponse,
     RebornAutomationRecentRunInfo, RebornAutomationRecentRunStatus, RebornAutomationRequest,
     RebornAutomationRunStatus, RebornAutomationSource, RebornAutomationState,
     RebornChannelConfigField, RebornChannelConnectAction, RebornChannelConnectStrategy,
-    RebornCommandId, RebornCreateProjectRequest, RebornDeleteProjectRequest,
-    RebornDeleteThreadRequest, RebornExtensionListResponse, RebornExtensionOnboardingState,
-    RebornExtensionSurface, RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest,
-    RebornFsMountsResponse, RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest,
-    RebornGetRunStateRequest, RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse,
-    RebornListAutomationsResponse, RebornListMembersRequest, RebornListMembersResponse,
-    RebornListProjectsRequest, RebornListProjectsResponse, RebornListThreadsResponse,
-    RebornLogLevel, RebornLogQueryRequest, RebornLogQueryResponse,
-    RebornOperatorCommandPlaneResponse, RebornOperatorConfigDiagnosticSeverity,
-    RebornOperatorConfigGetResponse, RebornOperatorConfigListResponse,
-    RebornOperatorConfigSetRequest, RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery,
-    RebornOperatorSetupRequest, RebornOperatorSetupStatus, RebornOperatorStatusCheck,
-    RebornOperatorStatusResponse, RebornOperatorStatusSeverity, RebornOperatorStatusState,
-    RebornOperatorSurfaceStatus, RebornOperatorToolCatalog, RebornOperatorToolInfo,
-    RebornOutboundDeliveryModality, RebornOutboundDeliveryTargetCapabilities,
-    RebornOutboundDeliveryTargetDescription, RebornOutboundDeliveryTargetId,
-    RebornOutboundDeliveryTargetListResponse, RebornOutboundDeliveryTargetOption,
-    RebornOutboundDeliveryTargetStatus, RebornOutboundDeliveryTargetSummary,
-    RebornOutboundPreferencesResponse, RebornProjectFsListRequest, RebornProjectFsListResponse,
-    RebornProjectFsStatRequest, RebornProjectFsStatResponse, RebornProjectInfo,
-    RebornProjectMemberInfo, RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole,
-    RebornProjectState, RebornRemoveMemberRequest, RebornRenameAutomationProductRequest,
-    RebornResolveGateResponse, RebornRunArtifact, RebornRunArtifactRequest,
-    RebornServiceLifecycleAction, RebornServiceLifecycleRequest, RebornServiceLifecycleResponse,
-    RebornServiceLifecycleState, RebornServices, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse,
-    RebornSkillContentResponse, RebornSkillInfo, RebornSkillListResponse,
-    RebornSkillSearchResponse, RebornSkillSourceKind, RebornSkillTrustLevel,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, RebornTraceCreditsResponse, RebornUpdateMemberRoleRequest,
-    RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery, ResolveApprovalInteractionRequest,
-    ResolveApprovalInteractionResponse, ResolveAuthInteractionRequest,
-    ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW, SKILL_SEARCH_VIEW, SKILLS_VIEW,
-    SetActiveLlmRequest, SkillsProductFacade, StaticOperatorStatusService,
-    THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_TRACES_VIEW,
-    TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest, WebUiAuthenticatedCaller,
-    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
-    WebUiRenameAutomationRequest, WebUiResolveGateRequest, WebUiRetryRunRequest,
-    WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
+    RebornCreateProjectRequest, RebornDeleteProjectRequest, RebornDeleteThreadRequest,
+    RebornExtensionListResponse, RebornExtensionOnboardingState, RebornExtensionSurface,
+    RebornFsListRequest, RebornFsListResponse, RebornFsMountsRequest, RebornFsMountsResponse,
+    RebornFsStatRequest, RebornFsStatResponse, RebornGetProjectRequest, RebornGetRunStateRequest,
+    RebornGlobalAutoApproveRequest, RebornGlobalAutoApproveResponse, RebornListAutomationsResponse,
+    RebornListMembersRequest, RebornListMembersResponse, RebornListProjectsRequest,
+    RebornListProjectsResponse, RebornListThreadsResponse, RebornLogLevel, RebornLogQueryRequest,
+    RebornLogQueryResponse, RebornOperatorCommandPlaneResponse,
+    RebornOperatorConfigDiagnosticSeverity, RebornOperatorConfigGetResponse,
+    RebornOperatorConfigListResponse, RebornOperatorConfigSetRequest,
+    RebornOperatorConfigValidateResponse, RebornOperatorLogsQuery, RebornOperatorSetupRequest,
+    RebornOperatorSetupStatus, RebornOperatorStatusCheck, RebornOperatorStatusResponse,
+    RebornOperatorStatusSeverity, RebornOperatorStatusState, RebornOperatorSurfaceStatus,
+    RebornOperatorToolCatalog, RebornOperatorToolInfo, RebornOutboundDeliveryModality,
+    RebornOutboundDeliveryTargetCapabilities, RebornOutboundDeliveryTargetDescription,
+    RebornOutboundDeliveryTargetId, RebornOutboundDeliveryTargetListResponse,
+    RebornOutboundDeliveryTargetOption, RebornOutboundDeliveryTargetStatus,
+    RebornOutboundDeliveryTargetSummary, RebornOutboundPreferencesResponse,
+    RebornProjectFsListRequest, RebornProjectFsListResponse, RebornProjectFsStatRequest,
+    RebornProjectFsStatResponse, RebornProjectInfo, RebornProjectMemberInfo,
+    RebornProjectMemberStatus, RebornProjectResponse, RebornProjectRole, RebornProjectState,
+    RebornRemoveMemberRequest, RebornRenameAutomationProductRequest, RebornResolveGateResponse,
+    RebornRunArtifact, RebornRunArtifactRequest, RebornServiceLifecycleAction,
+    RebornServiceLifecycleRequest, RebornServiceLifecycleResponse, RebornServiceLifecycleState,
+    RebornServices, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetOutboundPreferencesRequest, RebornSetupExtensionResponse, RebornSkillContentResponse,
+    RebornSkillInfo, RebornSkillListResponse, RebornSkillSearchResponse, RebornSkillSourceKind,
+    RebornSkillTrustLevel, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, RebornTraceCreditsResponse,
+    RebornUpdateMemberRoleRequest, RebornUpdateProjectRequest, RebornViewPage, RebornViewQuery,
+    ResolveApprovalInteractionRequest, ResolveApprovalInteractionResponse,
+    ResolveAuthInteractionRequest, ResolveAuthInteractionResponse, SKILL_CONTENT_VIEW,
+    SKILL_SEARCH_VIEW, SKILLS_VIEW, SetActiveLlmRequest, SkillsProductFacade,
+    StaticOperatorStatusService, THREAD_DELETE_CAPABILITY_ID, THREADS_VIEW, TIMELINE_VIEW,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TriggerRunThreadScope, UpsertLlmProviderRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListAutomationsRequest,
+    WebUiListThreadsRequest, WebUiRenameAutomationRequest, WebUiResolveGateRequest,
+    WebUiRetryRunRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest, approval_gate_ref,
     automation_trigger_thread_metadata_json,
 };
 use ironclaw_product_workflow::{
@@ -161,6 +160,7 @@ use ironclaw_turns::{
     TurnStatus,
 };
 use secrecy::SecretString;
+use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{Notify, oneshot};
 
@@ -3195,14 +3195,17 @@ fn product_surface_descriptor_helpers_keep_view_and_capability_declarations_type
     assert!(response.threads.is_empty());
     assert_eq!(response.next_cursor.as_deref(), Some("cursor-2"));
 
-    let command = CREATE_THREAD_COMMAND
+    let command = CREATE_THREAD_OPERATION
         .request(WebUiCreateThreadRequest {
             client_action_id: Some("action-1".to_string()),
             requested_thread_id: None,
             project_id: None,
         })
         .expect("create thread command");
-    assert_eq!(command.command_id, RebornCommandId::CreateThread.as_str());
+    assert_eq!(
+        command.operation_id,
+        ProductOperationId::CreateThread.as_str()
+    );
     assert_eq!(command.input["client_action_id"], "action-1");
 
     assert_eq!(
@@ -7371,10 +7374,16 @@ async fn pause_automation_rejects_missing_agent_id() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    let err = services
-        .pause_automation(caller_without_agent(), "trigger-alpha".to_string())
-        .await
-        .expect_err("missing agent id should fail closed");
+    let err = invoke_json_product_capability(
+        &services,
+        caller_without_agent(),
+        AUTOMATION_PAUSE_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "trigger-alpha".to_string(),
+        },
+    )
+    .await
+    .expect_err("missing agent id should fail closed");
 
     assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
@@ -7390,10 +7399,16 @@ async fn resume_automation_rejects_missing_agent_id() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    let err = services
-        .resume_automation(caller_without_agent(), "trigger-alpha".to_string())
-        .await
-        .expect_err("missing agent id should fail closed");
+    let err = invoke_json_product_capability(
+        &services,
+        caller_without_agent(),
+        AUTOMATION_RESUME_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "trigger-alpha".to_string(),
+        },
+    )
+    .await
+    .expect_err("missing agent id should fail closed");
 
     assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
@@ -7409,16 +7424,17 @@ async fn rename_automation_rejects_missing_agent_id() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    let err = services
-        .rename_automation(
-            caller_without_agent(),
-            "trigger-alpha".to_string(),
-            WebUiRenameAutomationRequest {
-                name: Some("Renamed".to_string()),
-            },
-        )
-        .await
-        .expect_err("missing agent id should fail closed");
+    let err = invoke_json_product_capability(
+        &services,
+        caller_without_agent(),
+        AUTOMATION_RENAME_CAPABILITY_ID,
+        RebornRenameAutomationProductRequest {
+            automation_id: "trigger-alpha".to_string(),
+            name: Some("Renamed".to_string()),
+        },
+    )
+    .await
+    .expect_err("missing agent id should fail closed");
 
     assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
@@ -7434,10 +7450,16 @@ async fn delete_automation_rejects_missing_agent_id() {
     )
     .with_automation_product_facade(automation_facade.clone());
 
-    let err = services
-        .delete_automation(caller_without_agent(), "trigger-alpha".to_string())
-        .await
-        .expect_err("missing agent id should fail closed");
+    let err = invoke_json_product_capability(
+        &services,
+        caller_without_agent(),
+        AUTOMATION_DELETE_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "trigger-alpha".to_string(),
+        },
+    )
+    .await
+    .expect_err("missing agent id should fail closed");
 
     assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
     assert_eq!(err.status_code, 400);
@@ -7455,36 +7477,66 @@ async fn automation_mutations_forward_caller_scope_to_product_facade() {
     let caller = caller();
     let expected_agent_id = caller.agent_id.clone().expect("agent id");
 
-    let pause = services
-        .pause_automation(caller.clone(), "trigger-alpha".to_string())
-        .await
-        .expect("pause automation");
-    assert!(pause.updated);
+    let pause = invoke_json_product_capability(
+        &services,
+        caller.clone(),
+        AUTOMATION_PAUSE_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "trigger-alpha".to_string(),
+        },
+    )
+    .await
+    .expect("pause automation");
+    assert!(matches!(
+        pause,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
 
-    let resume = services
-        .resume_automation(caller.clone(), "trigger-alpha".to_string())
-        .await
-        .expect("resume automation");
-    assert!(resume.updated);
+    let resume = invoke_json_product_capability(
+        &services,
+        caller.clone(),
+        AUTOMATION_RESUME_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "trigger-alpha".to_string(),
+        },
+    )
+    .await
+    .expect("resume automation");
+    assert!(matches!(
+        resume,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
 
-    let rename = services
-        .rename_automation(
-            caller.clone(),
-            "trigger-alpha".to_string(),
-            WebUiRenameAutomationRequest {
-                name: Some("  Renamed status  ".to_string()),
-            },
-        )
-        .await
-        .expect("rename automation");
-    assert!(rename.updated);
+    let rename = invoke_json_product_capability(
+        &services,
+        caller.clone(),
+        AUTOMATION_RENAME_CAPABILITY_ID,
+        RebornRenameAutomationProductRequest {
+            automation_id: "trigger-alpha".to_string(),
+            name: Some("  Renamed status  ".to_string()),
+        },
+    )
+    .await
+    .expect("rename automation");
+    assert!(matches!(
+        rename,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
 
-    let delete = services
-        .delete_automation(caller.clone(), "trigger-alpha".to_string())
-        .await
-        .expect("delete automation");
-    assert!(delete.updated);
-    assert!(delete.automation.is_none());
+    let delete = invoke_json_product_capability(
+        &services,
+        caller.clone(),
+        AUTOMATION_DELETE_CAPABILITY_ID,
+        RebornAutomationRequest {
+            automation_id: "trigger-alpha".to_string(),
+        },
+    )
+    .await
+    .expect("delete automation");
+    assert!(matches!(
+        delete,
+        Resolution::Done(outcome) if outcome.verdict.is_success()
+    ));
 
     let calls = automation_facade.mutation_calls();
     assert_eq!(calls.len(), 4);
@@ -7614,10 +7666,17 @@ async fn rename_automation_validates_name_before_product_facade() {
             WebUiInboundValidationCode::TooLong,
         ),
     ] {
-        let err = services
-            .rename_automation(caller(), "trigger-alpha".to_string(), request)
-            .await
-            .expect_err("invalid name should fail before facade");
+        let err = invoke_json_product_capability(
+            &services,
+            caller(),
+            AUTOMATION_RENAME_CAPABILITY_ID,
+            RebornRenameAutomationProductRequest {
+                automation_id: "trigger-alpha".to_string(),
+                name: request.name,
+            },
+        )
+        .await
+        .expect_err("invalid name should fail before facade");
 
         assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
         assert_eq!(err.status_code, 400);
@@ -10498,6 +10557,26 @@ async fn query_automations<S: ProductSurface + ?Sized>(
         .query(caller, AUTOMATIONS_VIEW.query(request, None)?)
         .await?;
     AUTOMATIONS_VIEW.decode_page(page)
+}
+
+async fn invoke_json_product_capability<S, T>(
+    services: &S,
+    caller: WebUiAuthenticatedCaller,
+    capability_id: &str,
+    input: T,
+) -> Result<Resolution, RebornServicesError>
+where
+    S: ProductSurface + ?Sized,
+    T: Serialize,
+{
+    services
+        .invoke(
+            caller,
+            CapabilityId::new(capability_id).expect("capability id"),
+            ProductCapabilityInput::json(serde_json::to_value(input).expect("capability input")),
+            ActivityId::new(),
+        )
+        .await
 }
 
 async fn query_threads<S: ProductSurface + ?Sized>(

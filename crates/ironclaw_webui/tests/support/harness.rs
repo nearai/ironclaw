@@ -27,7 +27,7 @@ use axum::extract::ConnectInfo;
 use axum::http::Request;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    ProductSurface, RebornCommandId, RebornCommandRequest, RebornCommandResponse,
+    ProductOperationId, ProductOperationRequest, ProductOperationResponse, ProductSurface,
     RebornCreateThreadResponse, RebornServicesError, RebornStreamEventsRequest,
     RebornStreamEventsResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
 };
@@ -119,18 +119,18 @@ impl ProductSurface for StubServices {
     async fn execute_command(
         &self,
         caller: WebUiAuthenticatedCaller,
-        request: RebornCommandRequest,
-    ) -> Result<RebornCommandResponse, RebornServicesError> {
-        let command_id = RebornCommandId::parse(request.command_id.as_str())
-            .ok_or_else(|| RebornServicesError::internal_from("unsupported product command"))?;
-        match command_id {
-            RebornCommandId::CreateThread => {
+        request: ProductOperationRequest,
+    ) -> Result<ProductOperationResponse, RebornServicesError> {
+        let operation_id = ProductOperationId::parse(request.operation_id.as_str())
+            .ok_or_else(|| RebornServicesError::internal_from("unsupported product operation"))?;
+        match operation_id {
+            ProductOperationId::CreateThread => {
                 let request = serde_json::from_value(request.input)
                     .map_err(RebornServicesError::internal_from)?;
-                RebornCommandResponse::json(self.create_thread(caller, request).await?)
+                ProductOperationResponse::json(self.create_thread(caller, request).await?)
             }
             _ => Err(RebornServicesError::internal_from(
-                "unsupported product command",
+                "unsupported product operation",
             )),
         }
     }

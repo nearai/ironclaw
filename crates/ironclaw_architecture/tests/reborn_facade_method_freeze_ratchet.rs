@@ -63,9 +63,6 @@ const RETIRED_PROTO_FACADE_TRAIT: &str = "RebornServicesApi";
 /// already listed below; never add another product operation here.
 const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     // --- turn lifecycle (the irreducible core, §5.2.3) ---
-    "delete_thread",
-    "get_timeline",
-    "global_auto_approve_enabled",
     "stream_events",
     "supports_stream_events_subscription",
     "subscribe_events",
@@ -73,38 +70,6 @@ const FROZEN_REBORN_SERVICES_METHODS: &[&str] = &[
     "invoke",
     "query",
     "execute_command",
-    // --- filesystem / project browsing (→ view descriptors, §5.2.2) ---
-    "list_project_dir",
-    "stat_project_path",
-    "list_fs_mounts",
-    "browse_fs_dir",
-    "stat_fs_path",
-    // --- projects + membership (→ capability + view descriptors) ---
-    "list_projects",
-    "get_project",
-    "update_project",
-    "delete_project",
-    "list_project_members",
-    "add_project_member",
-    "update_project_member_role",
-    "remove_project_member",
-    // --- automations (→ Automation-origin descriptors, §5.2.1) ---
-    "pause_automation",
-    "resume_automation",
-    "rename_automation",
-    "delete_automation",
-    // --- operator setup / config / diagnostics ---
-    "run_operator_setup",
-    // --- admin users + per-user secrets ---
-    "list_admin_users",
-    "get_admin_user",
-    "update_admin_user",
-    "set_admin_user_status",
-    "set_admin_user_role",
-    "delete_admin_user",
-    "list_admin_user_secrets",
-    "put_admin_user_secret",
-    "delete_admin_user_secret",
 ];
 
 /// Extract the method names declared **directly** in `trait <trait_name>`'s block

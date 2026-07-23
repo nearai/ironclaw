@@ -130,9 +130,9 @@ pub struct RebornViewPage {
     pub next_cursor: Option<String>,
 }
 
-/// Stable identifier for one result-bearing product command.
+/// Stable identifier for one result-bearing product operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RebornCommandId {
+pub enum ProductOperationId {
     CreateThread,
     SubmitTurn,
     CancelRun,
@@ -152,9 +152,14 @@ pub enum RebornCommandId {
     LlmNearAiWalletLogin,
     LlmCodexLogin,
     AdminUserCreate,
+    AdminUserDeleteSecret,
+    AutomationPause,
+    AutomationResume,
+    AutomationRename,
+    AutomationDelete,
 }
 
-impl RebornCommandId {
+impl ProductOperationId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CreateThread => "webui.create_thread",
@@ -176,6 +181,11 @@ impl RebornCommandId {
             Self::LlmNearAiWalletLogin => "webui.llm_nearai_wallet_login",
             Self::LlmCodexLogin => "webui.llm_codex_login",
             Self::AdminUserCreate => "webui.admin_user_create",
+            Self::AdminUserDeleteSecret => "webui.admin_user_delete_secret",
+            Self::AutomationPause => "webui.automation_pause",
+            Self::AutomationResume => "webui.automation_resume",
+            Self::AutomationRename => "webui.automation_rename",
+            Self::AutomationDelete => "webui.automation_delete",
         }
     }
 
@@ -200,66 +210,71 @@ impl RebornCommandId {
             "webui.llm_nearai_wallet_login" => Some(Self::LlmNearAiWalletLogin),
             "webui.llm_codex_login" => Some(Self::LlmCodexLogin),
             "webui.admin_user_create" => Some(Self::AdminUserCreate),
+            "webui.admin_user_delete_secret" => Some(Self::AdminUserDeleteSecret),
+            "webui.automation_pause" => Some(Self::AutomationPause),
+            "webui.automation_resume" => Some(Self::AutomationResume),
+            "webui.automation_rename" => Some(Self::AutomationRename),
+            "webui.automation_delete" => Some(Self::AutomationDelete),
             _ => None,
         }
     }
 }
 
-/// Typed declaration for one ProductSurface command.
+/// Typed declaration for one ProductSurface operation.
 ///
-/// Commands are the result-bearing sibling of API-only capability invocation:
+/// Operations are the result-bearing sibling of API-only capability invocation:
 /// the transport still sends an opaque command id plus JSON input, but handlers
 /// keep request/response DTOs tied to the declaration instead of calling a
 /// concrete facade method directly.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ProductSurfaceCommand<Params, Output> {
-    pub id: RebornCommandId,
+pub struct ProductOperation<Params, Output> {
+    pub id: ProductOperationId,
     _types: PhantomData<fn(Params) -> Output>,
 }
 
-impl<Params, Output> Clone for ProductSurfaceCommand<Params, Output> {
+impl<Params, Output> Clone for ProductOperation<Params, Output> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<Params, Output> Copy for ProductSurfaceCommand<Params, Output> {}
+impl<Params, Output> Copy for ProductOperation<Params, Output> {}
 
-impl<Params, Output> ProductSurfaceCommand<Params, Output> {
-    pub const fn new(id: RebornCommandId) -> Self {
+impl<Params, Output> ProductOperation<Params, Output> {
+    pub const fn new(id: ProductOperationId) -> Self {
         Self {
             id,
             _types: PhantomData,
         }
     }
 
-    pub fn request(&self, input: Params) -> Result<RebornCommandRequest, RebornServicesError>
+    pub fn request(&self, input: Params) -> Result<ProductOperationRequest, RebornServicesError>
     where
         Params: Serialize,
     {
-        Ok(RebornCommandRequest {
-            command_id: self.id.as_str().to_string(),
+        Ok(ProductOperationRequest {
+            operation_id: self.id.as_str().to_string(),
             input: serde_json::to_value(input).map_err(RebornServicesError::internal_from)?,
         })
     }
 }
 
-/// One registered, result-bearing product command invocation.
+/// One registered, result-bearing product operation invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RebornCommandRequest {
-    pub command_id: String,
+pub struct ProductOperationRequest {
+    pub operation_id: String,
     pub input: serde_json::Value,
 }
 
-/// One result-bearing product command response.
+/// One result-bearing product operation response.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RebornCommandResponse {
+pub enum ProductOperationResponse {
     Json(serde_json::Value),
     ProjectFile(ProjectFsFile),
     Attachment(RebornAttachmentBytes),
 }
 
-impl RebornCommandResponse {
+impl ProductOperationResponse {
     pub fn json<T: Serialize>(value: T) -> Result<Self, RebornServicesError> {
         Ok(Self::Json(
             serde_json::to_value(value).map_err(RebornServicesError::internal_from)?,
@@ -279,18 +294,18 @@ impl RebornCommandResponse {
             Self::Json(value) => {
                 serde_json::from_value(value).map_err(RebornServicesError::internal_from)
             }
-            Self::ProjectFile(_) | Self::Attachment(_) => {
-                Err(RebornServicesError::internal_from("command returned bytes"))
-            }
+            Self::ProjectFile(_) | Self::Attachment(_) => Err(RebornServicesError::internal_from(
+                "operation returned bytes",
+            )),
         }
     }
 
     pub fn into_project_file(self) -> Result<ProjectFsFile, RebornServicesError> {
         match self {
             Self::ProjectFile(file) => Ok(file),
-            Self::Json(_) | Self::Attachment(_) => {
-                Err(RebornServicesError::internal_from("command returned JSON"))
-            }
+            Self::Json(_) | Self::Attachment(_) => Err(RebornServicesError::internal_from(
+                "operation returned JSON",
+            )),
         }
     }
 
@@ -298,7 +313,7 @@ impl RebornCommandResponse {
         match self {
             Self::Attachment(bytes) => Ok(bytes),
             Self::Json(_) | Self::ProjectFile(_) => Err(RebornServicesError::internal_from(
-                "command returned non-attachment bytes",
+                "operation returned non-attachment bytes",
             )),
         }
     }

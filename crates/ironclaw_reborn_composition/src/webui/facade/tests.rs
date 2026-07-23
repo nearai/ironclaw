@@ -23,7 +23,7 @@ use ironclaw_host_api::{
     TenantId, UserId, VirtualPath,
 };
 use ironclaw_product_workflow::{
-    OPERATOR_SERVICE_LIFECYCLE_COMMAND, RebornOperatorToolCatalog, RebornOperatorToolInfo,
+    OPERATOR_SERVICE_LIFECYCLE_OPERATION, RebornOperatorToolCatalog, RebornOperatorToolInfo,
 };
 use std::time::Duration;
 
@@ -378,7 +378,7 @@ async fn build_webui_services_wires_lifecycle_owner_identity() {
         .expect("runtime builds");
     let bundle = build_webui_services(&runtime, None).expect("webui services build");
 
-    let error = OPERATOR_SERVICE_LIFECYCLE_COMMAND
+    let error = OPERATOR_SERVICE_LIFECYCLE_OPERATION
         .execute_on(
             bundle.api.as_ref(),
             caller("bob"),

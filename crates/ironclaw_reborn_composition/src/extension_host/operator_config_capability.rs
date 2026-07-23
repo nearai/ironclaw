@@ -182,7 +182,7 @@ impl FirstPartyCapabilityHandler for SetToolPermissionHandler {
         .await?;
         if tool_permission_locked(&tool) {
             return Err(dispatch_error(
-                RuntimeDispatchErrorKind::InputEncode,
+                RuntimeDispatchErrorKind::PolicyDenied,
                 started,
             ));
         }

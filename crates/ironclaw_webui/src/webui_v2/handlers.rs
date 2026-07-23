@@ -30,33 +30,33 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_COMMAND,
-    ADMIN_USER_DELETE_CAPABILITY, ADMIN_USER_DELETE_SECRET_CAPABILITY,
+    ADMIN_CONFIGURATION_REPLACE_CAPABILITY, ADMIN_CONFIGURATION_VIEW, ADMIN_USER_CREATE_OPERATION,
+    ADMIN_USER_DELETE_CAPABILITY, ADMIN_USER_DELETE_SECRET_OPERATION,
     ADMIN_USER_PUT_SECRET_CAPABILITY, ADMIN_USER_SECRETS_VIEW, ADMIN_USER_SET_ROLE_CAPABILITY,
     ADMIN_USER_SET_STATUS_CAPABILITY, ADMIN_USER_UPDATE_CAPABILITY, ADMIN_USER_VIEW,
-    ADMIN_USERS_VIEW, ATTACHMENT_READ_COMMAND, AUTOMATION_DELETE_CAPABILITY,
-    AUTOMATION_LIST_MAX_PAGE_SIZE, AUTOMATION_PAUSE_CAPABILITY, AUTOMATION_RENAME_CAPABILITY,
-    AUTOMATION_RESUME_CAPABILITY, AUTOMATIONS_VIEW, CANCEL_RUN_COMMAND, CREATE_THREAD_COMMAND,
-    CodexLoginStart, EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_IMPORT_CAPABILITY,
-    EXTENSION_INSTALL_CAPABILITY, EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY,
-    EXTENSION_SETUP_SUBMIT_CAPABILITY, EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW,
-    FS_MOUNTS_VIEW, FS_READ_COMMAND, FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW,
-    LLM_ACTIVE_SET_CAPABILITY, LLM_CODEX_LOGIN_COMMAND, LLM_CONFIG_VIEW, LLM_LIST_MODELS_COMMAND,
-    LLM_NEARAI_LOGIN_COMMAND, LLM_NEARAI_WALLET_LOGIN_COMMAND, LLM_PROVIDER_DELETE_CAPABILITY,
-    LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_COMMAND, LOGS_VIEW, LifecyclePackageKind,
+    ADMIN_USERS_VIEW, ATTACHMENT_READ_OPERATION, AUTOMATION_DELETE_OPERATION,
+    AUTOMATION_PAUSE_OPERATION, AUTOMATION_RENAME_OPERATION, AUTOMATION_RESUME_OPERATION,
+    AUTOMATIONS_VIEW, CANCEL_RUN_OPERATION, CREATE_THREAD_OPERATION, CodexLoginStart,
+    EXTENSION_ACTIVATE_CAPABILITY, EXTENSION_IMPORT_CAPABILITY, EXTENSION_INSTALL_CAPABILITY,
+    EXTENSION_REGISTRY_VIEW, EXTENSION_REMOVE_CAPABILITY, EXTENSION_SETUP_SUBMIT_CAPABILITY,
+    EXTENSION_SETUP_VIEW, EXTENSIONS_VIEW, FS_LIST_VIEW, FS_MOUNTS_VIEW, FS_READ_OPERATION,
+    FS_STAT_VIEW, FsMount, GLOBAL_AUTO_APPROVE_VIEW, LLM_ACTIVE_SET_CAPABILITY,
+    LLM_CODEX_LOGIN_OPERATION, LLM_CONFIG_VIEW, LLM_LIST_MODELS_OPERATION,
+    LLM_NEARAI_LOGIN_OPERATION, LLM_NEARAI_WALLET_LOGIN_OPERATION, LLM_PROVIDER_DELETE_CAPABILITY,
+    LLM_PROVIDER_UPSERT_CAPABILITY, LLM_TEST_CONNECTION_OPERATION, LOGS_VIEW, LifecyclePackageKind,
     LifecyclePackageRef, LlmConfigSnapshot, LlmModelsResult, LlmProbeResult, NearAiLoginStart,
     NearAiWalletLoginResult, OPERATOR_CONFIG_KEY_VIEW, OPERATOR_CONFIG_LIST_VIEW,
-    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_KEY_COMMAND,
+    OPERATOR_CONFIG_SET_AUTO_APPROVE_CAPABILITY, OPERATOR_CONFIG_SET_KEY_OPERATION,
     OPERATOR_CONFIG_VALIDATE_VIEW, OPERATOR_DIAGNOSTICS_VIEW, OPERATOR_LOGS_VIEW,
-    OPERATOR_SERVICE_LIFECYCLE_COMMAND, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW,
+    OPERATOR_SERVICE_LIFECYCLE_OPERATION, OPERATOR_SETUP_RUN_CAPABILITY, OPERATOR_SETUP_VIEW,
     OPERATOR_STATUS_VIEW, OUTBOUND_DELIVERY_TARGETS_VIEW, OUTBOUND_PREFERENCES_SET_CAPABILITY,
-    OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_COMMAND, PROJECT_DELETE_CAPABILITY,
-    PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_COMMAND, PROJECT_FS_STAT_VIEW,
+    OUTBOUND_PREFERENCES_VIEW, PROJECT_CREATE_OPERATION, PROJECT_DELETE_CAPABILITY,
+    PROJECT_FS_LIST_VIEW, PROJECT_FS_READ_OPERATION, PROJECT_FS_STAT_VIEW,
     PROJECT_MEMBER_ADD_CAPABILITY, PROJECT_MEMBER_REMOVE_CAPABILITY,
     PROJECT_MEMBER_UPDATE_CAPABILITY, PROJECT_MEMBERS_VIEW, PROJECT_UPDATE_CAPABILITY,
     PROJECT_VIEW, PROJECTS_VIEW, ProductCapabilityDescriptor, ProductCapabilityInput,
     ProductOutboundEnvelope, ProductSurface, ProductWorkflowError, ProjectFsFile, ProjectionCursor,
-    RESOLVE_GATE_COMMAND, RETRY_RUN_COMMAND, RebornAccountLoginLinkResponse,
+    RESOLVE_GATE_OPERATION, RETRY_RUN_OPERATION, RebornAccountLoginLinkResponse,
     RebornAccountTracesResponse, RebornAddMemberRequest, RebornAdminCreateUserRequest,
     RebornAdminDeleteSecretProductRequest, RebornAdminPutSecretProductRequest,
     RebornAdminPutSecretRequest, RebornAdminSecretDeletedResponse, RebornAdminSecretResponse,
@@ -94,9 +94,9 @@ use ironclaw_product_workflow::{
     RebornViewDescriptor, RebornViewQuery, SKILL_AUTO_ACTIVATE_LEARNED_SET_CAPABILITY,
     SKILL_AUTO_ACTIVATE_SET_CAPABILITY, SKILL_CONTENT_VIEW, SKILL_INSTALL_CAPABILITY,
     SKILL_REMOVE_CAPABILITY, SKILL_SEARCH_VIEW, SKILL_UPDATE_CAPABILITY, SKILLS_VIEW,
-    SUBMIT_TURN_COMMAND, SetActiveLlmRequest, SettingsToolPermissionState,
-    THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_COMMAND,
-    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_COMMAND,
+    SUBMIT_TURN_OPERATION, SetActiveLlmRequest, SettingsToolPermissionState,
+    THREAD_DELETE_CAPABILITY, THREADS_VIEW, TIMELINE_VIEW, TRACE_ACCOUNT_LOGIN_LINK_OPERATION,
+    TRACE_ACCOUNT_TRACES_VIEW, TRACE_CREDITS_VIEW, TRACE_HOLD_AUTHORIZE_OPERATION,
     UpsertLlmProviderRequest, WebUiAttachmentCapabilities, WebUiAuthenticatedCaller,
     WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
     WebUiInboundValidationError, WebUiListAutomationsRequest, WebUiListThreadsRequest,
@@ -220,7 +220,7 @@ pub async fn create_thread(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<WebUiCreateThreadRequest>,
 ) -> Result<Json<RebornCreateThreadResponse>, WebUiV2HttpError> {
-    let response = CREATE_THREAD_COMMAND
+    let response = CREATE_THREAD_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -241,7 +241,13 @@ pub async fn delete_thread(
         },
     )
     .await?;
-    api_capability_succeeded(resolution, "thread delete")?;
+    capability_resolution_succeeded(
+        resolution,
+        "thread delete",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     let thread_id = parse_thread_id_for_response("thread_id", thread_id)?;
     let response = RebornDeleteThreadResponse {
         thread_id,
@@ -324,7 +330,7 @@ pub async fn admin_create_user(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<RebornAdminCreateUserRequest>,
 ) -> Result<Json<RebornAdminUserCreatedResponse>, WebUiV2HttpError> {
-    let response = ADMIN_USER_CREATE_COMMAND
+    let response = ADMIN_USER_CREATE_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -367,7 +373,13 @@ pub async fn admin_update_user(
         },
     )
     .await?;
-    api_capability_succeeded(resolution, "admin user update")?;
+    capability_resolution_succeeded(
+        resolution,
+        "admin user update",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     let response = ADMIN_USER_VIEW
         .query_on(
             state.services().as_ref(),
@@ -395,7 +407,13 @@ pub async fn admin_delete_user(
         },
     )
     .await?;
-    api_capability_succeeded(resolution, "admin user delete")?;
+    capability_resolution_succeeded(
+        resolution,
+        "admin user delete",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     Ok(Json(RebornAdminUserDeletedResponse {
         user_id,
         deleted: true,
@@ -420,7 +438,13 @@ pub async fn admin_set_user_status(
         },
     )
     .await?;
-    api_capability_succeeded(resolution, "admin user status")?;
+    capability_resolution_succeeded(
+        resolution,
+        "admin user status",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     let response = ADMIN_USER_VIEW
         .query_on(
             state.services().as_ref(),
@@ -450,7 +474,13 @@ pub async fn admin_set_user_role(
         },
     )
     .await?;
-    api_capability_succeeded(resolution, "admin user role")?;
+    capability_resolution_succeeded(
+        resolution,
+        "admin user role",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     let response = ADMIN_USER_VIEW
         .query_on(
             state.services().as_ref(),
@@ -501,7 +531,13 @@ pub async fn admin_put_user_secret(
         },
     )
     .await?;
-    api_capability_succeeded(resolution, "admin user secret put")?;
+    capability_resolution_succeeded(
+        resolution,
+        "admin user secret put",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     let secret = read_admin_user_secret(state.services(), caller, user_id, handle_name).await?;
     Ok(Json(RebornAdminSecretResponse { secret }))
 }
@@ -515,21 +551,14 @@ pub async fn admin_delete_user_secret(
     let user_id = parse_admin_user_id(user_id)?;
     let handle = parse_admin_secret_handle(handle)?;
     let handle = handle.as_str().to_string();
-    let resolution = invoke_product_capability(
-        state.services(),
-        caller,
-        ADMIN_USER_DELETE_SECRET_CAPABILITY,
-        RebornAdminDeleteSecretProductRequest {
-            user_id,
-            handle: handle.clone(),
-        },
-    )
-    .await?;
-    api_capability_succeeded(resolution, "admin user secret delete")?;
-    Ok(Json(RebornAdminSecretDeletedResponse {
-        handle,
-        deleted: true,
-    }))
+    let response = ADMIN_USER_DELETE_SECRET_OPERATION
+        .execute_on(
+            state.services().as_ref(),
+            caller,
+            RebornAdminDeleteSecretProductRequest { user_id, handle },
+        )
+        .await?;
+    Ok(Json(response))
 }
 
 /// `POST /api/webchat/v2/threads/{thread_id}/messages`
@@ -543,7 +572,7 @@ pub async fn send_message(
     Json(mut body): Json<WebUiSendMessageRequest>,
 ) -> Result<Json<RebornSubmitTurnResponse>, WebUiV2HttpError> {
     body.thread_id = Some(thread_id);
-    let response = SUBMIT_TURN_COMMAND
+    let response = SUBMIT_TURN_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -656,7 +685,7 @@ pub async fn read_project_file(
         thread_id,
         path: require_project_fs_path(query.path)?,
     };
-    let file = PROJECT_FS_READ_COMMAND
+    let file = PROJECT_FS_READ_OPERATION
         .execute_file_on(state.services().as_ref(), caller, request)
         .await?;
     project_fs_download_response(file)
@@ -780,7 +809,7 @@ pub async fn read_fs_file(
         path: require_fs_browse_path(query.path)?,
         project_id: query.project_id,
     };
-    let file = FS_READ_COMMAND
+    let file = FS_READ_OPERATION
         .execute_file_on(state.services().as_ref(), caller, request)
         .await?;
     project_fs_download_response(file)
@@ -849,7 +878,7 @@ pub async fn create_project(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Json(body): Json<RebornCreateProjectRequest>,
 ) -> Result<Json<RebornProjectResponse>, WebUiV2HttpError> {
-    let response = PROJECT_CREATE_COMMAND
+    let response = PROJECT_CREATE_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -888,7 +917,13 @@ pub async fn update_project(
         body.clone(),
     )
     .await?;
-    project_mutation_succeeded(resolution)?;
+    capability_resolution_succeeded(
+        resolution,
+        "project",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     let response = PROJECT_VIEW
         .query_on(
             state.services().as_ref(),
@@ -915,7 +950,13 @@ pub async fn delete_project(
         RebornDeleteProjectRequest { project_id },
     )
     .await?;
-    project_mutation_succeeded(resolution)?;
+    capability_resolution_succeeded(
+        resolution,
+        "project",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -952,7 +993,13 @@ pub async fn add_project_member(
         body.clone(),
     )
     .await?;
-    project_mutation_succeeded(resolution)?;
+    capability_resolution_succeeded(
+        resolution,
+        "project",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     let response =
         read_project_member(state.services(), caller, body.project_id, body.user_id).await?;
     Ok(Json(response))
@@ -975,7 +1022,13 @@ pub async fn update_project_member(
         body.clone(),
     )
     .await?;
-    project_mutation_succeeded(resolution)?;
+    capability_resolution_succeeded(
+        resolution,
+        "project",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     let response =
         read_project_member(state.services(), caller, body.project_id, body.user_id).await?;
     Ok(Json(response))
@@ -997,7 +1050,13 @@ pub async fn remove_project_member(
         },
     )
     .await?;
-    project_mutation_succeeded(resolution)?;
+    capability_resolution_succeeded(
+        resolution,
+        "project",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1071,7 +1130,7 @@ pub async fn get_attachment(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path((thread_id, message_id, attachment_id)): Path<(String, String, String)>,
 ) -> Result<Response, WebUiV2HttpError> {
-    let attachment = ATTACHMENT_READ_COMMAND
+    let attachment = ATTACHMENT_READ_OPERATION
         .execute_attachment_on(
             state.services().as_ref(),
             caller,
@@ -1507,7 +1566,7 @@ pub async fn cancel_run(
 ) -> Result<Json<RebornCancelRunResponse>, WebUiV2HttpError> {
     body.thread_id = Some(thread_id);
     body.run_id = Some(run_id);
-    let response = CANCEL_RUN_COMMAND
+    let response = CANCEL_RUN_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -1536,7 +1595,7 @@ pub async fn resolve_gate(
     body.thread_id = Some(thread_id);
     body.run_id = Some(run_id);
     body.gate_ref = Some(gate_ref);
-    let response = RESOLVE_GATE_COMMAND
+    let response = RESOLVE_GATE_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -1561,7 +1620,7 @@ pub async fn retry_run(
 ) -> Result<Json<RebornRetryRunResponse>, WebUiV2HttpError> {
     body.thread_id = Some(thread_id);
     body.run_id = Some(run_id);
-    let response = RETRY_RUN_COMMAND
+    let response = RETRY_RUN_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -1639,18 +1698,13 @@ pub async fn pause_automation(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(automation_id): Path<String>,
 ) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
-    let resolution = invoke_product_capability(
-        state.services(),
-        caller.clone(),
-        AUTOMATION_PAUSE_CAPABILITY,
-        RebornAutomationRequest {
-            automation_id: automation_id.clone(),
-        },
-    )
-    .await?;
-    api_capability_succeeded(resolution, "automation pause")?;
-    let response =
-        read_automation_mutation_response(state.services(), caller, automation_id).await?;
+    let response = AUTOMATION_PAUSE_OPERATION
+        .execute_on(
+            state.services().as_ref(),
+            caller,
+            RebornAutomationRequest { automation_id },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -1660,18 +1714,13 @@ pub async fn resume_automation(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(automation_id): Path<String>,
 ) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
-    let resolution = invoke_product_capability(
-        state.services(),
-        caller.clone(),
-        AUTOMATION_RESUME_CAPABILITY,
-        RebornAutomationRequest {
-            automation_id: automation_id.clone(),
-        },
-    )
-    .await?;
-    api_capability_succeeded(resolution, "automation resume")?;
-    let response =
-        read_automation_mutation_response(state.services(), caller, automation_id).await?;
+    let response = AUTOMATION_RESUME_OPERATION
+        .execute_on(
+            state.services().as_ref(),
+            caller,
+            RebornAutomationRequest { automation_id },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -1682,19 +1731,16 @@ pub async fn rename_automation(
     Path(automation_id): Path<String>,
     Json(request): Json<WebUiRenameAutomationRequest>,
 ) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
-    let resolution = invoke_product_capability(
-        state.services(),
-        caller.clone(),
-        AUTOMATION_RENAME_CAPABILITY,
-        RebornRenameAutomationProductRequest {
-            automation_id: automation_id.clone(),
-            name: request.name,
-        },
-    )
-    .await?;
-    api_capability_succeeded(resolution, "automation rename")?;
-    let response =
-        read_automation_mutation_response(state.services(), caller, automation_id).await?;
+    let response = AUTOMATION_RENAME_OPERATION
+        .execute_on(
+            state.services().as_ref(),
+            caller,
+            RebornRenameAutomationProductRequest {
+                automation_id,
+                name: request.name,
+            },
+        )
+        .await?;
     Ok(Json(response))
 }
 
@@ -1704,47 +1750,14 @@ pub async fn delete_automation(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(automation_id): Path<String>,
 ) -> Result<Json<RebornAutomationMutationResponse>, WebUiV2HttpError> {
-    let resolution = invoke_product_capability(
-        state.services(),
-        caller,
-        AUTOMATION_DELETE_CAPABILITY,
-        RebornAutomationRequest { automation_id },
-    )
-    .await?;
-    api_capability_succeeded(resolution, "automation delete")?;
-    let response = RebornAutomationMutationResponse {
-        updated: true,
-        automation: None,
-    };
-    Ok(Json(response))
-}
-
-async fn read_automation_mutation_response(
-    services: &std::sync::Arc<dyn ProductSurface>,
-    caller: WebUiAuthenticatedCaller,
-    automation_id: String,
-) -> Result<RebornAutomationMutationResponse, WebUiV2HttpError> {
-    let response = AUTOMATIONS_VIEW
-        .query_on(
-            services.as_ref(),
+    let response = AUTOMATION_DELETE_OPERATION
+        .execute_on(
+            state.services().as_ref(),
             caller,
-            WebUiListAutomationsRequest {
-                limit: Some(AUTOMATION_LIST_MAX_PAGE_SIZE),
-                run_limit: None,
-                include_completed: true,
-            },
-            None,
+            RebornAutomationRequest { automation_id },
         )
         .await?;
-    let automation = response
-        .automations
-        .into_iter()
-        .find(|automation| automation.automation_id == automation_id)
-        .ok_or_else(|| RebornServicesError::internal_from("updated automation missing"))?;
-    Ok(RebornAutomationMutationResponse {
-        updated: true,
-        automation: Some(automation),
-    })
+    Ok(Json(response))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1824,7 +1837,7 @@ pub async fn trace_account_login_link(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
 ) -> Result<Json<RebornAccountLoginLinkResponse>, WebUiV2HttpError> {
-    let response = TRACE_ACCOUNT_LOGIN_LINK_COMMAND
+    let response = TRACE_ACCOUNT_LOGIN_LINK_OPERATION
         .execute_on(state.services().as_ref(), caller, serde_json::json!({}))
         .await?;
     Ok(Json(response))
@@ -1841,7 +1854,7 @@ pub async fn authorize_trace_hold(
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(submission_id): Path<String>,
 ) -> Result<Json<RebornTraceHoldAuthorizeResponse>, WebUiV2HttpError> {
-    let response = TRACE_HOLD_AUTHORIZE_COMMAND
+    let response = TRACE_HOLD_AUTHORIZE_OPERATION
         .execute_on(
             state.services().as_ref(),
             caller,
@@ -1883,7 +1896,13 @@ pub async fn set_outbound_preferences(
         body,
     )
     .await?;
-    outbound_preferences_mutation_succeeded(resolution)?;
+    capability_resolution_succeeded(
+        resolution,
+        "outbound preferences",
+        false,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
 
     let response = query_product_view(
         state.services(),
@@ -1896,8 +1915,12 @@ pub async fn set_outbound_preferences(
     Ok(Json(response))
 }
 
-fn outbound_preferences_mutation_succeeded(
+fn capability_resolution_succeeded(
     resolution: Resolution,
+    label: &'static str,
+    operation_failed_is_invalid_request: bool,
+    forbidden: fn() -> RebornServicesError,
+    unavailable: fn(bool) -> RebornServicesError,
 ) -> Result<(), RebornServicesError> {
     match resolution {
         Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
@@ -1910,31 +1933,7 @@ fn outbound_preferences_mutation_succeeded(
                 field: None,
                 validation_code: Some(WebUiInboundValidationCode::InvalidValue),
             }),
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
-                Err(outbound_preferences_forbidden())
-            }
-            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(outbound_preferences_unavailable(true))
-            }
-            _ => Err(RebornServicesError::internal_from(
-                "outbound preferences capability did not complete successfully",
-            )),
-        },
-        Resolution::Denied(_) => Err(outbound_preferences_forbidden()),
-        Resolution::Blocked(_) | Resolution::Suspended(_) => {
-            Err(outbound_preferences_unavailable(true))
-        }
-    }
-}
-
-fn api_capability_succeeded(
-    resolution: Resolution,
-    label: &'static str,
-) -> Result<(), RebornServicesError> {
-    match resolution {
-        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
-        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
+            Some(FailureKind::OperationFailed) if operation_failed_is_invalid_request => {
                 Err(RebornServicesError {
                     code: RebornServicesErrorCode::InvalidRequest,
                     kind: RebornServicesErrorKind::Validation,
@@ -1944,51 +1943,16 @@ fn api_capability_succeeded(
                     validation_code: Some(WebUiInboundValidationCode::InvalidValue),
                 })
             }
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
-                Err(outbound_preferences_forbidden())
-            }
+            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => Err(forbidden()),
             Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(outbound_preferences_unavailable(true))
+                Err(unavailable(true))
             }
             _ => Err(RebornServicesError::internal_from(format!(
                 "{label} capability did not complete successfully"
             ))),
         },
-        Resolution::Denied(_) => Err(outbound_preferences_forbidden()),
-        Resolution::Blocked(_) | Resolution::Suspended(_) => {
-            Err(outbound_preferences_unavailable(true))
-        }
-    }
-}
-
-fn project_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
-    match resolution {
-        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
-        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
-                Err(RebornServicesError {
-                    code: RebornServicesErrorCode::InvalidRequest,
-                    kind: RebornServicesErrorKind::Validation,
-                    status_code: 400,
-                    retryable: false,
-                    field: None,
-                    validation_code: Some(WebUiInboundValidationCode::InvalidValue),
-                })
-            }
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
-                Err(outbound_preferences_forbidden())
-            }
-            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(outbound_preferences_unavailable(true))
-            }
-            _ => Err(RebornServicesError::internal_from(
-                "project capability did not complete successfully",
-            )),
-        },
-        Resolution::Denied(_) => Err(outbound_preferences_forbidden()),
-        Resolution::Blocked(_) | Resolution::Suspended(_) => {
-            Err(outbound_preferences_unavailable(true))
-        }
+        Resolution::Denied(_) => Err(forbidden()),
+        Resolution::Blocked(_) | Resolution::Suspended(_) => Err(unavailable(true)),
     }
 }
 
@@ -3063,7 +3027,13 @@ pub async fn run_operator_setup(
         body,
     )
     .await?;
-    llm_config_mutation_succeeded(resolution)?;
+    capability_resolution_succeeded(
+        resolution,
+        "llm config",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
     let response = query_operator_setup_response(state.services(), caller).await?;
     Ok(Json(response))
 }
@@ -3113,7 +3083,13 @@ pub async fn set_settings_tools_auto_approve(
         serde_json::json!({ "enabled": body.enabled }),
     )
     .await?;
-    api_capability_succeeded(resolution, "settings tools auto approve")?;
+    capability_resolution_succeeded(
+        resolution,
+        "settings tools auto approve",
+        true,
+        outbound_preferences_forbidden,
+        outbound_preferences_unavailable,
+    )?;
     let response = query_operator_config_key_response(
         state.services(),
         caller,
@@ -3145,7 +3121,7 @@ pub async fn set_settings_tool_permission(
     validate_settings_tool_capability_id(&capability_id)?;
     let key =
         validate_operator_config_key(format!("{SETTINGS_TOOL_CONFIG_PREFIX}{capability_id}"))?;
-    let response = OPERATOR_CONFIG_SET_KEY_COMMAND
+    let response = OPERATOR_CONFIG_SET_KEY_OPERATION
         .execute_on(
             state.services().as_ref(),
             caller,
@@ -3283,7 +3259,7 @@ pub async fn set_operator_config_key(
 ) -> Result<Json<RebornOperatorConfigGetResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
     let key = validate_operator_config_key(key)?;
-    let response = OPERATOR_CONFIG_SET_KEY_COMMAND
+    let response = OPERATOR_CONFIG_SET_KEY_OPERATION
         .execute_on(
             state.services().as_ref(),
             caller,
@@ -3460,7 +3436,7 @@ pub async fn run_operator_service_lifecycle(
     Json(body): Json<RebornOperatorServiceLifecycleRequest>,
 ) -> Result<Json<RebornOperatorCommandPlaneResponse>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = OPERATOR_SERVICE_LIFECYCLE_COMMAND
+    let response = OPERATOR_SERVICE_LIFECYCLE_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -3500,37 +3476,6 @@ async fn query_llm_config_snapshot(
     serde_json::from_value(page.payload).map_err(RebornServicesError::internal_from)
 }
 
-fn llm_config_mutation_succeeded(resolution: Resolution) -> Result<(), RebornServicesError> {
-    match resolution {
-        Resolution::Done(outcome) if outcome.verdict.is_success() => Ok(()),
-        Resolution::Done(outcome) => match outcome.verdict.error_kind() {
-            Some(FailureKind::InvalidInput | FailureKind::OperationFailed) => {
-                Err(RebornServicesError {
-                    code: RebornServicesErrorCode::InvalidRequest,
-                    kind: RebornServicesErrorKind::Validation,
-                    status_code: 400,
-                    retryable: false,
-                    field: None,
-                    validation_code: Some(WebUiInboundValidationCode::InvalidValue),
-                })
-            }
-            Some(FailureKind::Authorization | FailureKind::PolicyDenied) => {
-                Err(extension_lifecycle_forbidden())
-            }
-            Some(FailureKind::Backend | FailureKind::Transient | FailureKind::Unavailable) => {
-                Err(extension_lifecycle_unavailable(true))
-            }
-            _ => Err(RebornServicesError::internal_from(
-                "llm config capability did not complete successfully",
-            )),
-        },
-        Resolution::Denied(_) => Err(extension_lifecycle_forbidden()),
-        Resolution::Blocked(_) | Resolution::Suspended(_) => {
-            Err(extension_lifecycle_unavailable(true))
-        }
-    }
-}
-
 /// `POST /api/webchat/v2/llm/providers`
 pub async fn upsert_llm_provider(
     State(state): State<WebUiV2State>,
@@ -3549,7 +3494,13 @@ pub async fn upsert_llm_provider(
             activity_id,
         )
         .await?;
-    llm_config_mutation_succeeded(resolution)?;
+    capability_resolution_succeeded(
+        resolution,
+        "llm config",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
     let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
 }
@@ -3569,7 +3520,13 @@ pub async fn delete_llm_provider(
         serde_json::json!({ "provider_id": provider_id }),
     )
     .await?;
-    llm_config_mutation_succeeded(resolution)?;
+    capability_resolution_succeeded(
+        resolution,
+        "llm config",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
     let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
 }
@@ -3589,7 +3546,13 @@ pub async fn set_active_llm(
         body,
     )
     .await?;
-    llm_config_mutation_succeeded(resolution)?;
+    capability_resolution_succeeded(
+        resolution,
+        "llm config",
+        true,
+        extension_lifecycle_forbidden,
+        extension_lifecycle_unavailable,
+    )?;
     let response = query_llm_config_snapshot(state.services(), caller).await?;
     Ok(Json(response))
 }
@@ -3602,7 +3565,7 @@ pub async fn test_llm_connection(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<LlmProbeResult>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = LLM_TEST_CONNECTION_COMMAND
+    let response = LLM_TEST_CONNECTION_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -3616,7 +3579,7 @@ pub async fn list_llm_models(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<LlmModelsResult>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = LLM_LIST_MODELS_COMMAND
+    let response = LLM_LIST_MODELS_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -3653,7 +3616,7 @@ pub async fn start_nearai_login(
                 serde_json::Value::String(origin.to_string()),
             );
     }
-    let response = LLM_NEARAI_LOGIN_COMMAND
+    let response = LLM_NEARAI_LOGIN_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -3671,7 +3634,7 @@ pub async fn complete_nearai_wallet_login(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<NearAiWalletLoginResult>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = LLM_NEARAI_WALLET_LOGIN_COMMAND
+    let response = LLM_NEARAI_WALLET_LOGIN_OPERATION
         .execute_on(state.services().as_ref(), caller, body)
         .await?;
     Ok(Json(response))
@@ -3687,7 +3650,7 @@ pub async fn start_codex_login(
     Extension(capabilities): Extension<WebUiV2Capabilities>,
 ) -> Result<Json<CodexLoginStart>, WebUiV2HttpError> {
     require_operator_webui_config(capabilities)?;
-    let response = LLM_CODEX_LOGIN_COMMAND
+    let response = LLM_CODEX_LOGIN_OPERATION
         .execute_on(state.services().as_ref(), caller, serde_json::json!({}))
         .await?;
     Ok(Json(response))
